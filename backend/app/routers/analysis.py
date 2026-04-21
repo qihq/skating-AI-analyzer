@@ -1,0 +1,849 @@
+from __future__ import annotations
+
+import logging
+import asyncio
+import json
+import shutil
+from pathlib import Path
+from statistics import mean
+from uuid import uuid4
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import AsyncSessionLocal, UPLOADS_DIR, get_session
+from app.models import Analysis, Skater, TrainingPlan, TrainingSession
+from app.schemas import (
+    AnalysisCompareResponse,
+    AnalysisDetail,
+    AnalysisListItem,
+    AnalysisSessionUpdateRequest,
+    AnalysisUploadResponse,
+    CompareSummary,
+    ComparisonChange,
+    ExtendPlanBody,
+    NoteUpdateRequest,
+    ProgressPoint,
+    ProgressResponse,
+    ProgressStats,
+    PoseResponse,
+    TrainingPlanDetail,
+    UpdatePlanSessionRequest,
+)
+from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
+from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
+from app.services.plan import extend_training_plan, generate_training_plan
+from app.services.memory_suggest import suggest_memory_updates
+from app.services.pose import extract_pose
+from app.services.report import calculate_force_score, generate_report
+from app.services.skill_progress import auto_update_skill_progress
+from app.services.skills import sync_skater_progress
+from app.services.video import (
+    build_processing_frames_dir,
+    build_upload_paths,
+    cleanup_processing_dir,
+    encode_frames,
+    extract_motion_sampled_frames,
+    persist_frames,
+    save_upload_file,
+)
+from app.services.vision import analyze_frames
+
+
+router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+plan_router = APIRouter(prefix="/api/plan", tags=["plan"])
+frames_router = APIRouter(prefix="/api/frames", tags=["frames"])
+
+VALID_ACTION_TYPES = {"跳跃", "旋转", "步法", "自由滑"}
+SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+logger = logging.getLogger(__name__)
+
+
+def _skater_display_name(skater: Skater) -> str:
+    return skater.display_name or skater.name
+
+
+async def process_analysis(analysis_id: str) -> None:
+    processing_frames_dir: Path | None = None
+    upload_frames_dir: Path | None = None
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+
+            analysis.status = "processing"
+            analysis.error_message = None
+            await session.commit()
+            logger.info("Analysis %s entered processing", analysis_id)
+
+            action_type = analysis.action_type
+            video_path = Path(analysis.video_path)
+            upload_frames_dir = video_path.parent / "frames"
+            _, processing_frames_dir = build_processing_frames_dir(analysis_id)
+
+        sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
+            video_path,
+            processing_frames_dir,
+            action_type,
+        )
+        logger.info("Analysis %s motion-sampled %s frames", analysis_id, len(sampled_frames))
+
+        pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir))
+        bio_data = analyze_biomechanics(pose_data, action_type)
+
+        payloads = await encode_frames(sampled_frames)
+        vision_structured = await analyze_frames(action_type, payloads, analysis.skater_id)
+        vision_raw = json.dumps(vision_structured, ensure_ascii=False)
+        logger.info("Analysis %s received vision result", analysis_id)
+        report = await generate_report(action_type, vision_structured, bio_data, analysis.skater_id)
+        force_score = calculate_force_score(report)
+        logger.info("Analysis %s generated report with score %s", analysis_id, force_score)
+        if upload_frames_dir is not None:
+            persist_frames(sampled_frames, upload_frames_dir)
+
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+
+            analysis.vision_raw = vision_raw
+            analysis.vision_structured = vision_structured
+            analysis.report = report
+            analysis.pose_data = pose_data
+            analysis.bio_data = bio_data
+            analysis.frame_motion_scores = motion_scores
+            analysis.action_window_start = sampling_metadata.action_window_start
+            analysis.action_window_end = sampling_metadata.action_window_end
+            analysis.source_fps = sampling_metadata.source_fps
+            analysis.is_slow_motion = sampling_metadata.is_slow_motion
+            analysis.force_score = force_score
+            analysis.status = "completed"
+            analysis.error_message = None
+            await auto_update_skill_progress(analysis_id, session)
+            if analysis.skater_id:
+                await sync_skater_progress(session, analysis.skater_id)
+            await session.commit()
+            if analysis.skater_id:
+                try:
+                    await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
+            logger.info("Analysis %s completed", analysis_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Analysis %s failed", analysis_id)
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.status = "failed"
+            analysis.error_message = str(exc)
+            await session.commit()
+    finally:
+        cleanup_processing_dir(analysis_id)
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+async def _get_default_skater(session: AsyncSession) -> Skater | None:
+    result = await session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc()).limit(1))
+    return result.scalar_one_or_none()
+
+
+async def _resolve_skater(session: AsyncSession, skater_id: str | None) -> Skater | None:
+    if skater_id:
+        skater = await session.get(Skater, skater_id)
+        if skater is None:
+            raise HTTPException(status_code=404, detail="未找到对应的练习档案。")
+        return skater
+
+    return await _get_default_skater(session)
+
+
+async def _get_skater_map(session: AsyncSession, skater_ids: set[str]) -> dict[str, Skater]:
+    if not skater_ids:
+        return {}
+    result = await session.execute(select(Skater).where(Skater.id.in_(skater_ids)))
+    return {skater.id: skater for skater in result.scalars().all()}
+
+
+def _report_summary(analysis: Analysis) -> str:
+    if isinstance(analysis.report, dict):
+        summary = str(analysis.report.get("summary", "")).strip()
+        if summary:
+            return summary
+    if analysis.error_message:
+        return analysis.error_message
+    if analysis.note:
+        return analysis.note
+    return "暂无报告摘要。"
+
+
+def _detail_from_analysis(analysis: Analysis, skater_name: str | None = None) -> AnalysisDetail:
+    return AnalysisDetail(
+        id=analysis.id,
+        skater_id=analysis.skater_id,
+        session_id=analysis.session_id,
+        skater_name=skater_name,
+        skill_category=analysis.skill_category,
+        skill_node_id=analysis.skill_node_id,
+        action_type=analysis.action_type,
+        video_path=analysis.video_path,
+        status=analysis.status,
+        vision_raw=analysis.vision_raw,
+        vision_structured=analysis.vision_structured,
+        report=analysis.report,
+        pose_data=analysis.pose_data,
+        bio_data=analysis.bio_data,
+        frame_motion_scores=analysis.frame_motion_scores,
+        action_window_start=analysis.action_window_start,
+        action_window_end=analysis.action_window_end,
+        source_fps=analysis.source_fps,
+        is_slow_motion=analysis.is_slow_motion,
+        force_score=analysis.force_score,
+        auto_unlocked_skill=analysis.auto_unlocked_skill,
+        error_message=analysis.error_message,
+        note=analysis.note,
+        created_at=analysis.created_at,
+        updated_at=analysis.updated_at,
+    )
+
+
+def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
+    safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
+    frame_urls = {
+        frame.get("frame", ""): f"/api/frames/{analysis_id}/{frame.get('frame', '')}"
+        for frame in safe_pose_data.get("frames", [])
+        if isinstance(frame, dict) and frame.get("frame")
+    }
+    return PoseResponse(
+        connections=safe_pose_data.get("connections", []),
+        frames=safe_pose_data.get("frames", []),
+        frame_urls=frame_urls,
+    )
+
+
+def _fallback_motion_payload(frames_dir: Path) -> dict[str, object]:
+    frame_paths = sorted(frames_dir.glob("frame_*.jpg"))
+    selected = []
+    for index, frame_path in enumerate(frame_paths):
+        selected.append(
+            {
+                "frame_id": frame_path.stem,
+                "source_thumb_index": index,
+                "timestamp": round(index / 5, 3),
+                "motion_score": None,
+            }
+        )
+
+    return {
+        "frame_rate": 5,
+        "thumb_size": None,
+        "full_size": None,
+        "total_thumb_frames": len(frame_paths),
+        "sample_count": len(frame_paths),
+        "selected": selected,
+        "scores": [],
+        "source": "legacy_frames",
+    }
+
+
+def _frames_dir_for_analysis(analysis: Analysis) -> Path:
+    frames_dir = Path(analysis.video_path).parent / "frames"
+    if frames_dir.exists():
+        return frames_dir
+    return UPLOADS_DIR / analysis.id / "frames"
+
+
+async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) -> Analysis:
+    if analysis.status != "completed":
+        return analysis
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    if not frames_dir.exists():
+        return analysis
+
+    changed = False
+    pose_data = analysis.pose_data if isinstance(analysis.pose_data, dict) else None
+    pose_frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
+    pose_has_keypoints = any(
+        isinstance(frame, dict) and bool(frame.get("keypoints"))
+        for frame in pose_frames
+    )
+
+    if not pose_frames or not pose_has_keypoints:
+        logger.info("Analysis %s is missing pose data, backfilling from existing frames", analysis.id)
+        computed_pose = await asyncio.to_thread(extract_pose, str(frames_dir))
+        analysis.pose_data = computed_pose
+        pose_data = computed_pose
+        changed = True
+
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
+    if bio_data is None or not bio_data.get("key_frames"):
+        logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
+        analysis.bio_data = analyze_biomechanics(pose_data or {"connections": [], "frames": []}, analysis.action_type)
+        changed = True
+    else:
+        sanitized_bio_data = sanitize_biomechanics_data(bio_data)
+        if sanitized_bio_data != bio_data:
+            logger.info("Analysis %s has implausible biomechanics metrics, sanitizing saved payload", analysis.id)
+            analysis.bio_data = sanitized_bio_data
+            changed = True
+
+    if analysis.frame_motion_scores is None:
+        logger.info("Analysis %s is missing motion sampling metadata, generating legacy fallback payload", analysis.id)
+        analysis.frame_motion_scores = _fallback_motion_payload(frames_dir)
+        changed = True
+
+    if changed:
+        await session.commit()
+        await session.refresh(analysis)
+
+    return analysis
+
+
+def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None) -> AnalysisListItem:
+    return AnalysisListItem(
+        id=analysis.id,
+        skater_id=analysis.skater_id,
+        session_id=analysis.session_id,
+        skater_name=skater_name,
+        skill_category=analysis.skill_category,
+        action_type=analysis.action_type,
+        status=analysis.status,
+        force_score=analysis.force_score,
+        note=analysis.note,
+        created_at=analysis.created_at,
+        updated_at=analysis.updated_at,
+    )
+
+
+def _build_issue_map(report: dict[str, object] | None) -> dict[str, dict[str, str]]:
+    issues = report.get("issues", []) if isinstance(report, dict) else []
+    issue_map: dict[str, dict[str, str]] = {}
+    for raw_issue in issues:
+        if not isinstance(raw_issue, dict):
+            continue
+        category = str(raw_issue.get("category", "")).strip() or "未分类问题"
+        issue_map[category] = {
+            "category": category,
+            "description": str(raw_issue.get("description", "")).strip(),
+            "severity": str(raw_issue.get("severity", "low")).strip().lower(),
+        }
+    return issue_map
+
+
+def _compare_reports(report_a: dict[str, object] | None, report_b: dict[str, object] | None) -> CompareSummary:
+    issues_a = _build_issue_map(report_a)
+    issues_b = _build_issue_map(report_b)
+    categories = list(dict.fromkeys([*issues_a.keys(), *issues_b.keys()]))
+
+    improved: list[ComparisonChange] = []
+    added: list[ComparisonChange] = []
+    unchanged: list[ComparisonChange] = []
+
+    for category in categories:
+        before = issues_a.get(category)
+        after = issues_b.get(category)
+
+        before_severity = before["severity"] if before else None
+        after_severity = after["severity"] if after else None
+
+        if before and not after:
+            improved.append(
+                ComparisonChange(
+                    category=category,
+                    before_severity=before_severity,
+                    after_severity=None,
+                    description=f"{before['description']} 当前复盘中未再出现。",
+                )
+            )
+            continue
+
+        if not before and after:
+            added.append(
+                ComparisonChange(
+                    category=category,
+                    before_severity=None,
+                    after_severity=after_severity,
+                    description=after["description"],
+                )
+            )
+            continue
+
+        if before is None or after is None:
+            continue
+
+        before_rank = SEVERITY_RANK.get(before["severity"], 1)
+        after_rank = SEVERITY_RANK.get(after["severity"], 1)
+        description = after["description"] or before["description"]
+
+        if after_rank < before_rank:
+            improved.append(
+                ComparisonChange(
+                    category=category,
+                    before_severity=before_severity,
+                    after_severity=after_severity,
+                    description=description,
+                )
+            )
+        elif after_rank > before_rank:
+            added.append(
+                ComparisonChange(
+                    category=category,
+                    before_severity=before_severity,
+                    after_severity=after_severity,
+                    description=description,
+                )
+            )
+        else:
+            unchanged.append(
+                ComparisonChange(
+                    category=category,
+                    before_severity=before_severity,
+                    after_severity=after_severity,
+                    description=description,
+                )
+            )
+
+    return CompareSummary(improved=improved, added=added, unchanged=unchanged)
+
+
+def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
+    return TrainingPlanDetail(
+        id=plan.id,
+        analysis_id=plan.analysis_id,
+        skater_id=plan.skater_id,
+        plan_json=plan.plan_json,
+        created_at=plan.created_at,
+    )
+
+
+def _skater_context(skater: Skater) -> str:
+    parts = [f"姓名：{_skater_display_name(skater)}"]
+    if skater.level:
+        parts.append(f"水平：{skater.level}")
+    if skater.notes:
+        parts.append(f"备注：{skater.notes}")
+    return "；".join(parts)
+
+
+async def _get_plan_by_analysis(session: AsyncSession, analysis_id: str) -> TrainingPlan | None:
+    result = await session.execute(select(TrainingPlan).where(TrainingPlan.analysis_id == analysis_id).limit(1))
+    return result.scalar_one_or_none()
+
+
+async def _verify_parent_pin_or_403(session: AsyncSession, pin: str) -> None:
+    try:
+        normalized_pin = validate_pin(pin)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    auth = await get_parent_auth(session)
+    if auth is None or not verify_pin_hash(normalized_pin, auth.pin_hash):
+        raise HTTPException(status_code=403, detail="家长 PIN 验证失败。")
+
+
+@router.post("/upload", response_model=AnalysisUploadResponse, status_code=status.HTTP_202_ACCEPTED)
+async def upload_analysis(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    action_type: str = Form(...),
+    skater_id: str | None = Form(default=None),
+    skill_node_id: str | None = Form(default=None),
+    skill_category: str | None = Form(default=None),
+    note: str | None = Form(default=None),
+    session_id: str | None = Form(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisUploadResponse:
+    if action_type not in VALID_ACTION_TYPES:
+        raise HTTPException(status_code=400, detail="action_type 必须是 跳跃 / 旋转 / 步法 / 自由滑 之一。")
+
+    skater = await _resolve_skater(session, skater_id)
+    normalized_session_id = _normalize_optional_text(session_id)
+    training_session = None
+    if normalized_session_id:
+        training_session = await session.get(TrainingSession, normalized_session_id)
+        if training_session is None:
+            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
+        if skater and training_session.skater_id != skater.id:
+            raise HTTPException(status_code=400, detail="训练视频只能关联到当前档案的训练课次。")
+
+    analysis_id = str(uuid4())
+    suffix = Path(file.filename or "").suffix.lower()
+    video_path, _ = build_upload_paths(analysis_id, suffix)
+
+    try:
+        await save_upload_file(file, video_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    analysis = Analysis(
+        id=analysis_id,
+        skater_id=skater.id if skater else None,
+        session_id=training_session.id if training_session else None,
+        skill_node_id=_normalize_optional_text(skill_node_id),
+        skill_category=_normalize_optional_text(skill_category),
+        action_type=action_type,
+        video_path=str(video_path),
+        note=_normalize_optional_text(note),
+        status="pending",
+    )
+    session.add(analysis)
+    await session.commit()
+
+    background_tasks.add_task(process_analysis, analysis_id)
+    return AnalysisUploadResponse(id=analysis_id, status="pending")
+
+
+@router.patch("/{analysis_id}/session", response_model=AnalysisDetail)
+async def update_analysis_session(
+    analysis_id: str,
+    payload: AnalysisSessionUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisDetail:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    next_session_id = payload.session_id
+    if next_session_id is None:
+        analysis.session_id = None
+    else:
+        training_session = await session.get(TrainingSession, next_session_id)
+        if training_session is None:
+            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
+        if analysis.skater_id and training_session.skater_id != analysis.skater_id:
+            raise HTTPException(status_code=400, detail="只能关联到同一档案下的训练课次。")
+        analysis.session_id = training_session.id
+
+    await session.commit()
+    await session.refresh(analysis)
+
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    return _detail_from_analysis(analysis, skater_name)
+
+
+@router.get("/", response_model=list[AnalysisListItem])
+async def list_analyses(
+    action_type: str | None = Query(default=None),
+    skater_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisListItem]:
+    query = select(Analysis).order_by(Analysis.created_at.desc())
+    if action_type:
+        query = query.where(Analysis.action_type == action_type)
+    if skater_id:
+        query = query.where(Analysis.skater_id == skater_id)
+
+    result = await session.execute(query)
+    analyses = list(result.scalars().all())
+    skater_map = await _get_skater_map(session, {analysis.skater_id for analysis in analyses if analysis.skater_id})
+    return [
+        _list_item_from_analysis(
+            analysis,
+            _skater_display_name(skater_map[analysis.skater_id]) if analysis.skater_id in skater_map else None,
+        )
+        for analysis in analyses
+    ]
+
+
+@router.get("/compare", response_model=AnalysisCompareResponse)
+async def compare_analyses(
+    id_a: str = Query(...),
+    id_b: str = Query(...),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCompareResponse:
+    analysis_a = await session.get(Analysis, id_a)
+    analysis_b = await session.get(Analysis, id_b)
+
+    if analysis_a is None or analysis_b is None:
+        raise HTTPException(status_code=404, detail="至少有一条对比记录不存在。")
+    if analysis_a.status != "completed" or analysis_b.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的记录可以进行对比。")
+    if analysis_a.action_type != analysis_b.action_type:
+        raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
+
+    skater_map = await _get_skater_map(
+        session,
+        {analysis.skater_id for analysis in (analysis_a, analysis_b) if analysis.skater_id},
+    )
+
+    return AnalysisCompareResponse(
+        analysis_a=_detail_from_analysis(
+            analysis_a,
+            _skater_display_name(skater_map[analysis_a.skater_id]) if analysis_a.skater_id in skater_map else None,
+        ),
+        analysis_b=_detail_from_analysis(
+            analysis_b,
+            _skater_display_name(skater_map[analysis_b.skater_id]) if analysis_b.skater_id in skater_map else None,
+        ),
+        score_delta=(analysis_b.force_score or 0) - (analysis_a.force_score or 0),
+        summary=_compare_reports(
+            analysis_a.report if isinstance(analysis_a.report, dict) else None,
+            analysis_b.report if isinstance(analysis_b.report, dict) else None,
+        ),
+    )
+
+
+@router.get("/progress", response_model=ProgressResponse)
+async def get_progress(
+    action_type: str | None = Query(default=None),
+    skater_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> ProgressResponse:
+    query = (
+        select(Analysis)
+        .where(Analysis.status == "completed", Analysis.force_score.is_not(None))
+        .order_by(Analysis.created_at.asc())
+    )
+    if action_type:
+        query = query.where(Analysis.action_type == action_type)
+    if skater_id:
+        query = query.where(Analysis.skater_id == skater_id)
+
+    result = await session.execute(query)
+    analyses = list(result.scalars().all())
+
+    points = [
+        ProgressPoint(
+            id=analysis.id,
+            created_at=analysis.created_at,
+            action_type=analysis.action_type,
+            force_score=analysis.force_score or 0,
+            summary=_report_summary(analysis),
+        )
+        for analysis in analyses
+    ]
+    recent_scores = [analysis.force_score or 0 for analysis in analyses[-5:]]
+    stats = ProgressStats(
+        total_count=len(analyses),
+        latest_score=analyses[-1].force_score if analyses else None,
+        best_score=max((analysis.force_score or 0 for analysis in analyses), default=None),
+        recent_five_average=round(mean(recent_scores), 1) if recent_scores else None,
+    )
+    return ProgressResponse(points=points, stats=stats)
+
+
+@router.post("/{analysis_id}/plan", response_model=TrainingPlanDetail)
+async def create_training_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
+    if not isinstance(analysis.report, dict):
+        raise HTTPException(status_code=400, detail="当前分析缺少结构化报告，无法生成训练计划。")
+
+    existing_plan = await _get_plan_by_analysis(session, analysis_id)
+    if existing_plan is not None:
+        return _plan_detail_from_model(existing_plan)
+
+    skater = await _resolve_skater(session, analysis.skater_id)
+    if skater is None:
+        raise HTTPException(status_code=400, detail="当前系统尚未配置练习档案。")
+
+    if analysis.skater_id != skater.id:
+        analysis.skater_id = skater.id
+
+    plan_json = await generate_training_plan(analysis.action_type, analysis.report, _skater_context(skater), skater.id)
+    plan = TrainingPlan(
+        analysis_id=analysis.id,
+        skater_id=skater.id,
+        plan_json=plan_json,
+    )
+    session.add(plan)
+    await session.commit()
+    await session.refresh(plan)
+    return _plan_detail_from_model(plan)
+
+
+@router.get("/{analysis_id}/plan", response_model=TrainingPlanDetail)
+async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
+    plan = await _get_plan_by_analysis(session, analysis_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="该分析记录尚未生成训练计划。")
+    return _plan_detail_from_model(plan)
+
+
+@router.get("/{analysis_id}/pose", response_model=PoseResponse)
+async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PoseResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    analysis = await _ensure_phase3_artifacts(session, analysis)
+    return _build_pose_response(analysis_id, analysis.pose_data)
+
+
+@router.get("/{analysis_id}", response_model=AnalysisDetail)
+async def get_analysis(analysis_id: str, session: AsyncSession = Depends(get_session)) -> AnalysisDetail:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    analysis = await _ensure_phase3_artifacts(session, analysis)
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    return _detail_from_analysis(analysis, skater_name)
+
+
+@router.patch("/{analysis_id}/note", response_model=AnalysisDetail)
+async def update_note(
+    analysis_id: str,
+    payload: NoteUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisDetail:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    analysis.note = _normalize_optional_text(payload.note)
+    await session.commit()
+    await session.refresh(analysis)
+
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    return _detail_from_analysis(analysis, skater_name)
+
+
+@router.delete("/{analysis_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_analysis(
+    analysis_id: str,
+    x_parent_pin: str = Header(..., alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    await _verify_parent_pin_or_403(session, x_parent_pin)
+
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status == "processing":
+        raise HTTPException(status_code=400, detail="分析进行中，无法删除。")
+
+    skater_id = analysis.skater_id
+    plan = await _get_plan_by_analysis(session, analysis_id)
+    if plan is not None:
+        await session.delete(plan)
+
+    upload_dir = UPLOADS_DIR / analysis_id
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
+
+    await session.delete(analysis)
+    await session.flush()
+
+    if skater_id:
+        await sync_skater_progress(session, skater_id)
+
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@plan_router.get("/{plan_id}", response_model=TrainingPlanDetail)
+async def get_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
+    plan = await session.get(TrainingPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+    return _plan_detail_from_model(plan)
+
+
+@plan_router.patch("/{plan_id}/session/{session_id}", response_model=TrainingPlanDetail)
+async def update_plan_session(
+    plan_id: str,
+    session_id: str,
+    payload: UpdatePlanSessionRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TrainingPlanDetail:
+    plan = await session.get(TrainingPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+
+    raw_plan = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+    days = raw_plan.get("days", [])
+    found = False
+    next_days: list[dict[str, object]] = []
+
+    for raw_day in days:
+        if not isinstance(raw_day, dict):
+            continue
+        sessions: list[dict[str, object]] = []
+        for raw_session in raw_day.get("sessions", []):
+            if not isinstance(raw_session, dict):
+                continue
+            session_payload = dict(raw_session)
+            if str(session_payload.get("id")) == session_id:
+                session_payload["completed"] = payload.completed
+                found = True
+            sessions.append(session_payload)
+
+        next_day = dict(raw_day)
+        next_day["sessions"] = sessions
+        next_days.append(next_day)
+
+    if not found:
+        raise HTTPException(status_code=404, detail="未找到对应的训练项目。")
+
+    plan.plan_json = {**raw_plan, "days": next_days}
+    await session.commit()
+    await session.refresh(plan)
+    return _plan_detail_from_model(plan)
+
+
+@plan_router.post("/{plan_id}/extend", response_model=TrainingPlanDetail)
+async def extend_plan(
+    plan_id: str,
+    payload: ExtendPlanBody,
+    session: AsyncSession = Depends(get_session),
+) -> TrainingPlanDetail:
+    plan = await session.get(TrainingPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+
+    analysis = await session.get(Analysis, plan.analysis_id)
+    if analysis is None or not isinstance(analysis.report, dict):
+        raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
+
+    skater = await session.get(Skater, plan.skater_id)
+    completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
+    if len(completed_days) < 3:
+        raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
+
+    plan.plan_json = await extend_training_plan(
+        original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
+        completed_days=completed_days,
+        action_type=analysis.action_type,
+        report=analysis.report,
+        skater_context=_skater_context(skater) if skater else None,
+        skater_id=skater.id if skater else None,
+    )
+    await session.commit()
+    await session.refresh(plan)
+    return _plan_detail_from_model(plan)
+
+
+@frames_router.get("/{analysis_id}/{filename}")
+async def get_frame(analysis_id: str, filename: str) -> FileResponse:
+    if not filename.startswith("frame_") or not filename.endswith(".jpg"):
+        raise HTTPException(status_code=400, detail="无效的帧文件名。")
+
+    frames_root = (UPLOADS_DIR / analysis_id / "frames").resolve()
+    frame_path = (frames_root / filename).resolve()
+    if frames_root not in frame_path.parents or not frame_path.exists():
+        raise HTTPException(status_code=404, detail="未找到该视频帧。")
+
+    return FileResponse(frame_path, media_type="image/jpeg")

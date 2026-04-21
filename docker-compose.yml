@@ -1,0 +1,43 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: skating-backend
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: skating-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backup:
+    image: alpine:3.19
+    container_name: skating-backup
+    volumes:
+      - ./data:/data:ro
+      - ./backups:/backups
+    command: >
+      sh -c "
+        echo '备份服务启动' &&
+        while true; do
+          TIMESTAMP=$$(date +%Y%m%d_%H%M) &&
+          cp /data/skating-analyzer.db /backups/skating_$${TIMESTAMP}.db &&
+          echo \"备份完成: skating_$${TIMESTAMP}.db\" &&
+          find /backups -name '*.db' -mtime +7 -delete &&
+          echo '清理7天前备份完成' &&
+          sleep 86400;
+        done
+      "
+    restart: unless-stopped

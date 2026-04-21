@@ -1,0 +1,15 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+httpx==0.28.0
+openai==1.57.0
+pydantic==2.10.3
+python-dotenv==1.0.1
+aiofiles==24.1.0
+cryptography==44.0.1
+bcrypt==4.2.1
+mediapipe==0.10.14
+opencv-python-headless==4.10.0.84
+apscheduler==3.10.4

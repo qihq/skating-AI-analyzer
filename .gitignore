@@ -1,0 +1,34 @@
+# 数据与敏感配置
+data/
+.env
+backups/*.db
+
+# 测试与临时文件
+tmp-test/
+*.tmp
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.envrc
+
+# Node
+node_modules/
+*.local
+
+# 构建产物
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

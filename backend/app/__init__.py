@@ -1,0 +1,1 @@
+"""Skating Analyzer backend package."""
