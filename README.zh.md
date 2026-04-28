@@ -6,6 +6,14 @@
 
 [贡献指南](./CONTRIBUTING.md) · [许可证](./LICENSE) · [截图说明](./SCREENSHOT_GUIDE.md)
 
+## Banner 预留区
+
+等仓库封面图准备好之后，可以把横幅图放在这里：
+
+```md
+![Skating Analyzer banner](./docs/banner-placeholder.png)
+```
+
 ## 项目简介
 
 Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，支持上传视频、自动抽帧、姿态估计、生物力学指标分析、AI 诊断报告生成，以及通过技能树、训练计划和历史档案持续跟踪训练进展。
@@ -19,6 +27,17 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 - 儿童模式 / 家长模式双视角
 - 技能树、训练计划、历史档案、成长追踪
 - Docker 一体化部署
+
+## 截图预留区
+
+后续可替换为真实产品截图：
+
+```md
+![技能树](./docs/screenshots/skill-tree.png)
+![上传与分析流程](./docs/screenshots/review-flow.png)
+![报告页](./docs/screenshots/report-page.png)
+![历史档案](./docs/screenshots/archive.png)
+```
 
 ## 技术栈
 

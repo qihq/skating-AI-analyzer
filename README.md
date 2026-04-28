@@ -6,6 +6,14 @@ AI-powered figure skating training analysis system built with React, FastAPI, an
 
 [Contributing](./CONTRIBUTING.md) · [License](./LICENSE) · [Screenshot Guide](./SCREENSHOT_GUIDE.md)
 
+## Banner
+
+Add your repository social preview or hero banner here after screenshots are ready.
+
+```md
+![Skating Analyzer banner](./docs/banner-placeholder.png)
+```
+
 ## Overview
 
 Skating Analyzer is a full-stack application for uploading training videos, extracting motion frames, running pose estimation, generating biomechanics metrics, creating AI-assisted reports, and tracking athlete progress through plans, archives, and skill trees.
@@ -19,6 +27,17 @@ Skating Analyzer is a full-stack application for uploading training videos, extr
 - Child mode and parent mode experiences
 - Skill tree, training plan, archive, and progress tracking
 - Docker all-in-one deployment
+
+## Screenshots
+
+Replace these placeholders with actual product screenshots.
+
+```md
+![Skill tree](./docs/screenshots/skill-tree.png)
+![Review upload flow](./docs/screenshots/review-flow.png)
+![Report page](./docs/screenshots/report-page.png)
+![Archive](./docs/screenshots/archive.png)
+```
 
 ## Tech Stack
 
