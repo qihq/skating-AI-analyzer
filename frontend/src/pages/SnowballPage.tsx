@@ -21,6 +21,7 @@ import {
 } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import ZodiacAvatar from "../components/ZodiacAvatar";
+import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 
 const WELCOME_MESSAGE = "嗨！我是冰宝（IceBuddy） ☃️ 今天想练什么？";
 const CATEGORY_OPTIONS = ["目标", "偏好", "总结", "卡点", "其他"] as const;
@@ -172,7 +173,7 @@ function flattenSuggestions(items: MemorySuggestion[]): SuggestionCard[] {
 
 export default function SnowballPage() {
   const location = useLocation();
-  const { isParentMode, enterParentMode } = useAppMode();
+  const { isParentMode, childView, setChildView, enterParentMode } = useAppMode();
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState("");
   const [messages, setMessages] = useState<SnowballChatMessage[]>([{ role: "assistant", content: WELCOME_MESSAGE }]);
@@ -207,7 +208,7 @@ export default function SnowballPage() {
           return;
         }
         setSkaters(data);
-        setSelectedSkaterId(focusSkaterId || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
+        setSelectedSkaterId(focusSkaterId || (isParentMode ? "" : pickSkaterIdForChildView(data, childView)) || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
       } catch {
         if (!cancelled) {
           setError("冰宝（IceBuddy）暂时没有拿到练习档案，请稍后再试。");
@@ -219,7 +220,16 @@ export default function SnowballPage() {
     return () => {
       cancelled = true;
     };
-  }, [focusSkaterId]);
+  }, [childView, focusSkaterId, isParentMode]);
+
+  useEffect(() => {
+    if (isParentMode || focusSkaterId || !skaters.length) {
+      return;
+    }
+
+    const nextSkaterId = pickSkaterIdForChildView(skaters, childView);
+    setSelectedSkaterId((current) => (current === nextSkaterId ? current : nextSkaterId));
+  }, [childView, focusSkaterId, isParentMode, skaters]);
 
   useEffect(() => {
     if (!selectedSkaterId || !isParentMode) {
@@ -295,6 +305,18 @@ export default function SnowballPage() {
   }, [shouldFocusSuggestions, suggestionCards.length]);
 
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
+
+  const handleSkaterChange = (nextSkaterId: string) => {
+    setSelectedSkaterId(nextSkaterId);
+    if (isParentMode) {
+      return;
+    }
+
+    const nextView = childViewFromSkater(skaters.find((skater) => skater.id === nextSkaterId));
+    if (nextView) {
+      setChildView(nextView);
+    }
+  };
 
   const resetMemoryModal = () => {
     setIsModalOpen(false);
@@ -511,7 +533,7 @@ export default function SnowballPage() {
                   <button
                     key={skater.id}
                     type="button"
-                    onClick={() => setSelectedSkaterId(skater.id)}
+                    onClick={() => handleSkaterChange(skater.id)}
                     className={`inline-flex min-h-[60px] items-center gap-3 rounded-full px-4 py-2 text-sm font-medium transition ${
                       selected ? "bg-blue-500 text-white shadow-[0_12px_24px_rgba(59,130,246,0.22)]" : "bg-white text-slate-600 hover:bg-slate-100"
                     }`}
@@ -807,7 +829,7 @@ export default function SnowballPage() {
                 </div>
               </fieldset>
 
-              <label className="flex items-center justify-between rounded-[24px] bg-slate-50 px-4 py-4">
+              <label className="settings-row flex items-center justify-between rounded-[24px] bg-slate-50 px-4 py-4">
                 <div>
                   <p className="text-sm font-semibold text-slate-900">固定给冰宝（IceBuddy）</p>
                   <p className="mt-1 text-sm text-slate-500">固定后，这条记忆会在未过期时注入到冰宝（IceBuddy）的长期 context。</p>
@@ -817,10 +839,11 @@ export default function SnowballPage() {
                   role="switch"
                   aria-checked={draftMemory.is_pinned}
                   onClick={() => setDraftMemory((current) => ({ ...current, is_pinned: !current.is_pinned }))}
-                  className={`relative h-8 w-14 rounded-full transition ${draftMemory.is_pinned ? "bg-blue-500" : "bg-slate-300"}`}
+                  data-checked={draftMemory.is_pinned}
+                  className={`toggle-switch ${draftMemory.is_pinned ? "bg-blue-500" : "bg-slate-300"}`}
                 >
                   <span
-                    className={`absolute top-1 h-6 w-6 rounded-full bg-white transition ${draftMemory.is_pinned ? "left-7" : "left-1"}`}
+                    className="toggle-thumb bg-white"
                   />
                 </button>
               </label>

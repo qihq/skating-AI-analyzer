@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models import AIProvider
+from app.schemas import ApiConnectionTestResponse
+from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 
 
 PRESET_PROVIDERS = [

@@ -1,6 +1,5 @@
 import axios from "axios";
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { PolarAngleAxis, PolarGrid, Radar, RadarChart, ResponsiveContainer } from "recharts";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
@@ -8,6 +7,7 @@ import {
   createPlan,
   deleteAnalysis,
   dismissMemorySuggestion,
+  exportAnalysis,
   fetchAnalysis,
   fetchAnalysisPlan,
   fetchAnalysisPose,
@@ -16,16 +16,21 @@ import {
   fetchSkaters,
   MemorySuggestion,
   PoseResponse,
+  retryAnalysis,
   Skater,
   SkillNode,
 } from "../api/client";
+import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
+import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import PoseViewer from "../components/PoseViewer";
 import ReportCard from "../components/ReportCard";
+import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import UnlockCelebration from "../components/UnlockCelebration";
 import { useAppMode } from "../components/AppModeContext";
+import { isAnalysisInProgress } from "../constants/analysisStatus";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 
 const STATUS_TEXT: Record<string, string> = {
@@ -53,6 +58,12 @@ const DATA_QUALITY_LABELS: Record<string, string> = {
   poor: "较弱",
 };
 
+const RADAR_VIEWBOX_SIZE = 300;
+const RADAR_CENTER = RADAR_VIEWBOX_SIZE / 2;
+const RADAR_RADIUS = 88;
+const RADAR_LABEL_RADIUS = 122;
+const RADAR_LEVELS = 4;
+
 type SuggestionPreview = {
   suggestionId: string;
   index: number;
@@ -74,6 +85,21 @@ function buildSubscoreRadarData(subscores: Record<string, number>) {
     label,
     value: Math.max(0, Math.min(Number(subscores[key] ?? 0), 100)),
   }));
+}
+
+function getRadarPoint(angleInDegrees: number, radius: number) {
+  const angleInRadians = ((angleInDegrees - 90) * Math.PI) / 180;
+  return {
+    x: RADAR_CENTER + Math.cos(angleInRadians) * radius,
+    y: RADAR_CENTER + Math.sin(angleInRadians) * radius,
+  };
+}
+
+function buildRadarPolygonPoints(length: number, radiusResolver: (index: number) => number) {
+  return Array.from({ length }, (_, index) => {
+    const point = getRadarPoint((360 / length) * index, radiusResolver(index));
+    return `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
+  }).join(" ");
 }
 
 function flattenSuggestionPreview(items: MemorySuggestion[]): SuggestionPreview[] {
@@ -138,12 +164,160 @@ function ForceScoreStars({ score }: { score: number }) {
 
   return (
     <div className="flex w-full max-w-[240px] flex-col items-center gap-2">
-      <div className="flex flex-wrap justify-center gap-1 text-[clamp(1.9rem,3vw,3rem)] leading-none">
+      {/* 修改前：使用 emoji 星号，依赖平台字体度量，不同设备上容易出现星形大小和基线偏差。 */}
+      {/* 修改后：改成固定 viewBox 的 SVG 星形，让移动端和桌面端保持一致对齐。 */}
+      <div className="flex flex-wrap justify-center gap-2 leading-none">
         {Array.from({ length: 5 }).map((_, index) => (
-          <span key={index}>{index < stars ? "⭐" : "☆"}</span>
+          <span key={index} className="block h-8 w-8 tablet:h-10 tablet:w-10" aria-hidden="true">
+            <svg viewBox="0 0 24 24" style={{ width: "100%", height: "100%", display: "block" }}>
+              <path
+                d="M12 2.75l2.78 5.63 6.22.9-4.5 4.39 1.06 6.2L12 16.96 6.44 19.87l1.06-6.2L3 9.28l6.22-.9L12 2.75z"
+                fill={index < stars ? "#FBBF24" : "#FFFFFF"}
+                stroke={index < stars ? "#F59E0B" : "#CBD5E1"}
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
         ))}
       </div>
       <p className="max-w-[240px] text-center text-base font-bold leading-7 text-[#6C63FF] tablet:text-lg">{encouragements[stars - 1]}</p>
+    </div>
+  );
+}
+
+function SubscoreRadarChart({ subscores }: { subscores: Record<string, number> }) {
+  const data = buildSubscoreRadarData(subscores);
+  const axisCount = Math.max(data.length, 1);
+  const gridPolygons = Array.from({ length: RADAR_LEVELS }, (_, level) =>
+    buildRadarPolygonPoints(axisCount, () => (RADAR_RADIUS * (level + 1)) / RADAR_LEVELS),
+  );
+  // 修改前：雷达图中心点和多边形坐标交给第三方布局推断，不同断点下不容易保持绝对居中。
+  // 修改后：所有点位都基于同一个 viewBox 中心显式计算，保证双端图形始终围绕同一中心。
+  const valuePolygon = buildRadarPolygonPoints(axisCount, (index) => (RADAR_RADIUS * data[index].value) / 100);
+
+  return (
+    <div className="mx-auto flex aspect-square h-64 w-full max-w-[320px] items-center justify-center rounded-[28px] border border-slate-200 bg-slate-50 p-4">
+      {/* 修改前：图表尺寸依赖内部布局实现，排查缩放错位时不够直观。 */}
+      {/* 修改后：改成 viewBox + width:100% 的响应式 SVG，让图案始终跟随容器内容区缩放。 */}
+      <svg
+        viewBox={`0 0 ${RADAR_VIEWBOX_SIZE} ${RADAR_VIEWBOX_SIZE}`}
+        style={{ width: "100%", height: "100%", display: "block" }}
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label="subscore radar chart"
+      >
+        {gridPolygons.map((points, index) => (
+          <polygon
+            key={`grid-${index}`}
+            points={points}
+            fill="none"
+            stroke="rgba(148,163,184,0.25)"
+            strokeWidth="1"
+          />
+        ))}
+
+        {data.map((item, index) => {
+          const axisPoint = getRadarPoint((360 / axisCount) * index, RADAR_RADIUS);
+          const labelPoint = getRadarPoint((360 / axisCount) * index, RADAR_LABEL_RADIUS);
+          const textAnchor =
+            Math.abs(labelPoint.x - RADAR_CENTER) < 8 ? "middle" : labelPoint.x > RADAR_CENTER ? "start" : "end";
+
+          return (
+            <g key={item.label}>
+              <line
+                x1={RADAR_CENTER}
+                y1={RADAR_CENTER}
+                x2={axisPoint.x}
+                y2={axisPoint.y}
+                stroke="rgba(148,163,184,0.22)"
+                strokeWidth="1"
+              />
+              <text
+                x={labelPoint.x}
+                y={labelPoint.y}
+                fill="#64748b"
+                fontSize="12"
+                textAnchor={textAnchor}
+                dominantBaseline="central"
+              >
+                {item.label}
+              </text>
+            </g>
+          );
+        })}
+
+        <polygon points={valuePolygon} fill="#60A5FA" fillOpacity="0.28" stroke="#3B82F6" strokeWidth="2.5" />
+
+        {data.map((item, index) => {
+          const point = getRadarPoint((360 / axisCount) * index, (RADAR_RADIUS * item.value) / 100);
+          return <circle key={`dot-${item.label}`} cx={point.x} cy={point.y} r="3.5" fill="#1D4ED8" />;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function DetailedFailedState({
+  analysis,
+  isParentMode,
+  isRetrying,
+  hideRetry,
+  onRetry,
+  onReupload,
+}: {
+  analysis: AnalysisDetail;
+  isParentMode: boolean;
+  isRetrying: boolean;
+  hideRetry: boolean;
+  onRetry: () => void;
+  onReupload: () => void;
+}) {
+  const errorMessage = getAnalysisErrorMessage(analysis.error_code);
+
+  if (!isParentMode) {
+    return (
+      <div className="app-card border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-sky-50 p-7 text-center shadow-[0_22px_60px_rgba(148,163,184,0.18)] tablet:p-9">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-white text-3xl shadow-sm">🤔</div>
+        <h2 className="mt-5 text-2xl font-semibold text-slate-900">{errorMessage.title}</h2>
+        <p className="mt-3 text-base leading-7 text-slate-600">冰宝遇到了一点问题，请让爸爸妈妈来看看。</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-card border border-rose-200 bg-gradient-to-br from-rose-50 via-white to-orange-50 p-6 text-rose-700 shadow-[0_22px_60px_rgba(251,113,133,0.14)] tablet:p-8">
+      <p className="text-xs font-semibold uppercase tracking-[0.28em] text-rose-400">分析失败</p>
+      <h2 className="mt-3 text-2xl font-semibold text-rose-600">{errorMessage.title}</h2>
+      <p className="mt-4 text-base leading-7 text-slate-600">{errorMessage.hint}</p>
+      <div className="mt-5 rounded-[22px] border border-rose-100 bg-white/80 px-4 py-3 text-sm text-slate-600">
+        错误代码：{analysis.error_code ?? "UNKNOWN_ERROR"}
+      </div>
+      {analysis.error_detail ? (
+        <details className="mt-4 rounded-[22px] border border-slate-200 bg-white/70 px-4 py-3 text-sm text-slate-500">
+          <summary className="cursor-pointer font-medium text-slate-700">调试详情</summary>
+          <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words text-xs leading-6">{analysis.error_detail}</pre>
+        </details>
+      ) : null}
+      <div className="mt-6 flex flex-wrap gap-3">
+        {!hideRetry ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            disabled={isRetrying}
+            className="min-h-[46px] rounded-full bg-orange-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isRetrying ? "提交中..." : "🔄 重新分析"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onReupload}
+          className="min-h-[46px] rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+        >
+          📤 重新上传
+        </button>
+      </div>
     </div>
   );
 }
@@ -194,6 +368,16 @@ export default function ReportPage() {
   const [memorySuggestions, setMemorySuggestions] = useState<MemorySuggestion[]>([]);
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [isSuggestionMutating, setIsSuggestionMutating] = useState(false);
+  const [isRetryingAnalysis, setIsRetryingAnalysis] = useState(false);
+  const [hideRetryAfterMissingVideo, setHideRetryAfterMissingVideo] = useState(false);
+  const [isRetryConfirmOpen, setIsRetryConfirmOpen] = useState(false);
+  const [isRetryPinOpen, setIsRetryPinOpen] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
+  const canUseNativeShare =
+    typeof window !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.share === "function" &&
+    window.matchMedia("(pointer: coarse)").matches;
   const deferredAnalysis = useDeferredValue(analysis);
   const subscores = deferredAnalysis?.report?.subscores ?? deferredAnalysis?.bio_data?.bio_subscores ?? null;
   const reportDataQuality = deferredAnalysis?.report?.data_quality ?? "partial";
@@ -267,6 +451,12 @@ export default function ReportPage() {
   }, [autoUnlockedSkill?.name, celebratedSkillId, deferredAnalysis?.auto_unlocked_skill, deferredAnalysis?.skill_category]);
 
   useEffect(() => {
+    setHideRetryAfterMissingVideo(false);
+    setIsRetryConfirmOpen(false);
+    setIsRetryPinOpen(false);
+  }, [id]);
+
+  useEffect(() => {
     if (!id) {
       setError("无效的报告 ID。");
       return;
@@ -277,7 +467,7 @@ export default function ReportPage() {
 
     const load = async () => {
       try {
-        const data = await fetchAnalysis(id);
+        const data = await fetchAnalysis(id, { isParentRequest: isParentMode });
         if (cancelled) {
           return;
         }
@@ -286,7 +476,7 @@ export default function ReportPage() {
           setError(null);
         });
 
-        if (data.status === "pending" || data.status === "processing") {
+        if (isAnalysisInProgress(data.status)) {
           timer = window.setTimeout(load, 3000);
         }
       } catch {
@@ -304,7 +494,7 @@ export default function ReportPage() {
         window.clearTimeout(timer);
       }
     };
-  }, [id]);
+  }, [id, isParentMode]);
 
   useEffect(() => {
     if (!id || analysis?.status !== "completed") {
@@ -496,6 +686,100 @@ export default function ReportPage() {
     });
   };
 
+  const handleRetryAnalysis = async () => {
+    if (!id) {
+      return;
+    }
+    setIsRetryingAnalysis(true);
+    setError(null);
+    try {
+      await retryAnalysis(id);
+      startTransition(() => {
+        setAnalysis((current) =>
+          current
+            ? {
+                ...current,
+                status: "pending",
+                error_code: null,
+                error_detail: null,
+                error_message: null,
+              }
+            : current,
+        );
+      });
+      setHideRetryAfterMissingVideo(false);
+      showNotice("已重新提交，请稍候");
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        if (requestError.response?.status === 404) {
+          setHideRetryAfterMissingVideo(true);
+          showNotice('原始视频已清理，请点击"重新上传"');
+          return;
+        }
+        setError(String(requestError.response?.data?.detail ?? "重新分析失败，请稍后重试。"));
+      } else {
+        setError("重新分析失败，请稍后重试。");
+      }
+    } finally {
+      setIsRetryingAnalysis(false);
+    }
+  };
+
+  const handleShareReport = async () => {
+    if (!id || !deferredAnalysis || deferredAnalysis.status !== "completed") {
+      return;
+    }
+
+    setIsSharing(true);
+    setError(null);
+    try {
+      const { text } = await exportAnalysis(id);
+      const shareTitle = `${deferredAnalysis.skater_name ?? "冰宝诊断"} · ${deferredAnalysis.action_type}`;
+
+      if (navigator.share) {
+        try {
+          await navigator.share({
+            title: shareTitle,
+            text,
+          });
+          showNotice("报告内容已复制");
+          return;
+        } catch (shareError) {
+          if (shareError instanceof DOMException && shareError.name === "AbortError") {
+            return;
+          }
+        }
+      }
+
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("clipboard_unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      showNotice("报告内容已复制");
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "报告分享失败，请稍后重试。"));
+      } else {
+        setError("报告分享失败，请稍后重试。");
+      }
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  const requestRetryAnalysis = () => {
+    if (!deferredAnalysis || isAnalysisInProgress(deferredAnalysis.status) || isRetryingAnalysis) {
+      return;
+    }
+
+    if (isParentMode) {
+      setIsRetryConfirmOpen(true);
+      return;
+    }
+
+    setIsRetryPinOpen(true);
+  };
+
   const canDeleteAnalysis = deferredAnalysis?.status === "completed" || deferredAnalysis?.status === "failed";
   const deleteDisabled = !deferredAnalysis || !canDeleteAnalysis;
   const deleteTitle =
@@ -513,6 +797,16 @@ export default function ReportPage() {
           ← 返回复盘
         </Link>
         <div className="flex flex-wrap gap-3">
+          {isParentMode && deferredAnalysis?.status === "completed" ? (
+            <button
+              type="button"
+              onClick={() => void handleShareReport()}
+              disabled={isSharing}
+              className="min-h-[44px] rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSharing ? (canUseNativeShare ? "分享中..." : "复制中...") : canUseNativeShare ? "📤 分享" : "📋 复制"}
+            </button>
+          ) : null}
           {isParentMode ? (
             <button
               type="button"
@@ -527,6 +821,24 @@ export default function ReportPage() {
           <Link to="/archive" className="app-pill">
             查看练习档案
           </Link>
+          {deferredAnalysis?.status === "completed" ? (
+            <>
+              <Link
+                to={`/report/${deferredAnalysis.id}`}
+                className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
+              >
+                📄 查看报告
+              </Link>
+              <button
+                type="button"
+                onClick={requestRetryAnalysis}
+                disabled={isRetryingAnalysis}
+                className="min-h-[44px] rounded-full border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-600 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isRetryingAnalysis ? "提交中..." : "🔄 再次分析"}
+              </button>
+            </>
+          ) : null}
           {planId ? (
             <Link to={`/plan/${planId}`} className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600">
               查看 7 天训练计划
@@ -549,7 +861,18 @@ export default function ReportPage() {
       {!deferredAnalysis ? (
         <LoadingState status="processing" />
       ) : deferredAnalysis.status === "failed" ? (
-        <FailedState message={deferredAnalysis.error_message} />
+        <DetailedFailedState
+          analysis={deferredAnalysis}
+          isParentMode={isParentMode}
+          isRetrying={isRetryingAnalysis}
+          hideRetry={hideRetryAfterMissingVideo}
+          onRetry={requestRetryAnalysis}
+          onReupload={() =>
+            navigate("/review", {
+              state: deferredAnalysis.skater_id ? { skaterId: deferredAnalysis.skater_id } : undefined,
+            })
+          }
+        />
       ) : deferredAnalysis.status !== "completed" ? (
         <LoadingState status={deferredAnalysis.status} />
       ) : (
@@ -612,15 +935,7 @@ export default function ReportPage() {
                 <ReportCard title="分项评分" eyebrow="Subscores">
                   {hasReliableSubscores && subscores ? (
                     <div className="grid gap-6 ipad:grid-cols-[1fr_1fr] web:grid-cols-1">
-                      <div className="h-64 overflow-hidden rounded-[28px] border border-slate-200 bg-slate-50">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <RadarChart data={buildSubscoreRadarData(subscores)}>
-                            <PolarGrid stroke="rgba(148,163,184,0.25)" />
-                            <PolarAngleAxis dataKey="label" tick={{ fill: "#64748b", fontSize: 12 }} />
-                            <Radar dataKey="value" stroke="#3B82F6" fill="#60A5FA" fillOpacity={0.28} dot={{ fill: "#1D4ED8", r: 3 }} />
-                          </RadarChart>
-                        </ResponsiveContainer>
-                      </div>
+                      <SubscoreRadarChart subscores={subscores} />
 
                       <div className="grid gap-3 sm:grid-cols-2">
                         {Object.entries(subscores).map(([key, value]) => (
@@ -806,6 +1121,37 @@ export default function ReportPage() {
           onClose={closeDeleteModal}
           onConfirmDelete={() => setDeleteStep("pin")}
           onSubmitPin={() => void handleDeleteAnalysis()}
+        />
+      ) : null}
+
+      {isRetryPinOpen ? (
+        <ParentPinVerifyModal
+          pinLength={pinLength}
+          title="输入家长 PIN"
+          description="验证通过后才能重新分析这个视频。"
+          confirmLabel="继续"
+          onClose={() => setIsRetryPinOpen(false)}
+          onVerified={() => {
+            setIsRetryPinOpen(false);
+            setIsRetryConfirmOpen(true);
+          }}
+        />
+      ) : null}
+
+      {isRetryConfirmOpen ? (
+        <RetryAnalysisConfirmSheet
+          isSubmitting={isRetryingAnalysis}
+          onClose={() => {
+            if (!isRetryingAnalysis) {
+              setIsRetryConfirmOpen(false);
+            }
+          }}
+          onConfirm={() =>
+            void (async () => {
+              await handleRetryAnalysis();
+              setIsRetryConfirmOpen(false);
+            })()
+          }
         />
       ) : null}
 

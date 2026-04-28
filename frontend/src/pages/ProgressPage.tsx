@@ -65,7 +65,7 @@ export default function ProgressPage() {
   );
 
   return (
-    <main className="page-shell min-h-screen">
+    <main className="page-shell page-scroll-container min-h-screen">
       <div className="absolute inset-0 -z-10 overflow-hidden">
         <div className="ice-orb left-[8%] top-[8%]" />
         <div className="ice-orb bottom-[10%] right-[10%]" />

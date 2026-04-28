@@ -1,9 +1,11 @@
 import axios from "axios";
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { ChangeEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import {
+  AnalysisStatus,
   createTrainingSession,
+  fetchAnalysis,
   fetchSkaterSkills,
   fetchSkaters,
   fetchTrainingSessions,
@@ -13,7 +15,10 @@ import {
   TrainingSessionRecord,
   uploadAnalysis,
 } from "../api/client";
+import { useAppMode } from "../components/AppModeContext";
+import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
 import ZodiacAvatar from "../components/ZodiacAvatar";
+import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -35,6 +40,15 @@ type SessionFormState = {
   coach_present: boolean;
   note: string;
 };
+
+type UploadStage = "idle" | "uploading" | "processing";
+
+const PROCESS_STEPS = [
+  { key: "uploaded", label: "视频上传" },
+  { key: "extracting", label: "画面提取" },
+  { key: "analyzing", label: "AI 分析" },
+  { key: "report", label: "生成报告" },
+] as const;
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) {
@@ -94,12 +108,15 @@ function sessionLabel(session: TrainingSessionRecord) {
 }
 
 export default function ReviewPage() {
+  const { isParentMode, childView, setChildView } = useAppMode();
+  const location = useLocation();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const draft = useMemo(() => loadDraft(), []);
+  const preferredSkaterId = (location.state as { skaterId?: string } | null)?.skaterId ?? "";
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [skaters, setSkaters] = useState<Skater[]>([]);
-  const [selectedSkaterId, setSelectedSkaterId] = useState(draft?.skaterId ?? "");
+  const [selectedSkaterId, setSelectedSkaterId] = useState(preferredSkaterId || draft?.skaterId || "");
   const [skills, setSkills] = useState<SkillNode[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState(draft?.skillId ?? "");
   const [sessions, setSessions] = useState<TrainingSessionRecord[]>([]);
@@ -111,6 +128,10 @@ export default function ReviewPage() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [uploadStage, setUploadStage] = useState<UploadStage>("idle");
+  const [uploadProgress, setUploadProgress] = useState({ loaded: 0, total: 0, percent: 0 });
+  const [pendingAnalysisId, setPendingAnalysisId] = useState<string | null>(null);
+  const [processingStatus, setProcessingStatus] = useState<AnalysisStatus>("pending");
 
   useEffect(() => {
     let cancelled = false;
@@ -122,7 +143,15 @@ export default function ReviewPage() {
           return;
         }
         setSkaters(data);
-        setSelectedSkaterId((current) => current || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
+        setSelectedSkaterId(
+          (current) =>
+            current ||
+            (preferredSkaterId && data.some((skater) => skater.id === preferredSkaterId) ? preferredSkaterId : "") ||
+            (!isParentMode ? pickSkaterIdForChildView(data, childView) : "") ||
+            data.find((skater) => skater.is_default)?.id ||
+            data[0]?.id ||
+            "",
+        );
       } catch {
         if (!cancelled) {
           setError("练习档案加载失败，请稍后刷新页面。");
@@ -134,7 +163,16 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [childView, isParentMode, preferredSkaterId]);
+
+  useEffect(() => {
+    if (isParentMode || !skaters.length || preferredSkaterId) {
+      return;
+    }
+
+    const nextSkaterId = pickSkaterIdForChildView(skaters, childView);
+    setSelectedSkaterId((current) => (current === nextSkaterId ? current : nextSkaterId));
+  }, [childView, isParentMode, preferredSkaterId, skaters]);
 
   useEffect(() => {
     if (!selectedSkaterId) {
@@ -178,10 +216,98 @@ export default function ReviewPage() {
     };
   }, [draft?.sessionId, draft?.skillId, selectedSkaterId]);
 
+  useEffect(() => {
+    if (!pendingAnalysisId) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const pollAnalysis = async () => {
+      try {
+        const data = await fetchAnalysis(pendingAnalysisId, { isParentRequest: isParentMode });
+        if (cancelled) {
+          return;
+        }
+
+        startTransition(() => {
+          setProcessingStatus(data.status);
+        });
+
+        if (data.status === "completed") {
+          window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+          setIsSubmitting(false);
+          navigate(`/report/${data.id}`);
+          return;
+        }
+
+        if (data.status === "failed") {
+          setError(data.error_message ?? "分析失败，请稍后重试。");
+          setUploadStage("idle");
+          setIsSubmitting(false);
+          setPendingAnalysisId(null);
+          return;
+        }
+
+        if (isAnalysisInProgress(data.status)) {
+          timer = window.setTimeout(pollAnalysis, 3000);
+        }
+      } catch {
+        if (!cancelled) {
+          setError("分析状态加载失败，请稍后重试。");
+          setUploadStage("idle");
+          setIsSubmitting(false);
+          setPendingAnalysisId(null);
+        }
+      }
+    };
+
+    void pollAnalysis();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [isParentMode, navigate, pendingAnalysisId]);
+
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
   const selectedSkill = skills.find((skill) => skill.id === selectedSkillId);
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const groupedSkills = useMemo(() => groupSkills(skills), [skills]);
+  const processingStage = getAnalysisProcessingStage(processingStatus);
+  const analysisSteps = useMemo(
+    () => [
+      { ...PROCESS_STEPS[0], state: uploadStage === "uploading" ? "active" : uploadStage === "processing" ? "done" : "idle" },
+      {
+        ...PROCESS_STEPS[1],
+        state: uploadStage === "processing" ? (processingStage >= 1 ? "done" : "active") : "idle",
+      },
+      {
+        ...PROCESS_STEPS[2],
+        state: uploadStage === "processing" ? (processingStage >= 2 ? "done" : processingStage >= 1 ? "active" : "idle") : "idle",
+      },
+      {
+        ...PROCESS_STEPS[3],
+        state: uploadStage === "processing" ? (processingStage >= 3 ? "done" : processingStage >= 2 ? "active" : "idle") : "idle",
+      },
+    ],
+    [processingStage, uploadStage],
+  );
+
+  const handleSkaterChange = (nextSkaterId: string) => {
+    setSelectedSkaterId(nextSkaterId);
+    if (isParentMode) {
+      return;
+    }
+
+    const nextView = childViewFromSkater(skaters.find((skater) => skater.id === nextSkaterId));
+    if (nextView) {
+      setChildView(nextView);
+    }
+  };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -229,6 +355,8 @@ export default function ReviewPage() {
       setSaveMessage("今天的训练课次已创建，并自动关联到本次复盘。");
       window.setTimeout(() => setSaveMessage(null), 2200);
     } catch (requestError) {
+      setUploadStage("idle");
+      setPendingAnalysisId(null);
       if (axios.isAxiosError(requestError)) {
         setError(String(requestError.response?.data?.detail ?? "课次创建失败，请稍后重试。"));
       } else {
@@ -266,18 +394,33 @@ export default function ReviewPage() {
 
     setIsSubmitting(true);
     setError(null);
+    setUploadStage("uploading");
+    setUploadProgress({ loaded: 0, total: selectedFile.size, percent: 0 });
+    setPendingAnalysisId(null);
+    setProcessingStatus("pending");
 
     try {
-      const response = await uploadAnalysis(formData);
-      window.localStorage.removeItem(DRAFT_STORAGE_KEY);
-      navigate(`/report/${response.id}`);
+      const response = await uploadAnalysis(formData, {
+        onProgress: (progress) => {
+          startTransition(() => {
+            setUploadProgress(progress);
+          });
+        },
+      });
+      startTransition(() => {
+        setUploadProgress({ loaded: selectedFile.size, total: selectedFile.size, percent: 100 });
+        setUploadStage("processing");
+        setProcessingStatus(response.status);
+        setPendingAnalysisId(response.id);
+      });
     } catch (requestError) {
+      setUploadStage("idle");
+      setPendingAnalysisId(null);
       if (axios.isAxiosError(requestError)) {
         setError(String(requestError.response?.data?.detail ?? "上传失败，请稍后重试。"));
       } else {
         setError("上传失败，请稍后重试。");
       }
-    } finally {
       setIsSubmitting(false);
     }
   };
@@ -467,7 +610,7 @@ export default function ReviewPage() {
             <div className="mt-5 grid gap-4">
               <label className="space-y-2">
                 <span className="text-sm font-medium text-slate-700">练习档案</span>
-                <select value={selectedSkaterId} onChange={(event) => setSelectedSkaterId(event.target.value)} className="app-select">
+                <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
                   {skaters.map((skater) => (
                     <option key={skater.id} value={skater.id}>
                       {skater.display_name || skater.name}
@@ -516,6 +659,48 @@ export default function ReviewPage() {
 
             {error ? <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-500">{error}</p> : null}
             {saveMessage ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-600">{saveMessage}</p> : null}
+
+            {uploadStage !== "idle" ? (
+              <div className="mt-5 rounded-[28px] border border-blue-100 bg-blue-50/70 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-slate-900">
+                    {uploadStage === "uploading" ? "正在上传视频" : "正在生成分析结果"}
+                  </p>
+                  <span className="text-sm font-semibold text-blue-600">
+                    {uploadStage === "uploading" ? `${uploadProgress.percent}%` : "100%"}
+                  </span>
+                </div>
+
+                <div className="mt-3 h-3 overflow-hidden rounded-full bg-white">
+                  <div
+                    className="h-full rounded-full bg-blue-500 transition-[width] duration-300"
+                    style={{ width: `${uploadStage === "uploading" ? uploadProgress.percent : 100}%` }}
+                  />
+                </div>
+
+                <p className="mt-3 text-sm text-slate-500">
+                  {formatFileSize(uploadProgress.loaded)} / {formatFileSize(uploadProgress.total || selectedFile?.size || 0)}
+                </p>
+
+                <div className="mt-5 grid gap-3">
+                  {analysisSteps.map((step) => {
+                    const icon = step.state === "done" ? "✅" : step.state === "active" ? "⏳" : "○";
+                    const tone =
+                      step.state === "done"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : step.state === "active"
+                          ? "border-amber-200 bg-amber-50 text-amber-700"
+                          : "border-slate-200 bg-white text-slate-400";
+                    return (
+                      <div key={step.key} className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${tone}`}>
+                        <span className="text-base leading-none">{icon}</span>
+                        <span className="font-medium">{step.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-5 flex flex-col gap-3 tablet:flex-row">
               <button

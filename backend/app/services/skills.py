@@ -281,7 +281,35 @@ async def sync_all_skater_progress() -> None:
         await session.commit()
 
 
-def serialize_skill(node: SkillNode, row: SkaterSkill) -> dict[str, Any]:
+async def get_latest_skill_scores(
+    session: AsyncSession,
+    skater_id: str,
+    skill_ids: list[str],
+) -> dict[str, int]:
+    if not skill_ids:
+        return {}
+
+    result = await session.execute(
+        select(Analysis.skill_node_id, Analysis.force_score)
+        .where(
+            Analysis.skater_id == skater_id,
+            Analysis.status == "completed",
+            Analysis.skill_node_id.in_(skill_ids),
+            Analysis.force_score.is_not(None),
+        )
+        .order_by(Analysis.created_at.desc())
+    )
+
+    latest_scores: dict[str, int] = {}
+    for skill_node_id, force_score in result.all():
+        if skill_node_id is None or skill_node_id in latest_scores or force_score is None:
+            continue
+        latest_scores[skill_node_id] = int(force_score)
+
+    return latest_scores
+
+
+def serialize_skill(node: SkillNode, row: SkaterSkill, last_analysis_score: int | None = None) -> dict[str, Any]:
     unlock_config = node.unlock_config if isinstance(node.unlock_config, dict) else None
     score_unlock_config = unlock_config
     if unlock_config is not None and isinstance(unlock_config.get("score"), dict):
@@ -307,6 +335,7 @@ def serialize_skill(node: SkillNode, row: SkaterSkill) -> dict[str, Any]:
         "unlocked_at": row.unlocked_at,
         "unlock_source": row.unlocked_by,
         "unlock_note": row.unlock_note,
+        "last_analysis_score": last_analysis_score,
     }
 
 
@@ -321,7 +350,8 @@ async def get_skater_skill_payloads(session: AsyncSession, skater_id: str) -> li
         row.skill_id: row
         for row in (await session.execute(select(SkaterSkill).where(SkaterSkill.skater_id == skater_id))).scalars().all()
     }
-    return [serialize_skill(node, rows[node.id]) for node in nodes if node.id in rows]
+    latest_scores = await get_latest_skill_scores(session, skater_id, [node.id for node in nodes])
+    return [serialize_skill(node, rows[node.id], latest_scores.get(node.id)) for node in nodes if node.id in rows]
 
 
 async def unlock_skill(

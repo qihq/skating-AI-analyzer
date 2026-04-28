@@ -1,9 +1,14 @@
-# 数据与敏感配置
+# Runtime data and secrets
 data/
 .env
 backups/*.db
 
-# 测试与临时文件
+# Image exports and archives
+*.tar
+*.tar.gz
+*.zip
+
+# Temporary files
 tmp-test/
 *.tmp
 *.log
@@ -18,8 +23,9 @@ venv/
 # Node
 node_modules/
 *.local
+frontend/dist/
 
-# 构建产物
+# Build artifacts
 dist/
 build/
 

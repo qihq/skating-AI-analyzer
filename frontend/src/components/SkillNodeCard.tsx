@@ -5,6 +5,7 @@ type SkillNodeCardProps = {
   disabled?: boolean;
   actionLabel?: string;
   onClick?: () => void;
+  highlightTone?: "default" | "focus";
 };
 
 function isUnlocked(status: SkillNode["status"]) {
@@ -41,14 +42,15 @@ function statusMeta(status: SkillNode["status"]) {
   };
 }
 
-export default function SkillNodeCard({ node, disabled, actionLabel, onClick }: SkillNodeCardProps) {
+export default function SkillNodeCard({ node, disabled, actionLabel, onClick, highlightTone = "default" }: SkillNodeCardProps) {
   const meta = statusMeta(node.status);
   const unlockedByParent = node.unlocked_by === "parent";
   const consecutive = Math.max(Number((node.unlock_config as { consecutive?: number } | null)?.consecutive ?? 0), 0);
   const progressPct = consecutive > 0 ? Math.min((node.attempt_count / consecutive) * 100, 100) : 0;
+  const highlightClass = highlightTone === "focus" ? "border-[#FACC15] shadow-[0_16px_32px_rgba(250,204,21,0.22)]" : "";
 
   return (
-    <div className={`relative flex min-w-[88px] flex-col gap-2 rounded-3xl border-2 p-4 transition-transform ${meta.wrapper}`}>
+    <div className={`relative flex min-w-[88px] flex-col gap-2 rounded-3xl border-2 p-4 transition-transform ${meta.wrapper} ${highlightClass}`}>
       <div className={`absolute left-3 top-3 h-3 w-3 rounded-full ${meta.dot}`} />
       <span className="pt-2 text-2xl leading-none">{node.emoji}</span>
       <span className={`text-center text-xs ${meta.title}`}>
@@ -69,6 +71,9 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick }: 
       ) : null}
 
       {node.unlock_note ? <span className="text-center text-[11px] leading-5 text-slate-500">{node.unlock_note}</span> : null}
+      {typeof node.last_analysis_score === "number" ? (
+        <span className="mt-auto text-center text-[11px] leading-5 text-slate-500">上次得分：{node.last_analysis_score}分</span>
+      ) : null}
 
       {onClick ? (
         <button

@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  --bg-primary: #fafafa;
   --kid-primary: #6c63ff;
   --kid-secondary: #ff6b9d;
   --kid-accent: #ffd93d;
@@ -36,28 +37,45 @@
   --node-locked-dot: #9ca3af;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
-  --touch-min: 44px;
+  --color-primary: var(--parent-accent);
+  --touch-target-min: 44px;
+  --list-row-min-height: 64px;
+  --bottom-nav-height: 56px;
+  --app-header-height: 72px;
+  --touch-min: var(--touch-target-min);
   --touch-kid: 56px;
 }
 
 html,
-body,
-#root {
+body {
   min-height: 100%;
 }
 
 html {
-  background: var(--parent-bg);
+  background-color: var(--bg-primary, #ffffff);
+  overflow-x: hidden;
+  overflow-y: scroll;
 }
 
 body {
   margin: 0;
   font-family: var(--font-sans);
   color: var(--parent-primary);
-  background:
+  background-color: var(--bg-primary, #ffffff);
+  overflow-x: hidden;
+  overflow-y: visible;
+  background-image:
     radial-gradient(circle at top left, rgba(108, 99, 255, 0.12), transparent 34%),
     radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 28%),
     linear-gradient(180deg, #fcfcff 0%, #fafafa 100%);
+}
+
+#root {
+  min-height: 100%;
+  display: block;
+  position: relative;
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 
 * {
@@ -86,8 +104,12 @@ a {
 
 .app-shell {
   min-height: 100vh;
+  display: block;
   position: relative;
-  background:
+  overflow-x: hidden;
+  overflow-y: visible;
+  background-color: var(--bg-primary, #ffffff);
+  background-image:
     radial-gradient(circle at 10% 10%, rgba(108, 99, 255, 0.08), transparent 28%),
     radial-gradient(circle at 88% 16%, rgba(255, 107, 157, 0.08), transparent 24%),
     linear-gradient(180deg, #fdfcff 0%, #fafafa 100%);
@@ -195,9 +217,98 @@ a {
 }
 
 .page-shell {
-  min-height: 100vh;
+  min-height: 100%;
+  display: block;
   position: relative;
-  background: transparent;
+  background-color: var(--bg-primary, #ffffff);
+}
+
+.page-scroll-container {
+  min-height: auto;
+  overflow-y: visible;
+}
+
+.app-header {
+  padding-top: env(safe-area-inset-top, 0px);
+  min-height: calc(var(--app-header-height) + env(safe-area-inset-top, 0px));
+}
+
+.page-content,
+.safe-bottom {
+  padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px) + 16px);
+}
+
+.bottom-nav {
+  height: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.bottom-nav-item {
+  min-width: var(--touch-target-min);
+  min-height: var(--bottom-nav-height);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.bottom-nav-item .icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.bottom-nav-item .label {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.bottom-nav-item.active .icon,
+.bottom-nav-item.active .label {
+  color: var(--color-primary);
+}
+
+.list-row {
+  min-height: var(--list-row-min-height);
+  padding: 12px 16px;
+}
+
+.list-row-action {
+  min-width: var(--touch-target-min);
+  min-height: var(--touch-target-min);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-row {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 51px;
+  min-width: 51px;
+  height: 31px;
+  border-radius: 999px;
+  transition: background-color 0.2s ease;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 29px;
+  height: 29px;
+  border-radius: 999px;
+  transition: transform 0.2s ease;
+}
+
+.toggle-switch[data-checked="true"] .toggle-thumb {
+  transform: translateX(20px);
 }
 
 .frost-panel {
@@ -269,10 +380,6 @@ a {
   background: rgba(255, 255, 255, 1);
   color: #0f172a;
   padding: 0.65rem 0.9rem;
-}
-
-.safe-bottom {
-  padding-bottom: calc(88px + env(safe-area-inset-bottom));
 }
 
 .content-visibility-auto {

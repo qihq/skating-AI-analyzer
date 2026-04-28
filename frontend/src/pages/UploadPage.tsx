@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { fetchSkaters, Skater, uploadAnalysis } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import TopNav from "../components/TopNav";
+import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 
 const ACTION_OPTIONS = ["跳跃", "旋转", "步法", "自由滑"];
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
@@ -19,7 +20,7 @@ function formatFileSize(bytes: number) {
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const { isParentMode, enterParentMode } = useAppMode();
+  const { isParentMode, childView, setChildView, enterParentMode } = useAppMode();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [actionType, setActionType] = useState<string>(ACTION_OPTIONS[0]);
@@ -41,7 +42,7 @@ export default function UploadPage() {
           return;
         }
         setSkaters(data);
-        setSelectedSkaterId((current) => current || data[0]?.id || "");
+        setSelectedSkaterId((current) => current || (isParentMode ? "" : pickSkaterIdForChildView(data, childView)) || data[0]?.id || "");
       } catch {
         if (!cancelled) {
           setError("练习档案加载失败，请稍后刷新页面。");
@@ -53,7 +54,16 @@ export default function UploadPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [childView, isParentMode]);
+
+  useEffect(() => {
+    if (isParentMode || !skaters.length) {
+      return;
+    }
+
+    const nextSkaterId = pickSkaterIdForChildView(skaters, childView);
+    setSelectedSkaterId((current) => (current === nextSkaterId ? current : nextSkaterId));
+  }, [childView, isParentMode, skaters]);
 
   const fileMeta = useMemo(() => {
     if (!selectedFile) {
@@ -87,6 +97,18 @@ export default function UploadPage() {
 
   const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     handleFile(event.target.files?.[0] ?? null);
+  };
+
+  const handleSkaterChange = (nextSkaterId: string) => {
+    setSelectedSkaterId(nextSkaterId);
+    if (isParentMode) {
+      return;
+    }
+
+    const nextView = childViewFromSkater(skaters.find((skater) => skater.id === nextSkaterId));
+    if (nextView) {
+      setChildView(nextView);
+    }
   };
 
   const handleDrop = (event: DragEvent<HTMLButtonElement>) => {
@@ -137,7 +159,7 @@ export default function UploadPage() {
   };
 
   return (
-    <main className="page-shell min-h-screen">
+    <main className="page-shell page-scroll-container min-h-screen">
       <div className="absolute inset-0 -z-10 overflow-hidden">
         <div className="ice-orb left-[8%] top-[10%]" />
         <div className="ice-orb bottom-[12%] right-[10%]" />
@@ -244,7 +266,7 @@ export default function UploadPage() {
                 <span className="text-sm font-medium text-slate-200">练习档案</span>
                 <select
                   value={selectedSkaterId}
-                  onChange={(event) => setSelectedSkaterId(event.target.value)}
+                  onChange={(event) => handleSkaterChange(event.target.value)}
                   className="input-shell"
                 >
                   {skaters.length ? (

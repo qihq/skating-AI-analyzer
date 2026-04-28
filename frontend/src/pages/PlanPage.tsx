@@ -1,12 +1,16 @@
 import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSession } from "../api/client";
 
 const LOCATION_MODE_STORAGE_KEY = "plan_location_mode";
 
 type LocationMode = "home" | "rink";
+type PlanLocationState = {
+  focusSessionId?: string;
+  focusDay?: number;
+} | null;
 
 function sessionTypeLabel(isOfficeTrainable: boolean) {
   return isOfficeTrainable ? "居家可练" : "需上冰";
@@ -18,6 +22,7 @@ function sessionTypeTone(isOfficeTrainable: boolean) {
 
 export default function PlanPage() {
   const { plan_id } = useParams<{ plan_id: string }>();
+  const location = useLocation();
   const [plan, setPlan] = useState<TrainingPlanDetail | null>(null);
   const [expandedDays, setExpandedDays] = useState<number[]>([1]);
   const [savingSessionIds, setSavingSessionIds] = useState<string[]>([]);
@@ -28,6 +33,11 @@ export default function PlanPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isExtending, setIsExtending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const [hasAppliedFocusTarget, setHasAppliedFocusTarget] = useState(false);
+  const routeState = location.state as PlanLocationState;
+  const focusSessionId = routeState?.focusSessionId ?? null;
+  const focusDay = routeState?.focusDay ?? null;
 
   useEffect(() => {
     if (!plan_id) {
@@ -59,6 +69,47 @@ export default function PlanPage() {
   useEffect(() => {
     window.localStorage.setItem(LOCATION_MODE_STORAGE_KEY, locationMode);
   }, [locationMode]);
+
+  useEffect(() => {
+    setHasAppliedFocusTarget(false);
+  }, [focusSessionId]);
+
+  useEffect(() => {
+    if (typeof focusDay !== "number") {
+      return;
+    }
+    setExpandedDays((current) => (current.includes(focusDay) ? current : [...current, focusDay]));
+  }, [focusDay]);
+
+  useEffect(() => {
+    if (!plan || !focusSessionId || hasAppliedFocusTarget) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>(`[data-plan-session-id="${focusSessionId}"]`);
+      const scrollContainer = document.querySelector<HTMLElement>(".page-scroll-container");
+      if (!target) {
+        return;
+      }
+
+      setFocusedSessionId(focusSessionId);
+      setHasAppliedFocusTarget(true);
+      window.setTimeout(() => setFocusedSessionId((current) => (current === focusSessionId ? null : current)), 2200);
+
+      if (scrollContainer) {
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const nextTop = scrollContainer.scrollTop + (targetRect.top - containerRect.top) - 92;
+        scrollContainer.scrollTo({ top: Math.max(nextTop, 0), behavior: "smooth" });
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [expandedDays, focusSessionId, hasAppliedFocusTarget, plan]);
 
   const progress = useMemo(() => {
     if (!plan) {
@@ -166,8 +217,8 @@ export default function PlanPage() {
   };
 
   return (
-    <main className="app-shell min-h-screen">
-      <section className="safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
+    <main className="app-shell page-scroll-container page-content min-h-screen">
+      <section className="page-content safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
         <div className="space-y-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Link to={plan ? `/report/${plan.analysis_id}` : "/review"} className="app-pill">
@@ -283,8 +334,13 @@ export default function PlanPage() {
                               return (
                                 <label
                                   key={session.id}
-                                  className={`flex gap-4 rounded-[24px] border p-4 transition ${
-                                    session.completed ? "border-emerald-200 bg-emerald-50/70" : "border-slate-200 bg-slate-50/80"
+                                  data-plan-session-id={session.id}
+                                  className={`list-row flex gap-4 rounded-[24px] border p-4 transition ${
+                                    focusedSessionId === session.id
+                                      ? "border-blue-300 bg-blue-50/90 shadow-[0_16px_32px_rgba(59,130,246,0.14)]"
+                                      : session.completed
+                                        ? "border-emerald-200 bg-emerald-50/70"
+                                        : "border-slate-200 bg-slate-50/80"
                                   }`}
                                 >
                                   <input

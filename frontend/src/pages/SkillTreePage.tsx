@@ -1,7 +1,9 @@
 import axios from "axios";
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
+  fetchLatestPlanForSkater,
   fetchLearningPath,
   fetchSkaters,
   LearningPathResponse,
@@ -9,6 +11,8 @@ import {
   lockSkaterSkill,
   Skater,
   SkillNode,
+  TrainingPlanDetail,
+  TrainingPlanSession,
   unlockSkaterSkill,
 } from "../api/client";
 import SkillNodeCard from "../components/SkillNodeCard";
@@ -16,10 +20,12 @@ import UnlockCelebration from "../components/UnlockCelebration";
 import XpProgressBar from "../components/XpProgressBar";
 import { useAppMode } from "../components/AppModeContext";
 import ZodiacAvatar from "../components/ZodiacAvatar";
+import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 
 type ViewMode = "path" | "roadmap";
 
 const XP_LEVELS = [0, 200, 600, 1500, 3000, 6000, 10000, 16000, 25000, 40000];
+const TODAY_TASK_MAX_ITEMS = 2;
 
 function isUnlocked(status: SkillNode["status"]) {
   return status === "unlocked";
@@ -42,8 +48,31 @@ function branchTone(chapter: string) {
   return "text-branch-jump";
 }
 
+type PendingPlanTask = TrainingPlanSession & {
+  day: number;
+  theme: string;
+};
+
+type FocusSkillNode = SkillNode & {
+  isFocusSkill: boolean;
+};
+
+function normalizeText(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function matchesFocusSkill(node: SkillNode, focusSkill: string | null | undefined) {
+  const normalizedFocus = normalizeText(focusSkill);
+  if (!normalizedFocus) {
+    return false;
+  }
+
+  const candidates = [node.name, node.action_type, node.group_name, node.stage_name].map(normalizeText).filter(Boolean);
+  return candidates.some((candidate) => candidate.includes(normalizedFocus) || normalizedFocus.includes(candidate));
+}
+
 export default function SkillTreePage() {
-  const { isParentMode, enterParentMode } = useAppMode();
+  const { isParentMode, childView, setChildView, enterParentMode } = useAppMode();
   const [viewMode, setViewMode] = useState<ViewMode>("path");
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState("");
@@ -56,6 +85,7 @@ export default function SkillTreePage() {
   const [unlockingSkill, setUnlockingSkill] = useState<SkillNode | null>(null);
   const [unlockNote, setUnlockNote] = useState("");
   const [celebrateSkillName, setCelebrateSkillName] = useState<string | null>(null);
+  const [todayPlan, setTodayPlan] = useState<TrainingPlanDetail | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,7 +97,7 @@ export default function SkillTreePage() {
           return;
         }
         setSkaters(data);
-        setSelectedSkaterId((current) => current || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
+        setSelectedSkaterId((current) => current || (isParentMode ? "" : pickSkaterIdForChildView(data, childView)) || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
       } catch {
         if (!cancelled) {
           setError("练习档案加载失败，请稍后刷新页面。");
@@ -80,7 +110,16 @@ export default function SkillTreePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [childView, isParentMode]);
+
+  useEffect(() => {
+    if (isParentMode || !skaters.length) {
+      return;
+    }
+
+    const nextSkaterId = pickSkaterIdForChildView(skaters, childView);
+    setSelectedSkaterId((current) => (current === nextSkaterId ? current : nextSkaterId));
+  }, [childView, isParentMode, skaters]);
 
   useEffect(() => {
     if (!selectedSkaterId) {
@@ -118,7 +157,55 @@ export default function SkillTreePage() {
     };
   }, [selectedSkaterId]);
 
+  useEffect(() => {
+    if (isParentMode || !selectedSkaterId) {
+      setTodayPlan(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadLatestPlan = async () => {
+      try {
+        const data = await fetchLatestPlanForSkater(selectedSkaterId);
+        if (!cancelled) {
+          setTodayPlan(data);
+        }
+      } catch (requestError) {
+        if (cancelled) {
+          return;
+        }
+        if (axios.isAxiosError(requestError) && requestError.response?.status === 404) {
+          setTodayPlan(null);
+          return;
+        }
+        setTodayPlan(null);
+      }
+    };
+
+    void loadLatestPlan();
+    return () => {
+      cancelled = true;
+    };
+  }, [isParentMode, selectedSkaterId]);
+
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
+  const pendingPlanTasks = useMemo<PendingPlanTask[]>(() => {
+    if (!todayPlan) {
+      return [];
+    }
+    return todayPlan.plan_json.days.flatMap((day) =>
+      day.sessions
+        .filter((session) => !session.completed)
+        .map((session) => ({
+          ...session,
+          day: day.day,
+          theme: day.theme,
+        })),
+    );
+  }, [todayPlan]);
+  const todayTaskPreview = pendingPlanTasks.slice(0, TODAY_TASK_MAX_ITEMS);
+  const nextTask = pendingPlanTasks[0] ?? null;
   const stageForDetail =
     deferredPath?.stages.find((stage) => stage.stage === selectedStage) ??
     deferredPath?.stages.find((stage) => stage.stage === deferredPath.current_stage) ??
@@ -143,6 +230,18 @@ export default function SkillTreePage() {
     const [nextPath, nextSkaters] = await Promise.all([fetchLearningPath(selectedSkaterId), fetchSkaters()]);
     setPath(nextPath);
     setSkaters(nextSkaters);
+  };
+
+  const handleSkaterChange = (nextSkaterId: string) => {
+    setSelectedSkaterId(nextSkaterId);
+    if (isParentMode) {
+      return;
+    }
+
+    const nextView = childViewFromSkater(skaters.find((skater) => skater.id === nextSkaterId));
+    if (nextView) {
+      setChildView(nextView);
+    }
   };
 
   const handleSkillMutation = async (skill: SkillNode) => {
@@ -213,7 +312,7 @@ export default function SkillTreePage() {
           <div className="space-y-4">
             <label className="block space-y-2">
               <span className="text-sm font-medium text-slate-700">当前练习档案</span>
-              <select value={selectedSkaterId} onChange={(event) => setSelectedSkaterId(event.target.value)} className="app-select">
+              <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
                 {skaters.map((skater) => (
                   <option key={skater.id} value={skater.id}>
                     {skaterLabel(skater)}
@@ -243,6 +342,35 @@ export default function SkillTreePage() {
                 </div>
                 <p className="mt-3 text-sm text-slate-500">距离下一等级还差 {Math.max((XP_LEVELS[selectedSkater.avatar_level] ?? selectedSkater.total_xp) - selectedSkater.total_xp, 0)} XP</p>
               </div>
+            ) : null}
+
+            {!isParentMode && todayPlan ? (
+              nextTask ? (
+                <section className="overflow-hidden rounded-[28px] bg-gradient-to-br from-[#6C63FF] via-[#5B8CFF] to-[#59C3FF] p-[1px] shadow-[0_20px_50px_rgba(92,110,255,0.28)]">
+                  <div className="rounded-[27px] bg-[linear-gradient(135deg,rgba(255,255,255,0.2),rgba(255,255,255,0.08))] px-5 py-5 text-white backdrop-blur-sm">
+                    <p className="text-sm font-semibold tracking-[0.04em] text-white/88">⛸️ 今天要练：</p>
+                    <div className="mt-3 space-y-2">
+                      {todayTaskPreview.map((task) => (
+                        <p key={task.id} className="text-lg font-semibold leading-7 text-white">
+                          {task.title}
+                        </p>
+                      ))}
+                    </div>
+                    <Link
+                      to={`/plan/${todayPlan.id}`}
+                      state={{ focusSessionId: nextTask.id, focusDay: nextTask.day }}
+                      className="mt-5 flex min-h-[56px] w-full items-center justify-center rounded-full bg-white px-5 text-base font-semibold text-[#3457f6] shadow-[0_12px_24px_rgba(255,255,255,0.22)] transition hover:bg-slate-50"
+                    >
+                      出发！ →→
+                    </Link>
+                  </div>
+                </section>
+              ) : (
+                <section className="rounded-[28px] border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-sky-50 px-5 py-5 shadow-[0_16px_42px_rgba(34,197,94,0.08)]">
+                  <p className="text-sm font-semibold tracking-[0.04em] text-emerald-600">今天超棒！✨</p>
+                  <p className="mt-2 text-lg font-semibold text-slate-900">休息一下，明天继续发光。</p>
+                </section>
+              )
             ) : null}
           </div>
         </div>
@@ -287,6 +415,7 @@ export default function SkillTreePage() {
           isParentMode={isParentMode}
           mutatingSkillId={mutatingSkillId}
           onSkillAction={handleSkillMutation}
+          focusSkill={todayPlan?.plan_json.focus_skill ?? null}
         />
       )}
 
@@ -471,13 +600,53 @@ function RoadmapView({
   isParentMode,
   mutatingSkillId,
   onSkillAction,
+  focusSkill,
 }: {
   path: LearningPathResponse;
   isParentMode: boolean;
   mutatingSkillId: string | null;
   onSkillAction: (skill: SkillNode) => void;
+  focusSkill?: string | null;
 }) {
   const totalNodeCount = path.stages.reduce((sum, stage) => sum + stage.groups.reduce((groupSum, group) => groupSum + group.nodes.length, 0), 0);
+  const topFocusNodes = useMemo<FocusSkillNode[]>(() => {
+    if (isParentMode) {
+      return [];
+    }
+
+    const allNodes = path.stages.flatMap((stage) => stage.groups.flatMap((group) => group.nodes));
+    const pinnedNodes: FocusSkillNode[] = [];
+    const seen = new Set<string>();
+
+    for (const node of allNodes) {
+      const isInProgress = node.status === "attempting" || node.status === "in_progress";
+      const isFocusSkill = matchesFocusSkill(node, focusSkill);
+      if (!isInProgress && !isFocusSkill) {
+        continue;
+      }
+      if (seen.has(node.id)) {
+        continue;
+      }
+
+      seen.add(node.id);
+      pinnedNodes.push({
+        ...node,
+        isFocusSkill,
+      });
+    }
+
+    return pinnedNodes.sort((left, right) => {
+      const leftInProgress = left.status === "attempting" || left.status === "in_progress";
+      const rightInProgress = right.status === "attempting" || right.status === "in_progress";
+      if (leftInProgress !== rightInProgress) {
+        return leftInProgress ? -1 : 1;
+      }
+      if (left.isFocusSkill !== right.isFocusSkill) {
+        return left.isFocusSkill ? -1 : 1;
+      }
+      return left.stage - right.stage || left.chapter_order - right.chapter_order || left.name.localeCompare(right.name);
+    });
+  }, [focusSkill, isParentMode, path]);
 
   return (
     <section className="app-card p-6 tablet:p-7">
@@ -489,6 +658,25 @@ function RoadmapView({
         </div>
         {!isParentMode ? <p className="text-sm text-slate-500">进入家长模式后可手动点亮或收回节点。</p> : null}
       </div>
+
+      {!isParentMode && topFocusNodes.length ? (
+        <section className="mt-6 rounded-[28px] border-2 border-[#FACC15] bg-[linear-gradient(180deg,#FFFBEA_0%,#FFFFFF_100%)] p-4 shadow-[0_18px_42px_rgba(250,204,21,0.14)] tablet:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-amber-500">Now Practicing</p>
+              <h3 className="mt-2 text-xl font-semibold text-slate-900">正在练习</h3>
+            </div>
+            <span className="rounded-full bg-white px-4 py-2 text-sm text-amber-600 shadow-sm">{topFocusNodes.length} 个重点</span>
+          </div>
+          <p className="mt-3 text-sm leading-7 text-slate-600">把推进中和今日专注的技能放到最上面，孩子打开就能直接找到。</p>
+
+          <div className="mt-4 grid grid-cols-2 gap-3 tablet:grid-cols-4 web:grid-cols-4">
+            {topFocusNodes.map((node) => (
+              <SkillNodeCard key={`focus-${node.id}`} node={node} highlightTone="focus" />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className="mt-6 space-y-8">
         {path.stages.map((stage) => (

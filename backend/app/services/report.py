@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from app.schemas import Severity
+from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
 
@@ -224,10 +225,16 @@ async def generate_report(
     cleaned = clean_json_text(raw_content)
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return _fallback_report(action_type, vision_structured, bio_data)
+    except json.JSONDecodeError as exc:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
+            f"Report JSON parse failed: {exc}: {cleaned[:500]}",
+        ) from exc
 
     report = normalize_report(parsed, bio_data)
     if not report["summary"] or not report["training_focus"]:
-        return _fallback_report(action_type, vision_structured, bio_data)
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
+            f"Report payload missing required fields: {cleaned[:500]}",
+        )
     return report

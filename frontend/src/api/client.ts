@@ -1,9 +1,26 @@
 import axios from "axios";
 
-export type AnalysisStatus = "pending" | "processing" | "completed" | "failed";
+export type AnalysisStatus =
+  | "pending"
+  | "processing"
+  | "extracting_frames"
+  | "analyzing"
+  | "generating_report"
+  | "completed"
+  | "failed";
 export type IssueSeverity = "high" | "medium" | "low";
 export type AvatarType = "zodiac_rat" | "zodiac_tiger" | "emoji";
 export type MemoryExpiryPreset = "1m" | "3m" | "never";
+export type AnalysisErrorCode =
+  | "VIDEO_DECODE_FAILED"
+  | "FRAME_EXTRACT_FAILED"
+  | "AI_API_TIMEOUT"
+  | "AI_API_AUTH_ERROR"
+  | "AI_API_QUOTA_EXCEEDED"
+  | "AI_API_CONTENT_FILTER"
+  | "AI_RESPONSE_PARSE_FAIL"
+  | "REPORT_SAVE_FAILED"
+  | "UNKNOWN_ERROR";
 
 export interface ReportIssue {
   category: string;
@@ -93,12 +110,28 @@ export interface AnalysisDetail extends AnalysisListItem {
   is_slow_motion: boolean;
   skill_node_id: string | null;
   auto_unlocked_skill: string | null;
+  error_code: AnalysisErrorCode | null;
+  error_detail: string | null;
   error_message: string | null;
 }
 
 export interface UploadResponse {
   id: string;
   status: AnalysisStatus;
+}
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percent: number;
+}
+
+export interface RetryAnalysisResponse {
+  message: string;
+}
+
+export interface AnalysisExportResponse {
+  text: string;
 }
 
 export interface Skater {
@@ -120,7 +153,7 @@ export interface Skater {
   created_at: string;
 }
 
-export type SkillStatus = "locked" | "attempting" | "unlocked";
+export type SkillStatus = "locked" | "attempting" | "in_progress" | "unlocked";
 
 export interface SkillNode {
   id: string;
@@ -143,6 +176,7 @@ export interface SkillNode {
   unlocked_at: string | null;
   unlock_source: string | null;
   unlock_note: string | null;
+  last_analysis_score: number | null;
 }
 
 export interface SkillMutationResponse {
@@ -285,6 +319,7 @@ export interface ArchiveResponse {
   timeline: Array<{
     id: string;
     created_at: string;
+    status: AnalysisStatus;
     entry_type: string;
     skill_category: string | null;
     action_type: string;
@@ -383,21 +418,111 @@ export interface BackupActionResponse {
   filename: string;
 }
 
+export interface ApiConnectionTestResponse {
+  status: "ok" | "error";
+  latency_ms: number | null;
+  error_code: AnalysisErrorCode | null;
+  message: string | null;
+  failed_stage: string | null;
+}
+
 export const apiClient = axios.create({
   baseURL: "/api",
   timeout: 300000,
 });
 
-export async function uploadAnalysis(formData: FormData) {
-  const response = await apiClient.post<UploadResponse>("/analysis/upload", formData, {
-    headers: { "Content-Type": "multipart/form-data" },
+export function uploadAnalysis(
+  formData: FormData,
+  options?: {
+    onProgress?: (progress: UploadProgress) => void;
+    signal?: AbortSignal;
+  },
+) {
+  return new Promise<UploadResponse>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const url = `${apiClient.defaults.baseURL ?? ""}/analysis/upload`;
+
+    request.open("POST", url, true);
+    request.timeout = typeof apiClient.defaults.timeout === "number" ? apiClient.defaults.timeout : 300000;
+    request.withCredentials = apiClient.defaults.withCredentials ?? false;
+    request.responseType = "json";
+
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable || !options?.onProgress) {
+        return;
+      }
+      const total = event.total;
+      const loaded = Math.min(event.loaded, total);
+      options.onProgress({
+        loaded,
+        total,
+        percent: total > 0 ? Math.round((loaded / total) * 100) : 0,
+      });
+    };
+
+    request.onload = () => {
+      const responseData = request.response ?? (request.responseText ? JSON.parse(request.responseText) : null);
+      if (request.status >= 200 && request.status < 300) {
+        resolve(responseData as UploadResponse);
+        return;
+      }
+
+      reject({
+        response: {
+          status: request.status,
+          data: responseData,
+        },
+      });
+    };
+
+    request.onerror = () => {
+      reject(new Error("Network Error"));
+    };
+
+    request.ontimeout = () => {
+      reject(new Error("Timeout"));
+    };
+
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        request.abort();
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+
+      options.signal.addEventListener(
+        "abort",
+        () => {
+          request.abort();
+          reject(new DOMException("Aborted", "AbortError"));
+        },
+        { once: true },
+      );
+    }
+
+    request.send(formData);
+  });
+}
+
+export async function fetchAnalysis(id: string, options?: { isParentRequest?: boolean }) {
+  const response = await apiClient.get<AnalysisDetail>(`/analysis/${id}`, {
+    params: options?.isParentRequest ? { is_parent_request: true } : undefined,
   });
   return response.data;
 }
 
-export async function fetchAnalysis(id: string) {
-  const response = await apiClient.get<AnalysisDetail>(`/analysis/${id}`);
+export async function retryAnalysis(id: string) {
+  const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`);
   return response.data;
+}
+
+export async function exportAnalysis(id: string) {
+  const response = await apiClient.post<string>(`/analysis/${id}/export`, undefined, {
+    responseType: "text",
+  });
+  return {
+    text: response.data,
+  } satisfies AnalysisExportResponse;
 }
 
 export async function deleteAnalysis(id: string, parentPin: string) {
@@ -442,6 +567,11 @@ export async function fetchAnalysisPlan(analysisId: string) {
 
 export async function fetchPlan(planId: string) {
   const response = await apiClient.get<TrainingPlanDetail>(`/plan/${planId}`);
+  return response.data;
+}
+
+export async function fetchLatestPlanForSkater(skaterId: string) {
+  const response = await apiClient.get<TrainingPlanDetail>(`/plan/skater/${skaterId}/latest`);
   return response.data;
 }
 
@@ -630,6 +760,11 @@ export async function fetchSystemInfo() {
 
 export async function fetchStorageStats() {
   const response = await apiClient.get<StorageStats>("/admin/storage-stats");
+  return response.data;
+}
+
+export async function testActiveApiConnection() {
+  const response = await apiClient.get<ApiConnectionTestResponse>("/settings/test-api");
   return response.data;
 }
 

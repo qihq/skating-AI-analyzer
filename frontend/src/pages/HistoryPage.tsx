@@ -1,11 +1,16 @@
 import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import { AnalysisListItem, deleteAnalysis, fetchAnalyses } from "../api/client";
+import { AnalysisListItem, deleteAnalysis, fetchAnalyses, fetchSkaters, retryAnalysis, Skater } from "../api/client";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import { useAppMode } from "../components/AppModeContext";
+import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
+import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
+import ZodiacAvatar from "../components/ZodiacAvatar";
+import { isAnalysisInProgress } from "../constants/analysisStatus";
 import TopNav from "../components/TopNav";
+import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkaterIdForChildView } from "../utils/childView";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 
@@ -54,11 +59,16 @@ function statusTone(status: AnalysisListItem["status"]) {
   return "border-cyan-300/25 bg-cyan-400/10 text-cyan-100";
 }
 
+const actionIconClassName =
+  "list-row-action inline-flex rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
+
 export default function HistoryPage() {
+  const location = useLocation();
   const navigate = useNavigate();
-  const { isParentMode, pinLength } = useAppMode();
+  const { isParentMode, pinLength, childView } = useAppMode();
   const [activeFilter, setActiveFilter] = useState<(typeof FILTER_OPTIONS)[number]>("全部");
   const [records, setRecords] = useState<AnalysisListItem[]>([]);
+  const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
@@ -66,19 +76,82 @@ export default function HistoryPage() {
   const [deletePin, setDeletePin] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [retryingRecordId, setRetryingRecordId] = useState<string | null>(null);
+  const [missingVideoRetryIds, setMissingVideoRetryIds] = useState<string[]>([]);
+  const [confirmRetryRecordId, setConfirmRetryRecordId] = useState<string | null>(null);
+  const [pinRetryRecordId, setPinRetryRecordId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSkaterContextReady, setIsSkaterContextReady] = useState(false);
+  const focusedSkaterId = (location.state as { skaterId?: string } | null)?.skaterId ?? "";
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadSkaters = async () => {
+      try {
+        const data = await fetchSkaters();
+        if (!cancelled) {
+          setSkaters(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setError((current) => current ?? "练习档案加载失败，请稍后刷新。");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSkaterContextReady(true);
+        }
+      }
+    };
+
+    void loadSkaters();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const currentSkaterId = useMemo(() => {
+    if (focusedSkaterId) {
+      return focusedSkaterId;
+    }
+    if (!isParentMode) {
+      return pickSkaterIdForChildView(skaters, childView);
+    }
+    return "";
+  }, [childView, focusedSkaterId, isParentMode, skaters]);
+
+  const currentSkater = useMemo(() => {
+    if (currentSkaterId) {
+      return skaters.find((skater) => skater.id === currentSkaterId) ?? null;
+    }
+    if (!isParentMode) {
+      return findSkaterForChildView(skaters, childView);
+    }
+    return null;
+  }, [childView, currentSkaterId, isParentMode, skaters]);
+
+  const emptyStateName = currentSkater?.display_name || currentSkater?.name || childViewLabel(childView);
+  const emptyStateSkaterId = currentSkaterId || focusedSkaterId || "";
+
+  useEffect(() => {
+    if (!isParentMode && !currentSkaterId && !isSkaterContextReady) {
+      return;
+    }
+
     let cancelled = false;
 
     const load = async () => {
       setIsLoading(true);
       try {
-        const data = await fetchAnalyses(activeFilter === "全部" ? undefined : { action_type: activeFilter });
+        const params = {
+          ...(activeFilter === "全部" ? {} : { action_type: activeFilter }),
+          ...(currentSkaterId ? { skater_id: currentSkaterId } : {}),
+        };
+        const data = await fetchAnalyses(Object.keys(params).length ? params : undefined);
         if (!cancelled) {
           setRecords(data);
-          setError(null);
+          setError((current) => (current === "练习档案加载失败，请稍后刷新。" ? current : null));
           setSelectedIds((current) => current.filter((id) => data.some((record) => record.id === id)));
         }
       } catch {
@@ -96,12 +169,15 @@ export default function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeFilter]);
+  }, [activeFilter, currentSkaterId, isParentMode, isSkaterContextReady]);
 
   const selectedRecords = useMemo(
     () => records.filter((record) => selectedIds.includes(record.id)),
     [records, selectedIds],
   );
+
+  const confirmRetryRecord = records.find((record) => record.id === confirmRetryRecordId) ?? null;
+  const pinRetryRecord = records.find((record) => record.id === pinRetryRecordId) ?? null;
 
   const toggleSelect = (record: AnalysisListItem) => {
     setError(null);
@@ -131,6 +207,20 @@ export default function HistoryPage() {
   const showNotice = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 2400);
+  };
+
+  const markRecordAsProcessing = (recordId: string) => {
+    setRecords((current) =>
+      current.map((item) =>
+        item.id === recordId
+          ? {
+              ...item,
+              status: "processing",
+              updated_at: new Date().toISOString(),
+            }
+          : item,
+      ),
+    );
   };
 
   const closeDeleteModal = () => {
@@ -171,15 +261,66 @@ export default function HistoryPage() {
     }
   };
 
+  const handleRetryRecord = async (record: AnalysisListItem) => {
+    setRetryingRecordId(record.id);
+    setError(null);
+    try {
+      await retryAnalysis(record.id);
+      markRecordAsProcessing(record.id);
+      setMissingVideoRetryIds((current) => current.filter((id) => id !== record.id));
+      showNotice("已重新提交，请稍候");
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        if (requestError.response?.status === 404) {
+          setMissingVideoRetryIds((current) => (current.includes(record.id) ? current : [...current, record.id]));
+          showNotice('原始视频已清理，请点击"重新上传"');
+          return;
+        }
+        setError(String(requestError.response?.data?.detail ?? "重新分析失败，请稍后重试。"));
+      } else {
+        setError("重新分析失败，请稍后重试。");
+      }
+    } finally {
+      setRetryingRecordId(null);
+    }
+  };
+
+  const requestReanalysis = (record: AnalysisListItem) => {
+    if (record.status !== "completed" || retryingRecordId === record.id) {
+      return;
+    }
+
+    if (isParentMode) {
+      setConfirmRetryRecordId(record.id);
+      return;
+    }
+
+    setPinRetryRecordId(record.id);
+  };
+
+  const handleVerifiedRetry = () => {
+    if (!pinRetryRecord) {
+      return;
+    }
+    setPinRetryRecordId(null);
+    setConfirmRetryRecordId(pinRetryRecord.id);
+  };
+
+  const handleUploadFirstVideo = () => {
+    navigate("/review", {
+      state: emptyStateSkaterId ? { skaterId: emptyStateSkaterId } : undefined,
+    });
+  };
+
   return (
-    <main className="page-shell min-h-screen">
+    <main className="page-shell page-scroll-container page-content min-h-screen">
       <div className="absolute inset-0 -z-10 overflow-hidden">
         <div className="ice-orb left-[10%] top-[8%]" />
         <div className="ice-orb bottom-[10%] right-[6%]" />
         <div className="grid-ice h-full w-full" />
       </div>
 
-      <section className="mx-auto min-h-screen w-full max-w-6xl px-6 py-6 lg:px-10">
+      <section className="page-content mx-auto min-h-screen w-full max-w-6xl px-6 py-6 lg:px-10">
         <TopNav />
 
         <header className="frost-panel">
@@ -224,10 +365,13 @@ export default function HistoryPage() {
           ) : records.length ? (
             records.map((record) => {
               const isSelected = selectedIds.includes(record.id);
+              const isRetrying = retryingRecordId === record.id;
+              const hideRetry = missingVideoRetryIds.includes(record.id);
+
               return (
                 <article
                   key={record.id}
-                  className={`frost-panel transition ${isSelected ? "ring-1 ring-cyan-300/70" : "hover:bg-white/6"}`}
+                  className={`frost-panel list-row transition ${isSelected ? "ring-1 ring-cyan-300/70" : "hover:bg-white/6"}`}
                 >
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="space-y-3">
@@ -252,31 +396,113 @@ export default function HistoryPage() {
                       <p className="max-w-3xl text-slate-100/90">{record.note || "本次记录未填写训练备注。"}</p>
                     </div>
 
-                    <div className="flex flex-wrap gap-3">
-                      {isParentMode ? (
-                        <button
-                          type="button"
-                          onClick={() => openDeleteModal(record.id)}
-                          disabled={record.status === "processing"}
-                          title={record.status === "processing" ? "分析进行中，无法删除" : "删除这条分析记录"}
-                          className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-rose-300/25 bg-rose-500/10 text-lg text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          🗑️
+                    <div className="flex flex-col gap-3 lg:items-end">
+                      <div className="flex items-center gap-2 pr-2">
+                        {record.status === "completed" ? (
+                          <>
+                            <Link
+                              to={`/report/${record.id}`}
+                              title="查看分析报告"
+                              aria-label="查看分析报告"
+                              className={`${actionIconClassName} border-cyan-300/30 bg-cyan-300/10 text-cyan-100 hover:bg-cyan-300/20`}
+                            >
+                              📄
+                            </Link>
+                            <button
+                              type="button"
+                              onClick={() => requestReanalysis(record)}
+                              disabled={isRetrying}
+                              title="再次分析"
+                              aria-label="再次分析"
+                              className={`${actionIconClassName} border-orange-300/30 bg-orange-500/10 text-orange-100 hover:bg-orange-500/20`}
+                            >
+                              {isRetrying ? "…" : "🔄"}
+                            </button>
+                          </>
+                        ) : null}
+
+                        {isAnalysisInProgress(record.status) ? (
+                          <span
+                            title="分析进行中"
+                            aria-label="分析进行中"
+                            className={`${actionIconClassName} cursor-default border-cyan-300/25 bg-cyan-400/10 text-cyan-100`}
+                          >
+                            ⏳
+                          </span>
+                        ) : null}
+
+                        {record.status === "failed" && !hideRetry ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleRetryRecord(record)}
+                            disabled={isRetrying}
+                            title="分析失败，点击重试"
+                            aria-label="分析失败，点击重试"
+                            className={`${actionIconClassName} border-rose-300/30 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20`}
+                          >
+                            {isRetrying ? "…" : "❌"}
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <div className="flex flex-wrap gap-3 lg:justify-end">
+                        {record.status === "failed" && hideRetry ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate("/review", {
+                                state: record.skater_id ? { skaterId: record.skater_id } : undefined,
+                              })
+                            }
+                            className="rounded-full border border-white/20 bg-white/8 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/12"
+                          >
+                            📤 重新上传
+                          </button>
+                        ) : null}
+
+                        {isParentMode ? (
+                          <button
+                            type="button"
+                            onClick={() => openDeleteModal(record.id)}
+                            disabled={isAnalysisInProgress(record.status)}
+                            title={
+                              isAnalysisInProgress(record.status)
+                                ? "分析进行中，无法删除"
+                                : "删除这条分析记录"
+                            }
+                            className="list-row-action inline-flex rounded-full border border-rose-300/25 bg-rose-500/10 text-lg text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            🗑️
+                          </button>
+                        ) : null}
+
+                        <button type="button" onClick={() => toggleSelect(record)} className="pill-link">
+                          {isSelected ? "取消对比" : "加入对比"}
                         </button>
-                      ) : null}
-                      <button type="button" onClick={() => toggleSelect(record)} className="pill-link">
-                        {isSelected ? "取消对比" : "加入对比"}
-                      </button>
-                      <Link to={`/report/${record.id}`} className="rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950">
-                        查看报告
-                      </Link>
+                      </div>
                     </div>
                   </div>
                 </article>
               );
             })
           ) : (
-            <div className="frost-panel text-slate-300">当前筛选下还没有复盘记录，先去上传一段训练视频吧。</div>
+            <div className="frost-panel flex flex-col items-center px-6 py-10 text-center">
+              <ZodiacAvatar
+                avatarType={currentSkater?.avatar_type ?? childViewAvatarType(childView)}
+                avatarEmoji={currentSkater?.avatar_emoji}
+                size="lg"
+                animate
+              />
+              <h3 className="mt-5 text-2xl font-semibold text-white">{emptyStateName}还没有训练记录</h3>
+              <p className="mt-3 max-w-md text-base leading-7 text-slate-300">拍一段练习视频，让冰宝来分析 🎬</p>
+              <button
+                type="button"
+                onClick={handleUploadFirstVideo}
+                className="mt-6 inline-flex min-h-[48px] items-center justify-center rounded-full bg-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200"
+              >
+                + 上传第一个视频
+              </button>
+            </div>
           )}
         </div>
 
@@ -300,16 +526,44 @@ export default function HistoryPage() {
         ) : null}
 
         {deletingRecordId ? (
-        <DeleteAnalysisModal
-          step={deleteStep}
-          pin={deletePin}
-          pinLength={pinLength}
-          error={deleteError}
-          isSubmitting={isDeleting}
-          onChangePin={setDeletePin}
+          <DeleteAnalysisModal
+            step={deleteStep}
+            pin={deletePin}
+            pinLength={pinLength}
+            error={deleteError}
+            isSubmitting={isDeleting}
+            onChangePin={setDeletePin}
             onClose={closeDeleteModal}
             onConfirmDelete={() => setDeleteStep("pin")}
             onSubmitPin={() => void handleDeleteRecord()}
+          />
+        ) : null}
+
+        {pinRetryRecord ? (
+          <ParentPinVerifyModal
+            pinLength={pinLength}
+            title="输入家长 PIN"
+            description="验证通过后才能重新分析这个视频。"
+            confirmLabel="继续"
+            onClose={() => setPinRetryRecordId(null)}
+            onVerified={handleVerifiedRetry}
+          />
+        ) : null}
+
+        {confirmRetryRecord ? (
+          <RetryAnalysisConfirmSheet
+            isSubmitting={retryingRecordId === confirmRetryRecord.id}
+            onClose={() => {
+              if (retryingRecordId !== confirmRetryRecord.id) {
+                setConfirmRetryRecordId(null);
+              }
+            }}
+            onConfirm={() =>
+              void (async () => {
+                await handleRetryRecord(confirmRetryRecord);
+                setConfirmRetryRecordId(null);
+              })()
+            }
           />
         ) : null}
       </section>

@@ -3,6 +3,7 @@ import { createContext, ReactNode, useContext, useEffect, useState } from "react
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { fetchHasPin, verifyPin } from "../api/client";
+import { ChildView } from "../utils/childView";
 import ParentUnlockModal from "./ParentUnlockModal";
 
 type AppMode = "child" | "parent";
@@ -10,9 +11,12 @@ type AppMode = "child" | "parent";
 type AppModeContextValue = {
   mode: AppMode;
   isParentMode: boolean;
+  childView: ChildView;
   hasPin: boolean | null;
   pinLength: number;
   openParentDialog: () => void;
+  setChildView: (nextView: ChildView) => void;
+  switchToChildView: (nextView: ChildView) => void;
   switchToChildMode: () => void;
   enterParentMode: () => Promise<void>;
   activateParentMode: () => void;
@@ -21,6 +25,7 @@ type AppModeContextValue = {
 
 const AppModeContext = createContext<AppModeContextValue | null>(null);
 const MODE_STORAGE_KEY = "icebuddy.account-mode";
+const CHILD_VIEW_STORAGE_KEY = "icebuddy.child-view";
 const LOCK_SECONDS = 30;
 
 export function useAppMode() {
@@ -35,10 +40,15 @@ function readInitialMode(): AppMode {
   return window.localStorage.getItem(MODE_STORAGE_KEY) === "parent" ? "parent" : "child";
 }
 
+function readInitialChildView(): ChildView {
+  return window.localStorage.getItem(CHILD_VIEW_STORAGE_KEY) === "zhaozao" ? "zhaozao" : "tantan";
+}
+
 export function AppModeProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [mode, setMode] = useState<AppMode>(readInitialMode);
+  const [childView, setChildViewState] = useState<ChildView>(readInitialChildView);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [hasPin, setHasPin] = useState<boolean | null>(null);
   const [pinLength, setPinLength] = useState(4);
@@ -72,6 +82,11 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
   const setModeAndPersist = (nextMode: AppMode) => {
     setMode(nextMode);
     window.localStorage.setItem(MODE_STORAGE_KEY, nextMode);
+  };
+
+  const setChildViewAndPersist = (nextView: ChildView) => {
+    setChildViewState(nextView);
+    window.localStorage.setItem(CHILD_VIEW_STORAGE_KEY, nextView);
   };
 
   const refreshPinState = async () => {
@@ -131,6 +146,11 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
     setError(null);
   };
 
+  const switchToChildView = (nextView: ChildView) => {
+    setChildViewAndPersist(nextView);
+    switchToChildMode();
+  };
+
   const handleSubmit = async () => {
     if (isLocked) {
       return;
@@ -178,9 +198,12 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
       value={{
         mode,
         isParentMode: mode === "parent",
+        childView,
         hasPin,
         pinLength,
         openParentDialog,
+        setChildView: setChildViewAndPersist,
+        switchToChildView,
         switchToChildMode,
         enterParentMode,
         activateParentMode: () => setModeAndPersist("parent"),

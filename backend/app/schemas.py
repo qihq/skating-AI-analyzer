@@ -40,6 +40,10 @@ class AnalysisUploadResponse(BaseModel):
     status: str
 
 
+class AnalysisRetryResponse(BaseModel):
+    message: str
+
+
 class AnalysisListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -80,6 +84,8 @@ class AnalysisDetail(BaseModel):
     force_score: int | None = None
     skill_node_id: str | None = None
     auto_unlocked_skill: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
     error_message: str | None = None
     note: str | None = None
     created_at: datetime
@@ -201,6 +207,7 @@ class ArchiveTimelineEntry(BaseModel):
     id: str
     created_at: datetime
     entry_type: str
+    status: str
     skill_category: str | None = None
     action_type: str
     force_score: int | None = None
@@ -322,6 +329,14 @@ class ProviderTestResponse(BaseModel):
     detail: str
 
 
+class ApiConnectionTestResponse(BaseModel):
+    status: str
+    latency_ms: int | None = None
+    error_code: str | None = None
+    message: str | None = None
+    failed_stage: str | None = None
+
+
 class BackupFilePublic(BaseModel):
     filename: str
     size_bytes: int
@@ -394,6 +409,7 @@ class SkillNodePublic(BaseModel):
     unlocked_at: datetime | None = None
     unlock_source: str | None = None
     unlock_note: str | None = None
+    last_analysis_score: int | None = None
 
 
 class SkillMutationResponse(BaseModel):

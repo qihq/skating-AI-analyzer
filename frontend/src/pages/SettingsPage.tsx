@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
+  ApiConnectionTestResponse,
   BackupFile,
   changePin,
   createBackup,
@@ -14,8 +15,10 @@ import {
   Skater,
   StorageStats,
   SystemInfo,
+  testActiveApiConnection,
   updateSkater,
 } from "../api/client";
+import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import { useAppMode } from "../components/AppModeContext";
 import PinInput from "../components/PinInput";
 
@@ -63,6 +66,8 @@ export default function SettingsPage() {
   const [isSavingPin, setIsSavingPin] = useState(false);
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
   const [restoringFilename, setRestoringFilename] = useState<string | null>(null);
+  const [apiTestResult, setApiTestResult] = useState<ApiConnectionTestResponse | null>(null);
+  const [isTestingApi, setIsTestingApi] = useState(false);
 
   useEffect(() => {
     setNewPinLength((pinLength >= 4 && pinLength <= 6 ? pinLength : 4) as PinLengthOption);
@@ -258,6 +263,26 @@ export default function SettingsPage() {
     }
   };
 
+  const handleTestApi = async () => {
+    setIsTestingApi(true);
+    setError(null);
+    try {
+      const result = await testActiveApiConnection();
+      setApiTestResult(result);
+      if (result.status === "ok") {
+        showNotice(`API 连接正常（延迟 ${result.latency_ms ?? 0}ms）。`);
+      }
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "API 连接测试失败。"));
+      } else {
+        setError("API 连接测试失败。");
+      }
+    } finally {
+      setIsTestingApi(false);
+    }
+  };
+
   if (!isParentMode) {
     return (
       <div className="space-y-6">
@@ -310,9 +335,48 @@ export default function SettingsPage() {
               </button>
             </div>
 
-            <div className="mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+            <div className="settings-row mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
               <p className="text-sm font-medium text-slate-600">当前 PIN 位数</p>
               <p className="mt-2 text-3xl font-semibold text-slate-900">{pinLength} 位</p>
+            </div>
+          </section>
+
+          <section className="app-card p-6 tablet:p-7">
+            <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">API</p>
+                <h2 className="mt-2 text-2xl font-semibold text-slate-900">API 配置</h2>
+                <p className="mt-3 text-sm leading-7 text-slate-500">检查当前激活的视觉模型和文本模型是否连接正常，也可以进入 API 页面切换供应商。</p>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Link to="/settings/api" className="app-pill text-sm font-semibold">
+                  打开 API 设置
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => void handleTestApi()}
+                  disabled={isTestingApi}
+                  className="min-h-[44px] rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isTestingApi ? "连接中..." : "🔌 测试连接"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+              {!apiTestResult ? (
+                <p className="text-sm leading-7 text-slate-500">点击“测试连接”后，系统会用当前已保存的 API Key 发送一次极小请求，用来验证配置是否可用。</p>
+              ) : apiTestResult.status === "ok" ? (
+                <p className="text-sm font-medium text-emerald-700">✅ 连接正常（延迟 {apiTestResult.latency_ms ?? 0}ms）</p>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-rose-600">
+                    ❌ {getAnalysisErrorMessage(apiTestResult.error_code).title}
+                    {apiTestResult.message ? ` — ${apiTestResult.message}` : ""}
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-slate-500">{getAnalysisErrorMessage(apiTestResult.error_code).hint}</p>
+                </>
+              )}
             </div>
           </section>
 
@@ -361,7 +425,7 @@ export default function SettingsPage() {
                     </label>
                   </div>
 
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="settings-row mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px]">
                     <p className="text-sm text-slate-500">内部名：{skater.name}</p>
                     <button
                       type="button"
@@ -400,7 +464,7 @@ export default function SettingsPage() {
               {backups.length ? (
                 backups.map((backup) => (
                   <article key={backup.filename} className="rounded-[22px] border border-slate-200 bg-slate-50 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="settings-row flex flex-wrap items-center justify-between gap-3 rounded-[18px]">
                       <div>
                         <p className="text-sm font-semibold text-slate-900">{backup.filename}</p>
                         <p className="mt-1 text-sm text-slate-500">
@@ -457,7 +521,7 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+            <div className="settings-row mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
               <p className="text-sm font-medium text-slate-600">已归档视频</p>
               <p className="mt-2 text-3xl font-semibold text-slate-900">{storageStats?.archived_count ?? "--"}</p>
             </div>

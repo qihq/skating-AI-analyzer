@@ -1,86 +1,83 @@
-# Skating Analyzer | 花样滑冰训练分析系统
+# Skating Analyzer
 
-<p align="center">
-  <b>AI-powered figure skating video analysis & biomechanics scoring</b><br>
-  <b>基于 AI 视觉与生物力学的花样滑冰视频分析评分系统</b>
-</p>
+花样滑冰训练分析系统。  
+一个基于 React + FastAPI + Docker 的全栈项目，用于上传训练视频、自动抽帧、姿态估计、生物力学分析、AI 诊断、训练计划生成与成长档案管理。
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#features">Features</a> •
-  <a href="#tech-stack">Tech Stack</a> •
-  <a href="#api">API</a> •
-  <a href="README.zh.md">中文</a>
-</p>
+## 功能概览
 
----
+- 视频上传与异步分析
+- 关键帧抽取与 MediaPipe 姿态识别
+- 生物力学指标计算
+- AI 结构化诊断报告
+- 儿童模式 / 家长模式双视角
+- 技能树、训练计划、历史档案、成长追踪
+- Docker 一体化部署
 
-## Overview | 项目简介
+## 技术栈
 
-**Skating Analyzer** is a full-stack application that analyzes figure skating training videos using computer vision and LLMs. It extracts motion frames, detects 33 skeletal keypoints via MediaPipe, calculates biomechanical metrics (air time, jump height, rotation speed), and fuses AI visual scoring with geometric pose scoring to generate structured training reports.
+- 前端：React 18、TypeScript、Vite、Tailwind CSS、React Router、Recharts
+- 后端：FastAPI、SQLAlchemy Async、SQLite
+- 多媒体与视觉：FFmpeg、OpenCV、MediaPipe
+- AI 接入：兼容 OpenAI SDK 的视觉 / 文本模型供应商
+- 部署：Docker、nginx
 
-**花样滑冰训练分析系统**是一套全栈应用，利用计算机视觉与大模型分析花样滑冰训练视频。系统通过 FFmpeg + OpenCV 进行运动密度抽帧，使用 MediaPipe 提取 33 个骨骼关键点，计算生物力学指标（滞空时间、跳跃高度、转速），并将 AI 视觉评分与骨骼几何评分融合，生成结构化训练报告。
+## 目录结构
 
----
+```text
+skating-analyzer/
+├─ backend/                  # FastAPI 后端
+│  ├─ app/
+│  │  ├─ routers/            # API 路由
+│  │  ├─ services/           # 分析、报告、技能、供应商等服务
+│  │  ├─ main.py
+│  │  ├─ models.py
+│  │  └─ schemas.py
+│  └─ requirements.txt
+├─ frontend/                 # React 前端
+│  ├─ src/
+│  └─ public/
+├─ docker/
+│  └─ allinone/              # allinone 镜像构建配置
+├─ data/                     # 运行时数据（已忽略）
+├─ backups/                  # 备份目录（已忽略数据库文件）
+├─ .env.example
+├─ docker-compose.yml
+└─ README.md
+```
 
-## Features | 核心功能
+## 环境变量
 
-| Feature | Description |
-|---------|-------------|
-| 🎬 **Video Upload** | Upload `mp4 / mov / avi` and trigger async analysis. |
-| 🧠 **Motion Frame Sampling** | FFmpeg + OpenCV motion-density sampling (default 20 frames). |
-| 🦴 **Pose Detection** | MediaPipe 33-keypoint skeleton tracking with playback viewer. |
-| 📐 **Biomechanics** | Takeoff / Apex / Landing keyframes; air time, jump height, velocity, rotation speed. |
-| 🤖 **AI Scoring** | Structured itemized scoring via vision LLMs (Qwen / DeepSeek / etc.). |
-| ⚖️ **Fused Score** | 40 % AI visual + 60 % skeletal geometry weighted fusion. |
-| 📝 **Report Generation** | Structured Chinese training report JSON via text LLM. |
-| 🔐 **Secure Key Storage** | AES-256 encryption for API keys using `SECRET_KEY`. |
-| ⚙️ **Provider Management** | Built-in AI provider config & activation switching. |
-
----
-
-## Tech Stack | 技术栈
-
-- **Backend** — Python 3.11, FastAPI, SQLAlchemy (async), SQLite, FFmpeg, OpenAI SDK, MediaPipe, OpenCV
-- **Frontend** — React 18, Vite, TypeScript, Tailwind CSS, React Router, Recharts, Axios
-- **Deploy** — Docker Compose, nginx, volume mount `./data:/data`
-
----
-
-## Quick Start | 快速开始
-
-### Prerequisites | 前置要求
-
-- Docker & Docker Compose **or** Python 3.11 + Node.js 18+
-- API keys for at least one AI provider (Qwen / DeepSeek / etc.)
-
-### 1. Clone & Configure | 克隆与配置
+复制 `.env.example` 为 `.env`，再手动填写你的密钥：
 
 ```bash
-git clone https://github.com/<your-username>/skating-analyzer.git
-cd skating-analyzer
 cp .env.example .env
-# Edit .env and fill in your API keys
 ```
 
-### 2. Docker (Recommended) | Docker 启动（推荐）
+关键变量示例：
 
 ```bash
-docker compose up --build
+QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+SECRET_KEY=replace-with-a-random-32-char-secret
 ```
 
-- Frontend: http://localhost:8080
-- Health check: http://localhost:8080/api/health
+说明：
 
-### 3. Local Development | 本地开发
+- `.env` 不会提交到 Git 仓库
+- `.env.example` 只保留占位符
+- 运行期数据库、上传视频、备份文件默认也不会提交
 
-**Backend | 后端**
+## 本地开发
+
+### 后端
 
 ```bash
 cd backend
 python -m venv .venv
+
 # Windows
 .venv\Scripts\activate
+
 # macOS / Linux
 source .venv/bin/activate
 
@@ -88,7 +85,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**Frontend | 前端**
+### 前端
 
 ```bash
 cd frontend
@@ -96,107 +93,76 @@ npm install
 npm run dev
 ```
 
-**Default Dev URLs | 默认开发地址**
+默认地址：
 
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:8000`
+- 前端：`http://localhost:5173`
+- 后端：`http://localhost:8000`
 
----
+## Docker 部署
 
-## Environment Variables | 环境变量
-
-Copy `.env.example` to `.env` and configure at least these required fields:
+### docker-compose
 
 ```bash
-# Required | 必填
-QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-SECRET_KEY=replace-with-a-random-32-char-secret
+docker compose up --build
 ```
 
-`QWEN_API_KEY` also accepts `DASHSCOPE_API_KEY` as an alias.
+默认地址：
 
-Optional overrides | 可选覆盖：
+- 应用首页：`http://localhost:8080`
+- 健康检查：`http://localhost:8080/api/health`
+
+### allinone 镜像
+
+构建：
 
 ```bash
-FRAME_SAMPLE_COUNT=20
-FRAME_THUMB_SIZE=160x90
-FRAME_FULL_SIZE=854x480
-MAX_UPLOAD_SIZE_MB=500
-DATA_DIR=/data
-DATABASE_URL=sqlite+aiosqlite:////data/skating-analyzer.db
+docker build -f docker/allinone/Dockerfile -t skating-analyzer-allinone:latest .
 ```
 
----
+运行：
 
-## API Overview | 接口概览
-
-### Analysis Flow | 分析流程
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/analysis/upload` | Upload video |
-| GET | `/api/analysis/` | List analyses |
-| GET | `/api/analysis/{id}` | Get analysis detail |
-| GET | `/api/analysis/{id}/pose` | Get pose data |
-| GET | `/api/frames/{analysis_id}/{filename}` | Get frame image |
-| PATCH | `/api/analysis/{id}/note` | Update note |
-| GET | `/api/health` | Health check |
-
-### AI Provider Management | AI 供应商管理
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/providers` | List providers |
-| POST | `/api/providers` | Add provider |
-| PATCH | `/api/providers/{id}` | Update provider |
-| PATCH | `/api/providers/{id}/activate` | Activate provider |
-| DELETE | `/api/providers/{id}` | Delete provider |
-| POST | `/api/providers/{id}/test` | Test connectivity |
-
----
-
-## Project Structure | 项目结构
-
-```
-skating-analyzer/
-├── backend/               # FastAPI backend
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── models.py
-│   │   ├── schemas.py
-│   │   ├── routers/
-│   │   └── services/      # analysis, vision, report, providers, pose, etc.
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/              # React + Vite frontend
-│   ├── src/
-│   ├── Dockerfile
-│   └── nginx.conf
-├── docker-compose.yml
-├── .env.example
-└── README.md
+```bash
+docker run -d \
+  --name skating-allinone \
+  -p 8080:80 \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/backups:/backups" \
+  -v "$(pwd)/.env:/workspace/.env:ro" \
+  skating-analyzer-allinone:latest
 ```
 
----
+导出镜像：
 
-## Data & Privacy | 数据与隐私
+```bash
+docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:latest
+```
 
-- Runtime data is written to the `./data` directory:
-  - SQLite database: `./data/skating-analyzer.db`
-  - Uploaded videos & extracted frames: `./data/uploads/<analysis_id>/`
-- The `./data` directory is **gitignored** to prevent accidental commits of user data.
-- API keys are encrypted with AES-256-GCM before being stored in the database.
+## 主要页面
 
----
+- `/path`：技能树与学习路径
+- `/review`：上传视频并发起分析
+- `/report/:id`：分析报告
+- `/archive`：历史档案 / 训练进展
+- `/plan/:plan_id`：训练计划
+- `/snowball`：冰宝陪练与记忆建议
+- `/settings`：系统设置、PIN、备份、供应商配置
 
-## License | 许可
+## 数据与隐私
 
-MIT License
+- 运行数据默认写入 `./data`
+- 上传视频与抽帧素材不会进入 Git
+- API Key 使用应用内加密存储
+- 公开仓库前请只提交 `.env.example`，不要提交 `.env`
 
----
+## 当前仓库说明
 
-<p align="center">
-  Built with ❤️ for figure skating coaches and athletes.<br>
-  为花样滑冰教练与运动员精心打造。
-</p>
+这个仓库包含当前项目代码与文档，不包含：
+
+- 实际 API Key
+- 本地数据库
+- 训练视频与抽帧素材
+- 导出的镜像 tar 包
+
+## License
+
+MIT

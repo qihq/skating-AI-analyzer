@@ -14,7 +14,7 @@ export default function TopNav() {
   ];
 
   return (
-    <header className="sticky top-0 z-20 mb-8 pt-2">
+    <header className="app-header sticky top-0 z-20 mb-8">
       <div className="mx-auto flex max-w-6xl flex-col gap-4 rounded-[2rem] border border-white/10 bg-slate-950/65 px-4 py-3 backdrop-blur xl:px-6 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="text-xs uppercase tracking-[0.32em] text-cyan-200/80">IceBuddy</p>

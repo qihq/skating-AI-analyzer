@@ -58,6 +58,8 @@ class Analysis(Base):
     is_slow_motion: Mapped[bool] = mapped_column(Boolean, default=False)
     force_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     auto_unlocked_skill: Mapped[str | None] = mapped_column(String(80), ForeignKey("skill_nodes.id"), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

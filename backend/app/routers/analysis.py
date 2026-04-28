@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
-import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.schemas import (
     AnalysisCompareResponse,
     AnalysisDetail,
     AnalysisListItem,
+    AnalysisRetryResponse,
     AnalysisSessionUpdateRequest,
     AnalysisUploadResponse,
     CompareSummary,
@@ -31,6 +32,13 @@ from app.schemas import (
     PoseResponse,
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
+)
+from app.services.analysis_errors import (
+    AnalysisErrorCode,
+    classify_ai_failure,
+    classify_video_failure,
+    friendly_error_title,
+    stringify_exception,
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
@@ -68,6 +76,8 @@ def _skater_display_name(skater: Skater) -> str:
 async def process_analysis(analysis_id: str) -> None:
     processing_frames_dir: Path | None = None
     upload_frames_dir: Path | None = None
+    action_type: str | None = None
+    skater_id: str | None = None
     try:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
@@ -75,72 +85,101 @@ async def process_analysis(analysis_id: str) -> None:
                 return
 
             analysis.status = "processing"
+            analysis.error_code = None
+            analysis.error_detail = None
             analysis.error_message = None
             await session.commit()
             logger.info("Analysis %s entered processing", analysis_id)
 
             action_type = analysis.action_type
+            skater_id = analysis.skater_id
             video_path = Path(analysis.video_path)
             upload_frames_dir = video_path.parent / "frames"
             _, processing_frames_dir = build_processing_frames_dir(analysis_id)
 
-        sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
-            video_path,
-            processing_frames_dir,
-            action_type,
-        )
+        await _set_analysis_status(analysis_id, "extracting_frames")
+
+        try:
+            sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
+                video_path,
+                processing_frames_dir,
+                action_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = classify_video_failure(exc)
+            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+            return
         logger.info("Analysis %s motion-sampled %s frames", analysis_id, len(sampled_frames))
 
-        pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir))
-        bio_data = analyze_biomechanics(pose_data, action_type)
+        try:
+            pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir))
+            bio_data = analyze_biomechanics(pose_data, action_type)
+        except Exception as exc:  # noqa: BLE001
+            await _mark_analysis_failed(analysis_id, AnalysisErrorCode.UNKNOWN_ERROR, stringify_exception(exc))
+            return
 
-        payloads = await encode_frames(sampled_frames)
-        vision_structured = await analyze_frames(action_type, payloads, analysis.skater_id)
-        vision_raw = json.dumps(vision_structured, ensure_ascii=False)
+        await _set_analysis_status(analysis_id, "analyzing")
+
+        try:
+            payloads = await encode_frames(sampled_frames)
+            vision_structured = await analyze_frames(action_type, payloads, skater_id)
+            vision_raw = json.dumps(vision_structured, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            failure = classify_ai_failure(exc)
+            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+            return
         logger.info("Analysis %s received vision result", analysis_id)
-        report = await generate_report(action_type, vision_structured, bio_data, analysis.skater_id)
-        force_score = calculate_force_score(report)
+
+        await _set_analysis_status(analysis_id, "generating_report")
+
+        try:
+            report = await generate_report(action_type, vision_structured, bio_data, skater_id)
+            force_score = calculate_force_score(report)
+        except Exception as exc:  # noqa: BLE001
+            failure = classify_ai_failure(exc)
+            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+            return
         logger.info("Analysis %s generated report with score %s", analysis_id, force_score)
         if upload_frames_dir is not None:
             persist_frames(sampled_frames, upload_frames_dir)
 
-        async with AsyncSessionLocal() as session:
-            analysis = await session.get(Analysis, analysis_id)
-            if analysis is None:
-                return
+        try:
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None:
+                    return
 
-            analysis.vision_raw = vision_raw
-            analysis.vision_structured = vision_structured
-            analysis.report = report
-            analysis.pose_data = pose_data
-            analysis.bio_data = bio_data
-            analysis.frame_motion_scores = motion_scores
-            analysis.action_window_start = sampling_metadata.action_window_start
-            analysis.action_window_end = sampling_metadata.action_window_end
-            analysis.source_fps = sampling_metadata.source_fps
-            analysis.is_slow_motion = sampling_metadata.is_slow_motion
-            analysis.force_score = force_score
-            analysis.status = "completed"
-            analysis.error_message = None
-            await auto_update_skill_progress(analysis_id, session)
-            if analysis.skater_id:
-                await sync_skater_progress(session, analysis.skater_id)
-            await session.commit()
-            if analysis.skater_id:
-                try:
-                    await suggest_memory_updates(analysis_id, analysis.skater_id, session)
-                except Exception:  # noqa: BLE001
-                    logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
-            logger.info("Analysis %s completed", analysis_id)
+                analysis.vision_raw = vision_raw
+                analysis.vision_structured = vision_structured
+                analysis.report = report
+                analysis.pose_data = pose_data
+                analysis.bio_data = bio_data
+                analysis.frame_motion_scores = motion_scores
+                analysis.action_window_start = sampling_metadata.action_window_start
+                analysis.action_window_end = sampling_metadata.action_window_end
+                analysis.source_fps = sampling_metadata.source_fps
+                analysis.is_slow_motion = sampling_metadata.is_slow_motion
+                analysis.force_score = force_score
+                analysis.status = "completed"
+                analysis.error_code = None
+                analysis.error_detail = None
+                analysis.error_message = None
+                await auto_update_skill_progress(analysis_id, session)
+                if analysis.skater_id:
+                    await sync_skater_progress(session, analysis.skater_id)
+                await session.commit()
+                if analysis.skater_id:
+                    try:
+                        await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
+                logger.info("Analysis %s completed", analysis_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Analysis %s failed while saving report", analysis_id)
+            await _mark_analysis_failed(analysis_id, AnalysisErrorCode.REPORT_SAVE_FAILED, stringify_exception(exc))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Analysis %s failed", analysis_id)
-        async with AsyncSessionLocal() as session:
-            analysis = await session.get(Analysis, analysis_id)
-            if analysis is None:
-                return
-            analysis.status = "failed"
-            analysis.error_message = str(exc)
-            await session.commit()
+        await _mark_analysis_failed(analysis_id, AnalysisErrorCode.UNKNOWN_ERROR, stringify_exception(exc))
     finally:
         cleanup_processing_dir(analysis_id)
 
@@ -150,6 +189,33 @@ def _normalize_optional_text(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+async def _mark_analysis_failed(analysis_id: str, code: AnalysisErrorCode, detail: str) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.status = "failed"
+            analysis.error_code = code.value
+            analysis.error_detail = detail
+            analysis.error_message = friendly_error_title(code)
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Analysis %s failed to persist error state", analysis_id)
+
+
+async def _set_analysis_status(analysis_id: str, status_value: str) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.status = status_value
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Analysis %s failed to persist status %s", analysis_id, status_value)
 
 
 async def _get_default_skater(session: AsyncSession) -> Skater | None:
@@ -186,7 +252,135 @@ def _report_summary(analysis: Analysis) -> str:
     return "暂无报告摘要。"
 
 
-def _detail_from_analysis(analysis: Analysis, skater_name: str | None = None) -> AnalysisDetail:
+def _score_to_stars(score: object) -> str:
+    try:
+        normalized = int(round(float(score)))
+    except (TypeError, ValueError):
+        normalized = 0
+
+    if normalized >= 85:
+        filled = 5
+    elif normalized >= 70:
+        filled = 4
+    elif normalized >= 56:
+        filled = 3
+    elif normalized >= 40:
+        filled = 2
+    else:
+        filled = 1
+    return ("★" * filled) + ("☆" * (5 - filled))
+
+
+def _first_nonempty_sentence(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = [part.strip("，。；; ") for part in text.replace("！", "。").replace("？", "。").split("。")]
+    for part in parts:
+        if part:
+            return part
+    return text
+
+
+def _join_export_items(items: list[str], fallback: str) -> str:
+    cleaned = [item.strip() for item in items if item and item.strip()]
+    if not cleaned:
+        return fallback
+    return "，".join(cleaned[:2])
+
+
+def _build_export_text(analysis: Analysis, skater_name: str | None, session_date: str | None = None) -> str:
+    report = analysis.report if isinstance(analysis.report, dict) else {}
+    vision_structured = analysis.vision_structured if isinstance(analysis.vision_structured, dict) else {}
+    phase_summary = (
+        vision_structured.get("action_phase_summary")
+        if isinstance(vision_structured.get("action_phase_summary"), dict)
+        else {}
+    )
+    frame_analysis = vision_structured.get("frame_analysis", []) if isinstance(vision_structured.get("frame_analysis"), list) else []
+
+    positives: list[str] = []
+    for frame in frame_analysis:
+        if not isinstance(frame, dict):
+            continue
+        for item in frame.get("positives", []):
+            text = _first_nonempty_sentence(item)
+            if text and text not in positives:
+                positives.append(text)
+
+    strongest_phase = str(phase_summary.get("strongest_phase", "")).strip()
+    weakest_phase = str(phase_summary.get("weakest_phase", "")).strip()
+
+    highlight = _join_export_items(
+        positives[:2]
+        or ([f"{strongest_phase}阶段表现相对稳定"] if strongest_phase and strongest_phase != "ä¸å¯åˆ†æž" else []),
+        "整体动作节奏基本稳定",
+    )
+
+    issue_texts: list[str] = []
+    issues = report.get("issues", []) if isinstance(report.get("issues"), list) else []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        text = _first_nonempty_sentence(issue.get("description"))
+        if text and text not in issue_texts:
+            issue_texts.append(text)
+
+    improvements = report.get("improvements", []) if isinstance(report.get("improvements"), list) else []
+    improvement_actions: list[str] = []
+    for item in improvements:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target", "")).strip()
+        action = _first_nonempty_sentence(item.get("action"))
+        if target and action:
+            improvement_actions.append(f"{target}：{action}")
+        elif action:
+            improvement_actions.append(action)
+
+    improvement = _join_export_items(
+        issue_texts[:1]
+        + improvement_actions[:1]
+        + ([f"{weakest_phase}阶段还可以继续加强"] if weakest_phase and weakest_phase != "ä¸å¯åˆ†æž" else []),
+        "建议继续加强稳定性和基础控制练习",
+    )
+
+    subscores = report.get("subscores") if isinstance(report.get("subscores"), dict) else {}
+    detail_labels = {
+        "takeoff_power": "起跳发力",
+        "rotation_axis": "旋转轴心",
+        "arm_coordination": "手臂配合",
+        "landing_absorption": "落冰缓冲",
+        "core_stability": "核心稳定",
+    }
+    detail_parts = [
+        f"[{label} {_score_to_stars(subscores.get(key))}]"
+        for key, label in detail_labels.items()
+        if key in subscores
+    ]
+    if not detail_parts:
+        detail_parts = [f"[综合表现 {_score_to_stars(analysis.force_score)}]"]
+
+    export_date = session_date or analysis.created_at.date().isoformat()
+    skater_label = skater_name or "小运动员"
+    score_label = analysis.force_score if analysis.force_score is not None else "--"
+
+    return (
+        f"[冰宝诊断] {skater_label} · {analysis.action_type} · {export_date}\n"
+        f"综合评分：{score_label}分\n\n"
+        f"亮点：{highlight}\n"
+        f"待改善：{improvement}\n\n"
+        f"技术细节：{' '.join(detail_parts)}\n\n"
+        "由冰宝（IceBuddy）生成 · 仅供参考"
+    )
+
+
+def _detail_from_analysis(
+    analysis: Analysis,
+    skater_name: str | None = None,
+    *,
+    include_error_detail: bool = False,
+) -> AnalysisDetail:
     return AnalysisDetail(
         id=analysis.id,
         skater_id=analysis.skater_id,
@@ -209,6 +403,8 @@ def _detail_from_analysis(analysis: Analysis, skater_name: str | None = None) ->
         is_slow_motion=analysis.is_slow_motion,
         force_score=analysis.force_score,
         auto_unlocked_skill=analysis.auto_unlocked_skill,
+        error_code=analysis.error_code,
+        error_detail=analysis.error_detail if include_error_detail else None,
         error_message=analysis.error_message,
         note=analysis.note,
         created_at=analysis.created_at,
@@ -437,6 +633,16 @@ def _skater_context(skater: Skater) -> str:
 
 async def _get_plan_by_analysis(session: AsyncSession, analysis_id: str) -> TrainingPlan | None:
     result = await session.execute(select(TrainingPlan).where(TrainingPlan.analysis_id == analysis_id).limit(1))
+    return result.scalar_one_or_none()
+
+
+async def _get_latest_plan_for_skater(session: AsyncSession, skater_id: str) -> TrainingPlan | None:
+    result = await session.execute(
+        select(TrainingPlan)
+        .where(TrainingPlan.skater_id == skater_id)
+        .order_by(TrainingPlan.created_at.desc(), TrainingPlan.id.desc())
+        .limit(1)
+    )
     return result.scalar_one_or_none()
 
 
@@ -687,7 +893,11 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
 
 
 @router.get("/{analysis_id}", response_model=AnalysisDetail)
-async def get_analysis(analysis_id: str, session: AsyncSession = Depends(get_session)) -> AnalysisDetail:
+async def get_analysis(
+    analysis_id: str,
+    is_parent_request: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
@@ -697,7 +907,60 @@ async def get_analysis(analysis_id: str, session: AsyncSession = Depends(get_ses
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
         skater_name = _skater_display_name(skater) if skater else None
-    return _detail_from_analysis(analysis, skater_name)
+    return _detail_from_analysis(analysis, skater_name, include_error_detail=is_parent_request)
+
+
+@router.post("/{analysis_id}/export", response_class=PlainTextResponse)
+async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„åˆ†æžæ‰èƒ½å¯¼å‡ºæŠ¥å‘Šã€‚")
+
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+
+    training_session = await session.get(TrainingSession, analysis.session_id) if analysis.session_id else None
+    session_date = training_session.session_date.isoformat() if training_session else None
+    return PlainTextResponse(_build_export_text(analysis, skater_name, session_date))
+
+
+@router.post("/{analysis_id}/retry", response_model=AnalysisRetryResponse)
+async def retry_analysis(
+    analysis_id: str,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisRetryResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "failed":
+        raise HTTPException(status_code=400, detail='只有 status 为 "failed" 的记录才可以重新分析。')
+
+    upload_dir = UPLOADS_DIR / analysis_id
+    source_video_path = (
+        next(
+            (path for path in upload_dir.iterdir() if path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"}),
+            None,
+        )
+        if upload_dir.exists()
+        else None
+    )
+    if source_video_path is None:
+        raise HTTPException(status_code=404, detail="原始视频文件已不存在，请重新上传")
+
+    analysis.status = "pending"
+    analysis.error_code = None
+    analysis.error_detail = None
+    analysis.error_message = None
+    analysis.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    background_tasks.add_task(process_analysis, analysis_id)
+    return AnalysisRetryResponse(message="已重新提交分析任务")
 
 
 @router.patch("/{analysis_id}/note", response_model=AnalysisDetail)
@@ -752,6 +1015,14 @@ async def delete_analysis(
 
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@plan_router.get("/skater/{skater_id}/latest", response_model=TrainingPlanDetail)
+async def get_latest_skater_plan(skater_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
+    plan = await _get_latest_plan_for_skater(session, skater_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No training plan found for this skater.")
+    return _plan_detail_from_model(plan)
 
 
 @plan_router.get("/{plan_id}", response_model=TrainingPlanDetail)

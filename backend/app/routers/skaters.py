@@ -296,6 +296,7 @@ async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get
         ArchiveTimelineEntry(
             id=analysis.id,
             created_at=analysis.created_at,
+            status=analysis.status,
             entry_type="冰宝（IceBuddy）诊断",
             skill_category=analysis.skill_category or "未分类",
             action_type=analysis.action_type,

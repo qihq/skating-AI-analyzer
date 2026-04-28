@@ -15,36 +15,36 @@ const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings">; to: strin
   { tab: "archive", to: "/archive", label: "进展", icon: "📈" },
 ];
 
+const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon: string }> = [
+  { tab: "review", to: "/review", label: "分析", icon: "📹" },
+  { tab: "path", to: "/path", label: "计划", icon: "📋" },
+  { tab: "archive", to: "/archive", label: "进展", icon: "📊" },
+  { tab: "settings", to: "/settings", label: "设置", icon: "⚙️" },
+];
+
 export default function BottomNav({ activeTab }: BottomNavProps) {
   const { isParentMode } = useAppMode();
-  const mobileNavItems = isParentMode
-    ? [...PRIMARY_NAV_ITEMS.slice(0, 3), { tab: "settings" as const, to: "/settings", label: "设置", icon: "⚙️" }]
-    : PRIMARY_NAV_ITEMS;
-  const desktopNavItems = isParentMode
-    ? [...PRIMARY_NAV_ITEMS, { tab: "settings" as const, to: "/settings", label: "家长设置", icon: "⚙️" }]
-    : PRIMARY_NAV_ITEMS;
+  const mobileNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
+  const desktopNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
 
   return (
     <>
       <nav
         aria-label="主导航"
-        className="fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB] bg-white/96 backdrop-blur web:hidden"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        className="bottom-nav fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB] bg-white/96 backdrop-blur web:hidden"
       >
-        <div className={`mx-auto grid h-[49px] max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : "grid-cols-5"}`}>
+        <div className={`mx-auto grid h-full max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : "grid-cols-5"}`}>
           {mobileNavItems.map((item) => (
             <NavLink
               key={item.tab}
               to={item.to}
               className={({ isActive }) => {
                 const selected = isActive || activeTab === item.tab;
-                return `flex min-h-[49px] flex-col items-center justify-center gap-0.5 text-xs font-medium transition ${
-                  selected ? "text-[#3B82F6]" : "text-[#9CA3AF]"
-                }`;
+                return `bottom-nav-item text-[#9CA3AF] transition ${selected ? "active" : ""}`;
               }}
             >
-              <span className="text-base leading-none">{item.icon}</span>
-              <span>{item.label}</span>
+              <span className="icon">{item.icon}</span>
+              <span className="label">{item.label}</span>
             </NavLink>
           ))}
         </div>
@@ -78,7 +78,7 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         <div className="mt-auto rounded-[24px] border border-blue-100 bg-blue-50/80 p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">家庭模式</p>
           <p className="mt-2 text-sm leading-6 text-slate-600">
-            手机与 iPad 使用底部导航，网页端使用左侧固定导航。进入家长模式后，设置入口会自动出现在导航中。
+            手机与 iPad 使用底部导航，网页端使用左侧固定导航。进入家长模式后，会显示分析、计划、进展与设置四个入口。
           </p>
         </div>
       </aside>

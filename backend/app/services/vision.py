@@ -6,6 +6,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
 from app.services.providers import extract_message_text, get_active_provider
 from app.services.report import clean_json_text
 from app.services.snowball import build_memory_context
@@ -144,7 +145,11 @@ async def analyze_frames(
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        logger.warning("Vision JSON parse failed, using fallback structured payload: %s", exc)
+        logger.warning("Vision JSON parse failed: %s", exc)
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
+            f"Vision JSON parse failed: {exc}: {cleaned[:500]}",
+        ) from exc
         parsed = {
             "frame_analysis": [_fallback_frame(frame.frame_id) for frame in frame_payloads],
             "action_phase_summary": {

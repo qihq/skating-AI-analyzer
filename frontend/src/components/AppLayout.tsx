@@ -1,7 +1,7 @@
 import { Outlet, useLocation } from "react-router-dom";
 
+import AppHeader from "./AppHeader";
 import BottomNav, { PrimaryTab } from "./BottomNav";
-import ModeToggle from "./ModeToggle";
 
 const TAB_MATCHERS: Array<{ tab: PrimaryTab; paths: string[] }> = [
   { tab: "path", paths: ["/path"] },
@@ -22,12 +22,12 @@ export default function AppLayout() {
   return (
     <div className="app-shell">
       <BottomNav activeTab={activeTab} />
-      <ModeToggle />
+      <div className="web:pl-[240px]">
+        <AppHeader />
 
-      <div className="min-h-screen web:pl-[240px]">
-        <div className="safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
+        <main className="page-content safe-bottom mx-auto w-full max-w-[1480px] px-4 pt-[96px] phone:px-5 tablet:px-6 tablet:pt-[108px] web:px-8 web:pb-10 web:pt-[112px]">
           <Outlet />
-        </div>
+        </main>
       </div>
     </div>
   );

@@ -53,7 +53,7 @@ export default function ParentSetupPage() {
   };
 
   return (
-    <main className="app-shell min-h-screen">
+    <main className="app-shell page-scroll-container page-content min-h-screen">
       <section className="safe-bottom mx-auto flex min-h-screen max-w-5xl items-center px-4 py-10 phone:px-5 tablet:px-6">
         <div className="grid w-full gap-6 web:grid-cols-[1fr_420px]">
           <div className="app-card overflow-hidden p-8 tablet:p-10">

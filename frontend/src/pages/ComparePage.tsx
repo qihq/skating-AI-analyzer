@@ -139,7 +139,7 @@ export default function ComparePage() {
   }, [id_a, id_b]);
 
   return (
-    <main className="page-shell min-h-screen">
+    <main className="page-shell page-scroll-container page-content min-h-screen">
       <div className="absolute inset-0 -z-10 overflow-hidden">
         <div className="ice-orb left-[8%] top-[12%]" />
         <div className="ice-orb bottom-[12%] right-[10%]" />

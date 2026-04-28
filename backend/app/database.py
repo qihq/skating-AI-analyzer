@@ -148,6 +148,7 @@ async def _run_migrations(conn) -> None:
     await run_migrations_phase6(conn)
     await run_migrations_patch_f(conn)
     await run_migrations_patch_g(conn)
+    await run_migrations_patch_h(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -348,6 +349,25 @@ async def _apply_patch_g(conn) -> None:
     analysis_columns = {row[1] for row in analysis_columns_result.fetchall()}
     if "session_id" not in analysis_columns:
         await conn.execute(text("ALTER TABLE analyses ADD COLUMN session_id TEXT REFERENCES training_sessions(id)"))
+
+
+async def run_migrations_patch_h(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _apply_patch_h(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _apply_patch_h(conn)
+
+
+async def _apply_patch_h(conn) -> None:
+    analysis_columns_result = await conn.execute(text("PRAGMA table_info(analyses)"))
+    analysis_columns = {row[1] for row in analysis_columns_result.fetchall()}
+    if "error_code" not in analysis_columns:
+        await conn.execute(text("ALTER TABLE analyses ADD COLUMN error_code TEXT"))
+    if "error_detail" not in analysis_columns:
+        await conn.execute(text("ALTER TABLE analyses ADD COLUMN error_detail TEXT"))
 
 
 async def _create_phase6_tables(conn) -> None:
