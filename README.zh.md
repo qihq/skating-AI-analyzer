@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+[贡献指南](./CONTRIBUTING.md) · [许可证](./LICENSE) · [截图说明](./SCREENSHOT_GUIDE.md)
+
 ## 项目简介
 
 Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，支持上传视频、自动抽帧、姿态估计、生物力学指标分析、AI 诊断报告生成，以及通过技能树、训练计划和历史档案持续跟踪训练进展。
@@ -165,6 +167,13 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - 本地数据库
 - 训练视频与媒体素材
 - 导出的 Docker tar 包
+
+## 开源补充材料
+
+- 封面图文案：[REPO_COVER_COPY.md](./REPO_COVER_COPY.md)
+- GitHub About / Topics 文案：[GITHUB_PROFILE_COPY.md](./GITHUB_PROFILE_COPY.md)
+- 截图规划：[SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
+- Release 文案草稿：[RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
 
 ## 许可证
 
