@@ -85,6 +85,9 @@ cp .env.example .env
 QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
+# 可选：启用二期多姿态跟踪
+# MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
+# POSE_NUM_POSES=4
 ```
 
 说明：
@@ -92,6 +95,16 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 - `.env` 不会提交到 Git 仓库
 - `.env.example` 只保留占位符
 - 运行期数据库、上传视频和备份文件不会被提交
+
+## 二期姿态模型启用
+
+二期多姿态跟踪通过宿主机挂载 MediaPipe `.task` 模型文件启用。
+
+- 将模型文件放到 `./models`，例如 `./models/pose_landmarker_heavy.task`
+- 在 `.env` 中设置 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
+- 可选设置 `POSE_NUM_POSES=4`
+- `.task` 模型文件不提交到当前仓库
+- 如果模型缺失或加载失败，后端会自动降级回一期单人 pose 流程
 
 ## 本地开发
 
@@ -108,7 +121,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --no-use-colors
 ```
 
 ### 前端
@@ -132,6 +145,8 @@ npm run dev
 docker compose up --build
 ```
 
+如果要启用二期多姿态跟踪，启动 Docker Compose 前请先将模型文件放入 `./models`。
+
 默认地址：
 
 - 应用首页：`http://localhost:8080`
@@ -153,9 +168,16 @@ docker run -d \
   -p 8080:80 \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/backups:/backups" \
+  -v "$(pwd)/models:/models:ro" \
   -v "$(pwd)/.env:/workspace/.env:ro" \
   skating-analyzer-allinone:latest
 ```
+
+说明：
+
+- 如果使用 `.env` 文件方式运行 allinone，请确保其中包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
+- 如果在 NAS / Container Manager 中直接手动配置环境变量，可以不挂载 `.env`，但仍需额外设置同名环境变量，并挂载 `models` 目录
+- 旧的分析记录如果保存的是 Windows 本地绝对路径，allinone 会自动回退到 `/data/uploads/<analysis_id>/source.*` 查找原始视频
 
 导出：
 

@@ -30,9 +30,12 @@ from app.schemas import (
     ProgressResponse,
     ProgressStats,
     PoseResponse,
+    TargetLockRequest,
+    TargetPreviewResponse,
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
 )
+from app.services.action_profiles import infer_analysis_profile, infer_profile_hint, normalize_action_subtype
 from app.services.analysis_errors import (
     AnalysisErrorCode,
     classify_ai_failure,
@@ -48,6 +51,13 @@ from app.services.pose import extract_pose
 from app.services.report import calculate_force_score, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
+from app.services.target_lock import (
+    TARGET_LOCK_AUTO_THRESHOLD,
+    build_target_lock_payload,
+    build_target_preview,
+    frame_names_from_dir,
+    resolve_manual_candidate,
+)
 from app.services.video import (
     build_processing_frames_dir,
     build_upload_paths,
@@ -78,6 +88,14 @@ async def process_analysis(analysis_id: str) -> None:
     upload_frames_dir: Path | None = None
     action_type: str | None = None
     skater_id: str | None = None
+    action_subtype: str | None = None
+    analysis_profile_hint: str | None = None
+    existing_target_lock: dict[str, object] | None = None
+    saved_motion_scores: dict[str, object] | None = None
+    saved_action_window_start = 0.0
+    saved_action_window_end = 0.0
+    saved_source_fps = 30.0
+    saved_is_slow_motion = False
     try:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
@@ -92,28 +110,74 @@ async def process_analysis(analysis_id: str) -> None:
             logger.info("Analysis %s entered processing", analysis_id)
 
             action_type = analysis.action_type
+            action_subtype = normalize_action_subtype(analysis.action_type, analysis.action_subtype)
+            analysis_profile_hint = infer_profile_hint(action_type, action_subtype)
             skater_id = analysis.skater_id
-            video_path = Path(analysis.video_path)
+            video_path = _video_path_for_analysis(analysis)
             upload_frames_dir = video_path.parent / "frames"
             _, processing_frames_dir = build_processing_frames_dir(analysis_id)
+            analysis.action_subtype = action_subtype
+            await session.commit()
+            existing_target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else None
+            saved_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+            saved_action_window_start = float(analysis.action_window_start or 0.0)
+            saved_action_window_end = float(analysis.action_window_end or 0.0)
+            saved_source_fps = float(analysis.source_fps or 30.0)
+            saved_is_slow_motion = bool(analysis.is_slow_motion)
 
         await _set_analysis_status(analysis_id, "extracting_frames")
 
-        try:
-            sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
-                video_path,
-                processing_frames_dir,
-                action_type,
+        if existing_target_lock and str(existing_target_lock.get("status")) == "locked" and upload_frames_dir is not None and upload_frames_dir.exists():
+            sampled_frames = persist_frames(sorted(upload_frames_dir.glob("frame_*.jpg")), processing_frames_dir)
+            motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
+            from app.services.video import VideoSamplingMetadata
+
+            sampling_metadata = VideoSamplingMetadata(
+                action_window_start=saved_action_window_start,
+                action_window_end=saved_action_window_end,
+                source_fps=saved_source_fps,
+                is_slow_motion=saved_is_slow_motion,
             )
-        except Exception as exc:  # noqa: BLE001
-            failure = classify_video_failure(exc)
-            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
-            return
+        else:
+            try:
+                sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path,
+                    processing_frames_dir,
+                    action_type,
+                    analysis_profile_hint,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = classify_video_failure(exc)
+                await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+                return
         logger.info("Analysis %s motion-sampled %s frames", analysis_id, len(sampled_frames))
 
+        preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
+        target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get("status")) == "locked" else build_target_lock_payload(preview)
+
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.frame_motion_scores = motion_scores
+            analysis.action_window_start = sampling_metadata.action_window_start
+            analysis.action_window_end = sampling_metadata.action_window_end
+            analysis.source_fps = sampling_metadata.source_fps
+            analysis.is_slow_motion = sampling_metadata.is_slow_motion
+            analysis.target_lock = target_lock
+            analysis.target_lock_status = target_lock["status"]
+            await session.commit()
+
+        if (not existing_target_lock or str(existing_target_lock.get("status")) != "locked") and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
+            if upload_frames_dir is not None:
+                persist_frames(sampled_frames, upload_frames_dir)
+            await _set_analysis_status(analysis_id, "awaiting_target_selection")
+            return
+
         try:
-            pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir))
-            bio_data = analyze_biomechanics(pose_data, action_type)
+            pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir), target_lock)
+            analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
+            bio_data = analyze_biomechanics(pose_data, action_type, analysis_profile)
         except Exception as exc:  # noqa: BLE001
             await _mark_analysis_failed(analysis_id, AnalysisErrorCode.UNKNOWN_ERROR, stringify_exception(exc))
             return
@@ -122,7 +186,14 @@ async def process_analysis(analysis_id: str) -> None:
 
         try:
             payloads = await encode_frames(sampled_frames)
-            vision_structured = await analyze_frames(action_type, payloads, skater_id)
+            vision_structured = await analyze_frames(
+                action_type,
+                payloads,
+                skater_id,
+                action_subtype=action_subtype,
+                analysis_profile=analysis_profile,
+                profile_evidence=profile_evidence,
+            )
             vision_raw = json.dumps(vision_structured, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             failure = classify_ai_failure(exc)
@@ -155,6 +226,9 @@ async def process_analysis(analysis_id: str) -> None:
                 analysis.pose_data = pose_data
                 analysis.bio_data = bio_data
                 analysis.frame_motion_scores = motion_scores
+                analysis.analysis_profile = analysis_profile
+                analysis.target_lock = target_lock
+                analysis.target_lock_status = "auto_locked"
                 analysis.action_window_start = sampling_metadata.action_window_start
                 analysis.action_window_end = sampling_metadata.action_window_end
                 analysis.source_fps = sampling_metadata.source_fps
@@ -389,6 +463,8 @@ def _detail_from_analysis(
         skill_category=analysis.skill_category,
         skill_node_id=analysis.skill_node_id,
         action_type=analysis.action_type,
+        action_subtype=analysis.action_subtype,
+        analysis_profile=analysis.analysis_profile,
         video_path=analysis.video_path,
         status=analysis.status,
         vision_raw=analysis.vision_raw,
@@ -397,6 +473,8 @@ def _detail_from_analysis(
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
         frame_motion_scores=analysis.frame_motion_scores,
+        target_lock=analysis.target_lock,
+        target_lock_status=analysis.target_lock_status,
         action_window_start=analysis.action_window_start,
         action_window_end=analysis.action_window_end,
         source_fps=analysis.source_fps,
@@ -451,8 +529,26 @@ def _fallback_motion_payload(frames_dir: Path) -> dict[str, object]:
     }
 
 
+def _video_path_for_analysis(analysis: Analysis) -> Path:
+    raw_video_path = Path(analysis.video_path)
+    if raw_video_path.exists():
+        return raw_video_path
+
+    filename = raw_video_path.name or "source.mp4"
+    upload_dir = UPLOADS_DIR / analysis.id
+    fallback_video_path = upload_dir / filename
+    if fallback_video_path.exists():
+        return fallback_video_path
+
+    for candidate in upload_dir.glob("source.*"):
+        if candidate.is_file():
+            return candidate
+
+    return fallback_video_path
+
+
 def _frames_dir_for_analysis(analysis: Analysis) -> Path:
-    frames_dir = Path(analysis.video_path).parent / "frames"
+    frames_dir = _video_path_for_analysis(analysis).parent / "frames"
     if frames_dir.exists():
         return frames_dir
     return UPLOADS_DIR / analysis.id / "frames"
@@ -476,7 +572,7 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
 
     if not pose_frames or not pose_has_keypoints:
         logger.info("Analysis %s is missing pose data, backfilling from existing frames", analysis.id)
-        computed_pose = await asyncio.to_thread(extract_pose, str(frames_dir))
+        computed_pose = await asyncio.to_thread(extract_pose, str(frames_dir), analysis.target_lock if isinstance(analysis.target_lock, dict) else None)
         analysis.pose_data = computed_pose
         pose_data = computed_pose
         changed = True
@@ -484,7 +580,11 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
     if bio_data is None or not bio_data.get("key_frames"):
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
-        analysis.bio_data = analyze_biomechanics(pose_data or {"connections": [], "frames": []}, analysis.action_type)
+        analysis.bio_data = analyze_biomechanics(
+            pose_data or {"connections": [], "frames": []},
+            analysis.action_type,
+            analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+        )
         changed = True
     else:
         sanitized_bio_data = sanitize_biomechanics_data(bio_data)
@@ -513,6 +613,8 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
         skater_name=skater_name,
         skill_category=analysis.skill_category,
         action_type=analysis.action_type,
+        action_subtype=analysis.action_subtype,
+        analysis_profile=analysis.analysis_profile,
         status=analysis.status,
         force_score=analysis.force_score,
         note=analysis.note,
@@ -662,6 +764,7 @@ async def upload_analysis(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     action_type: str = Form(...),
+    action_subtype: str | None = Form(default=None),
     skater_id: str | None = Form(default=None),
     skill_node_id: str | None = Form(default=None),
     skill_category: str | None = Form(default=None),
@@ -698,9 +801,11 @@ async def upload_analysis(
         skill_node_id=_normalize_optional_text(skill_node_id),
         skill_category=_normalize_optional_text(skill_category),
         action_type=action_type,
+        action_subtype=normalize_action_subtype(action_type, action_subtype),
         video_path=str(video_path),
         note=_normalize_optional_text(note),
         status="pending",
+        target_lock_status="pending",
     )
     session.add(analysis)
     await session.commit()
@@ -888,7 +993,8 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
-    analysis = await _ensure_phase3_artifacts(session, analysis)
+    if analysis.status != "awaiting_target_selection":
+        analysis = await _ensure_phase3_artifacts(session, analysis)
     return _build_pose_response(analysis_id, analysis.pose_data)
 
 
@@ -902,7 +1008,8 @@ async def get_analysis(
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
-    analysis = await _ensure_phase3_artifacts(session, analysis)
+    if analysis.status != "awaiting_target_selection":
+        analysis = await _ensure_phase3_artifacts(session, analysis)
     skater_name = None
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
@@ -937,8 +1044,8 @@ async def retry_analysis(
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
-    if analysis.status != "failed":
-        raise HTTPException(status_code=400, detail='只有 status 为 "failed" 的记录才可以重新分析。')
+    if analysis.status in {"pending", "processing", "extracting_frames", "awaiting_target_selection", "analyzing", "generating_report"}:
+        raise HTTPException(status_code=400, detail="当前分析正在进行中，请稍后再试。")
 
     upload_dir = UPLOADS_DIR / analysis_id
     source_video_path = (
@@ -956,11 +1063,64 @@ async def retry_analysis(
     analysis.error_code = None
     analysis.error_detail = None
     analysis.error_message = None
+    analysis.target_lock_status = "pending"
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
 
     background_tasks.add_task(process_analysis, analysis_id)
     return AnalysisRetryResponse(message="已重新提交分析任务")
+
+
+@router.get("/{analysis_id}/target-preview", response_model=TargetPreviewResponse)
+async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TargetPreviewResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
+    return TargetPreviewResponse(
+        analysis_id=analysis.id,
+        status=analysis.status,
+        auto_candidate_id=preview.auto_candidate_id,
+        lock_confidence=preview.lock_confidence,
+        preview_frame=preview.preview_frame,
+        preview_frame_url=preview.preview_frame_url,
+        candidates=preview.candidates,
+        target_lock_status=analysis.target_lock_status,
+    )
+
+
+@router.post("/{analysis_id}/target-lock", response_model=AnalysisDetail)
+async def confirm_target_lock(
+    analysis_id: str,
+    payload: TargetLockRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisDetail:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
+    selected = resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
+    if selected is None:
+        raise HTTPException(status_code=400, detail="未能确定要分析的主滑行者，请重新点选。")
+
+    analysis.target_lock = build_target_lock_payload(preview, selected_candidate=selected, manual=True)
+    analysis.target_lock_status = "locked"
+    analysis.status = "pending"
+    analysis.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    background_tasks.add_task(process_analysis, analysis_id)
+
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    return _detail_from_analysis(analysis, skater_name)
 
 
 @router.patch("/{analysis_id}/note", response_model=AnalysisDetail)

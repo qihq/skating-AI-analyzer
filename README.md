@@ -85,6 +85,9 @@ Example:
 QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
+# Optional: enable phase-2 multi-pose tracking
+# MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
+# POSE_NUM_POSES=4
 ```
 
 Notes:
@@ -92,6 +95,16 @@ Notes:
 - `.env` is not tracked by Git
 - `.env.example` keeps placeholders only
 - Runtime databases, uploaded videos, and backups are not committed
+
+## Phase 2 Pose Model
+
+Phase-2 multi-pose tracking is enabled through a host-mounted MediaPipe `.task` model file.
+
+- Put the model file under `./models`, for example `./models/pose_landmarker_heavy.task`
+- Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`
+- Optionally set `POSE_NUM_POSES=4`
+- The `.task` file is not committed to this repository
+- If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline
 
 ## Local Development
 
@@ -108,7 +121,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --no-use-colors
 ```
 
 ### Frontend
@@ -132,6 +145,8 @@ Default URLs:
 docker compose up --build
 ```
 
+If you want to enable phase-2 multi-pose tracking, place the model file under `./models` before starting Docker Compose.
+
 Default URLs:
 
 - App: `http://localhost:8080`
@@ -153,9 +168,16 @@ docker run -d \
   -p 8080:80 \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/backups:/backups" \
+  -v "$(pwd)/models:/models:ro" \
   -v "$(pwd)/.env:/workspace/.env:ro" \
   skating-analyzer-allinone:latest
 ```
+
+Notes:
+
+- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
+- If you configure environment variables directly in NAS / Container Manager, mounting `.env` is optional, but you still need the same environment variable and the mounted `models` directory
+- Older analysis rows that still store Windows absolute paths automatically fall back to `/data/uploads/<analysis_id>/source.*` when the all-in-one container resolves the original video
 
 Export:
 

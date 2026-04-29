@@ -18,6 +18,7 @@ from app.routers.skaters import admin_router, router as skaters_router, session_
 from app.routers.snowball import router as snowball_router
 from app.schemas import HealthResponse
 from app.services.archive_policy import run_archive_policy
+from app.services.pose import log_pose_runtime_mode
 from app.services.providers import seed_preset_providers
 from app.services.skaters import seed_preset_skaters
 from app.services.skills import seed_skill_catalog, sync_all_skater_progress
@@ -34,6 +35,7 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_storage_dirs()
+    log_pose_runtime_mode()
     await init_db()
     await seed_preset_providers()
     await seed_preset_skaters()

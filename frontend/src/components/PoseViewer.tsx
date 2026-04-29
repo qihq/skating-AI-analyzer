@@ -63,6 +63,26 @@ function drawPose(
     context.fillRect(0, 0, width, height);
   }
 
+  if (frame.target_bbox) {
+    context.strokeStyle = "rgba(56, 189, 248, 0.95)";
+    context.lineWidth = 2;
+    context.setLineDash([8, 6]);
+    context.strokeRect(
+      frame.target_bbox.x * width,
+      frame.target_bbox.y * height,
+      frame.target_bbox.width * width,
+      frame.target_bbox.height * height,
+    );
+    context.setLineDash([]);
+    if (typeof frame.tracking_confidence === "number") {
+      context.fillStyle = "rgba(8, 47, 73, 0.88)";
+      context.fillRect(frame.target_bbox.x * width, Math.max(0, frame.target_bbox.y * height - 24), 112, 20);
+      context.fillStyle = "#E0F2FE";
+      context.font = "12px sans-serif";
+      context.fillText(`lock ${(frame.tracking_confidence * 100).toFixed(0)}%`, frame.target_bbox.x * width + 8, Math.max(14, frame.target_bbox.y * height - 10));
+    }
+  }
+
   const points = new Map(frame.keypoints.map((point) => [point.id, point]));
   context.lineCap = "round";
   context.lineJoin = "round";

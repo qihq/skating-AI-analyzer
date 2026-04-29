@@ -9,11 +9,31 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 
 
-DEFAULT_DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parents[2] / "data"
-DATA_DIR = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+WINDOWS_LOCAL_DEV = os.name == "nt"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" if WINDOWS_LOCAL_DEV else (Path("/data") if Path("/data").exists() else PROJECT_ROOT / "data")
+DEFAULT_BACKUPS_DIR = PROJECT_ROOT / "backups" if WINDOWS_LOCAL_DEV else (Path("/backups") if Path("/backups").exists() else PROJECT_ROOT / "backups")
+
+
+def _resolve_runtime_path(raw_path: str | Path, fallback: Path) -> Path:
+    path = Path(raw_path)
+    if WINDOWS_LOCAL_DEV and path.is_absolute() and not str(path.drive):
+        return PROJECT_ROOT / str(path).lstrip("/\\")
+    if path.exists():
+        return path
+    if path.is_absolute() and not str(path.drive):
+        fallback_candidate = PROJECT_ROOT / str(path).lstrip("/\\")
+        if fallback_candidate.exists() or path == fallback:
+            return fallback_candidate
+    if not path.is_absolute():
+        return PROJECT_ROOT / path
+    return path
+
+
+DATA_DIR = _resolve_runtime_path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)), DEFAULT_DATA_DIR)
 UPLOADS_DIR = DATA_DIR / "uploads"
 ARCHIVE_DIR = DATA_DIR / "archive"
-BACKUPS_DIR = Path("/backups") if Path("/backups").exists() else Path(__file__).resolve().parents[2] / "backups"
+BACKUPS_DIR = _resolve_runtime_path(os.getenv("BACKUPS_DIR", str(DEFAULT_BACKUPS_DIR)), DEFAULT_BACKUPS_DIR)
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{DATA_DIR / 'skating-analyzer.db'}")
 
 
@@ -95,10 +115,14 @@ async def _run_migrations(conn) -> None:
         ("session_id", "VARCHAR(36) REFERENCES training_sessions(id)"),
         ("skill_node_id", "TEXT REFERENCES skill_nodes(id)"),
         ("skill_category", "TEXT"),
+        ("action_subtype", "TEXT"),
+        ("analysis_profile", "TEXT"),
         ("vision_structured", "JSON"),
         ("pose_data", "JSON"),
         ("bio_data", "JSON"),
         ("frame_motion_scores", "JSON"),
+        ("target_lock", "JSON"),
+        ("target_lock_status", "TEXT"),
         ("auto_unlocked_skill", "TEXT REFERENCES skill_nodes(id)"),
     ]
 
