@@ -15,21 +15,32 @@ import {
   TrainingSessionRecord,
   uploadAnalysis,
 } from "../api/client";
+import ZodiacAvatar from "../components/ZodiacAvatar";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
-import ZodiacAvatar from "../components/ZodiacAvatar";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
 const LOCATION_OPTIONS = ["冰场", "家", "体育馆"] as const;
 const SESSION_TYPE_OPTIONS = ["上冰", "陆训"] as const;
+const ACTION_TYPE_OPTIONS = ["跳跃", "旋转", "步法", "自由滑"] as const;
+const ACTION_SUBTYPE_OPTIONS: Record<(typeof ACTION_TYPE_OPTIONS)[number], readonly string[]> = {
+  跳跃: ["未指定", "单跳", "连跳"],
+  旋转: ["未指定", "直立旋转", "蹲转", "燕式旋转", "联合旋转"],
+  步法: ["未指定", "步法序列", "燕式滑行"],
+  自由滑: ["节目片段"],
+};
+
+type ActionType = (typeof ACTION_TYPE_OPTIONS)[number];
 
 type ReviewDraft = {
   skaterId: string;
   skillId: string;
   note: string;
   sessionId: string;
+  actionType?: string;
+  actionSubtype?: string;
 };
 
 type SessionFormState = {
@@ -80,8 +91,23 @@ function groupSkills(skills: SkillNode[]) {
   return Array.from(groups.entries());
 }
 
-function actionTypeForSkill(skill: SkillNode | undefined) {
-  return skill?.action_type ?? "自由滑";
+function isActionType(value: string | null | undefined): value is ActionType {
+  return ACTION_TYPE_OPTIONS.includes((value ?? "") as ActionType);
+}
+
+function actionTypeForSkill(skill: SkillNode | undefined): ActionType {
+  return isActionType(skill?.action_type) ? skill.action_type : "自由滑";
+}
+
+function defaultSubtypeForActionType(actionType: ActionType) {
+  return ACTION_SUBTYPE_OPTIONS[actionType][0];
+}
+
+function normalizeSubtype(actionType: ActionType, subtype?: string | null) {
+  if (subtype && ACTION_SUBTYPE_OPTIONS[actionType].includes(subtype)) {
+    return subtype;
+  }
+  return defaultSubtypeForActionType(actionType);
 }
 
 function todayString() {
@@ -118,6 +144,12 @@ export default function ReviewPage() {
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState(preferredSkaterId || draft?.skaterId || "");
   const [skills, setSkills] = useState<SkillNode[]>([]);
+  const [selectedActionType, setSelectedActionType] = useState<ActionType>(
+    isActionType(draft?.actionType) ? draft.actionType : "自由滑",
+  );
+  const [selectedActionSubtype, setSelectedActionSubtype] = useState(() =>
+    normalizeSubtype(isActionType(draft?.actionType) ? draft.actionType : "自由滑", draft?.actionSubtype),
+  );
   const [selectedSkillId, setSelectedSkillId] = useState(draft?.skillId ?? "");
   const [sessions, setSessions] = useState<TrainingSessionRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState(draft?.sessionId ?? "");
@@ -189,9 +221,9 @@ export default function ReviewPage() {
         if (cancelled) {
           return;
         }
+
         setSkills(skillData);
         setSessions(sessionData);
-        setSelectedSkillId((current) => current || draft?.skillId || skillData[0]?.id || "");
         setSelectedSessionId((current) => {
           if (current && sessionData.some((item) => item.id === current)) {
             return current;
@@ -200,6 +232,31 @@ export default function ReviewPage() {
             return draft.sessionId;
           }
           return "";
+        });
+
+        const draftSkill = skillData.find((skill) => skill.id === draft?.skillId);
+        const nextActionType = draftSkill
+          ? actionTypeForSkill(draftSkill)
+          : isActionType(draft?.actionType)
+            ? draft.actionType
+            : skillData[0]
+              ? actionTypeForSkill(skillData[0])
+              : "自由滑";
+
+        setSelectedActionType(nextActionType);
+        setSelectedActionSubtype(normalizeSubtype(nextActionType, draft?.actionSubtype));
+
+        const filtered = skillData.filter((skill) => actionTypeForSkill(skill) === nextActionType);
+        setSelectedSkillId((current) => {
+          const draftSkillId =
+            draftSkill && actionTypeForSkill(draftSkill) === nextActionType ? draftSkill.id : "";
+          if (current && filtered.some((skill) => skill.id === current)) {
+            return current;
+          }
+          if (draftSkillId) {
+            return draftSkillId;
+          }
+          return filtered[0]?.id ?? "";
         });
       } catch {
         if (!cancelled) {
@@ -214,7 +271,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [draft?.sessionId, draft?.skillId, selectedSkaterId]);
+  }, [draft?.actionSubtype, draft?.actionType, draft?.sessionId, draft?.skillId, selectedSkaterId]);
 
   useEffect(() => {
     if (!pendingAnalysisId) {
@@ -239,6 +296,12 @@ export default function ReviewPage() {
           window.localStorage.removeItem(DRAFT_STORAGE_KEY);
           setIsSubmitting(false);
           navigate(`/report/${data.id}`);
+          return;
+        }
+
+        if (data.status === "awaiting_target_selection") {
+          setIsSubmitting(false);
+          navigate(`/report/${data.id}/target`);
           return;
         }
 
@@ -273,10 +336,14 @@ export default function ReviewPage() {
     };
   }, [isParentMode, navigate, pendingAnalysisId]);
 
+  const filteredSkills = useMemo(
+    () => skills.filter((skill) => actionTypeForSkill(skill) === selectedActionType),
+    [selectedActionType, skills],
+  );
+  const groupedSkills = useMemo(() => groupSkills(filteredSkills), [filteredSkills]);
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
-  const selectedSkill = skills.find((skill) => skill.id === selectedSkillId);
+  const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0];
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
-  const groupedSkills = useMemo(() => groupSkills(skills), [skills]);
   const processingStage = getAnalysisProcessingStage(processingStatus);
   const analysisSteps = useMemo(
     () => [
@@ -297,6 +364,27 @@ export default function ReviewPage() {
     [processingStage, uploadStage],
   );
 
+  useEffect(() => {
+    setSelectedActionSubtype((current) => normalizeSubtype(selectedActionType, current));
+    setSelectedSkillId((current) => {
+      if (current && filteredSkills.some((skill) => skill.id === current)) {
+        return current;
+      }
+      return filteredSkills[0]?.id ?? "";
+    });
+  }, [filteredSkills, selectedActionType]);
+
+  useEffect(() => {
+    if (!selectedSkill) {
+      return;
+    }
+    const skillActionType = actionTypeForSkill(selectedSkill);
+    if (skillActionType !== selectedActionType) {
+      setSelectedActionType(skillActionType);
+      setSelectedActionSubtype((current) => normalizeSubtype(skillActionType, current));
+    }
+  }, [selectedActionType, selectedSkill]);
+
   const handleSkaterChange = (nextSkaterId: string) => {
     setSelectedSkaterId(nextSkaterId);
     if (isParentMode) {
@@ -315,15 +403,22 @@ export default function ReviewPage() {
     setError(null);
   };
 
+  const handleActionTypeChange = (nextType: ActionType) => {
+    setSelectedActionType(nextType);
+    setSelectedActionSubtype((current) => normalizeSubtype(nextType, current));
+  };
+
   const handleSaveDraft = () => {
     window.localStorage.setItem(
       DRAFT_STORAGE_KEY,
       JSON.stringify({
         skaterId: selectedSkaterId,
-        skillId: selectedSkillId,
+        skillId: selectedSkill?.id ?? "",
         note,
         sessionId: selectedSessionId,
-      }),
+        actionType: selectedActionType,
+        actionSubtype: selectedActionSubtype,
+      } satisfies ReviewDraft),
     );
     setSaveMessage("这条复盘草稿已保存。");
     window.setTimeout(() => setSaveMessage(null), 1800);
@@ -379,7 +474,8 @@ export default function ReviewPage() {
 
     const formData = new FormData();
     formData.append("file", selectedFile);
-    formData.append("action_type", actionTypeForSkill(selectedSkill));
+    formData.append("action_type", selectedActionType);
+    formData.append("action_subtype", selectedActionSubtype);
     formData.append("skill_node_id", selectedSkill.id);
     formData.append("skill_category", selectedSkill.name);
     if (selectedSkaterId) {
@@ -441,8 +537,9 @@ export default function ReviewPage() {
             <p className="text-sm font-semibold text-slate-900">本次复盘预览</p>
             <div className="mt-4 space-y-3 text-sm text-slate-500">
               <p>练习档案：{selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..."}</p>
+              <p>动作大类：{selectedActionType}</p>
+              <p>动作子类：{selectedActionSubtype}</p>
               <p>技能分类：{selectedSkill?.name ?? "尚未选择"}</p>
-              <p>诊断类型：{actionTypeForSkill(selectedSkill)}</p>
               <p>关联课次：{selectedSession ? sessionLabel(selectedSession) : "不关联"}</p>
               <p>视频文件：{selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传"}</p>
             </div>
@@ -462,7 +559,11 @@ export default function ReviewPage() {
                 <h2 className="text-xl font-semibold text-slate-900">选择训练视频</h2>
                 <p className="mt-2 text-sm text-slate-500">支持 mp4 / mov / avi，视频会被自动抽帧分析。</p>
               </div>
-              <button type="button" onClick={() => inputRef.current?.click()} className="app-pill min-h-[56px] px-5 font-semibold text-blue-600">
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="app-pill min-h-[56px] px-5 font-semibold text-blue-600"
+              >
                 选择训练视频
               </button>
             </div>
@@ -471,7 +572,9 @@ export default function ReviewPage() {
 
             <div className="mt-5 rounded-[28px] border border-dashed border-blue-100 bg-blue-50/70 p-5">
               <p className="text-sm font-medium text-slate-700">{selectedFile ? selectedFile.name : "尚未选择视频"}</p>
-              <p className="mt-2 text-sm text-slate-500">{selectedFile ? formatFileSize(selectedFile.size) : "点击上方按钮选择本次训练视频。"}</p>
+              <p className="mt-2 text-sm text-slate-500">
+                {selectedFile ? formatFileSize(selectedFile.size) : "点击上方按钮选择本次训练视频。"}
+              </p>
             </div>
 
             <div className="mt-5 rounded-[28px] border border-slate-200 bg-white p-5">
@@ -620,9 +723,41 @@ export default function ReviewPage() {
                 </select>
               </label>
 
+              <div className="grid gap-4 tablet:grid-cols-2">
+                <label className="space-y-2">
+                  <span className="text-sm font-medium text-slate-700">动作大类</span>
+                  <select
+                    value={selectedActionType}
+                    onChange={(event) => handleActionTypeChange(event.target.value as ActionType)}
+                    className="app-select"
+                  >
+                    {ACTION_TYPE_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-sm font-medium text-slate-700">动作子类</span>
+                  <select
+                    value={selectedActionSubtype}
+                    onChange={(event) => setSelectedActionSubtype(event.target.value)}
+                    className="app-select"
+                  >
+                    {ACTION_SUBTYPE_OPTIONS[selectedActionType].map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
               <label className="space-y-2">
                 <span className="text-sm font-medium text-slate-700">技能分类</span>
-                <select value={selectedSkillId} onChange={(event) => setSelectedSkillId(event.target.value)} className="app-select">
+                <select value={selectedSkill?.id ?? ""} onChange={(event) => setSelectedSkillId(event.target.value)} className="app-select">
                   {groupedSkills.length ? (
                     groupedSkills.map(([groupLabel, items]) => (
                       <optgroup key={groupLabel} label={groupLabel}>
@@ -634,7 +769,7 @@ export default function ReviewPage() {
                       </optgroup>
                     ))
                   ) : (
-                    <option value="">正在加载技能节点...</option>
+                    <option value="">当前大类下暂无技能节点</option>
                   )}
                 </select>
               </label>
@@ -655,7 +790,9 @@ export default function ReviewPage() {
           <section className="app-card p-6 tablet:p-7">
             <p className="text-sm font-semibold text-blue-500">Step 3</p>
             <h2 className="mt-2 text-xl font-semibold text-slate-900">开始冰宝（IceBuddy）视频诊断</h2>
-            <p className="mt-3 text-sm leading-7 text-slate-500">开始诊断后会上传视频并跳转到诊断报告页。分析结果完成后会自动进入练习档案时间轴。</p>
+            <p className="mt-3 text-sm leading-7 text-slate-500">
+              开始诊断后会上传视频并跳转到诊断报告页。分析结果完成后会自动进入练习档案时间轴。
+            </p>
 
             {error ? <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-500">{error}</p> : null}
             {saveMessage ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-600">{saveMessage}</p> : null}
@@ -684,7 +821,7 @@ export default function ReviewPage() {
 
                 <div className="mt-5 grid gap-3">
                   {analysisSteps.map((step) => {
-                    const icon = step.state === "done" ? "✅" : step.state === "active" ? "⏳" : "○";
+                    const icon = step.state === "done" ? "✓" : step.state === "active" ? "⏳" : "○";
                     const tone =
                       step.state === "done"
                         ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -723,7 +860,7 @@ export default function ReviewPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">复盘说明</p>
             <div className="mt-4 space-y-4 text-sm leading-7 text-slate-500">
               <p>1. 选择视频后，系统会自动上传原片并抽取动作关键帧。</p>
-              <p>2. 技能分类会直接使用技能树节点名称，帮助冰宝（IceBuddy）更快定位动作语境。</p>
+              <p>2. 动作大类和子类会一起送入分析链路，帮助冰宝更稳定地区分跳跃、旋转、步法和节目片段。</p>
               <p>3. 你补充的备注会和报告一起进入练习档案，课次信息也会同步进入时间轴。</p>
             </div>
           </section>
@@ -732,7 +869,13 @@ export default function ReviewPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前对象</p>
             {selectedSkater ? (
               <div className="mt-4 rounded-[28px] bg-slate-50 p-5">
-                <ZodiacAvatar avatarType={selectedSkater.avatar_type} avatarEmoji={selectedSkater.avatar_emoji} size="md" animate className="mx-auto tablet:mx-0" />
+                <ZodiacAvatar
+                  avatarType={selectedSkater.avatar_type}
+                  avatarEmoji={selectedSkater.avatar_emoji}
+                  size="md"
+                  animate
+                  className="mx-auto tablet:mx-0"
+                />
                 <h2 className="mt-3 text-xl font-semibold text-slate-900">{selectedSkater.display_name || selectedSkater.name}</h2>
                 <p className="mt-2 text-sm text-slate-500">{selectedSkater.level ?? selectedSkater.current_level}</p>
                 <p className="mt-4 text-sm text-slate-500">当前 XP：{selectedSkater.total_xp}</p>

@@ -27,8 +27,21 @@ type ViewMode = "path" | "roadmap";
 const XP_LEVELS = [0, 200, 600, 1500, 3000, 6000, 10000, 16000, 25000, 40000];
 const TODAY_TASK_MAX_ITEMS = 2;
 
+type PendingPlanTask = TrainingPlanSession & {
+  day: number;
+  theme: string;
+};
+
+type FocusSkillNode = SkillNode & {
+  isFocusSkill: boolean;
+};
+
 function isUnlocked(status: SkillNode["status"]) {
   return status === "unlocked";
+}
+
+function isInProgress(status: SkillNode["status"]) {
+  return status === "attempting" || status === "in_progress";
 }
 
 function skaterLabel(skater: Skater) {
@@ -48,15 +61,6 @@ function branchTone(chapter: string) {
   return "text-branch-jump";
 }
 
-type PendingPlanTask = TrainingPlanSession & {
-  day: number;
-  theme: string;
-};
-
-type FocusSkillNode = SkillNode & {
-  isFocusSkill: boolean;
-};
-
 function normalizeText(value: string | null | undefined) {
   return (value ?? "").trim().toLowerCase();
 }
@@ -69,6 +73,24 @@ function matchesFocusSkill(node: SkillNode, focusSkill: string | null | undefine
 
   const candidates = [node.name, node.action_type, node.group_name, node.stage_name].map(normalizeText).filter(Boolean);
   return candidates.some((candidate) => candidate.includes(normalizedFocus) || normalizedFocus.includes(candidate));
+}
+
+function readUnlockTargets(node: SkillNode | null) {
+  const config = (node?.unlock_config as { consecutive?: number; threshold?: number } | null) ?? null;
+  return {
+    consecutive: Math.max(Number(config?.consecutive ?? 0), 0),
+    threshold: Math.max(Number(config?.threshold ?? 0), 0),
+  };
+}
+
+function skillStatusLabel(status: SkillNode["status"]) {
+  if (status === "unlocked") {
+    return "已点亮";
+  }
+  if (isInProgress(status)) {
+    return "推进中";
+  }
+  return "未开始";
 }
 
 export default function SkillTreePage() {
@@ -96,8 +118,16 @@ export default function SkillTreePage() {
         if (cancelled) {
           return;
         }
+
         setSkaters(data);
-        setSelectedSkaterId((current) => current || (isParentMode ? "" : pickSkaterIdForChildView(data, childView)) || data.find((skater) => skater.is_default)?.id || data[0]?.id || "");
+        setSelectedSkaterId(
+          (current) =>
+            current ||
+            (isParentMode ? "" : pickSkaterIdForChildView(data, childView)) ||
+            data.find((skater) => skater.is_default)?.id ||
+            data[0]?.id ||
+            "",
+        );
       } catch {
         if (!cancelled) {
           setError("练习档案加载失败，请稍后刷新页面。");
@@ -135,6 +165,7 @@ export default function SkillTreePage() {
         if (cancelled) {
           return;
         }
+
         startTransition(() => {
           setPath(data);
           setSelectedStage((current) => current || data.current_stage);
@@ -194,6 +225,7 @@ export default function SkillTreePage() {
     if (!todayPlan) {
       return [];
     }
+
     return todayPlan.plan_json.days.flatMap((day) =>
       day.sessions
         .filter((session) => !session.completed)
@@ -215,11 +247,13 @@ export default function SkillTreePage() {
     if (!selectedSkater) {
       return 0;
     }
+
     const currentLevelFloor = XP_LEVELS[Math.max((selectedSkater.avatar_level ?? 1) - 1, 0)] ?? 0;
     const nextLevelTarget = XP_LEVELS[selectedSkater.avatar_level ?? 1] ?? currentLevelFloor;
     if (nextLevelTarget <= currentLevelFloor) {
       return 100;
     }
+
     return Math.round(((selectedSkater.total_xp - currentLevelFloor) / (nextLevelTarget - currentLevelFloor)) * 100);
   }, [selectedSkater]);
 
@@ -227,6 +261,7 @@ export default function SkillTreePage() {
     if (!selectedSkaterId) {
       return;
     }
+
     const [nextPath, nextSkaters] = await Promise.all([fetchLearningPath(selectedSkaterId), fetchSkaters()]);
     setPath(nextPath);
     setSkaters(nextSkaters);
@@ -305,7 +340,7 @@ export default function SkillTreePage() {
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Skill Path</p>
             <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">学习路径 + 冰面路线图</h1>
             <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
-              左看阶段进度，右看整张技能图谱。孩子可以清楚看见“正在推进”和“已经点亮”的小目标，家长模式可以补备注并手动点亮。
+              左边看阶段进度，右边看完整技能图谱。孩子可以快速找到正在推进的目标，家长模式也能补备注并手动点亮技能。
             </p>
           </div>
 
@@ -340,7 +375,9 @@ export default function SkillTreePage() {
                 <div className="mt-4">
                   <XpProgressBar value={xpProgressPct} />
                 </div>
-                <p className="mt-3 text-sm text-slate-500">距离下一等级还差 {Math.max((XP_LEVELS[selectedSkater.avatar_level] ?? selectedSkater.total_xp) - selectedSkater.total_xp, 0)} XP</p>
+                <p className="mt-3 text-sm text-slate-500">
+                  距离下一级还差 {Math.max((XP_LEVELS[selectedSkater.avatar_level] ?? selectedSkater.total_xp) - selectedSkater.total_xp, 0)} XP
+                </p>
               </div>
             ) : null}
 
@@ -348,7 +385,7 @@ export default function SkillTreePage() {
               nextTask ? (
                 <section className="overflow-hidden rounded-[28px] bg-gradient-to-br from-[#6C63FF] via-[#5B8CFF] to-[#59C3FF] p-[1px] shadow-[0_20px_50px_rgba(92,110,255,0.28)]">
                   <div className="rounded-[27px] bg-[linear-gradient(135deg,rgba(255,255,255,0.2),rgba(255,255,255,0.08))] px-5 py-5 text-white backdrop-blur-sm">
-                    <p className="text-sm font-semibold tracking-[0.04em] text-white/88">⛸️ 今天要练：</p>
+                    <p className="text-sm font-semibold tracking-[0.04em] text-white/88">今天要练:</p>
                     <div className="mt-3 space-y-2">
                       {todayTaskPreview.map((task) => (
                         <p key={task.id} className="text-lg font-semibold leading-7 text-white">
@@ -361,14 +398,14 @@ export default function SkillTreePage() {
                       state={{ focusSessionId: nextTask.id, focusDay: nextTask.day }}
                       className="mt-5 flex min-h-[56px] w-full items-center justify-center rounded-full bg-white px-5 text-base font-semibold text-[#3457f6] shadow-[0_12px_24px_rgba(255,255,255,0.22)] transition hover:bg-slate-50"
                     >
-                      出发！ →→
+                      出发
                     </Link>
                   </div>
                 </section>
               ) : (
                 <section className="rounded-[28px] border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-sky-50 px-5 py-5 shadow-[0_16px_42px_rgba(34,197,94,0.08)]">
-                  <p className="text-sm font-semibold tracking-[0.04em] text-emerald-600">今天超棒！✨</p>
-                  <p className="mt-2 text-lg font-semibold text-slate-900">休息一下，明天继续发光。</p>
+                  <p className="text-sm font-semibold tracking-[0.04em] text-emerald-600">今天超棒</p>
+                  <p className="mt-2 text-lg font-semibold text-slate-900">今天的计划都完成了，休息一下，明天继续发光。</p>
                 </section>
               )
             ) : null}
@@ -424,12 +461,12 @@ export default function SkillTreePage() {
           <section className="app-card w-full max-w-md p-6">
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Parent Unlock</p>
             <h2 className="mt-3 text-2xl font-semibold text-slate-900">点亮 {unlockingSkill.name}</h2>
-            <p className="mt-3 text-sm leading-7 text-slate-500">可以写一句家长备注，比如“今天教练确认动作稳定”或“连续做对了 3 次”。</p>
+            <p className="mt-3 text-sm leading-7 text-slate-500">可以写一句家长备注，比如“今天教练确认动作稳定”或者“连续做对了 3 次”。</p>
             <textarea
               value={unlockNote}
               onChange={(event) => setUnlockNote(event.target.value)}
               rows={4}
-              placeholder="备注（可选）"
+              placeholder="备注(可选)"
               className="app-textarea mt-5 min-h-[120px] resize-y"
             />
             <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
@@ -468,9 +505,10 @@ function PathView({
   onShowRoadmap: () => void;
 }) {
   const [selectedNode, setSelectedNode] = useState<SkillNode | null>(null);
-  const selectedNodeConsecutive = Math.max(Number((selectedNode?.unlock_config as { consecutive?: number } | null)?.consecutive ?? 0), 0);
-  const selectedNodeThreshold = Math.max(Number((selectedNode?.unlock_config as { threshold?: number } | null)?.threshold ?? 0), 0);
-  const selectedNodeRemaining = Math.max(selectedNodeConsecutive - Number(selectedNode?.attempt_count ?? 0), 0);
+
+  useEffect(() => {
+    setSelectedNode(null);
+  }, [selectedStage]);
 
   return (
     <div className="grid gap-6 web:grid-cols-[260px_minmax(0,1fr)]">
@@ -495,7 +533,7 @@ function PathView({
                 }`}
               >
                 <p className={`text-xs font-medium ${isSelected || isCurrent ? "text-blue-500" : "text-slate-400"}`}>阶段 {stage.stage}</p>
-                <div className={`mt-2 h-1.5 rounded-full ${isSelected || isCurrent ? "bg-blue-100" : "bg-slate-200"} overflow-hidden`}>
+                <div className={`mt-2 h-1.5 overflow-hidden rounded-full ${isSelected || isCurrent ? "bg-blue-100" : "bg-slate-200"}`}>
                   <div
                     className={`h-full rounded-full ${isSelected || isCurrent ? "bg-blue-500" : "bg-slate-400"}`}
                     style={{ width: `${stage.progress_pct}%` }}
@@ -531,7 +569,7 @@ function PathView({
                 onClick={onShowRoadmap}
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
               >
-                看已点亮图谱
+                看完整图谱
               </button>
             </div>
           </div>
@@ -564,30 +602,14 @@ function PathView({
                   </div>
                   <div className="mt-4 grid gap-3 grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
                     {group.nodes.map((node) => (
-                      <SkillNodeCard key={node.id} node={node} onClick={node.status === "attempting" ? () => setSelectedNode(node) : undefined} actionLabel={node.status === "attempting" ? "查看详情" : undefined} />
+                      <SkillNodeCard key={node.id} node={node} onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
                     ))}
                   </div>
                 </section>
               ))}
             </div>
 
-            {selectedNode?.status === "attempting" ? (
-              <div className="mt-6 rounded-[28px] border border-orange-200 bg-orange-50 p-5">
-                <p className="text-sm font-semibold text-[#F59E0B]">
-                  {selectedNode.name} · 🔥 尝试中
-                </p>
-                <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-600">
-                  <span>最高分：{selectedNode.best_score}</span>
-                  <span>目标分：{selectedNodeThreshold}</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-600">
-                  已达标：{selectedNode.attempt_count} / {selectedNodeConsecutive} 次
-                </p>
-                <p className="mt-2 text-sm font-medium text-orange-500">
-                  {selectedNodeRemaining > 0 ? `再来 ${selectedNodeRemaining} 次就能点亮！⭐` : "已经满足点亮条件，等分析同步完成就会更新。"}
-                </p>
-              </div>
-            ) : null}
+            {selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
           </div>
         </section>
       ) : null}
@@ -608,6 +630,7 @@ function RoadmapView({
   onSkillAction: (skill: SkillNode) => void;
   focusSkill?: string | null;
 }) {
+  const [selectedNode, setSelectedNode] = useState<SkillNode | null>(null);
   const totalNodeCount = path.stages.reduce((sum, stage) => sum + stage.groups.reduce((groupSum, group) => groupSum + group.nodes.length, 0), 0);
   const topFocusNodes = useMemo<FocusSkillNode[]>(() => {
     if (isParentMode) {
@@ -619,9 +642,9 @@ function RoadmapView({
     const seen = new Set<string>();
 
     for (const node of allNodes) {
-      const isInProgress = node.status === "attempting" || node.status === "in_progress";
+      const nodeInProgress = isInProgress(node.status);
       const isFocusSkill = matchesFocusSkill(node, focusSkill);
-      if (!isInProgress && !isFocusSkill) {
+      if (!nodeInProgress && !isFocusSkill) {
         continue;
       }
       if (seen.has(node.id)) {
@@ -636,8 +659,8 @@ function RoadmapView({
     }
 
     return pinnedNodes.sort((left, right) => {
-      const leftInProgress = left.status === "attempting" || left.status === "in_progress";
-      const rightInProgress = right.status === "attempting" || right.status === "in_progress";
+      const leftInProgress = isInProgress(left.status);
+      const rightInProgress = isInProgress(right.status);
       if (leftInProgress !== rightInProgress) {
         return leftInProgress ? -1 : 1;
       }
@@ -653,10 +676,10 @@ function RoadmapView({
       <div className="flex flex-col gap-4 tablet:flex-row tablet:items-end tablet:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Ice Roadmap</p>
-          <h2 className="mt-2 text-2xl font-semibold text-slate-900">整张冰面路线图（{totalNodeCount} 个节点）</h2>
-          <p className="mt-3 text-sm leading-7 text-slate-500">按阶段和群组展开所有技能节点，手机端为 3 列节点网格，iPad 和网页端会自动扩展到更宽布局。</p>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-900">整张冰面路线图 ({totalNodeCount} 个节点)</h2>
+          <p className="mt-3 text-sm leading-7 text-slate-500">按阶段和群组展开全部技能节点。现在每张卡都可以直接点击，不需要只对准一个小按钮。</p>
         </div>
-        {!isParentMode ? <p className="text-sm text-slate-500">进入家长模式后可手动点亮或收回节点。</p> : null}
+        {!isParentMode ? <p className="text-sm text-slate-500">进入家长模式后可以手动点亮或收回节点。</p> : null}
       </div>
 
       {!isParentMode && topFocusNodes.length ? (
@@ -668,11 +691,11 @@ function RoadmapView({
             </div>
             <span className="rounded-full bg-white px-4 py-2 text-sm text-amber-600 shadow-sm">{topFocusNodes.length} 个重点</span>
           </div>
-          <p className="mt-3 text-sm leading-7 text-slate-600">把推进中和今日专注的技能放到最上面，孩子打开就能直接找到。</p>
+          <p className="mt-3 text-sm leading-7 text-slate-600">把推进中和今天聚焦的技能放到最上面，打开就能直接找到。</p>
 
           <div className="mt-4 grid grid-cols-2 gap-3 tablet:grid-cols-4 web:grid-cols-4">
             {topFocusNodes.map((node) => (
-              <SkillNodeCard key={`focus-${node.id}`} node={node} highlightTone="focus" />
+              <SkillNodeCard key={`focus-${node.id}`} node={node} highlightTone="focus" onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
             ))}
           </div>
         </section>
@@ -708,8 +731,8 @@ function RoadmapView({
                         key={node.id}
                         node={node}
                         disabled={mutatingSkillId === node.id}
-                        actionLabel={isUnlocked(node.status) ? "收回点亮" : "手动点亮"}
-                        onClick={isParentMode ? () => onSkillAction(node) : undefined}
+                        actionLabel={isParentMode ? (isUnlocked(node.status) ? "收回点亮" : "手动点亮") : "查看详情"}
+                        onClick={isParentMode ? () => onSkillAction(node) : () => setSelectedNode(node)}
                       />
                     ))}
                   </div>
@@ -719,6 +742,77 @@ function RoadmapView({
           </section>
         ))}
       </div>
+
+      {!isParentMode && selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
+    </section>
+  );
+}
+
+function SkillDetailPanel({
+  node,
+  onClose,
+  className = "",
+}: {
+  node: SkillNode;
+  onClose?: () => void;
+  className?: string;
+}) {
+  const { consecutive, threshold } = readUnlockTargets(node);
+  const remainingAttempts = Math.max(consecutive - Number(node.attempt_count ?? 0), 0);
+  const hasAttemptProgress = consecutive > 0;
+
+  return (
+    <section className={`rounded-[28px] border border-blue-100 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_44px_rgba(59,130,246,0.08)] ${className}`}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Skill Detail</p>
+          <h3 className="mt-3 text-2xl font-semibold text-slate-900">
+            <span className="mr-2">{node.emoji}</span>
+            {node.name}
+          </h3>
+          <p className="mt-2 text-sm text-slate-500">
+            阶段 {node.stage} · {node.group_name}
+            {node.action_type ? ` · ${node.action_type}` : ""}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">{skillStatusLabel(node.status)}</span>
+          {onClose ? (
+            <button type="button" onClick={onClose} className="min-h-[44px] rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+              收起
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
+        <span className="rounded-full bg-white px-3 py-2 shadow-sm">XP: {node.xp}</span>
+        <span className="rounded-full bg-white px-3 py-2 shadow-sm">最高分: {node.best_score}</span>
+        {typeof node.last_analysis_score === "number" ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">上次得分: {node.last_analysis_score}</span> : null}
+        {threshold > 0 ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">目标分: {threshold}</span> : null}
+      </div>
+
+      {hasAttemptProgress ? (
+        <div className="mt-5 rounded-[24px] border border-orange-200 bg-orange-50 p-4">
+          <p className="text-sm font-semibold text-orange-500">当前进度</p>
+          <p className="mt-2 text-sm text-slate-600">
+            已达标: {node.attempt_count} / {consecutive} 次
+          </p>
+          <p className="mt-2 text-sm font-medium text-orange-500">
+            {remainingAttempts > 0 ? `再来 ${remainingAttempts} 次就能点亮。` : "已经满足点亮条件，等待分析结果同步。"}
+          </p>
+        </div>
+      ) : null}
+
+      {node.unlock_note ? (
+        <div className="mt-5 rounded-[24px] bg-white p-4 text-sm leading-7 text-slate-600 shadow-sm">
+          <p className="font-semibold text-slate-900">备注</p>
+          <p className="mt-2">{node.unlock_note}</p>
+        </div>
+      ) : null}
+
+      {node.requires.length ? <p className="mt-5 text-sm leading-7 text-slate-500">前置技能: {node.requires.join(" / ")}</p> : null}
     </section>
   );
 }

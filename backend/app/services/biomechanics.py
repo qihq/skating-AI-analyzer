@@ -24,8 +24,11 @@ def _empty_analysis(
     knee_angles: list[dict[str, Any]] | None = None,
     trunk_tilts: list[dict[str, Any]] | None = None,
     arm_symmetry: list[dict[str, Any]] | None = None,
+    *,
+    analysis_profile: str = "jump",
 ) -> dict[str, Any]:
     return {
+        "analysis_profile": analysis_profile,
         "knee_angles": knee_angles or [],
         "trunk_tilts": trunk_tilts or [],
         "arm_symmetry": arm_symmetry or [],
@@ -38,10 +41,12 @@ def _empty_analysis(
             "landing_absorption": 65,
             "core_stability": 65,
         },
+        "discipline_metrics": {},
+        "quality_flags": [],
         "key_frames": {},
-        "jump_metrics": _empty_jump_metrics(),
-        "jump_metrics_status": "invalid",
-        "jump_metrics_warning": "未检测到有效跳跃数据",
+        "jump_metrics": _empty_jump_metrics() if analysis_profile == "jump" else None,
+        "jump_metrics_status": "invalid" if analysis_profile == "jump" else "not_applicable",
+        "jump_metrics_warning": "未检测到有效跳跃数据" if analysis_profile == "jump" else None,
     }
 
 
@@ -210,6 +215,16 @@ def sanitize_biomechanics_data(bio_data: dict[str, Any] | None) -> dict[str, Any
     if not isinstance(bio_data, dict):
         return _empty_analysis()
 
+    analysis_profile = str(bio_data.get("analysis_profile", "jump") or "jump")
+    if analysis_profile != "jump":
+        sanitized = dict(bio_data)
+        sanitized["jump_metrics"] = None
+        sanitized["jump_metrics_status"] = "not_applicable"
+        sanitized["jump_metrics_warning"] = None
+        sanitized.setdefault("discipline_metrics", {})
+        sanitized.setdefault("quality_flags", [])
+        return sanitized
+
     sanitized = dict(bio_data)
     key_frames = sanitized.get("key_frames")
     metrics = sanitized.get("jump_metrics")
@@ -269,10 +284,31 @@ def _score_from_values(values: list[float], ideal: float, tolerance: float, inve
     return max(40, min(100, round(score)))
 
 
-def analyze_biomechanics(pose_data: dict[str, Any], action_type: str) -> dict[str, Any]:
+def _spiral_discipline_metrics(
+    trunk_tilts: list[dict[str, Any]],
+    knee_angles: list[dict[str, Any]],
+    arm_symmetry: list[dict[str, Any]],
+    com_trajectory: dict[str, Any],
+) -> dict[str, Any]:
+    tilts = [float(item["tilt_degrees"]) for item in trunk_tilts if item.get("tilt_degrees") is not None]
+    knees = [float(item["min_angle"]) for item in knee_angles if item.get("min_angle") is not None]
+    symmetries = [float(item["symmetry"]) for item in arm_symmetry if item.get("symmetry") is not None]
+    vertical_range = float(com_trajectory.get("vertical_range", 0.0) or 0.0)
+    return {
+        "trunk_pitch_degrees": round(sum(tilts) / len(tilts), 2) if tilts else None,
+        "free_leg_extension_degrees": round((sum(knees) / len(knees)) - 20, 2) if knees else None,
+        "hip_shoulder_alignment": round((sum(symmetries) / len(symmetries)) * 100, 1) if symmetries else None,
+        "glide_stability": max(0, min(100, round(100 - vertical_range * 300))) if vertical_range else 65,
+        "support_leg_stability": max(0, min(100, round(100 - abs((sum(knees) / len(knees)) - 155)))) if knees else 65,
+    }
+
+
+def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_profile: str = "jump") -> dict[str, Any]:
+    del action_type
+
     frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
     if not frames:
-        return _empty_analysis()
+        return _empty_analysis(analysis_profile=analysis_profile)
 
     knee_angles = []
     trunk_tilts = []
@@ -285,11 +321,39 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str) -> dict[st
 
     com_trajectory = calc_center_of_mass_trajectory(pose_data)
     if not com_trajectory["points"]:
-        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry)
+        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
+
+    if analysis_profile != "jump":
+        tilt_values = [item["tilt_degrees"] for item in trunk_tilts if item.get("tilt_degrees") is not None]
+        symmetries = [item["symmetry"] for item in arm_symmetry if item.get("symmetry") is not None]
+        bio_subscores = {
+            "takeoff_power": 65,
+            "rotation_axis": 65,
+            "arm_coordination": max(40, min(100, round((sum(symmetries) / len(symmetries)) * 100))) if symmetries else 65,
+            "landing_absorption": 65,
+            "core_stability": _score_from_values(tilt_values, 15, 30),
+        }
+        return sanitize_biomechanics_data(
+            {
+                "analysis_profile": analysis_profile,
+                "knee_angles": knee_angles,
+                "trunk_tilts": trunk_tilts,
+                "arm_symmetry": arm_symmetry,
+                "com_trajectory": com_trajectory,
+                "rotation_stability": {"average_tilt_degrees": None, "stability_score": 65},
+                "bio_subscores": bio_subscores,
+                "discipline_metrics": _spiral_discipline_metrics(trunk_tilts, knee_angles, arm_symmetry, com_trajectory),
+                "quality_flags": [],
+                "key_frames": {},
+                "jump_metrics": None,
+                "jump_metrics_status": "not_applicable",
+                "jump_metrics_warning": None,
+            }
+        )
 
     key_frames = _detect_key_frames(com_trajectory)
     if not key_frames:
-        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry)
+        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
 
     start_frame = _frame_number(key_frames.get("T", "frame_0001"))
     end_frame = _frame_number(key_frames.get("L", f"frame_{len(frames):04d}"))
@@ -314,18 +378,21 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str) -> dict[st
 
     return sanitize_biomechanics_data(
         {
-        "knee_angles": knee_angles,
-        "trunk_tilts": trunk_tilts,
-        "arm_symmetry": arm_symmetry,
-        "com_trajectory": com_trajectory,
-        "rotation_stability": rotation_stability,
-        "bio_subscores": bio_subscores,
-        "key_frames": key_frames,
-        "jump_metrics": {
-            "air_time_seconds": air_time_seconds,
-            "estimated_height_cm": estimated_height_cm,
-            "takeoff_speed_mps": takeoff_speed_mps,
-            "rotation_rps": _rotation_rps(pose_data, start_frame, end_frame),
-        },
+            "analysis_profile": analysis_profile,
+            "knee_angles": knee_angles,
+            "trunk_tilts": trunk_tilts,
+            "arm_symmetry": arm_symmetry,
+            "com_trajectory": com_trajectory,
+            "rotation_stability": rotation_stability,
+            "bio_subscores": bio_subscores,
+            "discipline_metrics": {},
+            "quality_flags": [],
+            "key_frames": key_frames,
+            "jump_metrics": {
+                "air_time_seconds": air_time_seconds,
+                "estimated_height_cm": estimated_height_cm,
+                "takeoff_speed_mps": takeoff_speed_mps,
+                "rotation_rps": _rotation_rps(pose_data, start_frame, end_frame),
+            },
         }
     )

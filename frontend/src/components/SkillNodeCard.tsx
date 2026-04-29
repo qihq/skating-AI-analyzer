@@ -1,3 +1,5 @@
+import type { KeyboardEvent } from "react";
+
 import { SkillNode } from "../api/client";
 
 type SkillNodeCardProps = {
@@ -48,9 +50,30 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick, hi
   const consecutive = Math.max(Number((node.unlock_config as { consecutive?: number } | null)?.consecutive ?? 0), 0);
   const progressPct = consecutive > 0 ? Math.min((node.attempt_count / consecutive) * 100, 100) : 0;
   const highlightClass = highlightTone === "focus" ? "border-[#FACC15] shadow-[0_16px_32px_rgba(250,204,21,0.22)]" : "";
+  const isInteractive = Boolean(onClick) && !disabled;
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!isInteractive || !onClick) {
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onClick();
+    }
+  };
 
   return (
-    <div className={`relative flex min-w-[88px] flex-col gap-2 rounded-3xl border-2 p-4 transition-transform ${meta.wrapper} ${highlightClass}`}>
+    <div
+      className={`relative flex min-w-[88px] flex-col gap-2 rounded-3xl border-2 p-4 transition-transform ${meta.wrapper} ${highlightClass} ${
+        isInteractive ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_16px_36px_rgba(15,23,42,0.12)] focus:outline-none focus:ring-2 focus:ring-blue-300 focus:ring-offset-2" : ""
+      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+      onClick={isInteractive ? onClick : undefined}
+      onKeyDown={isInteractive ? handleKeyDown : undefined}
+      role={isInteractive ? "button" : undefined}
+      tabIndex={isInteractive ? 0 : undefined}
+      aria-disabled={disabled || undefined}
+    >
       <div className={`absolute left-3 top-3 h-3 w-3 rounded-full ${meta.dot}`} />
       <span className="pt-2 text-2xl leading-none">{node.emoji}</span>
       <span className={`text-center text-xs ${meta.title}`}>
@@ -75,15 +98,14 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick, hi
         <span className="mt-auto text-center text-[11px] leading-5 text-slate-500">上次得分：{node.last_analysis_score}分</span>
       ) : null}
 
-      {onClick ? (
-        <button
-          type="button"
-          onClick={onClick}
-          disabled={disabled}
-          className="mt-2 min-h-[44px] rounded-full bg-white/80 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+      {actionLabel ? (
+        <span
+          className={`mt-2 inline-flex min-h-[44px] items-center justify-center rounded-full px-3 py-2 text-center text-xs font-semibold transition ${
+            isInteractive ? "bg-white/80 text-slate-700" : "bg-white/50 text-slate-400"
+          }`}
         >
           {actionLabel}
-        </button>
+        </span>
       ) : null}
     </div>
   );

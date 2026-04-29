@@ -86,6 +86,10 @@ async def analyze_frames(
     action_type: str,
     frame_payloads: list[FramePayload],
     skater_id: str | None = None,
+    *,
+    action_subtype: str | None = None,
+    analysis_profile: str | None = None,
+    profile_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     provider = await get_active_provider("vision")
     client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url, timeout=90.0, max_retries=0)
@@ -93,8 +97,13 @@ async def analyze_frames(
     memory_context = await build_memory_context(skater_id)
     system_prompt = VISION_SYSTEM_PROMPT if not memory_context else f"{VISION_SYSTEM_PROMPT}\n\n{memory_context}"
 
+    evidence_text = json.dumps(profile_evidence or {}, ensure_ascii=False)
     user_prompt = (
-        f"分析以下【{action_type}】动作帧序列（共 {len(frame_payloads)} 帧，按时间顺序排列）。\n\n"
+        f"分析以下【{action_type}】动作帧序列（共 {len(frame_payloads)} 帧，按时间顺序排列）。\n"
+        f"动作子类型：{action_subtype or '未指定'}\n"
+        f"分析 profile：{analysis_profile or 'unknown'}\n"
+        f"规则证据：{evidence_text}\n"
+        "重要约束：如果是燕式滑行/螺旋线，不要误判为跳跃，除非存在清晰的起跳、腾空、落冰证据。\n\n"
         "对每一帧，输出以下结构化数据：\n\n"
         "{\n"
         '  "frame_analysis": [\n'

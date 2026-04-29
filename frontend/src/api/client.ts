@@ -4,6 +4,7 @@ export type AnalysisStatus =
   | "pending"
   | "processing"
   | "extracting_frames"
+  | "awaiting_target_selection"
   | "analyzing"
   | "generating_report"
   | "completed"
@@ -74,6 +75,13 @@ export interface PoseKeypoint {
 export interface PoseFrame {
   frame: string;
   keypoints: PoseKeypoint[];
+  target_bbox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  tracking_confidence?: number | null;
 }
 
 export interface PoseResponse {
@@ -89,6 +97,8 @@ export interface AnalysisListItem {
   skater_name: string | null;
   skill_category: string | null;
   action_type: string;
+  action_subtype: string | null;
+  analysis_profile: string | null;
   status: AnalysisStatus;
   force_score: number | null;
   note: string | null;
@@ -104,6 +114,8 @@ export interface AnalysisDetail extends AnalysisListItem {
   pose_data: PoseResponse | null;
   bio_data: BioData | null;
   frame_motion_scores: Record<string, unknown> | null;
+  target_lock: Record<string, unknown> | null;
+  target_lock_status: string | null;
   action_window_start: number | null;
   action_window_end: number | null;
   source_fps: number | null;
@@ -118,6 +130,29 @@ export interface AnalysisDetail extends AnalysisListItem {
 export interface UploadResponse {
   id: string;
   status: AnalysisStatus;
+}
+
+export interface TargetCandidate {
+  id: string;
+  bbox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  confidence: number;
+  source: string;
+}
+
+export interface TargetPreviewResponse {
+  analysis_id: string;
+  status: AnalysisStatus | string;
+  auto_candidate_id: string | null;
+  lock_confidence: number;
+  preview_frame: string | null;
+  preview_frame_url: string | null;
+  candidates: TargetCandidate[];
+  target_lock_status: string | null;
 }
 
 export interface UploadProgress {
@@ -426,6 +461,15 @@ export interface ApiConnectionTestResponse {
   failed_stage: string | null;
 }
 
+export interface PoseRuntimeStatus {
+  mode: string;
+  configured: boolean;
+  model_path: string | null;
+  model_exists: boolean;
+  num_poses: number;
+  reason: string;
+}
+
 export const apiClient = axios.create({
   baseURL: "/api",
   timeout: 300000,
@@ -535,6 +579,19 @@ export async function deleteAnalysis(id: string, parentPin: string) {
 
 export async function fetchAnalysisPose(id: string) {
   const response = await apiClient.get<PoseResponse>(`/analysis/${id}/pose`);
+  return response.data;
+}
+
+export async function fetchTargetPreview(id: string) {
+  const response = await apiClient.get<TargetPreviewResponse>(`/analysis/${id}/target-preview`);
+  return response.data;
+}
+
+export async function confirmTargetLock(
+  id: string,
+  payload: { candidate_id?: string; x?: number; y?: number },
+) {
+  const response = await apiClient.post<AnalysisDetail>(`/analysis/${id}/target-lock`, payload);
   return response.data;
 }
 
@@ -765,6 +822,11 @@ export async function fetchStorageStats() {
 
 export async function testActiveApiConnection() {
   const response = await apiClient.get<ApiConnectionTestResponse>("/settings/test-api");
+  return response.data;
+}
+
+export async function fetchPoseRuntimeStatus() {
+  const response = await apiClient.get<PoseRuntimeStatus>("/settings/pose-runtime");
   return response.data;
 }
 

@@ -53,6 +53,8 @@ class AnalysisListItem(BaseModel):
     skater_name: str | None = None
     skill_category: str | None = None
     action_type: str
+    action_subtype: str | None = None
+    analysis_profile: str | None = None
     status: str
     force_score: int | None = None
     note: str | None = None
@@ -69,6 +71,8 @@ class AnalysisDetail(BaseModel):
     skater_name: str | None = None
     skill_category: str | None = None
     action_type: str
+    action_subtype: str | None = None
+    analysis_profile: str | None = None
     video_path: str
     status: str
     vision_raw: str | None = None
@@ -77,6 +81,8 @@ class AnalysisDetail(BaseModel):
     pose_data: dict[str, Any] | None = None
     bio_data: dict[str, Any] | None = None
     frame_motion_scores: dict[str, Any] | None = None
+    target_lock: dict[str, Any] | None = None
+    target_lock_status: str | None = None
     action_window_start: float | None = None
     action_window_end: float | None = None
     source_fps: float | None = None
@@ -272,9 +278,44 @@ class PoseFrameKeypoint(BaseModel):
     visibility: float
 
 
+class TargetBBox(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
 class PoseFrame(BaseModel):
     frame: str
     keypoints: list[PoseFrameKeypoint]
+    target_bbox: TargetBBox | None = None
+    tracking_confidence: float | None = None
+    tracking_state: str | None = None
+    pose_candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TargetCandidate(BaseModel):
+    id: str
+    bbox: TargetBBox
+    confidence: float
+    source: str
+
+
+class TargetPreviewResponse(BaseModel):
+    analysis_id: str
+    status: str
+    auto_candidate_id: str | None = None
+    lock_confidence: float
+    preview_frame: str | None = None
+    preview_frame_url: str | None = None
+    candidates: list[TargetCandidate] = Field(default_factory=list)
+    target_lock_status: str | None = None
+
+
+class TargetLockRequest(BaseModel):
+    candidate_id: str | None = None
+    x: float | None = None
+    y: float | None = None
 
 
 class PoseResponse(BaseModel):
@@ -335,6 +376,15 @@ class ApiConnectionTestResponse(BaseModel):
     error_code: str | None = None
     message: str | None = None
     failed_stage: str | None = None
+
+
+class PoseRuntimeStatusResponse(BaseModel):
+    mode: str
+    configured: bool
+    model_path: str | None = None
+    model_exists: bool
+    num_poses: int
+    reason: str
 
 
 class BackupFilePublic(BaseModel):

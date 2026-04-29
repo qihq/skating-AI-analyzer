@@ -471,6 +471,10 @@ export default function ReportPage() {
         if (cancelled) {
           return;
         }
+        if (data.status === "awaiting_target_selection") {
+          navigate(`/report/${data.id}/target`, { replace: true });
+          return;
+        }
         startTransition(() => {
           setAnalysis(data);
           setError(null);

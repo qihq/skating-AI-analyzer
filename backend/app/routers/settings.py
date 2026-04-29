@@ -7,12 +7,18 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.schemas import ApiConnectionTestResponse
+from app.schemas import ApiConnectionTestResponse, PoseRuntimeStatusResponse
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
+from app.services.pose import get_pose_runtime_status
 from app.services.providers import TINY_PNG_DATA_URL, default_extra_body, get_active_provider, request_text_completion
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@router.get("/pose-runtime", response_model=PoseRuntimeStatusResponse)
+async def get_pose_runtime() -> PoseRuntimeStatusResponse:
+    return PoseRuntimeStatusResponse(**get_pose_runtime_status())
 
 
 @router.get("/test-api", response_model=ApiConnectionTestResponse)

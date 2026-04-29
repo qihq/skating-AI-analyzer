@@ -13,6 +13,7 @@ import ReviewPage from "./pages/ReviewPage";
 import SettingsPage from "./pages/SettingsPage";
 import SkillTreePage from "./pages/SkillTreePage";
 import SnowballPage from "./pages/SnowballPage";
+import TargetSelectionPage from "./pages/TargetSelectionPage";
 
 function ScrollToTopOnRouteChange() {
   const location = useLocation();
@@ -122,6 +123,7 @@ export default function App() {
           <Route path="/review" element={<ReviewPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
+          <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />
         </Route>

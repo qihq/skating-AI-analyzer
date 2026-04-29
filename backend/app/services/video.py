@@ -36,6 +36,12 @@ ACTION_WINDOW_SIZES: dict[str, float | None] = {
     "步法": 8.0,
     "自由滑": None,
 }
+PROFILE_WINDOW_SIZES: dict[str, float | None] = {
+    "jump": 3.0,
+    "spin": 5.0,
+    "step": 8.0,
+    "spiral": 6.0,
+}
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
     "cannot allocate memory",
@@ -219,6 +225,13 @@ def _fallback_action_window(action_type: str) -> tuple[float, float]:
     return 0.0, min(float(MAX_SECONDS), float(window_size) + 2.0)
 
 
+def _fallback_profile_window(action_type: str, analysis_profile: str | None) -> tuple[float, float]:
+    window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", ACTION_WINDOW_SIZES.get(action_type))
+    if window_size is None:
+        return 0.0, float(MAX_SECONDS)
+    return 0.0, min(float(MAX_SECONDS), float(window_size) + 2.0)
+
+
 async def _extract_action_thumbnails(video_path: Path, thumbs_dir: Path) -> list[Path]:
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     output_pattern = str(thumbs_dir / "thumb_%05d.jpg")
@@ -235,7 +248,55 @@ async def _extract_action_thumbnails(video_path: Path, thumbs_dir: Path) -> list
     return sorted(thumbs_dir.glob("thumb_*.jpg"))
 
 
-async def detect_action_window(video_path: Path, action_type: str, source_fps: float) -> tuple[float, float]:
+def _pick_window_by_profile(
+    motion_scores: Sequence[float],
+    action_type: str,
+    analysis_profile: str | None,
+) -> tuple[int, int]:
+    window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", ACTION_WINDOW_SIZES.get(action_type))
+    if window_size is None:
+        return 0, len(motion_scores)
+
+    window_frames = max(1, int(window_size * ACTION_WINDOW_DETECTION_FPS))
+    max_start = max(1, len(motion_scores) - window_frames + 1)
+
+    if analysis_profile == "spiral":
+        best_start = 0
+        best_score = float("-inf")
+        for index in range(max_start):
+            window = motion_scores[index : index + window_frames]
+            if not window:
+                continue
+            avg_motion = sum(window) / len(window)
+            stability_bonus = -max(window) + min(window)
+            current_score = stability_bonus - avg_motion
+            if current_score > best_score:
+                best_score = current_score
+                best_start = index
+        return best_start, best_start + window_frames
+
+    best_start = 0
+    best_score = float("-inf")
+    for index in range(max_start):
+        window = motion_scores[index : index + window_frames]
+        if not window:
+            continue
+        if analysis_profile == "spin":
+            current_score = sum(window) - abs(window[0] - window[-1])
+        else:
+            current_score = sum(window)
+        if current_score > best_score:
+            best_score = current_score
+            best_start = index
+    return best_start, best_start + window_frames
+
+
+async def detect_action_window(
+    video_path: Path,
+    action_type: str,
+    source_fps: float,
+    analysis_profile: str | None = None,
+) -> tuple[float, float]:
     """
     用运动密度曲线找到峰值区间，返回 (start_sec, end_sec)。
     无法定位时退化为分析前 N 秒；自由滑维持前 60 秒。
@@ -254,28 +315,24 @@ async def detect_action_window(video_path: Path, action_type: str, source_fps: f
         motion_scores = _motion_scores_from_thumbs(thumbs)
     except Exception:  # noqa: BLE001
         logger.warning("Action window detection failed for %s, using fallback window", video_path, exc_info=True)
-        return _fallback_action_window(action_type)
+        return _fallback_profile_window(action_type, analysis_profile)
     finally:
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
 
     if len(motion_scores) <= 1:
-        return _fallback_action_window(action_type)
+        return _fallback_profile_window(action_type, analysis_profile)
 
-    window_frames = max(1, int(window_size * ACTION_WINDOW_DETECTION_FPS))
-    best_start_frame = 0
-    best_score = -1.0
-    max_start = max(1, len(motion_scores) - window_frames + 1)
-    for index in range(max_start):
-        current_score = sum(motion_scores[index : index + window_frames])
-        if current_score > best_score:
-            best_score = current_score
-            best_start_frame = index
+    best_start_frame, best_end_frame = _pick_window_by_profile(motion_scores, action_type, analysis_profile)
+    selected_window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", window_size)
+    if selected_window_size is None:
+        return 0.0, float(MAX_SECONDS)
 
     start_sec = max(0.0, best_start_frame / ACTION_WINDOW_DETECTION_FPS - 1.0)
-    end_sec = start_sec + float(window_size) + 2.0
+    end_sec = max(start_sec + 1.0, (best_end_frame / ACTION_WINDOW_DETECTION_FPS) + 1.0)
+    end_sec = min(end_sec, start_sec + float(selected_window_size) + 2.0)
     if end_sec <= start_sec:
-        return _fallback_action_window(action_type)
+        return _fallback_profile_window(action_type, analysis_profile)
     return start_sec, end_sec
 
 
@@ -445,6 +502,7 @@ async def extract_motion_sampled_frames(
     video_path: Path,
     frames_dir: Path,
     action_type: str,
+    analysis_profile: str | None = None,
 ) -> tuple[list[Path], dict[str, object], VideoSamplingMetadata]:
     for existing_frame in frames_dir.glob("frame_*.jpg"):
         existing_frame.unlink(missing_ok=True)
@@ -454,7 +512,7 @@ async def extract_motion_sampled_frames(
 
     source_fps = detect_video_fps(video_path)
     is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
-    start_sec, end_sec = await detect_action_window(video_path, action_type, source_fps)
+    start_sec, end_sec = await detect_action_window(video_path, action_type, source_fps, analysis_profile)
     sampling_metadata = VideoSamplingMetadata(
         action_window_start=round(start_sec, 3),
         action_window_end=round(end_sec, 3),
@@ -472,7 +530,7 @@ async def extract_motion_sampled_frames(
         )
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
-        start_sec, end_sec = 0.0, float(MAX_SECONDS)
+        start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile)
         sampling_metadata = VideoSamplingMetadata(
             action_window_start=round(start_sec, 3),
             action_window_end=round(end_sec, 3),
@@ -527,6 +585,7 @@ async def extract_motion_sampled_frames(
         "full_size": FRAME_FULL_SIZE,
         "window_start": round(start_sec, 3),
         "window_end": round(end_sec, 3),
+        "analysis_profile_hint": analysis_profile,
         "source_fps": round(source_fps, 3),
         "is_slow_motion": is_slow_motion,
         "total_thumb_frames": len(thumbs),
