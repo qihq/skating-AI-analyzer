@@ -24,6 +24,11 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 - 关键帧抽取与 MediaPipe 姿态识别
 - 生物力学指标计算与结构化评分
 - AI 训练诊断报告
+- 阶段感知重试流程，支持缓存帧复用
+- 处理日志、管线计时、报告页调试信息
+- 自动检测过期任务并恢复失败状态
+- 模糊过滤与动作感知帧采样，提升视觉输入质量
+- 独立 `skating_vision` Python 包，可脱离主应用复用
 - 儿童模式 / 家长模式双视角
 - 技能树、训练计划、历史档案、成长追踪
 - Docker 一体化部署
@@ -62,6 +67,9 @@ skating-analyzer/
 ├─ frontend/                 # React 前端
 │  ├─ src/
 │  └─ public/
+├─ skating_vision/           # 独立视觉分析 Python 包
+├─ docs/
+│  └─ ai-analysis-flow.md   # 完整 10 阶段管线文档
 ├─ docker/
 │  └─ allinone/              # allinone 镜像构建配置
 ├─ data/                     # 运行时数据（已忽略）
@@ -106,6 +114,43 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 - `.task` 模型文件不提交到当前仓库
 - 如果模型缺失或加载失败，后端会自动降级回一期单人 pose 流程
 
+## 分析管线更新
+
+最近的迭代聚焦于让长时间运行的视频分析更可观测、更容易恢复：
+
+- 基于阶段的管线状态（抽帧、姿态、生物力学、视觉、报告生成）
+- 从最后一个安全阶段重试，而非每次从头开始
+- API 和报告页返回处理日志与各阶段耗时
+- 自动检测过期的进行中分析，提供失败恢复提示
+- 重试时复用缓存的抽帧和已恢复帧
+- 跳跃、旋转、燕式、步法等动作的感知提示
+- 跳跃专属启发式：腾空检测、旋转信号、跳跃类型推断
+- 视觉编码前的模糊帧过滤，减少低质量输入噪声
+
+## skating_vision 独立模块
+
+`skating_vision` 目录是一个独立的 Python 包，将核心分析模块抽取出来，可在主 FastAPI 应用之外复用。包含：
+
+- **video** — 抽帧、运动采样、动作窗口检测、模糊过滤
+- **pose** — MediaPipe 姿态提取，支持多候选回退
+- **biomechanics** — 几何启发式指标、跳跃旋转估算
+- **vision** — 基于 LLM 的逐帧视觉分析
+- **report** — 结构化报告生成与评分融合
+- **providers** — 兼容 OpenAI SDK 的供应商抽象
+- **target_lock** — 主滑行者候选锁定
+- **action_profiles** — 跳跃、旋转、燕式、步法序列的动作推断
+
+安装为本地包或直接导入：
+
+```python
+from skating_vision.video import extract_motion_sampled_frames
+from skating_vision.pose import extract_pose
+from skating_vision.biomechanics import analyze_biomechanics
+from skating_vision.report import generate_report
+```
+
+详见 [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) 完整 10 阶段管线文档。
+
 ## 本地开发
 
 ### 后端
@@ -136,6 +181,23 @@ npm run dev
 
 - 前端：`http://localhost:5173`
 - 后端：`http://localhost:8000`
+
+## 测试
+
+后端回归测试覆盖新增的管线和启发式逻辑，包括：
+
+- 动作推断（根据用户输入推断分析类型）
+- 阶段重试与管线版本行为
+- 模糊过滤与视觉回退处理
+- 相位平滑
+- 生物力学归一化与跳跃旋转估算
+
+运行：
+
+```bash
+cd backend
+pytest tests
+```
 
 ## Docker 部署
 
@@ -208,6 +270,8 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - 本地数据库
 - 训练视频与媒体素材
 - 导出的 Docker tar 包
+- 本地 worktree 元数据如 `.claude/`
+- 交付物打包产物
 
 ## 开源补充材料
 
@@ -215,6 +279,8 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - GitHub About / Topics 文案：[GITHUB_PROFILE_COPY.md](./GITHUB_PROFILE_COPY.md)
 - 截图规划：[SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
 - Release 文案草稿：[RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
+- AI 分析流程文档：[docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)
+- 迭代开发指南：[video-analysis-iteration-guide.md](./video-analysis-iteration-guide%20(1).md)
 
 ## 许可证
 

@@ -28,6 +28,7 @@ Skating Analyzer is a full-stack application for uploading training videos, extr
 - Processing logs, pipeline timing, and in-report debug visibility
 - Automatic stale-task recovery and safer failure handling
 - Blur filtering and profile-aware frame sampling for more stable vision input
+- Standalone `skating_vision` package for reuse outside the main app
 - Child mode and parent mode experiences
 - Skill tree, training plan, archive, and progress tracking
 - Docker all-in-one deployment
@@ -66,6 +67,9 @@ skating-analyzer/
 ├─ frontend/                 # React frontend
 │  ├─ src/
 │  └─ public/
+├─ skating_vision/           # standalone vision analysis Python package
+├─ docs/
+│  └─ ai-analysis-flow.md   # full 10-stage pipeline documentation
 ├─ docker/
 │  └─ allinone/              # all-in-one image build config
 ├─ data/                     # runtime data (ignored)
@@ -122,6 +126,30 @@ Recent updates focus on making long-running video analysis more observable and e
 - Profile-aware prompt hints for jump, spin, spiral, and step analysis
 - Jump-specific heuristics for airborne detection, rotation signal, and probable jump characterization
 - Blur filtering before vision encoding to reduce low-quality frame noise
+
+## skating_vision Package
+
+The `skating_vision` directory is a standalone Python package that extracts the core analysis modules for use outside the main FastAPI app. It provides:
+
+- **video** — frame extraction, motion sampling, action window detection, blur filtering
+- **pose** — MediaPipe pose extraction with multi-candidate fallback
+- **biomechanics** — geometric heuristic metrics, jump rotation estimation
+- **vision** — LLM-based frame-by-frame visual analysis
+- **report** — structured report generation and score fusion
+- **providers** — OpenAI SDK-compatible provider abstraction
+- **target_lock** — primary skater candidate locking
+- **action_profiles** — profile inference for jump, spin, spiral, and step sequences
+
+Install as a local package or import directly:
+
+```python
+from skating_vision.video import extract_motion_sampled_frames
+from skating_vision.pose import extract_pose
+from skating_vision.biomechanics import analyze_biomechanics
+from skating_vision.report import generate_report
+```
+
+See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full 10-stage pipeline documentation.
 
 ## Local Development
 
@@ -253,6 +281,8 @@ This repository does not include:
 - GitHub about/topics copy: [GITHUB_PROFILE_COPY.md](./GITHUB_PROFILE_COPY.md)
 - Screenshot planning: [SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
 - Release body draft: [RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
+- AI analysis flow: [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)
+- Iteration guide: [video-analysis-iteration-guide.md](./video-analysis-iteration-guide%20(1).md)
 
 ## License
 
