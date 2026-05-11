@@ -24,6 +24,10 @@ Skating Analyzer is a full-stack application for uploading training videos, extr
 - Motion frame sampling and MediaPipe pose detection
 - Biomechanics metrics and structured scoring
 - AI-generated training reports
+- Stage-aware retry flow with cached frame reuse
+- Processing logs, pipeline timing, and in-report debug visibility
+- Automatic stale-task recovery and safer failure handling
+- Blur filtering and profile-aware frame sampling for more stable vision input
 - Child mode and parent mode experiences
 - Skill tree, training plan, archive, and progress tracking
 - Docker all-in-one deployment
@@ -106,6 +110,19 @@ Phase-2 multi-pose tracking is enabled through a host-mounted MediaPipe `.task` 
 - The `.task` file is not committed to this repository
 - If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline
 
+## Analysis Pipeline Updates
+
+Recent updates focus on making long-running video analysis more observable and easier to recover:
+
+- Stage-based pipeline states for frame extraction, pose, biomechanics, vision, and report generation
+- Retry from the last safe stage instead of always restarting from scratch
+- Processing logs and per-stage timings returned by the API and shown on the report page
+- Automatic detection of stale in-progress analyses, with failed-state recovery hints
+- Reuse of cached sampled frames and restored frames for retry scenarios
+- Profile-aware prompt hints for jump, spin, spiral, and step analysis
+- Jump-specific heuristics for airborne detection, rotation signal, and probable jump characterization
+- Blur filtering before vision encoding to reduce low-quality frame noise
+
 ## Local Development
 
 ### Backend
@@ -136,6 +153,23 @@ Default URLs:
 
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
+
+## Testing
+
+Backend regression tests cover the newer pipeline and heuristics, including:
+
+- analysis profile inference from user input
+- stage retry and pipeline version behavior
+- blur filtering and vision fallback handling
+- phase smoothing
+- biomechanics normalization and jump rotation estimation
+
+Example:
+
+```bash
+cd backend
+pytest tests
+```
 
 ## Docker
 
@@ -210,6 +244,8 @@ This repository does not include:
 - Local databases
 - Training videos or extracted media assets
 - Exported Docker tar archives
+- Local worktree metadata such as `.claude/`
+- Deliverable packaging artifacts
 
 ## Open Source Extras
 

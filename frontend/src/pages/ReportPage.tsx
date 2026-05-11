@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
   AnalysisDetail,
+  AnalysisLogEntry,
   createPlan,
   deleteAnalysis,
   dismissMemorySuggestion,
@@ -30,7 +31,7 @@ import ReportCard from "../components/ReportCard";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import UnlockCelebration from "../components/UnlockCelebration";
 import { useAppMode } from "../components/AppModeContext";
-import { isAnalysisInProgress } from "../constants/analysisStatus";
+import { getAnalysisProcessingStage, getAnalysisStageDescription, getAnalysisStatusLabel, isAnalysisInProgress } from "../constants/analysisStatus";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 
 const STATUS_TEXT: Record<string, string> = {
@@ -69,6 +70,13 @@ type SuggestionPreview = {
   index: number;
   title: string;
 };
+
+const PROGRESS_STAGE_META = [
+  { key: "extract_frames", label: "抽帧与锁定" },
+  { key: "vision", label: "视觉分析" },
+  { key: "report", label: "报告生成" },
+  { key: "completed", label: "完成" },
+] as const;
 
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -126,6 +134,159 @@ function flattenSuggestionPreview(items: MemorySuggestion[]): SuggestionPreview[
         title: "建议设为过期",
       };
     }),
+  );
+}
+
+function formatDuration(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return null;
+  }
+  return `${value.toFixed(2)}s`;
+}
+
+function formatLogTimestamp(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
+function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
+  const currentStage = getAnalysisProcessingStage(analysis.status);
+  const progressPercent = Math.max(8, Math.min(currentStage * 25, analysis.status === "completed" ? 100 : 92));
+  const logs = analysis.processing_logs ?? [];
+  const latestLog = logs.length ? logs[logs.length - 1] : null;
+  const timings = analysis.processing_timings ?? {};
+
+  return (
+    <section className="app-card overflow-hidden border border-cyan-100 bg-gradient-to-br from-cyan-50 via-white to-sky-50 p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-cyan-600">Analysis Progress</p>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-900">{getAnalysisStatusLabel(analysis.status)}</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-600">{getAnalysisStageDescription(analysis.status)}</p>
+          {analysis.retry_from_stage ? (
+            <p className="mt-2 text-xs text-slate-500">当前重试起点：{analysis.retry_from_stage}</p>
+          ) : null}
+        </div>
+        <div className="rounded-[22px] border border-cyan-100 bg-white/80 px-4 py-3 text-sm text-slate-600">
+          <p>Pipeline: {analysis.pipeline_version ?? "v1.0.0"}</p>
+          {typeof timings.total_s === "number" ? <p className="mt-1">累计耗时：{formatDuration(timings.total_s)}</p> : null}
+        </div>
+      </div>
+
+      <div className="mt-5 h-3 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-sky-500 to-blue-500 transition-[width] duration-500"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        {PROGRESS_STAGE_META.map((stage, index) => {
+          const done = currentStage > index + 1 || (stage.key === "completed" && analysis.status === "completed");
+          const active =
+            (stage.key === "extract_frames" && currentStage === 1) ||
+            (stage.key === "vision" && currentStage === 2) ||
+            (stage.key === "report" && currentStage === 3) ||
+            (stage.key === "completed" && analysis.status === "completed");
+          return (
+            <div
+              key={stage.key}
+              className={`rounded-[22px] border px-4 py-3 text-sm ${
+                active
+                  ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                  : done
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-slate-200 bg-white text-slate-500"
+              }`}
+            >
+              <p className="font-semibold">{stage.label}</p>
+              <p className="mt-1 text-xs">{done ? "已完成" : active ? "进行中" : "等待中"}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {latestLog ? (
+        <div className="mt-5 rounded-[22px] border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-600">
+          <p className="font-semibold text-slate-900">最新日志</p>
+          <p className="mt-2">
+            [{formatLogTimestamp(latestLog.timestamp)}] {latestLog.message}
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AnalysisDebugLogPanel({
+  logs,
+  timings,
+  pipelineVersion,
+}: {
+  logs: AnalysisLogEntry[];
+  timings: Record<string, number> | null | undefined;
+  pipelineVersion: string | null | undefined;
+}) {
+  const timingEntries = Object.entries(timings ?? {});
+
+  return (
+    <ReportCard title="分析日志" eyebrow="Debug Log">
+      <div className="space-y-4">
+        <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          <p>Pipeline Version: {pipelineVersion ?? "v1.0.0"}</p>
+          {timingEntries.length ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {timingEntries.map(([key, value]) => (
+                <span key={key} className="rounded-full bg-white px-3 py-1 text-xs text-slate-600">
+                  {key}: {formatDuration(value)}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">当前还没有阶段耗时数据。</p>
+          )}
+        </div>
+
+        <div className="max-h-[26rem] space-y-3 overflow-y-auto pr-1">
+          {logs.length ? (
+            logs
+              .slice()
+              .reverse()
+              .map((entry, index) => (
+                <article key={`${entry.timestamp}-${index}`} className="rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                        {entry.stage}
+                      </span>
+                      <span className="text-xs text-slate-400">{entry.level}</span>
+                    </div>
+                    <span className="text-xs text-slate-400">{formatLogTimestamp(entry.timestamp)}</span>
+                  </div>
+                  <p className="mt-2 leading-7 text-slate-700">{entry.message}</p>
+                  {entry.elapsed_s != null ? <p className="mt-2 text-xs text-slate-500">耗时：{formatDuration(entry.elapsed_s)}</p> : null}
+                  {entry.error_code ? <p className="mt-2 text-xs text-rose-500">错误码：{entry.error_code}</p> : null}
+                  {entry.detail ? (
+                    <details className="mt-2 text-xs text-slate-500">
+                      <summary className="cursor-pointer">展开详情</summary>
+                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words leading-6">{entry.detail}</pre>
+                    </details>
+                  ) : null}
+                </article>
+              ))
+          ) : (
+            <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+              当前还没有可显示的分析日志。
+            </div>
+          )}
+        </div>
+      </div>
+    </ReportCard>
   );
 }
 
@@ -385,6 +546,7 @@ export default function ReportPage() {
   const reportSkater = skaters.find((item) => item.id === deferredAnalysis?.skater_id) ?? null;
   const autoUnlockedSkill = skills.find((item) => item.id === deferredAnalysis?.auto_unlocked_skill) ?? null;
   const flattenedSuggestions = useMemo(() => flattenSuggestionPreview(memorySuggestions), [memorySuggestions]);
+  const shouldPollAnalysis = Boolean(id && analysis && isAnalysisInProgress(analysis.status));
 
   useEffect(() => {
     let cancelled = false;
@@ -498,7 +660,7 @@ export default function ReportPage() {
         window.clearTimeout(timer);
       }
     };
-  }, [id, isParentMode]);
+  }, [id, isParentMode, shouldPollAnalysis]);
 
   useEffect(() => {
     if (!id || analysis?.status !== "completed") {
@@ -698,12 +860,16 @@ export default function ReportPage() {
     setError(null);
     try {
       await retryAnalysis(id);
+      setPose(null);
+      setPlanId(null);
       startTransition(() => {
         setAnalysis((current) =>
           current
             ? {
                 ...current,
                 status: "pending",
+                processing_timings: null,
+                processing_logs: [],
                 error_code: null,
                 error_detail: null,
                 error_message: null,
@@ -865,20 +1031,36 @@ export default function ReportPage() {
       {!deferredAnalysis ? (
         <LoadingState status="processing" />
       ) : deferredAnalysis.status === "failed" ? (
-        <DetailedFailedState
-          analysis={deferredAnalysis}
-          isParentMode={isParentMode}
-          isRetrying={isRetryingAnalysis}
-          hideRetry={hideRetryAfterMissingVideo}
-          onRetry={requestRetryAnalysis}
-          onReupload={() =>
-            navigate("/review", {
-              state: deferredAnalysis.skater_id ? { skaterId: deferredAnalysis.skater_id } : undefined,
-            })
-          }
-        />
+        <>
+          <AnalysisProgressCard analysis={deferredAnalysis} />
+          <DetailedFailedState
+            analysis={deferredAnalysis}
+            isParentMode={isParentMode}
+            isRetrying={isRetryingAnalysis}
+            hideRetry={hideRetryAfterMissingVideo}
+            onRetry={requestRetryAnalysis}
+            onReupload={() =>
+              navigate("/review", {
+                state: deferredAnalysis.skater_id ? { skaterId: deferredAnalysis.skater_id } : undefined,
+              })
+            }
+          />
+          <AnalysisDebugLogPanel
+            logs={deferredAnalysis.processing_logs ?? []}
+            timings={deferredAnalysis.processing_timings}
+            pipelineVersion={deferredAnalysis.pipeline_version}
+          />
+        </>
       ) : deferredAnalysis.status !== "completed" ? (
-        <LoadingState status={deferredAnalysis.status} />
+        <>
+          <AnalysisProgressCard analysis={deferredAnalysis} />
+          <LoadingState status={deferredAnalysis.status} />
+          <AnalysisDebugLogPanel
+            logs={deferredAnalysis.processing_logs ?? []}
+            timings={deferredAnalysis.processing_timings}
+            pipelineVersion={deferredAnalysis.pipeline_version}
+          />
+        </>
       ) : (
         <>
           {deferredAnalysis.report?.data_quality === "poor" ? (
@@ -990,6 +1172,12 @@ export default function ReportPage() {
                   ) : null}
                 </ReportCard>
               ) : null}
+
+              <AnalysisDebugLogPanel
+                logs={deferredAnalysis.processing_logs ?? []}
+                timings={deferredAnalysis.processing_timings}
+                pipelineVersion={deferredAnalysis.pipeline_version}
+              />
             </div>
 
             <div className="space-y-6">
@@ -1145,6 +1333,7 @@ export default function ReportPage() {
       {isRetryConfirmOpen ? (
         <RetryAnalysisConfirmSheet
           isSubmitting={isRetryingAnalysis}
+          retryFromStage={deferredAnalysis?.retry_from_stage}
           onClose={() => {
             if (!isRetryingAnalysis) {
               setIsRetryConfirmOpen(false);

@@ -25,6 +25,16 @@ function formatDateShort(dateString: string) {
   }).format(new Date(dateString));
 }
 
+function formatDateLong(dateString: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(dateString));
+}
+
 export default function ProgressPage() {
   const [activeFilter, setActiveFilter] = useState<FilterOption>("全部");
   const [data, setData] = useState<ProgressResponse | null>(null);
@@ -72,19 +82,19 @@ export default function ProgressPage() {
         <div className="grid-ice h-full w-full" />
       </div>
 
-      <section className="mx-auto min-h-screen w-full max-w-6xl px-6 py-6 lg:px-10">
+      <section className="mx-auto min-h-screen w-full max-w-6xl px-4 py-4 sm:px-6 sm:py-6 lg:px-10">
         <TopNav />
 
         <header className="frost-panel">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <p className="text-sm uppercase tracking-[0.3em] text-cyan-200/80">Progress</p>
-              <h2 className="mt-3 text-3xl font-semibold text-white">进步趋势折线图</h2>
-              <p className="mt-2 max-w-3xl text-slate-300">
+              <h2 className="mt-3 text-2xl font-semibold text-white sm:text-3xl">进步趋势折线图</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
                 跟踪每次训练复盘的发力评分变化，快速看到近期上升趋势、波动区间和最新阶段的训练摘要。
               </p>
             </div>
-            <Link to="/history" className="pill-link">
+            <Link to="/history" className="pill-link w-fit">
               返回历史记录
             </Link>
           </div>
@@ -107,66 +117,71 @@ export default function ProgressPage() {
 
         {error ? <div className="mt-5 text-sm text-rose-200">{error}</div> : null}
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="frost-panel min-h-[420px]">
+        <div className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr] lg:gap-6">
+          <div className="frost-panel min-h-[300px] overflow-hidden px-2 py-3 sm:min-h-[420px] sm:px-6 sm:py-5">
             {chartData.length ? (
-              <ResponsiveContainer width="100%" height={360}>
-                <LineChart
-                  data={chartData}
-                  onClick={(state: { activePayload?: Array<{ payload?: ChartPoint }> }) => {
-                    const payload = state?.activePayload?.[0]?.payload as ChartPoint | undefined;
-                    if (payload) {
-                      setSelectedPoint(payload);
-                    }
-                  }}
-                >
-                  <CartesianGrid stroke="rgba(148,163,184,0.12)" vertical={false} />
-                  <XAxis dataKey="dateLabel" stroke="#cbd5e1" tickLine={false} axisLine={false} />
-                  <YAxis domain={[0, 100]} stroke="#cbd5e1" tickLine={false} axisLine={false} />
-                  <Tooltip
-                    cursor={{ stroke: "rgba(34,211,238,0.35)", strokeWidth: 1 }}
-                    contentStyle={{
-                      background: "rgba(2, 6, 23, 0.92)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      borderRadius: "18px",
-                      color: "#f8fafc",
+              <div className="h-[280px] sm:h-[320px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={chartData}
+                    margin={{ top: 8, right: 8, bottom: 8, left: -16 }}
+                    onClick={(state: { activePayload?: Array<{ payload?: ChartPoint }> }) => {
+                      const payload = state?.activePayload?.[0]?.payload as ChartPoint | undefined;
+                      if (payload) {
+                        setSelectedPoint(payload);
+                      }
                     }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="force_score"
-                    stroke="#67e8f9"
-                    strokeWidth={3}
-                    dot={{ r: 5, strokeWidth: 0, fill: "#22d3ee", cursor: "pointer" }}
-                    activeDot={{ r: 7, fill: "#cffafe" }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+                  >
+                    <CartesianGrid stroke="rgba(148,163,184,0.12)" vertical={false} />
+                    <XAxis dataKey="dateLabel" stroke="#cbd5e1" tickLine={false} axisLine={false} minTickGap={20} />
+                    <YAxis width={28} domain={[0, 100]} stroke="#cbd5e1" tickLine={false} axisLine={false} />
+                    <Tooltip
+                      cursor={{ stroke: "rgba(34,211,238,0.35)", strokeWidth: 1 }}
+                      contentStyle={{
+                        background: "rgba(2, 6, 23, 0.92)",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        borderRadius: "18px",
+                        color: "#f8fafc",
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="force_score"
+                      stroke="#67e8f9"
+                      strokeWidth={3}
+                      dot={{ r: 5, strokeWidth: 0, fill: "#22d3ee", cursor: "pointer" }}
+                      activeDot={{ r: 7, fill: "#cffafe" }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             ) : (
-              <div className="flex h-full items-center justify-center text-slate-300">当前筛选下还没有可展示的趋势数据。</div>
+              <div className="flex h-full items-center justify-center text-center text-sm text-slate-300 sm:text-base">
+                当前筛选下还没有可展示的趋势数据。
+              </div>
             )}
           </div>
 
-          <div className="space-y-6">
-            <div className="frost-panel">
+          <div className="space-y-4 sm:space-y-6">
+            <div className="frost-panel min-w-0 overflow-hidden p-4 sm:p-6">
               <p className="text-sm uppercase tracking-[0.28em] text-cyan-200/80">Selected Point</p>
               {selectedPoint ? (
                 <>
-                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <div className="mt-3 flex flex-wrap items-start gap-2">
                     <span className="rounded-full bg-white/8 px-3 py-1 text-sm text-white">{selectedPoint.action_type}</span>
-                    <span className="rounded-full bg-cyan-300/12 px-3 py-1 text-sm text-cyan-50">
-                      评分 {selectedPoint.force_score}
-                    </span>
+                    <span className="rounded-full bg-cyan-300/12 px-3 py-1 text-sm text-cyan-50">评分 {selectedPoint.force_score}</span>
                   </div>
-                  <p className="mt-4 text-sm text-slate-400">{new Date(selectedPoint.created_at).toLocaleString("zh-CN")}</p>
-                  <p className="mt-4 leading-7 text-slate-100/90">{selectedPoint.summary}</p>
+                  <p className="mt-4 break-words text-sm leading-6 text-slate-400">{formatDateLong(selectedPoint.created_at)}</p>
+                  <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-7 text-slate-100/90 sm:text-base">
+                    {selectedPoint.summary}
+                  </p>
                 </>
               ) : (
-                <p className="mt-4 text-slate-300">点击折线图中的任意数据点，查看对应训练摘要。</p>
+                <p className="mt-4 text-sm leading-7 text-slate-300 sm:text-base">点击折线图中的任意数据点，查看对应训练摘要。</p>
               )}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
               <div className="stat-panel">
                 <p className="stat-label">总次数</p>
                 <p className="stat-value">{data?.stats.total_count ?? 0}</p>

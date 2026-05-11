@@ -117,10 +117,14 @@ async def _run_migrations(conn) -> None:
         ("skill_category", "TEXT"),
         ("action_subtype", "TEXT"),
         ("analysis_profile", "TEXT"),
+        ("retry_from_stage", "TEXT"),
+        ("pipeline_version", "TEXT NOT NULL DEFAULT 'v1.0.0'"),
         ("vision_structured", "JSON"),
         ("pose_data", "JSON"),
         ("bio_data", "JSON"),
         ("frame_motion_scores", "JSON"),
+        ("processing_timings", "JSON"),
+        ("processing_logs", "JSON"),
         ("target_lock", "JSON"),
         ("target_lock_status", "TEXT"),
         ("auto_unlocked_skill", "TEXT REFERENCES skill_nodes(id)"),
@@ -173,6 +177,7 @@ async def _run_migrations(conn) -> None:
     await run_migrations_patch_f(conn)
     await run_migrations_patch_g(conn)
     await run_migrations_patch_h(conn)
+    await run_migrations_patch_i(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -392,6 +397,22 @@ async def _apply_patch_h(conn) -> None:
         await conn.execute(text("ALTER TABLE analyses ADD COLUMN error_code TEXT"))
     if "error_detail" not in analysis_columns:
         await conn.execute(text("ALTER TABLE analyses ADD COLUMN error_detail TEXT"))
+
+
+async def run_migrations_patch_i(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _apply_patch_i(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _apply_patch_i(conn)
+
+
+async def _apply_patch_i(conn) -> None:
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_id ON analyses(skater_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_created_at ON analyses(skater_id, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_status_created_at ON analyses(status, created_at DESC)"))
 
 
 async def _create_phase6_tables(conn) -> None:

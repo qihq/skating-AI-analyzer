@@ -398,7 +398,7 @@ export default function HistoryPage() {
 
                     <div className="flex flex-col gap-3 lg:items-end">
                       <div className="flex items-center gap-2 pr-2">
-                        {record.status === "completed" ? (
+                        {record.status === "completed" || record.status === "failed" ? (
                           <>
                             <Link
                               to={`/report/${record.id}`}
@@ -408,6 +408,11 @@ export default function HistoryPage() {
                             >
                               📄
                             </Link>
+                          </>
+                        ) : null}
+
+                        {record.status === "completed" ? (
+                          <>
                             <button
                               type="button"
                               onClick={() => requestReanalysis(record)}

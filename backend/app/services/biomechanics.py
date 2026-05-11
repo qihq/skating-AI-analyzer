@@ -11,12 +11,14 @@ MAX_TAKEOFF_SPEED_MPS = 6.5
 MAX_ROTATION_RPS = 6.0
 
 
-def _empty_jump_metrics() -> dict[str, float | None]:
+def _empty_jump_metrics() -> dict[str, Any]:
     return {
         "air_time_seconds": None,
         "estimated_height_cm": None,
         "takeoff_speed_mps": None,
         "rotation_rps": None,
+        "estimated_rotations": None,
+        "probable_jump_type": "unknown",
     }
 
 
@@ -59,6 +61,36 @@ def _point(keypoints: list[dict[str, Any]], index: int) -> dict[str, float] | No
     return {"x": float(raw.get("x", 0.0)), "y": float(raw.get("y", 0.0)), "z": float(raw.get("z", 0.0))}
 
 
+def _distance(a: dict[str, float], b: dict[str, float]) -> float:
+    return math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+
+
+def _midpoint(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {"x": (a["x"] + b["x"]) / 2, "y": (a["y"] + b["y"]) / 2}
+
+
+def _reference_length(keypoints: list[dict[str, Any]]) -> float:
+    """Use shoulder width to normalize the skater scale within the frame."""
+    left_shoulder = _point(keypoints, 11)
+    right_shoulder = _point(keypoints, 12)
+    if not (left_shoulder and right_shoulder):
+        return 0.0
+    return _distance(left_shoulder, right_shoulder)
+
+
+def _shoulder_hip_reference_length(keypoints: list[dict[str, Any]]) -> float:
+    """Use shoulder-to-hip midpoint distance to normalize vertical motion."""
+    left_shoulder = _point(keypoints, 11)
+    right_shoulder = _point(keypoints, 12)
+    left_hip = _point(keypoints, 23)
+    right_hip = _point(keypoints, 24)
+    if not all((left_shoulder, right_shoulder, left_hip, right_hip)):
+        return 0.0
+    shoulder_mid = _midpoint(left_shoulder, right_shoulder)
+    hip_mid = _midpoint(left_hip, right_hip)
+    return _distance(shoulder_mid, hip_mid)
+
+
 def _angle(a: dict[str, float], b: dict[str, float], c: dict[str, float]) -> float:
     ab = (a["x"] - b["x"], a["y"] - b["y"])
     cb = (c["x"] - b["x"], c["y"] - b["y"])
@@ -90,8 +122,8 @@ def calc_trunk_tilt(keypoints: list[dict[str, Any]], frame_idx: int) -> dict[str
     hips = [_point(keypoints, 23), _point(keypoints, 24)]
     if not all(shoulders + hips):
         return {"frame_idx": frame_idx, "tilt_degrees": None}
-    shoulder_mid = {"x": (shoulders[0]["x"] + shoulders[1]["x"]) / 2, "y": (shoulders[0]["y"] + shoulders[1]["y"]) / 2}
-    hip_mid = {"x": (hips[0]["x"] + hips[1]["x"]) / 2, "y": (hips[0]["y"] + hips[1]["y"]) / 2}
+    shoulder_mid = _midpoint(shoulders[0], shoulders[1])
+    hip_mid = _midpoint(hips[0], hips[1])
     dx = shoulder_mid["x"] - hip_mid["x"]
     dy = hip_mid["y"] - shoulder_mid["y"]
     tilt = abs(math.degrees(math.atan2(dx, max(dy, 0.001))))
@@ -99,20 +131,27 @@ def calc_trunk_tilt(keypoints: list[dict[str, Any]], frame_idx: int) -> dict[str
 
 
 def calc_arm_symmetry(keypoints: list[dict[str, Any]], frame_idx: int) -> dict[str, Any]:
+    reference_length = _reference_length(keypoints)
+    if reference_length < 0.01:
+        return {"frame_idx": frame_idx, "symmetry": None}
+
     left_shoulder = _point(keypoints, 11)
     right_shoulder = _point(keypoints, 12)
     left_wrist = _point(keypoints, 15)
     right_wrist = _point(keypoints, 16)
     if not all([left_shoulder, right_shoulder, left_wrist, right_wrist]):
         return {"frame_idx": frame_idx, "symmetry": None}
-    left_distance = math.hypot(left_wrist["x"] - left_shoulder["x"], left_wrist["y"] - left_shoulder["y"])
-    right_distance = math.hypot(right_wrist["x"] - right_shoulder["x"], right_wrist["y"] - right_shoulder["y"])
+
+    left_distance = _distance(left_wrist, left_shoulder) / reference_length
+    right_distance = _distance(right_wrist, right_shoulder) / reference_length
     symmetry = max(0.0, 1.0 - abs(left_distance - right_distance))
     return {"frame_idx": frame_idx, "symmetry": symmetry}
 
 
 def calc_center_of_mass_trajectory(pose_data: dict[str, Any]) -> dict[str, Any]:
     points: list[dict[str, Any]] = []
+    y_values: list[float] = []
+    reference_lengths: list[float] = []
     for frame in pose_data.get("frames", []):
         keypoints = frame.get("keypoints", [])
         hips = [_point(keypoints, 23), _point(keypoints, 24)]
@@ -120,43 +159,141 @@ def calc_center_of_mass_trajectory(pose_data: dict[str, Any]) -> dict[str, Any]:
         visible = [point for point in hips + shoulders if point is not None]
         if not visible:
             continue
+        y_value = sum(point["y"] for point in visible) / len(visible)
         points.append(
             {
                 "frame": frame.get("frame", ""),
                 "x": sum(point["x"] for point in visible) / len(visible),
-                "y": sum(point["y"] for point in visible) / len(visible),
+                "y": y_value,
             }
         )
+        y_values.append(y_value)
 
-    y_values = [point["y"] for point in points]
-    vertical_range = max(y_values) - min(y_values) if y_values else 0.0
+        reference_length = _shoulder_hip_reference_length(keypoints)
+        if reference_length >= 0.01:
+            reference_lengths.append(reference_length)
+
+    if y_values and reference_lengths:
+        average_reference = sum(reference_lengths) / len(reference_lengths)
+        vertical_range = (max(y_values) - min(y_values)) / average_reference
+    else:
+        vertical_range = 0.0
     return {"points": points, "vertical_range": vertical_range}
 
 
-def _detect_key_frames(com_trajectory: dict[str, Any]) -> dict[str, str]:
-    points = com_trajectory.get("points", [])
-    if len(points) < 3:
-        return {}
-    apex_index = min(range(len(points)), key=lambda index: points[index]["y"])
-    takeoff_index = max(0, apex_index - max(1, len(points) // 5))
-    landing_index = min(len(points) - 1, apex_index + max(1, len(points) // 5))
+def _normalize_frame_name(frame: str) -> str:
+    return PathLikeFrame(frame).stem
 
+
+def _find_descent_start(points: list[dict[str, Any]], apex_index: int) -> int:
+    takeoff_index = max(0, apex_index - max(1, len(points) // 5))
     for index in range(1, apex_index + 1):
         if points[index]["y"] < points[index - 1]["y"]:
-            takeoff_index = index - 1
-            break
+            return index - 1
+    return takeoff_index
 
+
+def _find_ascent_start(points: list[dict[str, Any]], apex_index: int) -> int:
+    landing_index = min(len(points) - 1, apex_index + max(1, len(points) // 5))
     for index in range(apex_index + 1, len(points)):
         if points[index]["y"] > points[index - 1]["y"]:
             landing_index = index
         if index - apex_index >= max(2, len(points) // 4):
             break
+    return landing_index
 
-    return {
-        "T": PathLikeFrame(points[takeoff_index]["frame"]).stem,
-        "A": PathLikeFrame(points[apex_index]["frame"]).stem,
-        "L": PathLikeFrame(points[landing_index]["frame"]).stem,
-    }
+
+def _hip_midpoint(frame: dict[str, Any]) -> dict[str, float] | None:
+    keypoints = frame.get("keypoints", [])
+    left_hip = _point(keypoints, 23)
+    right_hip = _point(keypoints, 24)
+    if not (left_hip and right_hip):
+        return None
+    return _midpoint(left_hip, right_hip)
+
+
+def _find_max_hip_x_delta(frames: list[dict[str, Any]]) -> int | None:
+    best_index: int | None = None
+    best_delta = 0.0
+    previous_hip: dict[str, float] | None = None
+
+    for index, frame in enumerate(frames):
+        current_hip = _hip_midpoint(frame)
+        if current_hip is None:
+            continue
+        if previous_hip is not None:
+            delta = abs(current_hip["x"] - previous_hip["x"])
+            if delta > best_delta:
+                best_delta = delta
+                best_index = index
+        previous_hip = current_hip
+
+    return best_index
+
+
+def _free_leg_ankle_y(frame: dict[str, Any]) -> float | None:
+    keypoints = frame.get("keypoints", [])
+    ankles = [_point(keypoints, 27), _point(keypoints, 28)]
+    visible = [point["y"] for point in ankles if point is not None]
+    if not visible:
+        return None
+    return min(visible)
+
+
+def _find_free_leg_peak(frames: list[dict[str, Any]]) -> int | None:
+    best_index: int | None = None
+    best_y: float | None = None
+
+    for index, frame in enumerate(frames):
+        ankle_y = _free_leg_ankle_y(frame)
+        if ankle_y is None:
+            continue
+        if best_y is None or ankle_y < best_y:
+            best_y = ankle_y
+            best_index = index
+
+    return best_index
+
+
+def detect_key_frames(
+    com_trajectory: dict[str, Any],
+    pose_data: dict[str, Any],
+    analysis_profile: str = "jump",
+) -> dict[str, str]:
+    points = com_trajectory.get("points", [])
+    if len(points) < 3:
+        return {}
+
+    if analysis_profile == "jump":
+        apex_index = min(range(len(points)), key=lambda index: points[index]["y"])
+        takeoff_index = _find_descent_start(points, apex_index)
+        landing_index = _find_ascent_start(points, apex_index)
+        return {
+            "T": _normalize_frame_name(points[takeoff_index]["frame"]),
+            "A": _normalize_frame_name(points[apex_index]["frame"]),
+            "L": _normalize_frame_name(points[landing_index]["frame"]),
+        }
+
+    frames = pose_data.get("frames", [])
+    if analysis_profile == "spin":
+        max_delta_index = _find_max_hip_x_delta(frames)
+        if max_delta_index is None:
+            return {}
+        start_index = max(0, max_delta_index - 1)
+        end_index = min(len(frames) - 1, max_delta_index + 1)
+        return {
+            "旋转入": _normalize_frame_name(str(frames[start_index].get("frame", ""))),
+            "旋转中": _normalize_frame_name(str(frames[max_delta_index].get("frame", ""))),
+            "旋转出": _normalize_frame_name(str(frames[end_index].get("frame", ""))),
+        }
+
+    if analysis_profile in ("spiral", "step"):
+        peak_index = _find_free_leg_peak(frames)
+        if peak_index is None:
+            return {}
+        return {"峰值": _normalize_frame_name(str(frames[peak_index].get("frame", "")))}
+
+    return {}
 
 
 class PathLikeFrame:
@@ -177,6 +314,15 @@ def calc_rotation_axis_stability(pose_data: dict[str, Any], start_frame: int, en
     return {"average_tilt_degrees": average_tilt, "stability_score": stability_score}
 
 
+def _normalized_angle_delta(current_angle: float, previous_angle: float) -> float:
+    delta = current_angle - previous_angle
+    while delta <= -math.pi:
+        delta += 2 * math.pi
+    while delta > math.pi:
+        delta -= 2 * math.pi
+    return delta
+
+
 def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int) -> float:
     angles: list[float] = []
     for frame in pose_data.get("frames", []):
@@ -188,9 +334,41 @@ def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int) -
                 angles.append(math.atan2(right["y"] - left["y"], right["x"] - left["x"]))
     if len(angles) < 2:
         return 0.0
-    total_turns = abs(angles[-1] - angles[0]) / (2 * math.pi)
+
+    total_rotation = 0.0
+    for previous_angle, current_angle in zip(angles, angles[1:]):
+        total_rotation += abs(_normalized_angle_delta(current_angle, previous_angle))
+
+    total_turns = total_rotation / (2 * math.pi)
     duration = max((end_frame - start_frame) / FPS, 1 / FPS)
     return round(total_turns / duration, 2)
+
+
+def estimate_jump_rotations(
+    rotation_rps: float | None,
+    air_time_seconds: float | None,
+) -> dict[str, Any]:
+    if rotation_rps is None or air_time_seconds is None:
+        return {"estimated_rotations": None, "probable_jump_type": "unknown"}
+
+    rotations = rotation_rps * air_time_seconds
+
+    thresholds = [
+        (0.8, 1.8, "单圈跳 (1T/1S/1Lo/1F/1Lz)"),
+        (1.8, 2.8, "双圈跳 (2A/2T/2S/2Lo/2F/2Lz)"),
+        (2.8, 3.8, "三圈跳 (3A/3T/3S/3Lo/3F/3Lz)"),
+        (3.8, 5.0, "四圈跳 (4T/4S/4Lo/4F/4Lz)"),
+    ]
+    probable = "unknown"
+    for low, high, label in thresholds:
+        if low <= rotations < high:
+            probable = label
+            break
+
+    return {
+        "estimated_rotations": round(rotations, 2),
+        "probable_jump_type": probable,
+    }
 
 
 def _to_float(value: Any) -> float | None:
@@ -267,6 +445,10 @@ def sanitize_biomechanics_data(bio_data: dict[str, Any] | None) -> dict[str, Any
         "estimated_height_cm": round(metric_values["estimated_height_cm"], 1),
         "takeoff_speed_mps": round(metric_values["takeoff_speed_mps"], 2),
         "rotation_rps": round(metric_values["rotation_rps"], 2),
+        **estimate_jump_rotations(
+            metric_values["rotation_rps"],
+            metric_values["air_time_seconds"],
+        ),
     }
     sanitized["jump_metrics_status"] = "ok"
     sanitized["jump_metrics_warning"] = None
@@ -324,6 +506,7 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
         return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
 
     if analysis_profile != "jump":
+        key_frames = detect_key_frames(com_trajectory, pose_data, analysis_profile)
         tilt_values = [item["tilt_degrees"] for item in trunk_tilts if item.get("tilt_degrees") is not None]
         symmetries = [item["symmetry"] for item in arm_symmetry if item.get("symmetry") is not None]
         bio_subscores = {
@@ -344,14 +527,14 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
                 "bio_subscores": bio_subscores,
                 "discipline_metrics": _spiral_discipline_metrics(trunk_tilts, knee_angles, arm_symmetry, com_trajectory),
                 "quality_flags": [],
-                "key_frames": {},
+                "key_frames": key_frames,
                 "jump_metrics": None,
                 "jump_metrics_status": "not_applicable",
                 "jump_metrics_warning": None,
             }
         )
 
-    key_frames = _detect_key_frames(com_trajectory)
+    key_frames = detect_key_frames(com_trajectory, pose_data, analysis_profile)
     if not key_frames:
         return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
 

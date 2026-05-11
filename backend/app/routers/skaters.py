@@ -6,9 +6,11 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.database import DATA_DIR, UPLOADS_DIR, get_session
 from app.models import Analysis, Skater, TrainingSession
+from app.routers.analysis import _build_stale_analysis_snapshot
 from app.schemas import (
     ArchiveResponse,
     ArchiveStats,
@@ -268,11 +270,32 @@ async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get
 
     result = await session.execute(
         select(Analysis, TrainingSession)
+        .options(
+            load_only(
+                Analysis.id,
+                Analysis.skater_id,
+                Analysis.session_id,
+                Analysis.skill_category,
+                Analysis.action_type,
+                Analysis.force_score,
+                Analysis.status,
+                Analysis.report,
+                Analysis.error_message,
+                Analysis.note,
+                Analysis.created_at,
+                Analysis.updated_at,
+                Analysis.retry_from_stage,
+                Analysis.processing_logs,
+            )
+        )
         .outerjoin(TrainingSession, Analysis.session_id == TrainingSession.id)
         .where(Analysis.skater_id == skater_id)
         .order_by(Analysis.created_at.desc())
     )
-    rows = result.all()
+    rows = [
+        (_build_stale_analysis_snapshot(analysis) or analysis, training_session)
+        for analysis, training_session in result.all()
+    ]
     records = [analysis for analysis, _ in rows]
 
     now = datetime.now(timezone.utc)
