@@ -725,7 +725,7 @@ export default function ArchivePage() {
 
                               <div className="flex flex-col gap-3 tablet:items-end">
                                 <div className="flex items-center gap-2 pr-2">
-                                  {entry.status === "completed" ? (
+                                  {entry.status === "completed" || entry.status === "failed" ? (
                                     <>
                                       <Link
                                         to={`/report/${entry.analysis_id}`}
@@ -735,6 +735,11 @@ export default function ArchivePage() {
                                       >
                                         📄
                                       </Link>
+                                    </>
+                                  ) : null}
+
+                                  {entry.status === "completed" ? (
+                                    <>
                                       <button
                                         type="button"
                                         onClick={() => requestReanalysis(entry)}

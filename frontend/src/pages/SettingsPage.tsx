@@ -20,9 +20,9 @@ import {
   testActiveApiConnection,
   updateSkater,
 } from "../api/client";
-import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import { useAppMode } from "../components/AppModeContext";
 import PinInput from "../components/PinInput";
+import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 
 type PinLengthOption = 4 | 5 | 6;
 
@@ -57,6 +57,9 @@ export default function SettingsPage() {
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
   const [backups, setBackups] = useState<BackupFile[]>([]);
   const [poseRuntime, setPoseRuntime] = useState<PoseRuntimeStatus | null>(null);
+  const [isPoseRuntimeLoading, setIsPoseRuntimeLoading] = useState(false);
+  const [poseRuntimeCheckedAt, setPoseRuntimeCheckedAt] = useState<string | null>(null);
+  const [poseRuntimeError, setPoseRuntimeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [savingSkaterId, setSavingSkaterId] = useState<string | null>(null);
@@ -76,19 +79,44 @@ export default function SettingsPage() {
     setNewPinLength((pinLength >= 4 && pinLength <= 6 ? pinLength : 4) as PinLengthOption);
   }, [pinLength]);
 
-  const loadSettingsData = async () => {
-    const [skaterData, systemData, storageData, backupData, poseRuntimeData] = await Promise.all([
+  const showNotice = (message: string) => {
+    setNotice(message);
+    window.setTimeout(() => setNotice(null), 2600);
+  };
+
+  const loadSettingsOverviewData = async () => {
+    const [skaterData, systemData, storageData, backupData] = await Promise.all([
       fetchSkaters(),
       fetchSystemInfo(),
       fetchStorageStats(),
       fetchBackups(),
-      fetchPoseRuntimeStatus(),
     ]);
     setSkaters(skaterData);
     setSystemInfo(systemData);
     setStorageStats(storageData);
     setBackups(backupData);
-    setPoseRuntime(poseRuntimeData);
+  };
+
+  const loadPoseRuntimeData = async (isCancelled?: () => boolean) => {
+    setIsPoseRuntimeLoading(true);
+    setPoseRuntimeError(null);
+    try {
+      const poseRuntimeData = await fetchPoseRuntimeStatus();
+      if (isCancelled?.()) {
+        return;
+      }
+      setPoseRuntime(poseRuntimeData);
+      setPoseRuntimeCheckedAt(new Date().toISOString());
+    } catch {
+      if (isCancelled?.()) {
+        return;
+      }
+      setPoseRuntimeError("暂时无法读取姿态运行时状态，可以稍后重试。");
+    } finally {
+      if (!isCancelled?.()) {
+        setIsPoseRuntimeLoading(false);
+      }
+    }
   };
 
   useEffect(() => {
@@ -99,21 +127,11 @@ export default function SettingsPage() {
     let cancelled = false;
     const load = async () => {
       try {
-        const [skaterData, systemData, storageData, backupData, poseRuntimeData] = await Promise.all([
-          fetchSkaters(),
-          fetchSystemInfo(),
-          fetchStorageStats(),
-          fetchBackups(),
-          fetchPoseRuntimeStatus(),
-        ]);
+        await loadSettingsOverviewData();
         if (cancelled) {
           return;
         }
-        setSkaters(skaterData);
-        setSystemInfo(systemData);
-        setStorageStats(storageData);
-        setBackups(backupData);
-        setPoseRuntime(poseRuntimeData);
+        await loadPoseRuntimeData(() => cancelled);
       } catch {
         if (!cancelled) {
           setError("家长设置加载失败，请稍后重试。");
@@ -126,11 +144,6 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, [isParentMode]);
-
-  const showNotice = (message: string) => {
-    setNotice(message);
-    window.setTimeout(() => setNotice(null), 2600);
-  };
 
   const handleSkaterChange = (skaterId: string, field: "display_name" | "avatar_emoji" | "birth_year", value: string) => {
     setSkaters((current) =>
@@ -234,7 +247,7 @@ export default function SettingsPage() {
     setError(null);
     try {
       const result = await createBackup();
-      await loadSettingsData();
+      await loadSettingsOverviewData();
       showNotice(`${result.filename} 已创建。`);
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
@@ -248,7 +261,7 @@ export default function SettingsPage() {
   };
 
   const handleRestoreBackup = async (filename: string) => {
-    const confirmed = window.confirm(`确认恢复备份「${filename}」吗？这会覆盖当前 data 数据。`);
+    const confirmed = window.confirm(`确认恢复备份“${filename}”吗？这会覆盖当前 data 数据。`);
     if (!confirmed) {
       return;
     }
@@ -257,7 +270,7 @@ export default function SettingsPage() {
     setError(null);
     try {
       const result = await restoreBackup(filename);
-      await loadSettingsData();
+      await loadSettingsOverviewData();
       showNotice(result.detail);
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
@@ -290,22 +303,51 @@ export default function SettingsPage() {
     }
   };
 
-  const poseModeLabel = poseRuntime?.mode === "multi_pose" ? "二期多姿态已启用" : "当前为一期兼容模式";
+  const poseModeLabel =
+    !poseRuntime && isPoseRuntimeLoading
+      ? "正在检查模型状态"
+      : poseRuntime?.mode === "multi_pose"
+        ? "二期多姿态已启用"
+        : poseRuntime
+          ? "当前为一期兼容模式"
+          : "运行时状态暂不可用";
   const poseModeBadgeClass =
-    poseRuntime?.mode === "multi_pose"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : "border-amber-200 bg-amber-50 text-amber-700";
+    !poseRuntime && isPoseRuntimeLoading
+      ? "border-blue-200 bg-blue-50 text-blue-700"
+      : poseRuntime?.mode === "multi_pose"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : "border-amber-200 bg-amber-50 text-amber-700";
   const poseReasonText =
-    poseRuntime?.reason === "configured"
-      ? "模型已加载，可直接使用多姿态候选。"
-      : poseRuntime?.reason === "missing_model_file"
-        ? "已配置模型路径，但当前挂载目录里没有可读取的 .task 文件。"
-        : "尚未配置模型路径，系统会继续使用一期单人裁剪 Pose。";
+    !poseRuntime && isPoseRuntimeLoading
+      ? "正在读取运行时配置，这一步不会重复加载模型。"
+      : poseRuntime?.reason === "configured"
+        ? "模型已就绪，设置页这里只是在检查状态，不会重复加载模型。"
+        : poseRuntime?.reason === "missing_model_file"
+          ? "已配置模型路径，但当前挂载目录里没有可读取的 .task 文件。"
+          : poseRuntime
+            ? "尚未配置模型路径，系统会继续使用一期单人裁剪 Pose。"
+            : poseRuntimeError ?? "暂时无法读取姿态运行时状态，可以稍后重试。";
   const poseNextStepText =
-    poseRuntime?.mode === "multi_pose"
-      ? "当前环境已经具备二期主滑手多候选能力，可以直接去上传分析页验证多人场景。"
-      : "将模型文件放入 ./models/pose_landmarker_heavy.task，并在 .env 中设置 MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task 后重启服务。";
-  const posePathText = poseRuntime?.model_path ?? "未设置";
+    !poseRuntime && isPoseRuntimeLoading
+      ? "这里只会返回配置检查结果，不会像视频分析时那样触发多姿态推理。"
+      : poseRuntime?.mode === "multi_pose"
+        ? "当前环境已经具备二期主滑手多候选能力，可以直接去上传分析页验证多人场景。"
+        : "将模型文件放入 ./models/pose_landmarker_heavy.task，并在 .env 中设置 MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task 后重启服务。";
+  const posePathText = !poseRuntime && isPoseRuntimeLoading ? "检查中..." : poseRuntime?.model_path ?? "未设置";
+  const poseRuntimeCheckedText =
+    poseRuntimeCheckedAt
+      ? `上次检查：${formatDate(poseRuntimeCheckedAt)}`
+      : isPoseRuntimeLoading
+        ? "正在检查运行时状态..."
+        : "尚未完成检查";
+  const poseRuntimeModeText =
+    !poseRuntime && isPoseRuntimeLoading
+      ? "checking"
+      : poseRuntime?.mode === "multi_pose"
+        ? "multi_pose"
+        : poseRuntime
+          ? "fallback_single_pose"
+          : "--";
 
   if (!isParentMode) {
     return (
@@ -352,21 +394,32 @@ export default function SettingsPage() {
                   这里可以直接确认当前环境是否真正启用了二期多姿态模型，以及为什么会回落到一期兼容模式。
                 </p>
               </div>
-              <div className={`inline-flex rounded-full border px-4 py-2 text-sm font-semibold ${poseModeBadgeClass}`}>
-                {poseModeLabel}
+              <div className="flex flex-wrap items-start gap-3 tablet:justify-end">
+                <div className={`inline-flex rounded-full border px-4 py-2 text-sm font-semibold ${poseModeBadgeClass}`}>
+                  {poseModeLabel}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadPoseRuntimeData()}
+                  disabled={isPoseRuntimeLoading}
+                  className="min-h-[42px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isPoseRuntimeLoading ? "检查中..." : "重新检查"}
+                </button>
               </div>
             </div>
+
+            <p className="mt-4 text-sm text-slate-500">{poseRuntimeCheckedText}</p>
+            {poseRuntimeError ? <p className="mt-2 text-sm text-amber-600">{poseRuntimeError}</p> : null}
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
               <div className="stat-panel">
                 <p className="stat-label">运行模式</p>
-                <p className="stat-value text-[1.1rem]">
-                  {poseRuntime?.mode === "multi_pose" ? "multi_pose" : "fallback_single_pose"}
-                </p>
+                <p className="stat-value break-all text-[1.1rem]">{poseRuntimeModeText}</p>
               </div>
               <div className="stat-panel">
                 <p className="stat-label">多姿态上限</p>
-                <p className="stat-value">{poseRuntime?.num_poses ?? 4}</p>
+                <p className="stat-value">{!poseRuntime && isPoseRuntimeLoading ? "--" : poseRuntime?.num_poses ?? 4}</p>
               </div>
             </div>
 
@@ -383,18 +436,27 @@ export default function SettingsPage() {
               <div className="mt-4 flex flex-wrap gap-3 text-sm">
                 <span
                   className={`rounded-full px-3 py-1 font-medium ${
-                    poseRuntime?.model_exists ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"
+                    !poseRuntime && isPoseRuntimeLoading
+                      ? "bg-blue-100 text-blue-700"
+                      : poseRuntime?.model_exists
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-slate-200 text-slate-600"
                   }`}
                 >
-                  {poseRuntime?.model_exists ? "模型文件可读" : "模型文件不可用"}
+                  {!poseRuntime && isPoseRuntimeLoading
+                    ? "状态检查中"
+                    : poseRuntime?.model_exists
+                      ? "模型文件可读"
+                      : "模型文件不可用"}
                 </span>
-                <span className="rounded-full bg-slate-200 px-3 py-1 font-medium text-slate-600">{poseReasonText}</span>
+                <span className="rounded-2xl bg-slate-200 px-3 py-2 font-medium leading-6 text-slate-600">{poseReasonText}</span>
               </div>
             </div>
 
             <div className="mt-4 rounded-[24px] border border-blue-100 bg-blue-50 p-5">
               <p className="text-sm font-semibold text-blue-700">启用说明</p>
               <p className="mt-2 text-sm leading-7 text-blue-700">{poseNextStepText}</p>
+              <p className="mt-2 text-xs leading-6 text-blue-600">这里只是在读取配置和文件可用性，不会像正式分析那样触发模型推理。</p>
             </div>
 
             <div className="mt-5 flex flex-wrap gap-3">
@@ -446,7 +508,7 @@ export default function SettingsPage() {
                   disabled={isTestingApi}
                   className="min-h-[44px] rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isTestingApi ? "连接中..." : "🔌 测试连接"}
+                  {isTestingApi ? "连接中..." : "测试连接"}
                 </button>
               </div>
             </div>
@@ -455,12 +517,12 @@ export default function SettingsPage() {
               {!apiTestResult ? (
                 <p className="text-sm leading-7 text-slate-500">点击“测试连接”后，系统会用当前已保存的 API Key 发送一次极小请求，用来验证配置是否可用。</p>
               ) : apiTestResult.status === "ok" ? (
-                <p className="text-sm font-medium text-emerald-700">✅ 连接正常（延迟 {apiTestResult.latency_ms ?? 0}ms）</p>
+                <p className="text-sm font-medium text-emerald-700">连接正常（延迟 {apiTestResult.latency_ms ?? 0}ms）</p>
               ) : (
                 <>
                   <p className="text-sm font-medium text-rose-600">
-                    ❌ {getAnalysisErrorMessage(apiTestResult.error_code).title}
-                    {apiTestResult.message ? ` — ${apiTestResult.message}` : ""}
+                    {getAnalysisErrorMessage(apiTestResult.error_code).title}
+                    {apiTestResult.message ? `：${apiTestResult.message}` : ""}
                   </p>
                   <p className="mt-2 text-sm leading-7 text-slate-500">{getAnalysisErrorMessage(apiTestResult.error_code).hint}</p>
                 </>
@@ -475,9 +537,7 @@ export default function SettingsPage() {
                 <h2 className="mt-2 text-2xl font-semibold text-slate-900">选手展示信息</h2>
                 <p className="mt-3 text-sm leading-7 text-slate-500">这里修改首页和报告页里展示的昵称、头像和出生年份。</p>
               </div>
-              <Link to="/settings/api" className="app-pill text-sm font-semibold">
-                打开 API 设置
-              </Link>
+              <div className="app-pill text-sm font-semibold text-slate-600">共 {skaters.length} 位选手</div>
             </div>
 
             <div className="mt-6 grid gap-4">
@@ -499,12 +559,13 @@ export default function SettingsPage() {
                         value={skater.avatar_emoji}
                         onChange={(event) => handleSkaterChange(skater.id, "avatar_emoji", event.target.value)}
                         className="app-input"
-                        placeholder="🐯"
+                        placeholder="⛸️"
                       />
                     </label>
                     <label className="space-y-2">
                       <span className="text-sm font-medium text-slate-700">出生年份</span>
                       <input
+                        type="number"
                         value={skater.birth_year}
                         onChange={(event) => handleSkaterChange(skater.id, "birth_year", event.target.value)}
                         className="app-input"
@@ -649,7 +710,13 @@ export default function SettingsPage() {
 
               <div>
                 <p className="mb-3 text-sm font-medium text-slate-700">新 PIN</p>
-                <PinInput length={newPinLength} value={newPin} onChange={setNewPin} error={Boolean(pinError && !pinError.includes("旧") && newPin.length === newPinLength)} label="新 PIN" />
+                <PinInput
+                  length={newPinLength}
+                  value={newPin}
+                  onChange={setNewPin}
+                  error={Boolean(pinError && !pinError.includes("旧") && newPin.length === newPinLength)}
+                  label="新 PIN"
+                />
               </div>
 
               <div>

@@ -6,7 +6,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+from app.services.analysis_errors import AnalysisErrorCode
+from app.services.action_profiles import get_jump_characteristics
 from app.services.providers import extract_message_text, get_active_provider
 from app.services.report import clean_json_text
 from app.services.snowball import build_memory_context
@@ -20,7 +21,35 @@ VISION_SYSTEM_PROMPT = (
     "你的输出必须严格遵循指定 JSON 格式，不得输出任何格式之外的文字。"
 )
 
+PROFILE_HINTS: dict[str, str] = {
+    "jump": (
+        "重点观察：① 起跳阶段膝关节弯曲深度（深蹲效果）"
+        " ② 腾空阶段手臂是否快速收紧至胸前"
+        " ③ 落冰阶段是否为单腿支撑、膝盖弯曲缓冲"
+        " ④ 轴线是否保持垂直，无明显侧倾。"
+    ),
+    "spin": (
+        "重点观察：① 旋转轴垂直度，是否存在前倾/后仰漂移"
+        " ② 手臂/腿收紧与旋转加速的对应关系"
+        " ③ 入转和出转冰刃切换是否流畅"
+        " ④ 头部固定点（spotting）是否存在。"
+    ),
+    "spiral": (
+        "重点观察：① 自由腿高度，理想应超过髋关节水平线"
+        " ② 支撑腿膝盖是否完全伸直"
+        " ③ 躯干稳定性，不应有明显晃动"
+        " ④ 手臂姿态是否与身体轴线协调。"
+    ),
+    "step": (
+        "重点观察：① 冰刃切换节奏是否与音乐/节拍匹配"
+        " ② 膝盖推送力度，每步是否有明显 push"
+        " ③ 上半身（肩/臂）是否过度摆动"
+        " ④ 重心转移是否平稳，无明显身体侧倾。"
+    ),
+}
+
 VALID_PHASES = {"准备", "起跳", "腾空", "落冰", "滑出", "旋转入", "旋转中", "旋转出", "步法", "不可分析"}
+VALID_DATA_QUALITY_HINTS = {"good", "partial", "poor"}
 
 
 def _fallback_frame(frame_id: str) -> dict[str, Any]:
@@ -71,7 +100,13 @@ def normalize_vision_payload(payload: dict[str, Any], frame_payloads: list[Frame
         if str(phase) in VALID_PHASES and str(phase) != "不可分析"
     ]
 
-    return {
+    data_quality_hint = str(payload.get("data_quality_hint", "")).strip().lower()
+    if data_quality_hint not in VALID_DATA_QUALITY_HINTS:
+        data_quality_hint = ""
+
+    fallback_reason = str(payload.get("fallback_reason", "")).strip()
+
+    normalized_payload = {
         "frame_analysis": frame_analysis,
         "action_phase_summary": {
             "detected_phases": detected_phases,
@@ -80,6 +115,11 @@ def normalize_vision_payload(payload: dict[str, Any], frame_payloads: list[Frame
         },
         "overall_raw_text": str(payload.get("overall_raw_text", "")).strip(),
     }
+    if data_quality_hint:
+        normalized_payload["data_quality_hint"] = data_quality_hint
+    if fallback_reason:
+        normalized_payload["fallback_reason"] = fallback_reason
+    return normalized_payload
 
 
 async def analyze_frames(
@@ -96,12 +136,17 @@ async def analyze_frames(
     extra_body = {"enable_thinking": False} if provider.model_id == "qwen3.6-plus" else None
     memory_context = await build_memory_context(skater_id)
     system_prompt = VISION_SYSTEM_PROMPT if not memory_context else f"{VISION_SYSTEM_PROMPT}\n\n{memory_context}"
+    max_tokens = min(8000, 400 + len(frame_payloads) * 250)
 
     evidence_text = json.dumps(profile_evidence or {}, ensure_ascii=False)
+    profile_key = (analysis_profile or "jump").strip().lower()
+    profile_hint = PROFILE_HINTS.get(profile_key, PROFILE_HINTS["jump"])
+    jump_chars = get_jump_characteristics(action_subtype)
     user_prompt = (
         f"分析以下【{action_type}】动作帧序列（共 {len(frame_payloads)} 帧，按时间顺序排列）。\n"
         f"动作子类型：{action_subtype or '未指定'}\n"
         f"分析 profile：{analysis_profile or 'unknown'}\n"
+        f"{profile_hint}\n"
         f"规则证据：{evidence_text}\n"
         "重要约束：如果是燕式滑行/螺旋线，不要误判为跳跃，除非存在清晰的起跳、腾空、落冰证据。\n\n"
         "对每一帧，输出以下结构化数据：\n\n"
@@ -130,8 +175,17 @@ async def analyze_frames(
         "  },\n"
         '  "overall_raw_text": "综合文字描述 2-3 句"\n'
         "}\n\n"
-        "必须只输出 JSON。"
+        "每帧的 issues 和 positives 各不超过 2 条，每条不超过 30 字。\n"
+        "必须只输出 JSON，禁止任何解释文字。"
     )
+    if jump_chars and profile_key == "jump":
+        user_prompt += (
+            "\n跳跃类型专项信息：\n"
+            f"  起跳刃型：{jump_chars['takeoff_edge']}\n"
+            f"  方向特征：{jump_chars['direction']}\n"
+            f"  重点检查：{jump_chars['key_check']}\n"
+            f"  圈数说明：{jump_chars['rotation_note']}\n"
+        )
 
     content: list[dict[str, object]] = [{"type": "text", "text": user_prompt}]
     for frame in frame_payloads:
@@ -141,7 +195,7 @@ async def analyze_frames(
     response = await client.chat.completions.create(
         model=provider.model_id,
         temperature=0.1,
-        max_tokens=3500,
+        max_tokens=max_tokens,
         extra_body=extra_body,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -154,11 +208,7 @@ async def analyze_frames(
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        logger.warning("Vision JSON parse failed: %s", exc)
-        raise AnalysisPipelineError(
-            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
-            f"Vision JSON parse failed: {exc}: {cleaned[:500]}",
-        ) from exc
+        logger.warning("Vision JSON parse failed: %s | raw: %s", exc, cleaned[:300])
         parsed = {
             "frame_analysis": [_fallback_frame(frame.frame_id) for frame in frame_payloads],
             "action_phase_summary": {
@@ -167,6 +217,8 @@ async def analyze_frames(
                 "strongest_phase": "不可分析",
             },
             "overall_raw_text": raw_content[:500],
+            "data_quality_hint": "poor",
+            "fallback_reason": AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value,
         }
 
     return normalize_vision_payload(parsed, frame_payloads)

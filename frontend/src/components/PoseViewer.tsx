@@ -31,9 +31,9 @@ function keypointColor(point: PoseKeypoint) {
 
 function drawPose(
   canvas: HTMLCanvasElement,
-  image: HTMLImageElement | null,
   frame: PoseFrame,
   connections: number[][],
+  hasFrameImage: boolean,
 ) {
   const context = canvas.getContext("2d");
   if (!context) {
@@ -54,12 +54,9 @@ function drawPose(
 
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#020617";
-  context.fillRect(0, 0, width, height);
 
-  if (image?.complete) {
-    context.drawImage(image, 0, 0, width, height);
-    context.fillStyle = "rgba(2, 6, 23, 0.22)";
+  if (!hasFrameImage) {
+    context.fillStyle = "#020617";
     context.fillRect(0, 0, width, height);
   }
 
@@ -79,7 +76,11 @@ function drawPose(
       context.fillRect(frame.target_bbox.x * width, Math.max(0, frame.target_bbox.y * height - 24), 112, 20);
       context.fillStyle = "#E0F2FE";
       context.font = "12px sans-serif";
-      context.fillText(`lock ${(frame.tracking_confidence * 100).toFixed(0)}%`, frame.target_bbox.x * width + 8, Math.max(14, frame.target_bbox.y * height - 10));
+      context.fillText(
+        `lock ${(frame.tracking_confidence * 100).toFixed(0)}%`,
+        frame.target_bbox.x * width + 8,
+        Math.max(14, frame.target_bbox.y * height - 10),
+      );
     }
   }
 
@@ -119,9 +120,11 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseV
   const lastTickRef = useRef<number>(0);
   const [frameIndex, setFrameIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [frameImageError, setFrameImageError] = useState(false);
 
   const frames = pose.frames;
   const currentFrame = frames[frameIndex];
+  const currentFrameUrl = currentFrame ? pose.frame_urls[currentFrame.frame] ?? "" : "";
 
   useEffect(() => {
     if (!activeFrameId) {
@@ -139,28 +142,26 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseV
       return;
     }
 
+    setFrameImageError(false);
+
     const redraw = () => {
       if (canvasRef.current) {
-        drawPose(canvasRef.current, imageRef.current, currentFrame, pose.connections);
+        drawPose(
+          canvasRef.current,
+          currentFrame,
+          pose.connections,
+          Boolean(currentFrameUrl) && !frameImageError && Boolean(imageRef.current?.complete),
+        );
       }
-    };
-    const image = new Image();
-    image.src = pose.frame_urls[currentFrame.frame] ?? "";
-    image.onload = () => {
-      imageRef.current = image;
-      redraw();
-    };
-    image.onerror = () => {
-      imageRef.current = null;
-      redraw();
     };
 
     onFrameChange?.(frameIdFromName(currentFrame.frame));
+    redraw();
     window.addEventListener("resize", redraw);
     return () => {
       window.removeEventListener("resize", redraw);
     };
-  }, [currentFrame, onFrameChange, pose.connections, pose.frame_urls]);
+  }, [currentFrame, currentFrameUrl, frameImageError, onFrameChange, pose.connections]);
 
   useEffect(() => {
     if (!isPlaying || frames.length <= 1) {
@@ -200,7 +201,32 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseV
 
   return (
     <div className="space-y-4">
-      <canvas ref={canvasRef} className="h-auto w-full rounded-[1.5rem] border border-white/10 bg-slate-950" />
+      <div className="relative overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950">
+        <div className="aspect-video w-full">
+          {currentFrameUrl && !frameImageError ? (
+            <img
+              ref={imageRef}
+              src={currentFrameUrl}
+              alt={currentFrame ? `pose frame ${frameIdFromName(currentFrame.frame)}` : "pose frame"}
+              className="absolute inset-0 h-full w-full object-contain"
+              onLoad={() => {
+                if (canvasRef.current && currentFrame) {
+                  drawPose(canvasRef.current, currentFrame, pose.connections, true);
+                }
+              }}
+              onError={() => {
+                imageRef.current = null;
+                setFrameImageError(true);
+              }}
+            />
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center bg-slate-950 text-sm text-slate-300">
+              当前帧图片加载失败，已退回骨骼视图
+            </div>
+          )}
+          <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+        </div>
+      </div>
 
       <div className="flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-white/10 bg-white/5 p-3">
         <button type="button" className="pose-control" onClick={() => jumpTo(0)}>

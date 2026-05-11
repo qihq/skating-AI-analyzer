@@ -44,6 +44,17 @@ class AnalysisRetryResponse(BaseModel):
     message: str
 
 
+class AnalysisLogEntry(BaseModel):
+    timestamp: str
+    stage: str
+    level: str
+    message: str
+    elapsed_s: float | None = None
+    retry_from_stage: str | None = None
+    error_code: str | None = None
+    detail: str | None = None
+
+
 class AnalysisListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,6 +66,7 @@ class AnalysisListItem(BaseModel):
     action_type: str
     action_subtype: str | None = None
     analysis_profile: str | None = None
+    pipeline_version: str | None = None
     status: str
     force_score: int | None = None
     note: str | None = None
@@ -73,6 +85,8 @@ class AnalysisDetail(BaseModel):
     action_type: str
     action_subtype: str | None = None
     analysis_profile: str | None = None
+    retry_from_stage: str | None = None
+    pipeline_version: str | None = None
     video_path: str
     status: str
     vision_raw: str | None = None
@@ -81,6 +95,8 @@ class AnalysisDetail(BaseModel):
     pose_data: dict[str, Any] | None = None
     bio_data: dict[str, Any] | None = None
     frame_motion_scores: dict[str, Any] | None = None
+    processing_timings: dict[str, float] | None = None
+    processing_logs: list[AnalysisLogEntry] = Field(default_factory=list)
     target_lock: dict[str, Any] | None = None
     target_lock_status: str | None = None
     action_window_start: float | None = None

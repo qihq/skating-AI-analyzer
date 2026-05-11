@@ -114,6 +114,10 @@ export interface AnalysisDetail extends AnalysisListItem {
   pose_data: PoseResponse | null;
   bio_data: BioData | null;
   frame_motion_scores: Record<string, unknown> | null;
+  pipeline_version: string | null;
+  retry_from_stage: string | null;
+  processing_timings: Record<string, number> | null;
+  processing_logs: AnalysisLogEntry[];
   target_lock: Record<string, unknown> | null;
   target_lock_status: string | null;
   action_window_start: number | null;
@@ -125,6 +129,17 @@ export interface AnalysisDetail extends AnalysisListItem {
   error_code: AnalysisErrorCode | null;
   error_detail: string | null;
   error_message: string | null;
+}
+
+export interface AnalysisLogEntry {
+  timestamp: string;
+  stage: string;
+  level: string;
+  message: string;
+  elapsed_s?: number | null;
+  retry_from_stage?: string | null;
+  error_code?: string | null;
+  detail?: string | null;
 }
 
 export interface UploadResponse {
@@ -472,7 +487,7 @@ export interface PoseRuntimeStatus {
 
 export const apiClient = axios.create({
   baseURL: "/api",
-  timeout: 300000,
+  timeout: 600000,
 });
 
 export function uploadAnalysis(
@@ -487,7 +502,7 @@ export function uploadAnalysis(
     const url = `${apiClient.defaults.baseURL ?? ""}/analysis/upload`;
 
     request.open("POST", url, true);
-    request.timeout = typeof apiClient.defaults.timeout === "number" ? apiClient.defaults.timeout : 300000;
+    request.timeout = typeof apiClient.defaults.timeout === "number" ? apiClient.defaults.timeout : 600000;
     request.withCredentials = apiClient.defaults.withCredentials ?? false;
     request.responseType = "json";
 

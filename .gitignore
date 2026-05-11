@@ -13,6 +13,9 @@ models/*.task
 tmp-test/
 *.tmp
 *.log
+.claude/
+deliverables/
+backend/tests/__pycache__/
 
 # Python
 __pycache__/

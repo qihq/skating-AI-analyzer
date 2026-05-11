@@ -35,6 +35,29 @@ export function getAnalysisStatusLabel(status: AnalysisStatus | string): string 
   }
 }
 
+export function getAnalysisStageDescription(status: AnalysisStatus | string | null | undefined): string {
+  switch (status) {
+    case "pending":
+      return "任务已入队，正在准备分析环境。";
+    case "processing":
+      return "分析流程已启动，正在进入首个处理阶段。";
+    case "extracting_frames":
+      return "正在抽取关键帧，并尝试锁定主滑行者。";
+    case "awaiting_target_selection":
+      return "自动锁定置信度不足，等待确认主滑行者后继续。";
+    case "analyzing":
+      return "关键帧已送入视觉模型，正在生成结构化观察。";
+    case "generating_report":
+      return "视觉结果与生物力学指标已就绪，正在汇总报告。";
+    case "completed":
+      return "分析已完成，可以查看完整报告。";
+    case "failed":
+      return "分析已中断，请查看调试日志或重试。";
+    default:
+      return "正在同步分析状态。";
+  }
+}
+
 export function getAnalysisProcessingStage(status: AnalysisStatus | string | null | undefined): number {
   switch (status) {
     case "pending":

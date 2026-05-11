@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -12,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTT
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.database import AsyncSessionLocal, UPLOADS_DIR, get_session
 from app.models import Analysis, Skater, TrainingPlan, TrainingSession
@@ -35,7 +38,7 @@ from app.schemas import (
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
 )
-from app.services.action_profiles import infer_analysis_profile, infer_profile_hint, normalize_action_subtype
+from app.services.action_profiles import infer_analysis_profile, infer_profile_from_input, infer_profile_hint, normalize_action_subtype
 from app.services.analysis_errors import (
     AnalysisErrorCode,
     classify_ai_failure,
@@ -47,6 +50,8 @@ from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
 from app.services.plan import extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
+from app.services.phase_smoother import smooth_phases
+from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.report import calculate_force_score, generate_report
 from app.services.skill_progress import auto_update_skill_progress
@@ -65,6 +70,7 @@ from app.services.video import (
     encode_frames,
     extract_motion_sampled_frames,
     persist_frames,
+    restore_sampled_frames,
     save_upload_file,
 )
 from app.services.vision import analyze_frames
@@ -77,13 +83,213 @@ frames_router = APIRouter(prefix="/api/frames", tags=["frames"])
 VALID_ACTION_TYPES = {"跳跃", "旋转", "步法", "自由滑"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 logger = logging.getLogger(__name__)
+PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
+MAX_ANALYSIS_LOG_ENTRIES = 200
+STALE_ANALYSIS_TIMEOUT_SECONDS = 600
+IN_PROGRESS_ANALYSIS_STATUSES = {
+    "pending",
+    "processing",
+    "extracting_frames",
+    "analyzing",
+    "generating_report",
+}
 
 
 def _skater_display_name(skater: Skater) -> str:
     return skater.display_name or skater.name
 
 
-async def process_analysis(analysis_id: str) -> None:
+def _elapsed_seconds(start_time: float) -> float:
+    return round(time.monotonic() - start_time, 2)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_processing_logs(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)][-MAX_ANALYSIS_LOG_ENTRIES:]
+
+
+def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_log_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return _coerce_utc_datetime(parsed)
+
+
+def _retry_stage_from_status(status_value: str | None) -> str | None:
+    if status_value == "extracting_frames":
+        return "extract_frames"
+    if status_value == "analyzing":
+        return "vision"
+    if status_value == "generating_report":
+        return "report"
+    if status_value in {"pending", "processing"}:
+        return "extract_frames"
+    return None
+
+
+def _build_stale_analysis_snapshot(analysis: Analysis) -> Analysis | None:
+    if analysis.status not in IN_PROGRESS_ANALYSIS_STATUSES:
+        return None
+
+    logs = _normalize_processing_logs(analysis.processing_logs)
+    latest_log_ts = max(
+        (timestamp for timestamp in (_parse_log_timestamp(item.get("timestamp")) for item in logs) if timestamp is not None),
+        default=None,
+    )
+    updated_at = _coerce_utc_datetime(analysis.updated_at)
+    reference_time = max((value for value in (latest_log_ts, updated_at) if value is not None), default=None)
+    if reference_time is None:
+        return None
+
+    stale_for_seconds = (datetime.now(timezone.utc) - reference_time).total_seconds()
+    if stale_for_seconds < STALE_ANALYSIS_TIMEOUT_SECONDS:
+        return None
+
+    retry_from_stage = analysis.retry_from_stage or _retry_stage_from_status(analysis.status)
+    detail = (
+        f"Analysis heartbeat stalled for {round(stale_for_seconds, 1)}s while status={analysis.status}. "
+        "The worker likely exited before writing a terminal state."
+    )
+    logger.warning("Analysis %s detected as stale in-progress task: %s", analysis.id, detail)
+
+    logs.append(
+        {
+            "timestamp": _utc_now_iso(),
+            "stage": "pipeline",
+            "level": "error",
+            "message": "分析任务长时间无进展，已自动标记为失败，可重试。",
+            "retry_from_stage": retry_from_stage,
+            "error_code": AnalysisErrorCode.UNKNOWN_ERROR.value,
+            "detail": detail,
+        }
+    )
+    snapshot = Analysis()
+    for key, value in analysis.__dict__.items():
+        if key.startswith("_sa_"):
+            continue
+        setattr(snapshot, key, value)
+    snapshot.status = "failed"
+    snapshot.retry_from_stage = retry_from_stage
+    snapshot.error_code = AnalysisErrorCode.UNKNOWN_ERROR.value
+    snapshot.error_message = "分析任务中断，请重试。"
+    snapshot.error_detail = detail
+    snapshot.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
+    return snapshot
+
+
+async def _recover_stale_analyses(session: AsyncSession, analyses: list[Analysis]) -> list[Analysis]:
+    recovered: list[Analysis] = []
+    for analysis in analyses:
+        recovered.append(_build_stale_analysis_snapshot(analysis) or analysis)
+    return recovered
+
+
+async def _append_analysis_log(
+    analysis_id: str,
+    *,
+    stage: str,
+    level: str,
+    message: str,
+    elapsed_s: float | None = None,
+    retry_from_stage: str | None = None,
+    error_code: str | None = None,
+    detail: str | None = None,
+    status_value: str | None = None,
+    timings: dict[str, float] | None = None,
+) -> None:
+    entry: dict[str, Any] = {
+        "timestamp": _utc_now_iso(),
+        "stage": stage,
+        "level": level,
+        "message": message,
+    }
+    if elapsed_s is not None:
+        entry["elapsed_s"] = round(float(elapsed_s), 2)
+    if retry_from_stage:
+        entry["retry_from_stage"] = retry_from_stage
+    if error_code:
+        entry["error_code"] = error_code
+    if detail:
+        entry["detail"] = detail
+
+    log_method = getattr(logger, level.lower(), logger.info)
+    log_method("Analysis %s [%s] %s", analysis_id, stage, message)
+
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            logs = _normalize_processing_logs(analysis.processing_logs)
+            logs.append(entry)
+            analysis.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
+            if status_value is not None:
+                analysis.status = status_value
+            if timings is not None:
+                analysis.processing_timings = dict(timings)
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Analysis %s failed to append processing log", analysis_id)
+
+
+def _log_analysis_timings(
+    analysis_id: str,
+    timings: dict[str, float],
+    *,
+    context: str = "completed",
+) -> None:
+    logger.info("Analysis %s timings (%s): %s", analysis_id, context, timings)
+
+
+async def _persist_processing_timings(analysis_id: str, timings: dict[str, float]) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.processing_timings = dict(timings)
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Analysis %s failed to persist processing timings", analysis_id)
+
+
+def _is_retry_stage(value: str | None) -> bool:
+    return value in PIPELINE_STAGES
+
+
+def _default_retry_stage_for_error(error_code: str | None) -> str | None:
+    if not error_code:
+        return None
+    if error_code in {
+        AnalysisErrorCode.AI_API_TIMEOUT.value,
+        AnalysisErrorCode.AI_API_AUTH_ERROR.value,
+        AnalysisErrorCode.AI_API_QUOTA_EXCEEDED.value,
+        AnalysisErrorCode.AI_API_CONTENT_FILTER.value,
+        AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value,
+    }:
+        return "vision"
+    return None
+
+
+async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
+    timings: dict[str, float] = {}
+    total_start = time.monotonic()
     processing_frames_dir: Path | None = None
     upload_frames_dir: Path | None = None
     action_type: str | None = None
@@ -96,27 +302,36 @@ async def process_analysis(analysis_id: str) -> None:
     saved_action_window_end = 0.0
     saved_source_fps = 30.0
     saved_is_slow_motion = False
+    retry_from_stage: str | None = retry_from if _is_retry_stage(retry_from) else None
     try:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
                 return
 
-            analysis.status = "processing"
+            if retry_from_stage is None and _is_retry_stage(analysis.retry_from_stage):
+                retry_from_stage = analysis.retry_from_stage
+            if retry_from_stage is None:
+                retry_from_stage = _default_retry_stage_for_error(analysis.error_code)
+
+            analysis.status = 'processing'
             analysis.error_code = None
             analysis.error_detail = None
             analysis.error_message = None
+            analysis.processing_timings = None
+            analysis.processing_logs = []
             await session.commit()
-            logger.info("Analysis %s entered processing", analysis_id)
+            logger.info('Analysis %s entered processing from stage=%s', analysis_id, retry_from_stage or 'extract_frames')
 
             action_type = analysis.action_type
             action_subtype = normalize_action_subtype(analysis.action_type, analysis.action_subtype)
-            analysis_profile_hint = infer_profile_hint(action_type, action_subtype)
+            analysis_profile_hint = analysis.analysis_profile or infer_profile_hint(action_type, action_subtype)
             skater_id = analysis.skater_id
             video_path = _video_path_for_analysis(analysis)
-            upload_frames_dir = video_path.parent / "frames"
+            upload_frames_dir = video_path.parent / 'frames'
             _, processing_frames_dir = build_processing_frames_dir(analysis_id)
             analysis.action_subtype = action_subtype
+            analysis.pipeline_version = CURRENT_PIPELINE_VERSION
             await session.commit()
             existing_target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else None
             saved_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
@@ -125,92 +340,362 @@ async def process_analysis(analysis_id: str) -> None:
             saved_source_fps = float(analysis.source_fps or 30.0)
             saved_is_slow_motion = bool(analysis.is_slow_motion)
 
-        await _set_analysis_status(analysis_id, "extracting_frames")
+        await _append_analysis_log(
+            analysis_id,
+            stage='pipeline',
+            level='info',
+            message=f"开始分析流程，从 {retry_from_stage or 'extract_frames'} 阶段启动。",
+            retry_from_stage=retry_from_stage,
+        )
 
-        if existing_target_lock and str(existing_target_lock.get("status")) == "locked" and upload_frames_dir is not None and upload_frames_dir.exists():
-            sampled_frames = persist_frames(sorted(upload_frames_dir.glob("frame_*.jpg")), processing_frames_dir)
+        from app.services.video import VideoSamplingMetadata
+
+        start_idx = PIPELINE_STAGES.index(retry_from_stage) if retry_from_stage else 0
+        run_extract_frames = start_idx <= PIPELINE_STAGES.index('extract_frames')
+        run_pose = start_idx <= PIPELINE_STAGES.index('pose')
+        run_biomechanics = start_idx <= PIPELINE_STAGES.index('biomechanics')
+        run_vision = start_idx <= PIPELINE_STAGES.index('vision')
+
+        sampled_frames: list[Path]
+        motion_scores: dict[str, object]
+        sampling_metadata: VideoSamplingMetadata
+        target_lock: dict[str, Any]
+
+        if run_extract_frames:
+            await _append_analysis_log(
+                analysis_id,
+                stage='extract_frames',
+                level='info',
+                message='开始提取关键帧。',
+                status_value='extracting_frames',
+            )
+            await _set_analysis_status(analysis_id, 'extracting_frames')
+            extract_start = time.monotonic()
+            if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' and upload_frames_dir is not None and upload_frames_dir.exists():
+                sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
+                motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
+                sampling_metadata = VideoSamplingMetadata(
+                    action_window_start=saved_action_window_start,
+                    action_window_end=saved_action_window_end,
+                    source_fps=saved_source_fps,
+                    is_slow_motion=saved_is_slow_motion,
+                )
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='extract_frames',
+                    level='info',
+                    message='复用已锁定目标后的缓存帧，无需重新抽帧。',
+                )
+            else:
+                try:
+                    logger.info('Analysis %s extracting frames with profile=%s', analysis_id, analysis_profile_hint)
+                    sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
+                        video_path,
+                        processing_frames_dir,
+                        action_type,
+                        analysis_profile_hint,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failure = classify_video_failure(exc)
+                    timings['total_s'] = _elapsed_seconds(total_start)
+                    await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage='extract_frames', timings=timings)
+                    return
+            timings['extract_frames_s'] = _elapsed_seconds(extract_start)
+            logger.info('Analysis %s motion-sampled %s frames', analysis_id, len(sampled_frames))
+            await _append_analysis_log(
+                analysis_id,
+                stage='extract_frames',
+                level='info',
+                message=f'关键帧提取完成，共 {len(sampled_frames)} 帧。',
+                elapsed_s=timings['extract_frames_s'],
+                timings=timings,
+            )
+            if upload_frames_dir is not None:
+                persist_frames(sampled_frames, upload_frames_dir)
+
+            preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
+            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' else build_target_lock_payload(preview)
+
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None:
+                    return
+                analysis.frame_motion_scores = motion_scores
+                analysis.processing_timings = dict(timings)
+                analysis.action_window_start = sampling_metadata.action_window_start
+                analysis.action_window_end = sampling_metadata.action_window_end
+                analysis.source_fps = sampling_metadata.source_fps
+                analysis.is_slow_motion = sampling_metadata.is_slow_motion
+                analysis.target_lock = target_lock
+                analysis.target_lock_status = target_lock['status']
+                analysis.retry_from_stage = 'pose'
+                await session.commit()
+
+            if (not existing_target_lock or str(existing_target_lock.get('status')) != 'locked') and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
+                if upload_frames_dir is not None:
+                    persist_frames(sampled_frames, upload_frames_dir)
+                timings['total_s'] = _elapsed_seconds(total_start)
+                await _persist_processing_timings(analysis_id, timings)
+                _log_analysis_timings(analysis_id, timings, context='awaiting_target_selection')
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='extract_frames',
+                    level='warning',
+                    message='自动锁定主滑行者置信度不足，等待手动确认目标。',
+                    timings=timings,
+                )
+                await _set_analysis_status(analysis_id, 'awaiting_target_selection')
+                return
+        else:
+            if upload_frames_dir is None or not upload_frames_dir.exists():
+                raise RuntimeError('?????????????????')
+            sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
             motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
-            from app.services.video import VideoSamplingMetadata
-
             sampling_metadata = VideoSamplingMetadata(
                 action_window_start=saved_action_window_start,
                 action_window_end=saved_action_window_end,
                 source_fps=saved_source_fps,
                 is_slow_motion=saved_is_slow_motion,
             )
-        else:
+            preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
+            target_lock = existing_target_lock if existing_target_lock else build_target_lock_payload(preview)
+            await _append_analysis_log(
+                analysis_id,
+                stage='extract_frames',
+                level='info',
+                message=f'分段重试复用缓存关键帧，共 {len(sampled_frames)} 帧。',
+                retry_from_stage=retry_from_stage,
+            )
+
+        pose_data: dict[str, Any]
+        if run_pose:
             try:
-                sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
-                    video_path,
-                    processing_frames_dir,
-                    action_type,
-                    analysis_profile_hint,
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='pose',
+                    level='info',
+                    message='开始提取姿态关键点。',
+                )
+                pose_start = time.monotonic()
+                pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir), target_lock)
+                timings['pose_s'] = _elapsed_seconds(pose_start)
+                async with AsyncSessionLocal() as session:
+                    analysis = await session.get(Analysis, analysis_id)
+                    if analysis is None:
+                        return
+                    analysis.pose_data = pose_data
+                    analysis.processing_timings = dict(timings)
+                    analysis.retry_from_stage = 'biomechanics'
+                    await session.commit()
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='pose',
+                    level='info',
+                    message=f'姿态提取完成，共 {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} 帧。',
+                    elapsed_s=timings['pose_s'],
+                    timings=timings,
                 )
             except Exception as exc:  # noqa: BLE001
-                failure = classify_video_failure(exc)
-                await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+                timings['total_s'] = _elapsed_seconds(total_start)
+                await _mark_analysis_failed(
+                    analysis_id,
+                    AnalysisErrorCode.UNKNOWN_ERROR,
+                    stringify_exception(exc),
+                    stage='pose',
+                    timings=timings,
+                )
                 return
-        logger.info("Analysis %s motion-sampled %s frames", analysis_id, len(sampled_frames))
-
-        preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
-        target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get("status")) == "locked" else build_target_lock_payload(preview)
-
-        async with AsyncSessionLocal() as session:
-            analysis = await session.get(Analysis, analysis_id)
-            if analysis is None:
-                return
-            analysis.frame_motion_scores = motion_scores
-            analysis.action_window_start = sampling_metadata.action_window_start
-            analysis.action_window_end = sampling_metadata.action_window_end
-            analysis.source_fps = sampling_metadata.source_fps
-            analysis.is_slow_motion = sampling_metadata.is_slow_motion
-            analysis.target_lock = target_lock
-            analysis.target_lock_status = target_lock["status"]
-            await session.commit()
-
-        if (not existing_target_lock or str(existing_target_lock.get("status")) != "locked") and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
-            if upload_frames_dir is not None:
-                persist_frames(sampled_frames, upload_frames_dir)
-            await _set_analysis_status(analysis_id, "awaiting_target_selection")
-            return
-
-        try:
-            pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir), target_lock)
-            analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
-            bio_data = analyze_biomechanics(pose_data, action_type, analysis_profile)
-        except Exception as exc:  # noqa: BLE001
-            await _mark_analysis_failed(analysis_id, AnalysisErrorCode.UNKNOWN_ERROR, stringify_exception(exc))
-            return
-
-        await _set_analysis_status(analysis_id, "analyzing")
-
-        try:
-            payloads = await encode_frames(sampled_frames)
-            vision_structured = await analyze_frames(
-                action_type,
-                payloads,
-                skater_id,
-                action_subtype=action_subtype,
-                analysis_profile=analysis_profile,
-                profile_evidence=profile_evidence,
+        else:
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None or not isinstance(analysis.pose_data, dict):
+                    raise RuntimeError('???????????? pose_data?')
+                pose_data = analysis.pose_data
+            await _append_analysis_log(
+                analysis_id,
+                stage='pose',
+                level='info',
+                message='分段重试复用已有姿态结果。',
+                retry_from_stage=retry_from_stage,
             )
-            vision_raw = json.dumps(vision_structured, ensure_ascii=False)
-        except Exception as exc:  # noqa: BLE001
-            failure = classify_ai_failure(exc)
-            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
-            return
-        logger.info("Analysis %s received vision result", analysis_id)
 
-        await _set_analysis_status(analysis_id, "generating_report")
+        analysis_profile: str
+        profile_evidence: dict[str, Any]
+        bio_data: dict[str, Any]
+        if run_biomechanics:
+            try:
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='biomechanics',
+                    level='info',
+                    message='开始计算生物力学指标。',
+                )
+                biomechanics_start = time.monotonic()
+                analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
+                bio_data = analyze_biomechanics(pose_data, action_type, analysis_profile)
+                if isinstance(bio_data, dict):
+                    merged_quality_flags = bio_data.get('quality_flags') if isinstance(bio_data.get('quality_flags'), list) else []
+                    merged_quality_flags.extend(
+                        flag for flag in profile_evidence.get('quality_flags', []) if flag not in merged_quality_flags
+                    )
+                    bio_data['quality_flags'] = merged_quality_flags
+                    bio_data['profile_evidence'] = profile_evidence
+                    if 'jump_gate_not_passed' in merged_quality_flags:
+                        quality_hint = next(
+                            (
+                                message
+                                for message in profile_evidence.get('negative_constraints', [])
+                                if isinstance(message, str) and '??????' in message
+                            ),
+                            '???????CoM ????????????????????? jump ???',
+                        )
+                        bio_data['jump_metrics_warning'] = quality_hint
+                    if 'spin_rotation_signal_weak' in merged_quality_flags:
+                        profile_warning = next(
+                            (
+                                message
+                                for message in profile_evidence.get('negative_constraints', [])
+                                if isinstance(message, str) and '???????' in message
+                            ),
+                            '???????????????? spin ?????????????????',
+                        )
+                        bio_data['profile_warning'] = profile_warning
+                timings['biomechanics_s'] = _elapsed_seconds(biomechanics_start)
+                async with AsyncSessionLocal() as session:
+                    analysis = await session.get(Analysis, analysis_id)
+                    if analysis is None:
+                        return
+                    analysis.bio_data = bio_data
+                    analysis.analysis_profile = analysis_profile
+                    analysis.processing_timings = dict(timings)
+                    analysis.retry_from_stage = 'vision'
+                    await session.commit()
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='biomechanics',
+                    level='info',
+                    message=f'生物力学计算完成，profile={analysis_profile}。',
+                    elapsed_s=timings['biomechanics_s'],
+                    timings=timings,
+                )
+            except Exception as exc:  # noqa: BLE001
+                timings['total_s'] = _elapsed_seconds(total_start)
+                await _mark_analysis_failed(
+                    analysis_id,
+                    AnalysisErrorCode.UNKNOWN_ERROR,
+                    stringify_exception(exc),
+                    stage='biomechanics',
+                    timings=timings,
+                )
+                return
+        else:
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None or not isinstance(analysis.bio_data, dict):
+                    raise RuntimeError('???????????? bio_data?')
+                bio_data = analysis.bio_data
+                analysis_profile = analysis.analysis_profile or analysis_profile_hint or 'jump'
+                profile_evidence = bio_data.get('profile_evidence', {}) if isinstance(bio_data.get('profile_evidence'), dict) else {}
+            await _append_analysis_log(
+                analysis_id,
+                stage='biomechanics',
+                level='info',
+                message='分段重试复用已有生物力学结果。',
+                retry_from_stage=retry_from_stage,
+            )
+
+        if run_vision:
+            await _append_analysis_log(
+                analysis_id,
+                stage='vision',
+                level='info',
+                message='开始调用视觉模型分析关键帧。',
+                status_value='analyzing',
+            )
+            await _set_analysis_status(analysis_id, 'analyzing')
+            try:
+                vision_start = time.monotonic()
+                payloads = await encode_frames(sampled_frames)
+                vision_structured = await analyze_frames(
+                    action_type,
+                    payloads,
+                    skater_id,
+                    action_subtype=action_subtype,
+                    analysis_profile=analysis_profile,
+                    profile_evidence=profile_evidence,
+                )
+                frame_analysis = vision_structured.get('frame_analysis')
+                if isinstance(frame_analysis, list):
+                    vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile)
+                vision_raw = json.dumps(vision_structured, ensure_ascii=False)
+                timings['vision_s'] = _elapsed_seconds(vision_start)
+                async with AsyncSessionLocal() as session:
+                    analysis = await session.get(Analysis, analysis_id)
+                    if analysis is None:
+                        return
+                    analysis.vision_raw = vision_raw
+                    analysis.vision_structured = vision_structured
+                    analysis.processing_timings = dict(timings)
+                    analysis.retry_from_stage = 'report'
+                    await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                failure = classify_ai_failure(exc)
+                timings['total_s'] = _elapsed_seconds(total_start)
+                await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage='vision', timings=timings)
+                return
+            logger.info('Analysis %s received vision result', analysis_id)
+            await _append_analysis_log(
+                analysis_id,
+                stage='vision',
+                level='info',
+                message='视觉分析完成，已生成结构化帧观察。',
+                elapsed_s=timings['vision_s'],
+                timings=timings,
+            )
+        else:
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None or not isinstance(analysis.vision_structured, dict):
+                    raise RuntimeError('???????????? vision_structured?')
+                vision_structured = analysis.vision_structured
+                vision_raw = analysis.vision_raw or json.dumps(vision_structured, ensure_ascii=False)
+            await _append_analysis_log(
+                analysis_id,
+                stage='vision',
+                level='info',
+                message='分段重试复用已有视觉分析结果。',
+                retry_from_stage=retry_from_stage,
+            )
+
+        await _append_analysis_log(
+            analysis_id,
+            stage='report',
+            level='info',
+            message='开始生成训练报告。',
+            status_value='generating_report',
+        )
+        await _set_analysis_status(analysis_id, 'generating_report')
 
         try:
+            report_start = time.monotonic()
             report = await generate_report(action_type, vision_structured, bio_data, skater_id)
             force_score = calculate_force_score(report)
+            timings['report_s'] = _elapsed_seconds(report_start)
+            timings['total_s'] = _elapsed_seconds(total_start)
         except Exception as exc:  # noqa: BLE001
             failure = classify_ai_failure(exc)
-            await _mark_analysis_failed(analysis_id, failure.code, failure.detail)
+            timings['total_s'] = _elapsed_seconds(total_start)
+            await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage='report', timings=timings)
             return
-        logger.info("Analysis %s generated report with score %s", analysis_id, force_score)
+        logger.info('Analysis %s generated report with score %s', analysis_id, force_score)
+        await _append_analysis_log(
+            analysis_id,
+            stage='report',
+            level='info',
+            message=f'报告生成完成，Force Score={force_score}。',
+            elapsed_s=timings['report_s'],
+            timings=timings,
+        )
         if upload_frames_dir is not None:
             persist_frames(sampled_frames, upload_frames_dir)
 
@@ -226,18 +711,21 @@ async def process_analysis(analysis_id: str) -> None:
                 analysis.pose_data = pose_data
                 analysis.bio_data = bio_data
                 analysis.frame_motion_scores = motion_scores
+                analysis.processing_timings = dict(timings)
                 analysis.analysis_profile = analysis_profile
+                analysis.pipeline_version = CURRENT_PIPELINE_VERSION
                 analysis.target_lock = target_lock
-                analysis.target_lock_status = "auto_locked"
+                analysis.target_lock_status = 'auto_locked'
                 analysis.action_window_start = sampling_metadata.action_window_start
                 analysis.action_window_end = sampling_metadata.action_window_end
                 analysis.source_fps = sampling_metadata.source_fps
                 analysis.is_slow_motion = sampling_metadata.is_slow_motion
                 analysis.force_score = force_score
-                analysis.status = "completed"
+                analysis.status = 'completed'
                 analysis.error_code = None
                 analysis.error_detail = None
                 analysis.error_message = None
+                analysis.retry_from_stage = None
                 await auto_update_skill_progress(analysis_id, session)
                 if analysis.skater_id:
                     await sync_skater_progress(session, analysis.skater_id)
@@ -246,14 +734,37 @@ async def process_analysis(analysis_id: str) -> None:
                     try:
                         await suggest_memory_updates(analysis_id, analysis.skater_id, session)
                     except Exception:  # noqa: BLE001
-                        logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
-                logger.info("Analysis %s completed", analysis_id)
+                        logger.exception('Analysis %s memory suggestion generation failed', analysis_id)
+                _log_analysis_timings(analysis_id, timings)
+                logger.info('Analysis %s completed', analysis_id)
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='pipeline',
+                    level='info',
+                    message='分析流程已完成。',
+                    elapsed_s=timings['total_s'],
+                    timings=timings,
+                )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Analysis %s failed while saving report", analysis_id)
-            await _mark_analysis_failed(analysis_id, AnalysisErrorCode.REPORT_SAVE_FAILED, stringify_exception(exc))
+            logger.exception('Analysis %s failed while saving report', analysis_id)
+            timings['total_s'] = _elapsed_seconds(total_start)
+            await _mark_analysis_failed(
+                analysis_id,
+                AnalysisErrorCode.REPORT_SAVE_FAILED,
+                stringify_exception(exc),
+                stage='report',
+                timings=timings,
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Analysis %s failed", analysis_id)
-        await _mark_analysis_failed(analysis_id, AnalysisErrorCode.UNKNOWN_ERROR, stringify_exception(exc))
+        logger.exception('Analysis %s failed', analysis_id)
+        timings['total_s'] = _elapsed_seconds(total_start)
+        await _mark_analysis_failed(
+            analysis_id,
+            AnalysisErrorCode.UNKNOWN_ERROR,
+            stringify_exception(exc),
+            stage='pipeline',
+            timings=timings,
+        )
     finally:
         cleanup_processing_dir(analysis_id)
 
@@ -265,16 +776,37 @@ def _normalize_optional_text(value: str | None) -> str | None:
     return stripped or None
 
 
-async def _mark_analysis_failed(analysis_id: str, code: AnalysisErrorCode, detail: str) -> None:
+async def _mark_analysis_failed(
+    analysis_id: str,
+    code: AnalysisErrorCode,
+    detail: str,
+    *,
+    stage: str = "pipeline",
+    timings: dict[str, float] | None = None,
+) -> None:
     try:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
                 return
+            logs = _normalize_processing_logs(analysis.processing_logs)
+            logs.append(
+                {
+                    "timestamp": _utc_now_iso(),
+                    "stage": stage,
+                    "level": "error",
+                    "message": friendly_error_title(code),
+                    "error_code": code.value,
+                    "detail": detail,
+                }
+            )
             analysis.status = "failed"
             analysis.error_code = code.value
             analysis.error_detail = detail
             analysis.error_message = friendly_error_title(code)
+            analysis.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
+            if timings is not None:
+                analysis.processing_timings = dict(timings)
             await session.commit()
     except Exception:  # noqa: BLE001
         logger.exception("Analysis %s failed to persist error state", analysis_id)
@@ -465,6 +997,8 @@ def _detail_from_analysis(
         action_type=analysis.action_type,
         action_subtype=analysis.action_subtype,
         analysis_profile=analysis.analysis_profile,
+        retry_from_stage=analysis.retry_from_stage,
+        pipeline_version=analysis.pipeline_version,
         video_path=analysis.video_path,
         status=analysis.status,
         vision_raw=analysis.vision_raw,
@@ -473,6 +1007,8 @@ def _detail_from_analysis(
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
         frame_motion_scores=analysis.frame_motion_scores,
+        processing_timings=analysis.processing_timings,
+        processing_logs=_normalize_processing_logs(analysis.processing_logs),
         target_lock=analysis.target_lock,
         target_lock_status=analysis.target_lock_status,
         action_window_start=analysis.action_window_start,
@@ -554,12 +1090,62 @@ def _frames_dir_for_analysis(analysis: Analysis) -> Path:
     return UPLOADS_DIR / analysis.id / "frames"
 
 
+def _can_backfill_artifacts(status_value: str | None) -> bool:
+    return status_value in {"completed", "failed"}
+
+
+async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Analysis) -> tuple[Analysis, Path]:
+    frames_dir = _frames_dir_for_analysis(analysis)
+    existing_frame_paths = sorted(frames_dir.glob("frame_*.jpg")) if frames_dir.exists() else []
+    if existing_frame_paths:
+        return analysis, frames_dir
+
+    video_path = _video_path_for_analysis(analysis)
+    if not video_path.exists():
+        return analysis, frames_dir
+
+    logger.info("Analysis %s is missing persisted frame images, attempting backfill", analysis.id)
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    selected_frames = motion_scores.get("selected") if isinstance(motion_scores, dict) else None
+
+    restored_paths: list[Path] = []
+    if isinstance(selected_frames, list):
+        try:
+            restored_paths = await restore_sampled_frames(video_path, frames_dir, selected_frames)
+        except Exception:  # noqa: BLE001
+            logger.warning("Analysis %s failed to restore frames from saved timestamps", analysis.id, exc_info=True)
+
+    if not restored_paths:
+        processing_dir, processing_frames_dir = build_processing_frames_dir(analysis.id)
+        try:
+            restored_paths, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
+                video_path,
+                processing_frames_dir,
+                analysis.action_type,
+                analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+            )
+            persist_frames(restored_paths, frames_dir)
+            analysis.frame_motion_scores = motion_scores
+            analysis.action_window_start = sampling_metadata.action_window_start
+            analysis.action_window_end = sampling_metadata.action_window_end
+            analysis.source_fps = sampling_metadata.source_fps
+            analysis.is_slow_motion = sampling_metadata.is_slow_motion
+            await session.commit()
+            await session.refresh(analysis)
+        finally:
+            cleanup_processing_dir(analysis.id)
+    else:
+        logger.info("Analysis %s restored %s frame images from saved timestamps", analysis.id, len(restored_paths))
+
+    return analysis, frames_dir
+
+
 async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) -> Analysis:
-    if analysis.status != "completed":
+    if not _can_backfill_artifacts(analysis.status):
         return analysis
 
-    frames_dir = _frames_dir_for_analysis(analysis)
-    if not frames_dir.exists():
+    analysis, frames_dir = await _restore_missing_analysis_frames(session, analysis)
+    if analysis.status != "completed" or not frames_dir.exists():
         return analysis
 
     changed = False
@@ -615,6 +1201,7 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
         action_type=analysis.action_type,
         action_subtype=analysis.action_subtype,
         analysis_profile=analysis.analysis_profile,
+        pipeline_version=analysis.pipeline_version,
         status=analysis.status,
         force_score=analysis.force_score,
         note=analysis.note,
@@ -794,6 +1381,9 @@ async def upload_analysis(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    normalized_action_subtype = normalize_action_subtype(action_type, action_subtype)
+    inferred_input_profile = infer_profile_from_input(action_type, action_subtype)
+
     analysis = Analysis(
         id=analysis_id,
         skater_id=skater.id if skater else None,
@@ -801,10 +1391,14 @@ async def upload_analysis(
         skill_node_id=_normalize_optional_text(skill_node_id),
         skill_category=_normalize_optional_text(skill_category),
         action_type=action_type,
-        action_subtype=normalize_action_subtype(action_type, action_subtype),
+        action_subtype=normalized_action_subtype,
+        analysis_profile=inferred_input_profile,
+        pipeline_version=CURRENT_PIPELINE_VERSION,
         video_path=str(video_path),
         note=_normalize_optional_text(note),
         status="pending",
+        processing_timings=None,
+        retry_from_stage=None,
         target_lock_status="pending",
     )
     session.add(analysis)
@@ -851,14 +1445,36 @@ async def list_analyses(
     skater_id: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnalysisListItem]:
-    query = select(Analysis).order_by(Analysis.created_at.desc())
+    query = (
+        select(Analysis)
+        .options(
+            load_only(
+                Analysis.id,
+                Analysis.skater_id,
+                Analysis.session_id,
+                Analysis.skill_category,
+                Analysis.action_type,
+                Analysis.action_subtype,
+                Analysis.analysis_profile,
+                Analysis.pipeline_version,
+                Analysis.status,
+                Analysis.force_score,
+                Analysis.note,
+                Analysis.created_at,
+                Analysis.updated_at,
+                Analysis.retry_from_stage,
+                Analysis.processing_logs,
+            )
+        )
+        .order_by(Analysis.created_at.desc())
+    )
     if action_type:
         query = query.where(Analysis.action_type == action_type)
     if skater_id:
         query = query.where(Analysis.skater_id == skater_id)
 
     result = await session.execute(query)
-    analyses = list(result.scalars().all())
+    analyses = await _recover_stale_analyses(session, list(result.scalars().all()))
     skater_map = await _get_skater_map(session, {analysis.skater_id for analysis in analyses if analysis.skater_id})
     return [
         _list_item_from_analysis(
@@ -993,6 +1609,7 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
+    analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
     return _build_pose_response(analysis_id, analysis.pose_data)
@@ -1008,6 +1625,7 @@ async def get_analysis(
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
+    analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
     skater_name = None
@@ -1039,13 +1657,39 @@ async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends
 async def retry_analysis(
     analysis_id: str,
     background_tasks: BackgroundTasks,
+    retry_from: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="?????????")
+
+    stale_snapshot = _build_stale_analysis_snapshot(analysis)
+    if stale_snapshot is not None:
+        analysis.status = "failed"
+        analysis.retry_from_stage = stale_snapshot.retry_from_stage
+        analysis.error_code = stale_snapshot.error_code
+        analysis.error_message = stale_snapshot.error_message
+        analysis.error_detail = stale_snapshot.error_detail
+        analysis.processing_logs = stale_snapshot.processing_logs
+        await session.commit()
+        await session.refresh(analysis)
+
     if analysis.status in {"pending", "processing", "extracting_frames", "awaiting_target_selection", "analyzing", "generating_report"}:
-        raise HTTPException(status_code=400, detail="当前分析正在进行中，请稍后再试。")
+        raise HTTPException(status_code=400, detail="????????????????")
+
+    if retry_from is not None and not _is_retry_stage(retry_from):
+        raise HTTPException(status_code=400, detail="retry_from ??? extract_frames / pose / biomechanics / vision / report ???")
+
+    retry_from_stage = retry_from or analysis.retry_from_stage or _default_retry_stage_for_error(analysis.error_code)
+    if retry_from_stage == 'pose' and not isinstance(analysis.frame_motion_scores, dict):
+        retry_from_stage = None
+    if retry_from_stage == 'biomechanics' and not isinstance(analysis.pose_data, dict):
+        retry_from_stage = None
+    if retry_from_stage == 'vision' and (not isinstance(analysis.pose_data, dict) or not isinstance(analysis.bio_data, dict)):
+        retry_from_stage = None
+    if retry_from_stage == 'report' and not isinstance(analysis.vision_structured, dict):
+        retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) and isinstance(analysis.bio_data, dict) else None
 
     upload_dir = UPLOADS_DIR / analysis_id
     source_video_path = (
@@ -1057,18 +1701,24 @@ async def retry_analysis(
         else None
     )
     if source_video_path is None:
-        raise HTTPException(status_code=404, detail="原始视频文件已不存在，请重新上传")
+        raise HTTPException(status_code=404, detail="????????????????")
 
     analysis.status = "pending"
     analysis.error_code = None
     analysis.error_detail = None
     analysis.error_message = None
-    analysis.target_lock_status = "pending"
+    analysis.processing_timings = None
+    analysis.pipeline_version = CURRENT_PIPELINE_VERSION
+    analysis.retry_from_stage = retry_from_stage
+    if retry_from_stage in {None, 'extract_frames', 'pose'}:
+        analysis.target_lock_status = 'pending'
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
 
-    background_tasks.add_task(process_analysis, analysis_id)
-    return AnalysisRetryResponse(message="已重新提交分析任务")
+    background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
+    if retry_from_stage:
+        return AnalysisRetryResponse(message=f"?? {retry_from_stage} ??????????")
+    return AnalysisRetryResponse(message="?????????")
 
 
 @router.get("/{analysis_id}/target-preview", response_model=TargetPreviewResponse)
@@ -1110,6 +1760,7 @@ async def confirm_target_lock(
 
     analysis.target_lock = build_target_lock_payload(preview, selected_candidate=selected, manual=True)
     analysis.target_lock_status = "locked"
+    analysis.retry_from_stage = None
     analysis.status = "pending"
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
@@ -1268,11 +1919,16 @@ async def extend_plan(
 
 
 @frames_router.get("/{analysis_id}/{filename}")
-async def get_frame(analysis_id: str, filename: str) -> FileResponse:
+async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
     if not filename.startswith("frame_") or not filename.endswith(".jpg"):
         raise HTTPException(status_code=400, detail="无效的帧文件名。")
 
-    frames_root = (UPLOADS_DIR / analysis_id / "frames").resolve()
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
+    frames_root = restored_frames_dir.resolve() if restored_frames_dir.exists() else (UPLOADS_DIR / analysis_id / "frames").resolve()
     frame_path = (frames_root / filename).resolve()
     if frames_root not in frame_path.parents or not frame_path.exists():
         raise HTTPException(status_code=404, detail="未找到该视频帧。")
