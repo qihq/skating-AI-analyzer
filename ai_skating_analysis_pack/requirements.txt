@@ -1,0 +1,41 @@
+# AI 花样滑冰视频分析模块 — Python 依赖
+# 版本号来源于项目 backend/requirements.txt 锁定版本
+
+# ── Web 框架（pipeline 入口使用 FastAPI，但核心分析可独立运行）──
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# ── 异步数据库（独立版可选，providers 模块已改为环境变量模式）──
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+
+# ── HTTP 客户端 ──
+httpx==0.28.0
+
+# ── AI API SDK ──
+openai==1.57.0
+
+# ── 数据验证 ──
+pydantic==2.10.3
+
+# ── 环境变量 ──
+python-dotenv==1.0.1
+
+# ── 异步文件操作 ──
+aiofiles==24.1.0
+
+# ── 加密（API Key 加密存储）──
+cryptography==44.0.1
+
+# ── 密码哈希（家长 PIN，独立版可选）──
+bcrypt==4.2.1
+
+# ── 骨骼姿态估计 ──
+mediapipe==0.10.14
+
+# ── 图像处理（运动密度计算、帧读取）──
+opencv-python-headless==4.10.0.84
+
+# ── 定时任务（独立版可选）──
+apscheduler==3.10.4

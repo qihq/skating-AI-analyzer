@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
@@ -38,9 +39,16 @@ from app.schemas import (
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
 )
-from app.services.action_profiles import infer_analysis_profile, infer_profile_from_input, infer_profile_hint, normalize_action_subtype
+from app.services.action_profiles import (
+    infer_analysis_profile,
+    infer_jump_subtype_evidence,
+    infer_profile_from_input,
+    infer_profile_hint,
+    normalize_action_subtype,
+)
 from app.services.analysis_errors import (
     AnalysisErrorCode,
+    AnalysisPipelineError,
     classify_ai_failure,
     classify_video_failure,
     friendly_error_title,
@@ -48,7 +56,8 @@ from app.services.analysis_errors import (
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
-from app.services.plan import extend_training_plan, generate_training_plan
+from app.services.bbox_tracker import track_bbox
+from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
@@ -64,27 +73,32 @@ from app.services.target_lock import (
     resolve_manual_candidate,
 )
 from app.services.video import (
+    build_timestamp_map,
     build_processing_frames_dir,
     build_upload_paths,
     cleanup_processing_dir,
+    cut_action_window_clip,
     encode_frames,
     extract_motion_sampled_frames,
+    precheck_video,
     persist_frames,
     restore_sampled_frames,
     save_upload_file,
 )
-from app.services.vision import analyze_frames
+from app.services.vision_dual import analyze_frames_dual, dual_path_summary
+from app.services.providers import get_active_provider
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 plan_router = APIRouter(prefix="/api/plan", tags=["plan"])
 frames_router = APIRouter(prefix="/api/frames", tags=["frames"])
 
-VALID_ACTION_TYPES = {"跳跃", "旋转", "步法", "自由滑"}
+VALID_ACTION_TYPES = {"è·³è·ƒ", "æ—‹è½¬", "æ­¥æ³•", "è‡ªç”±æ»‘"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
 MAX_ANALYSIS_LOG_ENTRIES = 200
+CONFIRMED_TARGET_LOCK_STATUSES = {"locked", "manual"}
 STALE_ANALYSIS_TIMEOUT_SECONDS = 600
 IN_PROGRESS_ANALYSIS_STATUSES = {
     "pending",
@@ -95,12 +109,56 @@ IN_PROGRESS_ANALYSIS_STATUSES = {
 }
 
 
+def _sampling_metadata_from_saved(
+    *,
+    action_window_start: float,
+    action_window_end: float,
+    source_fps: float,
+    is_slow_motion: bool,
+    motion_scores: dict[str, object] | None = None,
+):
+    from app.services.video import MAX_SAMPLED_FRAMES, NORMAL_PLAYBACK_FPS, VideoSamplingMetadata
+
+    selected = motion_scores.get("selected") if isinstance(motion_scores, dict) else None
+    if isinstance(selected, list) and len(selected) >= 2:
+        sample_count = len(selected)
+    elif isinstance(motion_scores, dict):
+        sample_count = int(motion_scores.get("sample_count", 0) or MAX_SAMPLED_FRAMES)
+    else:
+        sample_count = MAX_SAMPLED_FRAMES
+    slow_motion_scale = max(source_fps / NORMAL_PLAYBACK_FPS, 1.0) if is_slow_motion and source_fps > 0 else 1.0
+    video_duration = max(action_window_end - action_window_start, 1e-6)
+    window_seconds = video_duration / slow_motion_scale
+    window_start_sec = action_window_start / slow_motion_scale
+    # 设计说明: 旧任务重试没有 effective_fps 持久字段，只能从已保存动作窗口和采样帧数恢复。
+    effective_fps = (max(sample_count, 2) - 1) / window_seconds
+    return VideoSamplingMetadata(
+        action_window_start=round(action_window_start, 3),
+        action_window_end=round(action_window_end, 3),
+        window_start_sec=round(window_start_sec, 3),
+        window_end_sec=round(window_start_sec + window_seconds, 3),
+        effective_fps=round(effective_fps, 3),
+        source_fps=round(source_fps, 3),
+        is_slow_motion=is_slow_motion,
+    )
+
+
 def _skater_display_name(skater: Skater) -> str:
     return skater.display_name or skater.name
 
 
 def _elapsed_seconds(start_time: float) -> float:
     return round(time.monotonic() - start_time, 2)
+
+
+async def _provider_for_slot(slot: str, fallback_slot: str = "vision"):
+    try:
+        return await get_active_provider(slot)
+    except RuntimeError:
+        if slot == fallback_slot:
+            raise
+        logger.info("Provider slot %s is not configured; falling back to %s", slot, fallback_slot)
+        return await get_active_provider(fallback_slot)
 
 
 def _utc_now_iso() -> str:
@@ -173,7 +231,7 @@ def _build_stale_analysis_snapshot(analysis: Analysis) -> Analysis | None:
             "timestamp": _utc_now_iso(),
             "stage": "pipeline",
             "level": "error",
-            "message": "分析任务长时间无进展，已自动标记为失败，可重试。",
+            "message": "åˆ†æžä»»åŠ¡é•¿æ—¶é—´æ— è¿›å±•ï¼Œå·²è‡ªåŠ¨æ ‡è®°ä¸ºå¤±è´¥ï¼Œå¯é‡è¯•ã€‚",
             "retry_from_stage": retry_from_stage,
             "error_code": AnalysisErrorCode.UNKNOWN_ERROR.value,
             "detail": detail,
@@ -187,7 +245,7 @@ def _build_stale_analysis_snapshot(analysis: Analysis) -> Analysis | None:
     snapshot.status = "failed"
     snapshot.retry_from_stage = retry_from_stage
     snapshot.error_code = AnalysisErrorCode.UNKNOWN_ERROR.value
-    snapshot.error_message = "分析任务中断，请重试。"
+    snapshot.error_message = "åˆ†æžä»»åŠ¡ä¸­æ–­ï¼Œè¯·é‡è¯•ã€‚"
     snapshot.error_detail = detail
     snapshot.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
     return snapshot
@@ -344,11 +402,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='pipeline',
             level='info',
-            message=f"开始分析流程，从 {retry_from_stage or 'extract_frames'} 阶段启动。",
+            message=f"å¼€å§‹åˆ†æžæµç¨‹ï¼Œä»Ž {retry_from_stage or 'extract_frames'} é˜¶æ®µå¯åŠ¨ã€‚",
             retry_from_stage=retry_from_stage,
         )
-
-        from app.services.video import VideoSamplingMetadata
 
         start_idx = PIPELINE_STAGES.index(retry_from_stage) if retry_from_stage else 0
         run_extract_frames = start_idx <= PIPELINE_STAGES.index('extract_frames')
@@ -366,29 +422,31 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message='开始提取关键帧。',
+                message='å¼€å§‹æå–å…³é”®å¸§ã€‚',
                 status_value='extracting_frames',
             )
             await _set_analysis_status(analysis_id, 'extracting_frames')
             extract_start = time.monotonic()
-            if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' and upload_frames_dir is not None and upload_frames_dir.exists():
+            if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES and upload_frames_dir is not None and upload_frames_dir.exists():
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
-                sampling_metadata = VideoSamplingMetadata(
+                sampling_metadata = _sampling_metadata_from_saved(
                     action_window_start=saved_action_window_start,
                     action_window_end=saved_action_window_end,
                     source_fps=saved_source_fps,
                     is_slow_motion=saved_is_slow_motion,
+                    motion_scores=motion_scores,
                 )
                 await _append_analysis_log(
                     analysis_id,
                     stage='extract_frames',
                     level='info',
-                    message='复用已锁定目标后的缓存帧，无需重新抽帧。',
+                    message='å¤ç”¨å·²é”å®šç›®æ ‡åŽçš„ç¼“å­˜å¸§ï¼Œæ— éœ€é‡æ–°æŠ½å¸§ã€‚',
                 )
             else:
                 try:
                     logger.info('Analysis %s extracting frames with profile=%s', analysis_id, analysis_profile_hint)
+                    await precheck_video(video_path)
                     sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
                         video_path,
                         processing_frames_dir,
@@ -406,7 +464,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message=f'关键帧提取完成，共 {len(sampled_frames)} 帧。',
+                message=f'å…³é”®å¸§æå–å®Œæˆï¼Œå…± {len(sampled_frames)} å¸§ã€‚',
                 elapsed_s=timings['extract_frames_s'],
                 timings=timings,
             )
@@ -414,7 +472,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 persist_frames(sampled_frames, upload_frames_dir)
 
             preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
-            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' else build_target_lock_payload(preview)
+            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES else build_target_lock_payload(preview)
 
             async with AsyncSessionLocal() as session:
                 analysis = await session.get(Analysis, analysis_id)
@@ -431,7 +489,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.retry_from_stage = 'pose'
                 await session.commit()
 
-            if (not existing_target_lock or str(existing_target_lock.get('status')) != 'locked') and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
+            if (not existing_target_lock or str(existing_target_lock.get('status')) not in CONFIRMED_TARGET_LOCK_STATUSES) and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
                 if upload_frames_dir is not None:
                     persist_frames(sampled_frames, upload_frames_dir)
                 timings['total_s'] = _elapsed_seconds(total_start)
@@ -441,7 +499,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='extract_frames',
                     level='warning',
-                    message='自动锁定主滑行者置信度不足，等待手动确认目标。',
+                    message='è‡ªåŠ¨é”å®šä¸»æ»‘è¡Œè€…ç½®ä¿¡åº¦ä¸è¶³ï¼Œç­‰å¾…æ‰‹åŠ¨ç¡®è®¤ç›®æ ‡ã€‚',
                     timings=timings,
                 )
                 await _set_analysis_status(analysis_id, 'awaiting_target_selection')
@@ -451,11 +509,12 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 raise RuntimeError('?????????????????')
             sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
             motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
-            sampling_metadata = VideoSamplingMetadata(
+            sampling_metadata = _sampling_metadata_from_saved(
                 action_window_start=saved_action_window_start,
                 action_window_end=saved_action_window_end,
                 source_fps=saved_source_fps,
                 is_slow_motion=saved_is_slow_motion,
+                motion_scores=motion_scores,
             )
             preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
             target_lock = existing_target_lock if existing_target_lock else build_target_lock_payload(preview)
@@ -463,7 +522,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message=f'分段重试复用缓存关键帧，共 {len(sampled_frames)} 帧。',
+                message=f'åˆ†æ®µé‡è¯•å¤ç”¨ç¼“å­˜å…³é”®å¸§ï¼Œå…± {len(sampled_frames)} å¸§ã€‚',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -474,16 +533,24 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pose',
                     level='info',
-                    message='开始提取姿态关键点。',
+                    message='å¼€å§‹æå–å§¿æ€å…³é”®ç‚¹ã€‚',
                 )
                 pose_start = time.monotonic()
-                pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir), target_lock)
+                bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock)
+                pose_data = await asyncio.to_thread(
+                    extract_pose,
+                    str(processing_frames_dir),
+                    target_lock,
+                    bbox_per_frame,
+                    sampling_metadata.effective_fps,
+                )
                 timings['pose_s'] = _elapsed_seconds(pose_start)
                 async with AsyncSessionLocal() as session:
                     analysis = await session.get(Analysis, analysis_id)
                     if analysis is None:
                         return
                     analysis.pose_data = pose_data
+                    analysis.target_lock = target_lock
                     analysis.processing_timings = dict(timings)
                     analysis.retry_from_stage = 'biomechanics'
                     await session.commit()
@@ -491,7 +558,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pose',
                     level='info',
-                    message=f'姿态提取完成，共 {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} 帧。',
+                    message=f'å§¿æ€æå–å®Œæˆï¼Œå…± {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} å¸§ã€‚',
                     elapsed_s=timings['pose_s'],
                     timings=timings,
                 )
@@ -515,7 +582,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='pose',
                 level='info',
-                message='分段重试复用已有姿态结果。',
+                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰å§¿æ€ç»“æžœã€‚',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -528,12 +595,25 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='biomechanics',
                     level='info',
-                    message='开始计算生物力学指标。',
+                    message='å¼€å§‹è®¡ç®—ç”Ÿç‰©åŠ›å­¦æŒ‡æ ‡ã€‚',
                 )
                 biomechanics_start = time.monotonic()
                 analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
-                bio_data = analyze_biomechanics(pose_data, action_type, analysis_profile)
+                bio_data = analyze_biomechanics(
+                    pose_data,
+                    action_type,
+                    analysis_profile,
+                    effective_fps=sampling_metadata.effective_fps,
+                    source_fps=sampling_metadata.source_fps,
+                    window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
+                )
                 if isinstance(bio_data, dict):
+                    if analysis_profile == 'jump':
+                        profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
+                            pose_data,
+                            bio_data.get('key_frames') if isinstance(bio_data.get('key_frames'), dict) else {},
+                            sampling_metadata.effective_fps,
+                        )
                     merged_quality_flags = bio_data.get('quality_flags') if isinstance(bio_data.get('quality_flags'), list) else []
                     merged_quality_flags.extend(
                         flag for flag in profile_evidence.get('quality_flags', []) if flag not in merged_quality_flags
@@ -574,7 +654,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='biomechanics',
                     level='info',
-                    message=f'生物力学计算完成，profile={analysis_profile}。',
+                    message=f'ç”Ÿç‰©åŠ›å­¦è®¡ç®—å®Œæˆï¼Œprofile={analysis_profile}ã€‚',
                     elapsed_s=timings['biomechanics_s'],
                     timings=timings,
                 )
@@ -600,7 +680,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='biomechanics',
                 level='info',
-                message='分段重试复用已有生物力学结果。',
+                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰ç”Ÿç‰©åŠ›å­¦ç»“æžœã€‚',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -609,24 +689,50 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='开始调用视觉模型分析关键帧。',
+                message='å¼€å§‹è°ƒç”¨è§†è§‰æ¨¡åž‹åˆ†æžå…³é”®å¸§ã€‚',
                 status_value='analyzing',
             )
             await _set_analysis_status(analysis_id, 'analyzing')
             try:
                 vision_start = time.monotonic()
-                payloads = await encode_frames(sampled_frames)
-                vision_structured = await analyze_frames(
-                    action_type,
-                    payloads,
-                    skater_id,
+                timestamps = build_timestamp_map(motion_scores)
+                raw_payloads = await encode_frames(sampled_frames, timestamps=timestamps)
+                clip_path = None
+                try:
+                    clip_path = await cut_action_window_clip(
+                        video_path,
+                        sampling_metadata.action_window_start,
+                        sampling_metadata.action_window_end,
+                        processing_frames_dir.parent / 'action_window.mp4',
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning('Analysis %s action-window clip failed; Path A will use frames: %s', analysis_id, exc)
+                dual = await analyze_frames_dual(
+                    action_type=action_type,
+                    frame_paths=sampled_frames,
+                    raw_frame_payloads=raw_payloads,
+                    pose_data=pose_data,
+                    bio_data=bio_data,
+                    provider_path_a=await _provider_for_slot("vision_path_a"),
+                    provider_path_b=await _provider_for_slot("vision_path_b"),
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
+                    memory_context="",
+                    timestamps=timestamps,
+                    clip_path=clip_path,
+                    window_start_sec=sampling_metadata.action_window_start,
                 )
+                vision_structured = dual.path_a
+                vision_path_a = dual.path_a
+                vision_path_b = dual.path_b
+                dual_path_meta = dual.dual_path_meta
+                cross_validation = {**dual.validation.to_dict(), **dual_path_meta}
+                ui_summary = dual_path_summary(dual)
                 frame_analysis = vision_structured.get('frame_analysis')
                 if isinstance(frame_analysis, list):
-                    vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile)
+                    vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
+                    vision_path_a = vision_structured
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
                 async with AsyncSessionLocal() as session:
@@ -635,6 +741,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         return
                     analysis.vision_raw = vision_raw
                     analysis.vision_structured = vision_structured
+                    analysis.vision_path_a = vision_path_a
+                    analysis.vision_path_b = vision_path_b
+                    analysis.cross_validation = cross_validation
                     analysis.processing_timings = dict(timings)
                     analysis.retry_from_stage = 'report'
                     await session.commit()
@@ -648,7 +757,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='视觉分析完成，已生成结构化帧观察。',
+                message='è§†è§‰åˆ†æžå®Œæˆï¼Œå·²ç”Ÿæˆç»“æž„åŒ–å¸§è§‚å¯Ÿã€‚',
                 elapsed_s=timings['vision_s'],
                 timings=timings,
             )
@@ -659,11 +768,15 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     raise RuntimeError('???????????? vision_structured?')
                 vision_structured = analysis.vision_structured
                 vision_raw = analysis.vision_raw or json.dumps(vision_structured, ensure_ascii=False)
+                vision_path_a = analysis.vision_path_a if isinstance(analysis.vision_path_a, dict) else vision_structured
+                vision_path_b = analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None
+                cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+                dual_path_meta = cross_validation
             await _append_analysis_log(
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='分段重试复用已有视觉分析结果。',
+                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰è§†è§‰åˆ†æžç»“æžœã€‚',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -671,14 +784,20 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='report',
             level='info',
-            message='开始生成训练报告。',
+            message='å¼€å§‹ç”Ÿæˆè®­ç»ƒæŠ¥å‘Šã€‚',
             status_value='generating_report',
         )
         await _set_analysis_status(analysis_id, 'generating_report')
 
         try:
             report_start = time.monotonic()
-            report = await generate_report(action_type, vision_structured, bio_data, skater_id)
+            report = await generate_report(
+                action_type,
+                vision_structured,
+                bio_data,
+                skater_id,
+                dual_path_meta=dual_path_meta,
+            )
             force_score = calculate_force_score(report)
             timings['report_s'] = _elapsed_seconds(report_start)
             timings['total_s'] = _elapsed_seconds(total_start)
@@ -692,7 +811,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='report',
             level='info',
-            message=f'报告生成完成，Force Score={force_score}。',
+            message=f'æŠ¥å‘Šç”Ÿæˆå®Œæˆï¼ŒForce Score={force_score}ã€‚',
             elapsed_s=timings['report_s'],
             timings=timings,
         )
@@ -707,6 +826,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
 
                 analysis.vision_raw = vision_raw
                 analysis.vision_structured = vision_structured
+                analysis.vision_path_a = vision_path_a
+                analysis.vision_path_b = vision_path_b
+                analysis.cross_validation = cross_validation
                 analysis.report = report
                 analysis.pose_data = pose_data
                 analysis.bio_data = bio_data
@@ -715,7 +837,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.analysis_profile = analysis_profile
                 analysis.pipeline_version = CURRENT_PIPELINE_VERSION
                 analysis.target_lock = target_lock
-                analysis.target_lock_status = 'auto_locked'
+                analysis.target_lock_status = str(target_lock.get('status') or 'auto_locked')
                 analysis.action_window_start = sampling_metadata.action_window_start
                 analysis.action_window_end = sampling_metadata.action_window_end
                 analysis.source_fps = sampling_metadata.source_fps
@@ -741,7 +863,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pipeline',
                     level='info',
-                    message='分析流程已完成。',
+                    message='åˆ†æžæµç¨‹å·²å®Œæˆã€‚',
                     elapsed_s=timings['total_s'],
                     timings=timings,
                 )
@@ -833,7 +955,7 @@ async def _resolve_skater(session: AsyncSession, skater_id: str | None) -> Skate
     if skater_id:
         skater = await session.get(Skater, skater_id)
         if skater is None:
-            raise HTTPException(status_code=404, detail="未找到对应的练习档案。")
+            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„ç»ƒä¹ æ¡£æ¡ˆã€‚")
         return skater
 
     return await _get_default_skater(session)
@@ -855,7 +977,7 @@ def _report_summary(analysis: Analysis) -> str:
         return analysis.error_message
     if analysis.note:
         return analysis.note
-    return "暂无报告摘要。"
+    return "æš‚æ— æŠ¥å‘Šæ‘˜è¦ã€‚"
 
 
 def _score_to_stars(score: object) -> str:
@@ -874,14 +996,14 @@ def _score_to_stars(score: object) -> str:
         filled = 2
     else:
         filled = 1
-    return ("★" * filled) + ("☆" * (5 - filled))
+    return ("â˜…" * filled) + ("â˜†" * (5 - filled))
 
 
 def _first_nonempty_sentence(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
-    parts = [part.strip("，。；; ") for part in text.replace("！", "。").replace("？", "。").split("。")]
+    parts = [part.strip("ï¼Œã€‚ï¼›; ") for part in text.replace("ï¼", "ã€‚").replace("ï¼Ÿ", "ã€‚").split("ã€‚")]
     for part in parts:
         if part:
             return part
@@ -892,7 +1014,7 @@ def _join_export_items(items: list[str], fallback: str) -> str:
     cleaned = [item.strip() for item in items if item and item.strip()]
     if not cleaned:
         return fallback
-    return "，".join(cleaned[:2])
+    return "ï¼Œ".join(cleaned[:2])
 
 
 def _build_export_text(analysis: Analysis, skater_name: str | None, session_date: str | None = None) -> str:
@@ -919,8 +1041,8 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
 
     highlight = _join_export_items(
         positives[:2]
-        or ([f"{strongest_phase}阶段表现相对稳定"] if strongest_phase and strongest_phase != "ä¸å¯åˆ†æž" else []),
-        "整体动作节奏基本稳定",
+        or ([f"{strongest_phase}é˜¶æ®µè¡¨çŽ°ç›¸å¯¹ç¨³å®š"] if strongest_phase and strongest_phase != "Ã¤Â¸ÂÃ¥ÂÂ¯Ã¥Ë†â€ Ã¦Å¾Â" else []),
+        "æ•´ä½“åŠ¨ä½œèŠ‚å¥åŸºæœ¬ç¨³å®š",
     )
 
     issue_texts: list[str] = []
@@ -940,24 +1062,24 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
         target = str(item.get("target", "")).strip()
         action = _first_nonempty_sentence(item.get("action"))
         if target and action:
-            improvement_actions.append(f"{target}：{action}")
+            improvement_actions.append(f"{target}ï¼š{action}")
         elif action:
             improvement_actions.append(action)
 
     improvement = _join_export_items(
         issue_texts[:1]
         + improvement_actions[:1]
-        + ([f"{weakest_phase}阶段还可以继续加强"] if weakest_phase and weakest_phase != "ä¸å¯åˆ†æž" else []),
-        "建议继续加强稳定性和基础控制练习",
+        + ([f"{weakest_phase}é˜¶æ®µè¿˜å¯ä»¥ç»§ç»­åŠ å¼º"] if weakest_phase and weakest_phase != "Ã¤Â¸ÂÃ¥ÂÂ¯Ã¥Ë†â€ Ã¦Å¾Â" else []),
+        "å»ºè®®ç»§ç»­åŠ å¼ºç¨³å®šæ€§å’ŒåŸºç¡€æŽ§åˆ¶ç»ƒä¹ ",
     )
 
     subscores = report.get("subscores") if isinstance(report.get("subscores"), dict) else {}
     detail_labels = {
-        "takeoff_power": "起跳发力",
-        "rotation_axis": "旋转轴心",
-        "arm_coordination": "手臂配合",
-        "landing_absorption": "落冰缓冲",
-        "core_stability": "核心稳定",
+        "takeoff_power": "èµ·è·³å‘åŠ›",
+        "rotation_axis": "æ—‹è½¬è½´å¿ƒ",
+        "arm_coordination": "æ‰‹è‡‚é…åˆ",
+        "landing_absorption": "è½å†°ç¼“å†²",
+        "core_stability": "æ ¸å¿ƒç¨³å®š",
     }
     detail_parts = [
         f"[{label} {_score_to_stars(subscores.get(key))}]"
@@ -965,19 +1087,19 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
         if key in subscores
     ]
     if not detail_parts:
-        detail_parts = [f"[综合表现 {_score_to_stars(analysis.force_score)}]"]
+        detail_parts = [f"[ç»¼åˆè¡¨çŽ° {_score_to_stars(analysis.force_score)}]"]
 
     export_date = session_date or analysis.created_at.date().isoformat()
-    skater_label = skater_name or "小运动员"
+    skater_label = skater_name or "å°è¿åŠ¨å‘˜"
     score_label = analysis.force_score if analysis.force_score is not None else "--"
 
     return (
-        f"[冰宝诊断] {skater_label} · {analysis.action_type} · {export_date}\n"
-        f"综合评分：{score_label}分\n\n"
-        f"亮点：{highlight}\n"
-        f"待改善：{improvement}\n\n"
-        f"技术细节：{' '.join(detail_parts)}\n\n"
-        "由冰宝（IceBuddy）生成 · 仅供参考"
+        f"[å†°å®è¯Šæ–­] {skater_label} Â· {analysis.action_type} Â· {export_date}\n"
+        f"ç»¼åˆè¯„åˆ†ï¼š{score_label}åˆ†\n\n"
+        f"äº®ç‚¹ï¼š{highlight}\n"
+        f"å¾…æ”¹å–„ï¼š{improvement}\n\n"
+        f"æŠ€æœ¯ç»†èŠ‚ï¼š{' '.join(detail_parts)}\n\n"
+        "ç”±å†°å®ï¼ˆIceBuddyï¼‰ç”Ÿæˆ Â· ä»…ä¾›å‚è€ƒ"
     )
 
 
@@ -1003,6 +1125,9 @@ def _detail_from_analysis(
         status=analysis.status,
         vision_raw=analysis.vision_raw,
         vision_structured=analysis.vision_structured,
+        vision_path_a=analysis.vision_path_a,
+        vision_path_b=analysis.vision_path_b,
+        cross_validation=analysis.cross_validation,
         report=analysis.report,
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
@@ -1063,6 +1188,33 @@ def _fallback_motion_payload(frames_dir: Path) -> dict[str, object]:
         "scores": [],
         "source": "legacy_frames",
     }
+
+
+def _append_target_lock_flags(target_lock: dict[str, Any], flags: list[str]) -> dict[str, Any]:
+    existing = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+    merged = list(existing)
+    for flag in flags:
+        if flag not in merged:
+            merged.append(flag)
+    target_lock["quality_flags"] = merged
+    return target_lock
+
+
+def _build_bbox_per_frame(sampled_frames: list[Path], target_lock: dict[str, Any]) -> list[dict[str, float]] | None:
+    selected_bbox = target_lock.get("selected_bbox")
+    if not isinstance(selected_bbox, dict):
+        return None
+    try:
+        bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox)
+        _append_target_lock_flags(target_lock, flags)
+        target_lock["bbox_per_frame"] = bbox_per_frame
+        return bbox_per_frame
+    except Exception:  # noqa: BLE001
+        logger.warning("bbox tracker failed; falling back to static target bbox", exc_info=True)
+        _append_target_lock_flags(target_lock, ["bbox_tracker_failed_fallback"])
+        bbox_per_frame = [selected_bbox for _ in sampled_frames]
+        target_lock["bbox_per_frame"] = bbox_per_frame
+        return bbox_per_frame
 
 
 def _video_path_for_analysis(analysis: Analysis) -> Path:
@@ -1158,7 +1310,20 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
 
     if not pose_frames or not pose_has_keypoints:
         logger.info("Analysis %s is missing pose data, backfilling from existing frames", analysis.id)
-        computed_pose = await asyncio.to_thread(extract_pose, str(frames_dir), analysis.target_lock if isinstance(analysis.target_lock, dict) else None)
+        sampling_metadata = _sampling_metadata_from_saved(
+            action_window_start=float(analysis.action_window_start or 0.0),
+            action_window_end=float(analysis.action_window_end or 0.0),
+            source_fps=float(analysis.source_fps or 30.0),
+            is_slow_motion=bool(analysis.is_slow_motion),
+            motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+        )
+        computed_pose = await asyncio.to_thread(
+            extract_pose,
+            str(frames_dir),
+            analysis.target_lock if isinstance(analysis.target_lock, dict) else None,
+            None,
+            sampling_metadata.effective_fps,
+        )
         analysis.pose_data = computed_pose
         pose_data = computed_pose
         changed = True
@@ -1166,10 +1331,20 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
     if bio_data is None or not bio_data.get("key_frames"):
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
+        sampling_metadata = _sampling_metadata_from_saved(
+            action_window_start=float(analysis.action_window_start or 0.0),
+            action_window_end=float(analysis.action_window_end or 0.0),
+            source_fps=float(analysis.source_fps or 30.0),
+            is_slow_motion=bool(analysis.is_slow_motion),
+            motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+        )
         analysis.bio_data = analyze_biomechanics(
             pose_data or {"connections": [], "frames": []},
             analysis.action_type,
             analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+            effective_fps=sampling_metadata.effective_fps,
+            source_fps=sampling_metadata.source_fps,
+            window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
         )
         changed = True
     else:
@@ -1216,7 +1391,7 @@ def _build_issue_map(report: dict[str, object] | None) -> dict[str, dict[str, st
     for raw_issue in issues:
         if not isinstance(raw_issue, dict):
             continue
-        category = str(raw_issue.get("category", "")).strip() or "未分类问题"
+        category = str(raw_issue.get("category", "")).strip() or "æœªåˆ†ç±»é—®é¢˜"
         issue_map[category] = {
             "category": category,
             "description": str(raw_issue.get("description", "")).strip(),
@@ -1247,7 +1422,7 @@ def _compare_reports(report_a: dict[str, object] | None, report_b: dict[str, obj
                     category=category,
                     before_severity=before_severity,
                     after_severity=None,
-                    description=f"{before['description']} 当前复盘中未再出现。",
+                    description=f"{before['description']} å½“å‰å¤ç›˜ä¸­æœªå†å‡ºçŽ°ã€‚",
                 )
             )
             continue
@@ -1312,12 +1487,12 @@ def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
 
 
 def _skater_context(skater: Skater) -> str:
-    parts = [f"姓名：{_skater_display_name(skater)}"]
+    parts = [f"å§“åï¼š{_skater_display_name(skater)}"]
     if skater.level:
-        parts.append(f"水平：{skater.level}")
+        parts.append(f"æ°´å¹³ï¼š{skater.level}")
     if skater.notes:
-        parts.append(f"备注：{skater.notes}")
-    return "；".join(parts)
+        parts.append(f"å¤‡æ³¨ï¼š{skater.notes}")
+    return "ï¼›".join(parts)
 
 
 async def _get_plan_by_analysis(session: AsyncSession, analysis_id: str) -> TrainingPlan | None:
@@ -1343,7 +1518,7 @@ async def _verify_parent_pin_or_403(session: AsyncSession, pin: str) -> None:
 
     auth = await get_parent_auth(session)
     if auth is None or not verify_pin_hash(normalized_pin, auth.pin_hash):
-        raise HTTPException(status_code=403, detail="家长 PIN 验证失败。")
+        raise HTTPException(status_code=403, detail="å®¶é•¿ PIN éªŒè¯å¤±è´¥ã€‚")
 
 
 @router.post("/upload", response_model=AnalysisUploadResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -1360,7 +1535,7 @@ async def upload_analysis(
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisUploadResponse:
     if action_type not in VALID_ACTION_TYPES:
-        raise HTTPException(status_code=400, detail="action_type 必须是 跳跃 / 旋转 / 步法 / 自由滑 之一。")
+        raise HTTPException(status_code=400, detail="action_type å¿…é¡»æ˜¯ è·³è·ƒ / æ—‹è½¬ / æ­¥æ³• / è‡ªç”±æ»‘ ä¹‹ä¸€ã€‚")
 
     skater = await _resolve_skater(session, skater_id)
     normalized_session_id = _normalize_optional_text(session_id)
@@ -1368,9 +1543,9 @@ async def upload_analysis(
     if normalized_session_id:
         training_session = await session.get(TrainingSession, normalized_session_id)
         if training_session is None:
-            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
+            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
         if skater and training_session.skater_id != skater.id:
-            raise HTTPException(status_code=400, detail="训练视频只能关联到当前档案的训练课次。")
+            raise HTTPException(status_code=400, detail="è®­ç»ƒè§†é¢‘åªèƒ½å…³è”åˆ°å½“å‰æ¡£æ¡ˆçš„è®­ç»ƒè¯¾æ¬¡ã€‚")
 
     analysis_id = str(uuid4())
     suffix = Path(file.filename or "").suffix.lower()
@@ -1378,6 +1553,10 @@ async def upload_analysis(
 
     try:
         await save_upload_file(file, video_path)
+        await precheck_video(video_path)
+    except AnalysisPipelineError as exc:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail={"code": exc.code.value, "message": exc.detail}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1416,7 +1595,7 @@ async def update_analysis_session(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     next_session_id = payload.session_id
     if next_session_id is None:
@@ -1424,9 +1603,9 @@ async def update_analysis_session(
     else:
         training_session = await session.get(TrainingSession, next_session_id)
         if training_session is None:
-            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
+            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
         if analysis.skater_id and training_session.skater_id != analysis.skater_id:
-            raise HTTPException(status_code=400, detail="只能关联到同一档案下的训练课次。")
+            raise HTTPException(status_code=400, detail="åªèƒ½å…³è”åˆ°åŒä¸€æ¡£æ¡ˆä¸‹çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
         analysis.session_id = training_session.id
 
     await session.commit()
@@ -1495,11 +1674,11 @@ async def compare_analyses(
     analysis_b = await session.get(Analysis, id_b)
 
     if analysis_a is None or analysis_b is None:
-        raise HTTPException(status_code=404, detail="至少有一条对比记录不存在。")
+        raise HTTPException(status_code=404, detail="è‡³å°‘æœ‰ä¸€æ¡å¯¹æ¯”è®°å½•ä¸å­˜åœ¨ã€‚")
     if analysis_a.status != "completed" or analysis_b.status != "completed":
-        raise HTTPException(status_code=400, detail="只有 completed 状态的记录可以进行对比。")
+        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„è®°å½•å¯ä»¥è¿›è¡Œå¯¹æ¯”ã€‚")
     if analysis_a.action_type != analysis_b.action_type:
-        raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
+        raise HTTPException(status_code=400, detail="ä»…æ”¯æŒåŒåŠ¨ä½œç±»åž‹çš„å¤ç›˜è®°å½•å¯¹æ¯”ã€‚")
 
     skater_map = await _get_skater_map(
         session,
@@ -1566,11 +1745,11 @@ async def get_progress(
 async def create_training_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
     if analysis.status != "completed":
-        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
+        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„åˆ†æžæ‰èƒ½ç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
     if not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="当前分析缺少结构化报告，无法生成训练计划。")
+        raise HTTPException(status_code=400, detail="å½“å‰åˆ†æžç¼ºå°‘ç»“æž„åŒ–æŠ¥å‘Šï¼Œæ— æ³•ç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
 
     existing_plan = await _get_plan_by_analysis(session, analysis_id)
     if existing_plan is not None:
@@ -1578,12 +1757,16 @@ async def create_training_plan(analysis_id: str, session: AsyncSession = Depends
 
     skater = await _resolve_skater(session, analysis.skater_id)
     if skater is None:
-        raise HTTPException(status_code=400, detail="当前系统尚未配置练习档案。")
+        raise HTTPException(status_code=400, detail="å½“å‰ç³»ç»Ÿå°šæœªé…ç½®ç»ƒä¹ æ¡£æ¡ˆã€‚")
 
     if analysis.skater_id != skater.id:
         analysis.skater_id = skater.id
 
-    plan_json = await generate_training_plan(analysis.action_type, analysis.report, _skater_context(skater), skater.id)
+    try:
+        plan_json = await generate_training_plan(analysis.action_type, analysis.report, _skater_context(skater), skater.id)
+    except PlanGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     plan = TrainingPlan(
         analysis_id=analysis.id,
         skater_id=skater.id,
@@ -1599,7 +1782,7 @@ async def create_training_plan(analysis_id: str, session: AsyncSession = Depends
 async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     plan = await _get_plan_by_analysis(session, analysis_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="该分析记录尚未生成训练计划。")
+        raise HTTPException(status_code=404, detail="è¯¥åˆ†æžè®°å½•å°šæœªç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
     return _plan_detail_from_model(plan)
 
 
@@ -1607,7 +1790,7 @@ async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(ge
 async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PoseResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
@@ -1623,7 +1806,7 @@ async def get_analysis(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
@@ -1639,9 +1822,9 @@ async def get_analysis(
 async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="Ã¦Å“ÂªÃ¦â€°Â¾Ã¥Ë†Â°Ã¨Â¯Â¥Ã¥Ë†â€ Ã¦Å¾ÂÃ¨Â®Â°Ã¥Â½â€¢Ã£â‚¬â€š")
     if analysis.status != "completed":
-        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„åˆ†æžæ‰èƒ½å¯¼å‡ºæŠ¥å‘Šã€‚")
+        raise HTTPException(status_code=400, detail="Ã¥ÂÂªÃ¦Å“â€° completed Ã§Å Â¶Ã¦â‚¬ÂÃ§Å¡â€žÃ¥Ë†â€ Ã¦Å¾ÂÃ¦â€°ÂÃ¨Æ’Â½Ã¥Â¯Â¼Ã¥â€¡ÂºÃ¦Å Â¥Ã¥â€˜Å Ã£â‚¬â€š")
 
     skater_name = None
     if analysis.skater_id:
@@ -1722,10 +1905,11 @@ async def retry_analysis(
 
 
 @router.get("/{analysis_id}/target-preview", response_model=TargetPreviewResponse)
+@router.get("/{analysis_id}/target_preview", response_model=TargetPreviewResponse)
 async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TargetPreviewResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     frames_dir = _frames_dir_for_analysis(analysis)
     preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
@@ -1742,6 +1926,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
 
 
 @router.post("/{analysis_id}/target-lock", response_model=AnalysisDetail)
+@router.post("/{analysis_id}/target_lock", response_model=AnalysisDetail)
 async def confirm_target_lock(
     analysis_id: str,
     payload: TargetLockRequest,
@@ -1750,16 +1935,23 @@ async def confirm_target_lock(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     frames_dir = _frames_dir_for_analysis(analysis)
     preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
-    selected = resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
-    if selected is None:
-        raise HTTPException(status_code=400, detail="未能确定要分析的主滑行者，请重新点选。")
+    try:
+        selected = None if payload.manual_bbox is not None else resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
+        if selected is None and payload.manual_bbox is None:
+            raise HTTPException(status_code=400, detail="Unable to resolve target skater; please select again.")
 
-    analysis.target_lock = build_target_lock_payload(preview, selected_candidate=selected, manual=True)
-    analysis.target_lock_status = "locked"
+        analysis.target_lock = (
+            build_target_lock_payload(preview, manual_bbox=payload.manual_bbox.model_dump())
+            if payload.manual_bbox is not None
+            else build_target_lock_payload(preview, selected_candidate=selected, manual=True)
+        )
+    except AnalysisPipelineError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    analysis.target_lock_status = str(analysis.target_lock.get("status") or "locked")
     analysis.retry_from_stage = None
     analysis.status = "pending"
     analysis.updated_at = datetime.now(timezone.utc)
@@ -1782,7 +1974,7 @@ async def update_note(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     analysis.note = _normalize_optional_text(payload.note)
     await session.commit()
@@ -1805,9 +1997,9 @@ async def delete_analysis(
 
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
     if analysis.status == "processing":
-        raise HTTPException(status_code=400, detail="分析进行中，无法删除。")
+        raise HTTPException(status_code=400, detail="åˆ†æžè¿›è¡Œä¸­ï¼Œæ— æ³•åˆ é™¤ã€‚")
 
     skater_id = analysis.skater_id
     plan = await _get_plan_by_analysis(session, analysis_id)
@@ -1840,7 +2032,7 @@ async def get_latest_skater_plan(skater_id: str, session: AsyncSession = Depends
 async def get_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
     return _plan_detail_from_model(plan)
 
 
@@ -1853,7 +2045,7 @@ async def update_plan_session(
 ) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
 
     raw_plan = plan.plan_json if isinstance(plan.plan_json, dict) else {}
     days = raw_plan.get("days", [])
@@ -1878,7 +2070,7 @@ async def update_plan_session(
         next_days.append(next_day)
 
     if not found:
-        raise HTTPException(status_code=404, detail="未找到对应的训练项目。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒé¡¹ç›®ã€‚")
 
     plan.plan_json = {**raw_plan, "days": next_days}
     await session.commit()
@@ -1894,25 +2086,29 @@ async def extend_plan(
 ) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
 
     analysis = await session.get(Analysis, plan.analysis_id)
     if analysis is None or not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
+        raise HTTPException(status_code=400, detail="å½“å‰è®¡åˆ’ç¼ºå°‘åŽŸå§‹åˆ†æžèƒŒæ™¯ï¼Œæ— æ³•ç»­æœŸã€‚")
 
     skater = await session.get(Skater, plan.skater_id)
     completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
     if len(completed_days) < 3:
-        raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
+        raise HTTPException(status_code=400, detail="è‡³å°‘å®Œæˆ 3 å¤©åŽæ‰èƒ½ç»­æœŸè®¡åˆ’ã€‚")
 
-    plan.plan_json = await extend_training_plan(
-        original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
-        completed_days=completed_days,
-        action_type=analysis.action_type,
-        report=analysis.report,
-        skater_context=_skater_context(skater) if skater else None,
-        skater_id=skater.id if skater else None,
-    )
+    try:
+        plan.plan_json = await extend_training_plan(
+            original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
+            completed_days=completed_days,
+            action_type=analysis.action_type,
+            report=analysis.report,
+            skater_context=_skater_context(skater) if skater else None,
+            skater_id=skater.id if skater else None,
+        )
+    except PlanGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     await session.commit()
     await session.refresh(plan)
     return _plan_detail_from_model(plan)
@@ -1921,16 +2117,16 @@ async def extend_plan(
 @frames_router.get("/{analysis_id}/{filename}")
 async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
     if not filename.startswith("frame_") or not filename.endswith(".jpg"):
-        raise HTTPException(status_code=400, detail="无效的帧文件名。")
+        raise HTTPException(status_code=400, detail="æ— æ•ˆçš„å¸§æ–‡ä»¶åã€‚")
 
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
 
     analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
     frames_root = restored_frames_dir.resolve() if restored_frames_dir.exists() else (UPLOADS_DIR / analysis_id / "frames").resolve()
     frame_path = (frames_root / filename).resolve()
     if frames_root not in frame_path.parents or not frame_path.exists():
-        raise HTTPException(status_code=404, detail="未找到该视频帧。")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è§†é¢‘å¸§ã€‚")
 
     return FileResponse(frame_path, media_type="image/jpeg")

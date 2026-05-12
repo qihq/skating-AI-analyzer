@@ -609,7 +609,7 @@ function PathView({
               ))}
             </div>
 
-            {selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
+            {selectedNode ? <SkillDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} /> : null}
           </div>
         </section>
       ) : null}
@@ -743,76 +743,84 @@ function RoadmapView({
         ))}
       </div>
 
-      {!isParentMode && selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
+      {!isParentMode && selectedNode ? <SkillDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} /> : null}
     </section>
   );
 }
 
-function SkillDetailPanel({
+function SkillDetailModal({
   node,
   onClose,
-  className = "",
 }: {
   node: SkillNode;
   onClose?: () => void;
-  className?: string;
 }) {
   const { consecutive, threshold } = readUnlockTargets(node);
   const remainingAttempts = Math.max(consecutive - Number(node.attempt_count ?? 0), 0);
   const hasAttemptProgress = consecutive > 0;
 
   return (
-    <section className={`rounded-[28px] border border-blue-100 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_44px_rgba(59,130,246,0.08)] ${className}`}>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Skill Detail</p>
-          <h3 className="mt-3 text-2xl font-semibold text-slate-900">
-            <span className="mr-2">{node.emoji}</span>
-            {node.name}
-          </h3>
-          <p className="mt-2 text-sm text-slate-500">
-            阶段 {node.stage} · {node.group_name}
-            {node.action_type ? ` · ${node.action_type}` : ""}
-          </p>
-        </div>
+    <div className="fixed inset-0 z-50 bg-slate-950/36 px-4 py-6 backdrop-blur-sm" onClick={onClose}>
+      <div className="mx-auto flex h-full w-full max-w-3xl items-center justify-center">
+        <section
+          className="max-h-[calc(100vh-3rem)] w-full overflow-y-auto rounded-[28px] border border-blue-100 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_44px_rgba(59,130,246,0.18)] tablet:p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label="技能详情"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Skill Detail</p>
+              <h3 className="mt-3 text-2xl font-semibold text-slate-900">
+                <span className="mr-2">{node.emoji}</span>
+                {node.name}
+              </h3>
+              <p className="mt-2 text-sm text-slate-500">
+                阶段 {node.stage} · {node.group_name}
+                {node.action_type ? ` · ${node.action_type}` : ""}
+              </p>
+            </div>
 
-        <div className="flex items-center gap-3">
-          <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">{skillStatusLabel(node.status)}</span>
-          {onClose ? (
-            <button type="button" onClick={onClose} className="min-h-[44px] rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-              收起
-            </button>
+            <div className="flex items-center gap-3">
+              <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">{skillStatusLabel(node.status)}</span>
+              {onClose ? (
+                <button type="button" onClick={onClose} className="min-h-[44px] rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                  关闭
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
+            <span className="rounded-full bg-white px-3 py-2 shadow-sm">XP: {node.xp}</span>
+            <span className="rounded-full bg-white px-3 py-2 shadow-sm">最高分: {node.best_score}</span>
+            {typeof node.last_analysis_score === "number" ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">上次得分: {node.last_analysis_score}</span> : null}
+            {threshold > 0 ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">目标分: {threshold}</span> : null}
+          </div>
+
+          {hasAttemptProgress ? (
+            <div className="mt-5 rounded-[24px] border border-orange-200 bg-orange-50 p-4">
+              <p className="text-sm font-semibold text-orange-500">当前进度</p>
+              <p className="mt-2 text-sm text-slate-600">
+                已达标: {node.attempt_count} / {consecutive} 次
+              </p>
+              <p className="mt-2 text-sm font-medium text-orange-500">
+                {remainingAttempts > 0 ? `再来 ${remainingAttempts} 次就能点亮。` : "已经满足点亮条件，等待分析结果同步。"}
+              </p>
+            </div>
           ) : null}
-        </div>
+
+          {node.unlock_note ? (
+            <div className="mt-5 rounded-[24px] bg-white p-4 text-sm leading-7 text-slate-600 shadow-sm">
+              <p className="font-semibold text-slate-900">备注</p>
+              <p className="mt-2">{node.unlock_note}</p>
+            </div>
+          ) : null}
+
+          {node.requires.length ? <p className="mt-5 text-sm leading-7 text-slate-500">前置技能: {node.requires.join(" / ")}</p> : null}
+        </section>
       </div>
-
-      <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
-        <span className="rounded-full bg-white px-3 py-2 shadow-sm">XP: {node.xp}</span>
-        <span className="rounded-full bg-white px-3 py-2 shadow-sm">最高分: {node.best_score}</span>
-        {typeof node.last_analysis_score === "number" ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">上次得分: {node.last_analysis_score}</span> : null}
-        {threshold > 0 ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">目标分: {threshold}</span> : null}
-      </div>
-
-      {hasAttemptProgress ? (
-        <div className="mt-5 rounded-[24px] border border-orange-200 bg-orange-50 p-4">
-          <p className="text-sm font-semibold text-orange-500">当前进度</p>
-          <p className="mt-2 text-sm text-slate-600">
-            已达标: {node.attempt_count} / {consecutive} 次
-          </p>
-          <p className="mt-2 text-sm font-medium text-orange-500">
-            {remainingAttempts > 0 ? `再来 ${remainingAttempts} 次就能点亮。` : "已经满足点亮条件，等待分析结果同步。"}
-          </p>
-        </div>
-      ) : null}
-
-      {node.unlock_note ? (
-        <div className="mt-5 rounded-[24px] bg-white p-4 text-sm leading-7 text-slate-600 shadow-sm">
-          <p className="font-semibold text-slate-900">备注</p>
-          <p className="mt-2">{node.unlock_note}</p>
-        </div>
-      ) : null}
-
-      {node.requires.length ? <p className="mt-5 text-sm leading-7 text-slate-500">前置技能: {node.requires.join(" / ")}</p> : null}
-    </section>
+    </div>
   );
 }

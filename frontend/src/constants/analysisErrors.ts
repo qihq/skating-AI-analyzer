@@ -7,6 +7,21 @@ export type AnalysisErrorMessage = {
 };
 
 export const ERROR_MESSAGES: Record<string, AnalysisErrorMessage> = {
+  VIDEO_FORMAT_INVALID: {
+    title: "视频格式无法识别",
+    hint: "请确认文件是真实的 MP4、MOV 或 AVI 视频，且文件未损坏",
+    action: "重新上传",
+  },
+  VIDEO_NO_VIDEO_STREAM: {
+    title: "视频缺少可分析画面",
+    hint: "视频需要至少 0.5 秒、分辨率不低于 320×180，并包含可解码的视频流",
+    action: "重新上传",
+  },
+  VIDEO_BLANK_FRAMES: {
+    title: "视频画面过暗或无有效内容",
+    hint: "检测到抽样画面接近纯黑，请重新上传能看清滑行者的视频",
+    action: "重新上传",
+  },
   VIDEO_DECODE_FAILED: {
     title: "视频格式无法识别",
     hint: "请确认视频文件未损坏，建议使用 MP4（H.264）格式",

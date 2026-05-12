@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.report import generate_report, summarize_vision_for_report
+from app.services.report import calculate_force_score, generate_report, summarize_vision_for_report
 from app.services.video import FramePayload
 from app.services.vision import analyze_frames
 
@@ -77,13 +77,12 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("app.services.vision.get_active_provider", AsyncMock(return_value=vision_provider)),
             patch("app.services.vision.build_memory_context", AsyncMock(return_value="")),
-            patch("app.services.vision.AsyncOpenAI") as mock_openai,
+            patch("app.services.vision.request_text_completion") as request_mock,
             patch("app.services.report.get_active_provider", AsyncMock(return_value=report_provider)),
             patch("app.services.report.build_memory_context", AsyncMock(return_value="")),
             patch("app.services.report.request_text_completion", AsyncMock(return_value=report_json)),
         ):
-            mock_client = mock_openai.return_value
-            mock_client.chat.completions.create = AsyncMock(return_value=vision_response)
+            request_mock.return_value = '{"frame_analysis": ['
 
             vision_structured = await analyze_frames("跳跃", frame_payloads)
             report = await generate_report("跳跃", vision_structured, bio_data=None)
@@ -186,22 +185,68 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("app.services.vision.get_active_provider", AsyncMock(return_value=vision_provider)),
             patch("app.services.vision.build_memory_context", AsyncMock(return_value="")),
-            patch("app.services.vision.AsyncOpenAI") as mock_openai,
+            patch("app.services.vision.request_text_completion") as request_mock,
         ):
-            mock_client = mock_openai.return_value
-            mock_client.chat.completions.create = AsyncMock(return_value=vision_response)
+            request_mock.return_value = json.dumps(response_payload, ensure_ascii=False)
 
             vision_structured = await analyze_frames("跳跃", frame_payloads)
 
-        create_kwargs = mock_client.chat.completions.create.await_args.kwargs
+        create_kwargs = request_mock.await_args.kwargs
         self.assertEqual(create_kwargs["max_tokens"], 5400)
         prompt_text = create_kwargs["messages"][1]["content"][0]["text"]
+        self.assertIn("JUMP_SUBTYPE_EVIDENCE", prompt_text)
         self.assertIn("每帧的 issues 和 positives 各不超过 2 条，每条不超过 30 字。", prompt_text)
         self.assertIn("必须只输出 JSON，禁止任何解释文字。", prompt_text)
         self.assertEqual(len(vision_structured["frame_analysis"]), 20)
         self.assertEqual(vision_structured["frame_analysis"][-1]["frame_id"], "frame_0020")
         self.assertEqual(vision_structured["frame_analysis"][-1]["issues"], ["issue-19-1", "issue-19-2"])
         self.assertEqual(vision_structured["frame_analysis"][-1]["positives"], ["positive-19-1", "positive-19-2"])
+
+    async def test_ai_request_failures_fall_back_to_biomechanics_report_and_force_score(self) -> None:
+        frame_payloads = [
+            FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA"),
+            FramePayload(frame_id="frame_0002", data_url="data:image/jpeg;base64,BBB"),
+        ]
+        provider = SimpleNamespace(
+            id="provider-1",
+            slot="vision",
+            name="provider",
+            provider="openai_compatible",
+            base_url="https://example.com/v1",
+            model_id="test-model",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+        bio_data = {
+            "bio_subscores": {
+                "takeoff_power": 82,
+                "rotation_axis": 78,
+                "arm_coordination": 74,
+                "landing_absorption": 70,
+                "core_stability": 66,
+            },
+            "quality_flags": ["vision_ai_unavailable_fallback"],
+        }
+
+        with (
+            patch("app.services.vision.get_active_provider", AsyncMock(return_value=provider)),
+            patch("app.services.vision.build_memory_context", AsyncMock(return_value="")),
+            patch("app.services.vision.request_text_completion", AsyncMock(side_effect=TimeoutError("timeout"))),
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=provider)),
+            patch("app.services.report.build_memory_context", AsyncMock(return_value="")),
+            patch("app.services.report.request_text_completion", AsyncMock(side_effect=TimeoutError("timeout"))),
+        ):
+            vision_structured = await analyze_frames("跳跃", frame_payloads)
+            report = await generate_report("跳跃", vision_structured, bio_data=bio_data)
+
+        self.assertTrue(vision_structured["fallback_used"])
+        self.assertEqual(vision_structured["action_phase_summary"], "AI 视觉分析暂不可用，以下评分基于生物力学数据。")
+        self.assertEqual(len(vision_structured["frame_analysis"]), len(frame_payloads))
+        self.assertTrue(report["fallback_used"])
+        self.assertEqual(report["data_quality"], "degraded_no_ai")
+        self.assertEqual(report["subscores"], bio_data["bio_subscores"])
+        self.assertEqual(calculate_force_score(report), 75)
 
 
 if __name__ == "__main__":

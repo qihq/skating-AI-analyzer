@@ -12,7 +12,7 @@ from app.services.providers import activate_provider, encrypt_api_key, mask_api_
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
-VALID_SLOTS = {"vision", "report"}
+VALID_SLOTS = {"vision", "vision_path_a", "vision_path_b", "report"}
 
 
 def serialize_provider(provider: AIProvider) -> ProviderPublic:

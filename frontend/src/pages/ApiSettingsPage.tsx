@@ -13,7 +13,7 @@ type ProviderTab =
   | "qwen"
   | "openai_compatible"
   | "claude_compatible";
-type ProviderSlot = "report" | "vision";
+type ProviderSlot = "report" | "vision" | "vision_path_a" | "vision_path_b";
 
 type ProviderFormState = {
   api_key: string;
@@ -32,6 +32,15 @@ type ProviderConfig = {
   supportsVision: boolean;
 };
 
+type VisionSectionConfig = {
+  slot: "vision" | "vision_path_a" | "vision_path_b";
+  eyebrow: string;
+  title: string;
+  body: string;
+  note: string;
+  activeLabel: string;
+};
+
 const REPORT_TAB_ORDER: ProviderTab[] = [
   "deepseek",
   "doubao",
@@ -44,66 +53,93 @@ const REPORT_TAB_ORDER: ProviderTab[] = [
 
 const VISION_PROVIDER_ORDER = ["qwen", "glm", "kimi", "doubao", "deepseek", "minimax", "openai_compatible"];
 
+const VISION_SECTION_CONFIG: VisionSectionConfig[] = [
+  {
+    slot: "vision",
+    eyebrow: "Primary Vision",
+    title: "主视觉链路",
+    body: "用于抽帧识别和主结构化视觉分析，也是双路未独立配置时的默认回退入口。",
+    note: "如果你只想维持单一视觉供应商，把这组配置好即可；Path A / Path B 未单独设置时会自动回退到这里。",
+    activeLabel: "当前主视觉供应商",
+  },
+  {
+    slot: "vision_path_a",
+    eyebrow: "Path A",
+    title: "Path A 纯视觉判断",
+    body: "只看原始画面，不引入骨架和数值指标，适合做直觉型动作观察。",
+    note: "未配置时会自动回退到主视觉链路。单独配置后，可以让 Path A 使用更擅长视频理解的模型。",
+    activeLabel: "当前 Path A 供应商",
+  },
+  {
+    slot: "vision_path_b",
+    eyebrow: "Path B",
+    title: "Path B 量化 grounding",
+    body: "结合骨架叠加帧和生物力学数值，适合做更保守的量化核验。",
+    note: "未配置时会自动回退到主视觉链路。单独配置后，可以让 Path B 使用更稳定的多模态模型。",
+    activeLabel: "当前 Path B 供应商",
+  },
+];
+
 const TAB_CONFIG: Record<ProviderTab, ProviderConfig> = {
   deepseek: {
     title: "DeepSeek",
-    body: "适合报告、训练计划和冰宝聊天的默认文本供应商。如果你的接口支持视觉模型，也可以额外填写视觉模型字段。",
+    body: "适合报告、训练计划和聊天助手的默认文本供应商。",
     baseUrl: "https://api.deepseek.com/v1",
-    note: "DeepSeek 入口仍然走 OpenAI 兼容协议。",
+    note: "DeepSeek 走 OpenAI 兼容协议。",
     modelLabel: "文本模型 ID",
     modelPlaceholder: "例如：deepseek-chat",
     supportsVision: true,
   },
   doubao: {
     title: "豆包（火山方舟）",
-    body: "豆包走 OpenAI 兼容接口；模型请填写接入点 ID，通常以 ep- 开头。",
+    body: "豆包走 OpenAI 兼容接口；模型通常填写接入点 ID。",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    note: "如果你有视觉接入点，也可以单独填在视觉模型字段里。",
+    note: "如果有视觉接入点，也可以单独填在视觉模型字段里。",
     modelLabel: "接入点模型 ID",
     modelPlaceholder: "例如：ep-xxxxxxxx-xxxxx",
     supportsVision: true,
   },
   minimax: {
     title: "MiniMax",
-    body: "MiniMax 可作为文本供应商接入；如果你当前只做文本分析，视觉模型字段可以留空。",
+    body: "适合作为文本供应商接入，也可以单独提供视觉模型。",
     baseUrl: "https://api.minimax.chat/v1",
-    note: "MiniMax 配置完成后，可以和其他文本供应商一样参与报告、计划和聊天。",
+    note: "配置完成后，可参与报告、计划和聊天。",
     modelLabel: "文本模型 ID",
     modelPlaceholder: "例如：MiniMax-Text-01",
     supportsVision: true,
   },
   glm: {
     title: "GLM",
-    body: "GLM 适合接入智谱开放平台。你可以把它作为文本模型，也可以在视觉区单独配置 GLM 的视觉模型。",
+    body: "适合接入智谱平台，可分别作为文本和视觉模型。",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    note: "如果文本和视觉都用 GLM，建议分别在文本区和视觉区保存，方便独立切换。",
+    note: "如果文本和视觉都用 GLM，建议分开保存，方便独立切换。",
     modelLabel: "模型 ID",
     modelPlaceholder: "例如：glm-5",
     supportsVision: true,
   },
   qwen: {
     title: "Qwen",
-    body: "Qwen 走 DashScope 的 OpenAI 兼容接口，适合做文本和视觉双链路配置。",
+    body: "走 DashScope 的 OpenAI 兼容接口，适合文本和视觉双链路配置。",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    note: "如果你希望完全不在群晖环境变量里放 key，可以在这里补文本配置，在视觉区补视觉配置。",
+    note: "如果不想在容器环境变量里放 key，可以在这里单独保存。",
     modelLabel: "模型 ID",
     modelPlaceholder: "例如：qwen-max-latest",
     supportsVision: true,
   },
   openai_compatible: {
     title: "自定义 OpenAI 兼容",
-    body: "用于接入任何兼容 OpenAI Chat Completions 协议的自定义服务，比如代理网关、自建兼容层或第三方聚合平台。",
+    body: "用于接入任何兼容 OpenAI Chat Completions 协议的服务。",
     baseUrl: "https://api.openai.com/v1",
-    note: "这个入口支持文本链路；若你的自定义接口也支持视觉模型，可补充视觉模型字段。",
+    note: "如果你的兼容服务也支持视觉，可补充视觉模型字段。",
     modelLabel: "文本模型 ID",
-    modelPlaceholder: "例如：gpt-4o-mini 或你的自定义模型名",
+    modelPlaceholder: "例如：gpt-4o-mini",
     supportsVision: true,
   },
   claude_compatible: {
     title: "自定义 Claude 兼容",
-    body: "用于接入兼容 Anthropic Messages 协议的服务。当前会接入报告、训练计划、记忆建议和冰宝聊天这些文本链路。",
+    body: "用于接入兼容 Anthropic Messages 协议的服务。",
     baseUrl: "https://api.anthropic.com/v1",
-    note: "Claude 兼容入口当前只接文本链路，视频视觉分析仍建议单独配置视觉供应商。",
+    note: "当前主要用于文本链路；视觉分析建议仍单独配置视觉供应商。",
     modelLabel: "Claude 模型 ID",
     modelPlaceholder: "例如：claude-3-5-sonnet-20241022",
     supportsVision: false,
@@ -152,13 +188,26 @@ function buildVisionFallbackConfig(provider: ProviderPublic | undefined): Provid
 
   return {
     title: provider?.name ?? fallback.title,
-    body: "这里专门配置视频抽帧后的视觉识别链路。上传视频后的动作阶段分析、帧级观察和结构化视觉结果，都会走这里的激活供应商。",
+    body: "这里专门配置视频抽帧后的视觉识别链路。",
     baseUrl: provider?.base_url ?? fallback.baseUrl,
-    note: "建议把视觉链路和文本链路分开配置，这样后续切换模型时更清晰，也不用把视觉 key 放到容器环境变量里。",
+    note: "建议把视觉链路和文本链路分开配置，后续切换模型时更清楚。",
     modelLabel: "视觉主模型 ID",
     modelPlaceholder: fallback.placeholder,
     supportsVision: true,
   };
+}
+
+function sortVisionProviders(items: ProviderPublic[]) {
+  return [...items].sort((a, b) => {
+    const orderA = VISION_PROVIDER_ORDER.indexOf(a.provider);
+    const orderB = VISION_PROVIDER_ORDER.indexOf(b.provider);
+    const normalizedA = orderA === -1 ? Number.MAX_SAFE_INTEGER : orderA;
+    const normalizedB = orderB === -1 ? Number.MAX_SAFE_INTEGER : orderB;
+    if (normalizedA !== normalizedB) {
+      return normalizedA - normalizedB;
+    }
+    return a.created_at.localeCompare(b.created_at);
+  });
 }
 
 export default function ApiSettingsPage() {
@@ -166,7 +215,7 @@ export default function ApiSettingsPage() {
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
   const [activeTab, setActiveTab] = useState<ProviderTab>("deepseek");
   const [forms, setForms] = useState<Record<string, ProviderFormState>>({});
-  const [expandedVisionId, setExpandedVisionId] = useState<string | null>(null);
+  const [expandedProviderKey, setExpandedProviderKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -193,13 +242,13 @@ export default function ApiSettingsPage() {
           const provider = data.find((item) => item.slot === "report" && item.provider === tab);
           nextForms[`report:${tab}`] = normalizeProvider(provider, TAB_CONFIG[tab]);
         }
-        for (const provider of data.filter((item) => item.slot === "vision")) {
-          nextForms[`vision:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
+        for (const provider of data.filter((item) => item.slot !== "report")) {
+          nextForms[`${provider.slot}:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
         }
         setForms(nextForms);
 
-        const activeVision = data.find((item) => item.slot === "vision" && item.is_active);
-        setExpandedVisionId(activeVision?.id ?? data.find((item) => item.slot === "vision")?.id ?? null);
+        const activeProvider = data.find((item) => item.slot !== "report" && item.is_active);
+        setExpandedProviderKey(activeProvider ? `${activeProvider.slot}:${activeProvider.id}` : null);
       } catch {
         if (!cancelled) {
           setError("API 设置加载失败，请稍后再试。");
@@ -217,19 +266,14 @@ export default function ApiSettingsPage() {
   const reportConfig = TAB_CONFIG[activeTab];
   const reportFormKey = `report:${activeTab}`;
 
-  const visionProviders = useMemo(() => {
-    const visionItems = providers.filter((item) => item.slot === "vision");
-    return visionItems.sort((a, b) => {
-      const orderA = VISION_PROVIDER_ORDER.indexOf(a.provider);
-      const orderB = VISION_PROVIDER_ORDER.indexOf(b.provider);
-      const normalizedA = orderA === -1 ? Number.MAX_SAFE_INTEGER : orderA;
-      const normalizedB = orderB === -1 ? Number.MAX_SAFE_INTEGER : orderB;
-      if (normalizedA !== normalizedB) {
-        return normalizedA - normalizedB;
-      }
-      return a.created_at.localeCompare(b.created_at);
-    });
-  }, [providers]);
+  const providersByVisionSlot = useMemo(
+    () => ({
+      vision: sortVisionProviders(providers.filter((item) => item.slot === "vision")),
+      vision_path_a: sortVisionProviders(providers.filter((item) => item.slot === "vision_path_a")),
+      vision_path_b: sortVisionProviders(providers.filter((item) => item.slot === "vision_path_b")),
+    }),
+    [providers],
+  );
 
   const setFormField = (formKey: string, field: keyof ProviderFormState, value: string) => {
     setForms((current) => ({
@@ -264,8 +308,8 @@ export default function ApiSettingsPage() {
         const provider = nextProviders.find((item) => item.slot === "report" && item.provider === tab);
         nextForms[`report:${tab}`] = normalizeProvider(provider, TAB_CONFIG[tab]);
       }
-      for (const provider of nextProviders.filter((item) => item.slot === "vision")) {
-        nextForms[`vision:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
+      for (const provider of nextProviders.filter((item) => item.slot !== "report")) {
+        nextForms[`${provider.slot}:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
       }
       return nextForms;
     });
@@ -334,10 +378,10 @@ export default function ApiSettingsPage() {
         item.slot === updated.slot ? { ...item, is_active: item.id === updated.id } : item,
       );
       refreshProviders(nextProviders);
-      if (provider.slot === "vision") {
-        setExpandedVisionId(updated.id);
+      if (provider.slot !== "report") {
+        setExpandedProviderKey(`${updated.slot}:${updated.id}`);
       }
-      showNotice(`${provider.name} 已设为当前${provider.slot === "vision" ? "视觉" : "文本"}供应商。`);
+      showNotice(`${provider.name} 已设为当前${provider.slot === "report" ? "文本" : "视觉"}供应商。`);
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
         setError(String(requestError.response?.data?.detail ?? "切换失败，请稍后再试。"));
@@ -354,12 +398,13 @@ export default function ApiSettingsPage() {
     slot: ProviderSlot,
     formKey: string,
     config: ProviderConfig,
+    activeLabel: string,
     collapsed = false,
   ) => {
     const form = forms[formKey] ?? normalizeProvider(provider, config);
-    const activeLabel = slot === "vision" ? "当前视觉供应商" : "当前文本供应商";
     const status = getProviderStatus(provider);
-    const isVisionExpanded = slot !== "vision" || expandedVisionId === provider.id;
+    const providerKey = `${slot}:${provider.id}`;
+    const isExpanded = slot === "report" || expandedProviderKey === providerKey;
 
     return (
       <div key={provider.id} className="rounded-[30px] border border-slate-200 bg-slate-50 p-6">
@@ -374,7 +419,7 @@ export default function ApiSettingsPage() {
                 ) : null}
               </div>
               <p className="mt-3 text-sm leading-7 text-slate-500">{config.body}</p>
-              {slot === "vision" && collapsed ? (
+              {slot !== "report" && collapsed ? (
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
                   <span className="rounded-full bg-white px-3 py-1">模型: {form.model_id || "未填写"}</span>
                   <span className="rounded-full bg-white px-3 py-1">Base URL: {form.base_url || "未填写"}</span>
@@ -385,13 +430,13 @@ export default function ApiSettingsPage() {
             </div>
 
             <div className="flex flex-wrap gap-3">
-              {slot === "vision" ? (
+              {slot !== "report" ? (
                 <button
                   type="button"
-                  onClick={() => setExpandedVisionId((current) => (current === provider.id ? null : provider.id))}
+                  onClick={() => setExpandedProviderKey((current) => (current === providerKey ? null : providerKey))}
                   className="app-pill min-h-[46px] px-5 text-sm font-semibold"
                 >
-                  {isVisionExpanded ? "收起配置" : "展开配置"}
+                  {isExpanded ? "收起配置" : "展开配置"}
                 </button>
               ) : null}
               {!provider.is_active ? (
@@ -407,7 +452,7 @@ export default function ApiSettingsPage() {
             </div>
           </div>
 
-          {slot === "vision" && collapsed && !isVisionExpanded ? null : (
+          {slot !== "report" && collapsed && !isExpanded ? null : (
             <>
               <p className="text-sm leading-7 text-slate-500">{config.note}</p>
 
@@ -517,7 +562,7 @@ export default function ApiSettingsPage() {
 
       <section className="app-card p-6 tablet:p-8">
         <p className="max-w-3xl text-base leading-8 text-slate-500">
-          这里分开管理文本链路和视觉链路。报告、训练计划、聊天走文本供应商；视频上传后的逐帧识别、动作阶段判断和视觉结构化输出走视觉供应商。
+          这里分开管理文本链路、主视觉链路，以及双路分析的 Path A / Path B。未单独配置的双路 slot 会自动回退到主视觉供应商。
         </p>
       </section>
 
@@ -525,7 +570,7 @@ export default function ApiSettingsPage() {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Report Models</p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">文本模型配置</h2>
-          <p className="mt-3 text-sm leading-7 text-slate-500">这部分对应报告生成、训练计划、记忆建议和冰宝聊天等文本能力。</p>
+          <p className="mt-3 text-sm leading-7 text-slate-500">这部分对应报告生成、训练计划、记忆建议和聊天等文本能力。</p>
         </div>
 
         <div className="mt-8 flex flex-wrap gap-3 rounded-[28px] bg-slate-100 p-2">
@@ -550,24 +595,57 @@ export default function ApiSettingsPage() {
         </div>
 
         <div className="mt-8">
-          {reportProvider ? renderProviderCard(reportProvider, "report", reportFormKey, reportConfig) : null}
+          {reportProvider ? renderProviderCard(reportProvider, "report", reportFormKey, reportConfig, "当前文本供应商") : null}
         </div>
       </section>
 
       <section className="app-card p-6 tablet:p-8">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Vision Models</p>
-          <h2 className="mt-2 text-2xl font-semibold text-slate-900">视觉模型配置</h2>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-900">视觉与双路模型配置</h2>
           <p className="mt-3 text-sm leading-7 text-slate-500">
-            视觉供应商现在默认折叠显示。你可以先看状态卡片，再按需展开配置。上传视频后，系统会使用当前激活的
-            `vision` 供应商做抽帧识别和结构化视觉分析。
+            上传视频后，系统会先跑主视觉分析，再按需调用 Path A 和 Path B 做双路交叉验证。未单独配置的双路 slot 会自动回退到主视觉链路。
           </p>
         </div>
 
-        <div className="mt-8 grid gap-6">
-          {visionProviders.map((provider) =>
-            renderProviderCard(provider, "vision", `vision:${provider.id}`, buildVisionFallbackConfig(provider), true),
-          )}
+        <div className="mt-8 space-y-8">
+          {VISION_SECTION_CONFIG.map((section) => {
+            const sectionProviders = providersByVisionSlot[section.slot];
+            if (!sectionProviders.length) {
+              return null;
+            }
+
+            return (
+              <div key={section.slot} className="space-y-4">
+                <div className="rounded-[28px] border border-slate-200 bg-slate-50 px-5 py-5">
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">{section.eyebrow}</p>
+                  <div className="mt-3 flex flex-col gap-3 tablet:flex-row tablet:items-end tablet:justify-between">
+                    <div className="max-w-3xl">
+                      <h3 className="text-xl font-semibold text-slate-900">{section.title}</h3>
+                      <p className="mt-2 text-sm leading-7 text-slate-500">{section.body}</p>
+                    </div>
+                    {section.slot !== "vision" ? (
+                      <span className="rounded-full bg-white px-4 py-2 text-xs font-semibold text-slate-500">未配置时回退到主视觉</span>
+                    ) : null}
+                  </div>
+                  <p className="mt-3 text-sm leading-7 text-slate-500">{section.note}</p>
+                </div>
+
+                <div className="grid gap-6">
+                  {sectionProviders.map((provider) =>
+                    renderProviderCard(
+                      provider,
+                      section.slot,
+                      `${provider.slot}:${provider.id}`,
+                      buildVisionFallbackConfig(provider),
+                      section.activeLabel,
+                      true,
+                    ),
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
     </div>

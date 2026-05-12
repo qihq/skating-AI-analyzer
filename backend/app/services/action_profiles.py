@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.jump_features import compute_jump_evidence
+
 
 ANALYSIS_PROFILES = {"jump", "spin", "step", "spiral"}
 
@@ -133,6 +135,29 @@ def get_jump_characteristics(action_subtype: str | None) -> dict[str, str] | Non
         if normalized_key in normalized or normalized in normalized_key:
             return characteristics
     return None
+
+
+def infer_jump_subtype_evidence(
+    pose_data: dict[str, Any] | None,
+    key_frames: dict[str, Any] | None,
+    effective_fps: float | None,
+) -> dict[str, Any]:
+    """Infer weak geometric evidence for jump subtype prompts.
+
+    Args:
+        pose_data: Pose payload containing MediaPipe keypoints.
+        key_frames: Biomechanics key-frame dict containing T/A/L.
+        effective_fps: Effective sampling fps on the real action timeline.
+
+    Returns:
+        Jump evidence dictionary. Missing inputs return a quality flag instead of raising.
+
+    Raises:
+        无。
+    """
+    if not isinstance(pose_data, dict) or not isinstance(key_frames, dict):
+        return {"quality_flags": ["jump_evidence_missing_inputs"]}
+    return compute_jump_evidence(pose_data, key_frames, float(effective_fps or 5.0))
 
 
 def _max_vertical_range(pose_data: dict[str, Any] | None) -> float:

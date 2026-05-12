@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+
 
 TARGET_LOCK_AUTO_THRESHOLD = 0.72
+TARGET_PERSON_MIN_CONFIDENCE = 0.15
 
 
 @dataclass(slots=True)
@@ -31,29 +34,46 @@ def _normalized_bbox(x: float, y: float, width: float, height: float) -> dict[st
     }
 
 
+def validate_manual_bbox(bbox: dict[str, Any] | None) -> dict[str, float]:
+    """校验并标准化前端手动框选的主目标 bbox。
+
+    Args:
+        bbox: 前端传入的归一化 bbox，支持 width/height 或 w/h 字段。
+
+    Returns:
+        标准化后的 bbox，字段为 x/y/width/height。
+
+    Raises:
+        AnalysisPipelineError: bbox 缺字段、越界或尺寸过小时抛出 TARGET_BBOX_INVALID。
+    """
+    if not isinstance(bbox, dict):
+        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox must be an object.")
+
+    try:
+        x = float(bbox["x"])
+        y = float(bbox["y"])
+        width = float(bbox.get("width", bbox.get("w")))
+        height = float(bbox.get("height", bbox.get("h")))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox requires x/y/w/h values.") from exc
+
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 <= width <= 1.0 and 0.0 <= height <= 1.0):
+        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox values must be normalized to 0-1.")
+    if width < 0.05 or height < 0.05:
+        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox width and height must be at least 0.05.")
+    if x + width > 1.0 or y + height > 1.0:
+        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox must stay inside the frame.")
+
+    return {
+        "x": round(x, 4),
+        "y": round(y, 4),
+        "width": round(width, 4),
+        "height": round(height, 4),
+    }
+
+
 def _fallback_candidates(frame_names: Sequence[str]) -> list[dict[str, Any]]:
-    if not frame_names:
-        return []
-    return [
-        {
-            "id": "candidate_center",
-            "bbox": _normalized_bbox(0.28, 0.08, 0.44, 0.84),
-            "confidence": 0.78,
-            "source": "motion_fallback",
-        },
-        {
-            "id": "candidate_left",
-            "bbox": _normalized_bbox(0.12, 0.1, 0.36, 0.8),
-            "confidence": 0.56,
-            "source": "motion_fallback",
-        },
-        {
-            "id": "candidate_right",
-            "bbox": _normalized_bbox(0.52, 0.1, 0.34, 0.8),
-            "confidence": 0.51,
-            "source": "motion_fallback",
-        },
-    ]
+    return []
 
 
 def build_target_preview(
@@ -68,9 +88,19 @@ def build_target_preview(
     if isinstance(existing_target_lock, dict) and existing_target_lock.get("candidates"):
         candidates = [item for item in existing_target_lock.get("candidates", []) if isinstance(item, dict)]
 
-    auto_candidate_id = candidates[0]["id"] if candidates else None
-    lock_confidence = float(candidates[0]["confidence"]) if candidates else 0.0
-    target_lock_status = "auto_locked" if lock_confidence >= TARGET_LOCK_AUTO_THRESHOLD else "awaiting_manual"
+    visible_candidates = [
+        item
+        for item in candidates
+        if isinstance(item, dict) and float(item.get("confidence", 0.0) or 0.0) >= TARGET_PERSON_MIN_CONFIDENCE
+    ]
+    if not visible_candidates:
+        auto_candidate_id = None
+        lock_confidence = 0.0
+        target_lock_status = "no_person_detected"
+    else:
+        auto_candidate_id = str(visible_candidates[0].get("id") or "") or None
+        lock_confidence = float(visible_candidates[0].get("confidence", 0.0) or 0.0)
+        target_lock_status = "auto_locked" if lock_confidence >= TARGET_LOCK_AUTO_THRESHOLD else "awaiting_manual"
 
     if isinstance(existing_target_lock, dict):
         auto_candidate_id = str(existing_target_lock.get("selected_candidate_id") or auto_candidate_id or "")
@@ -118,8 +148,22 @@ def build_target_lock_payload(
     preview: TargetPreview,
     *,
     selected_candidate: dict[str, Any] | None = None,
+    manual_bbox: dict[str, Any] | None = None,
     manual: bool = False,
 ) -> dict[str, Any]:
+    if manual_bbox is not None:
+        selected_bbox = validate_manual_bbox(manual_bbox)
+        return {
+            "preview_frame": preview.preview_frame,
+            "candidates": preview.candidates,
+            "selected_candidate_id": None,
+            "selected_bbox": selected_bbox,
+            "lock_confidence": 1.0,
+            "status": "manual",
+            "manual_override": True,
+            "quality_flags": [],
+        }
+
     chosen = selected_candidate
     if chosen is None and preview.auto_candidate_id:
         chosen = next((item for item in preview.candidates if str(item.get("id")) == preview.auto_candidate_id), None)
@@ -132,6 +176,7 @@ def build_target_lock_payload(
         "lock_confidence": float(chosen.get("confidence", preview.lock_confidence)) if isinstance(chosen, dict) else preview.lock_confidence,
         "status": "locked" if manual else preview.target_lock_status,
         "manual_override": manual,
+        "quality_flags": [],
     }
 
 

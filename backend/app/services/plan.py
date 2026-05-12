@@ -11,6 +11,11 @@ from app.services.snowball import build_memory_context
 
 logger = logging.getLogger(__name__)
 
+
+class PlanGenerationError(RuntimeError):
+    """Raised when the training plan cannot be produced from an AI response."""
+
+
 PLAN_DAY_THEMES = [
     (1, "核心稳定 + 轴心"),
     (2, "起跳发力"),
@@ -156,6 +161,61 @@ def normalize_plan(
     }
 
 
+def _require_complete_plan_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise PlanGenerationError("AI 未返回训练计划 JSON 对象。")
+
+    days = payload.get("days")
+    if not isinstance(days, list):
+        raise PlanGenerationError("AI 返回的训练计划缺少 days 数组。")
+
+    expected_days = {day for day, _ in PLAN_DAY_THEMES}
+    received_days: set[int] = set()
+    for raw_day in days:
+        if not isinstance(raw_day, dict):
+            continue
+        try:
+            day_number = int(raw_day.get("day", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        sessions = raw_day.get("sessions")
+        if day_number in expected_days and isinstance(sessions, list) and sessions:
+            received_days.add(day_number)
+
+    missing_days = sorted(expected_days - received_days)
+    if missing_days:
+        raise PlanGenerationError(f"AI 返回的训练计划不完整，缺少第 {missing_days} 天。")
+
+    return payload
+
+
+def _require_regenerated_days_payload(payload: Any, required_days: list[int]) -> list[dict[str, Any]]:
+    raw_days = payload if isinstance(payload, list) else payload.get("days", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_days, list):
+        raise PlanGenerationError("AI 未返回续期训练计划数组。")
+
+    expected_days = set(required_days)
+    valid_days: list[dict[str, Any]] = []
+    received_days: set[int] = set()
+    for raw_day in raw_days:
+        if not isinstance(raw_day, dict):
+            continue
+        try:
+            day_number = int(raw_day.get("day", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        sessions = raw_day.get("sessions")
+        if day_number in expected_days and isinstance(sessions, list) and sessions:
+            valid_days.append(raw_day)
+            received_days.add(day_number)
+
+    missing_days = sorted(expected_days - received_days)
+    if missing_days:
+        raise PlanGenerationError(f"AI 返回的续期计划不完整，缺少第 {missing_days} 天。")
+
+    return valid_days
+
+
 def summarize_completed_sessions(plan_json: dict[str, Any], completed_days: list[int]) -> str:
     days = plan_json.get("days", []) if isinstance(plan_json, dict) else []
     lines: list[str] = []
@@ -226,8 +286,12 @@ async def generate_training_plan(
     skater_context: str | None = None,
     skater_id: str | None = None,
 ) -> dict[str, Any]:
-    provider = await get_active_provider("report")
-    memory_context = await build_memory_context(skater_id)
+    try:
+        provider = await get_active_provider("report")
+        memory_context = await build_memory_context(skater_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Training plan provider setup failed: %s", exc)
+        raise PlanGenerationError(f"训练计划 AI 供应商不可用：{exc}") from exc
     system_prompt = PLAN_SYSTEM_PROMPT if not memory_context else f"{PLAN_SYSTEM_PROMPT}\n\n{memory_context}"
 
     issues_text = "\n".join(
@@ -235,15 +299,16 @@ async def generate_training_plan(
         for issue in report.get("issues", [])
     ) or "- 当前暂无明确问题，请围绕基础动作稳定性安排训练。"
 
-    raw_content = await request_text_completion(
-        provider,
-        temperature=0.25,
-        max_tokens=3200,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
+    try:
+        raw_content = await request_text_completion(
+            provider,
+            temperature=0.25,
+            max_tokens=3200,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
                     f"练习对象：{skater_context or '儿童滑冰学员'}\n"
                     f"动作类型：{action_type}\n"
                     f"总体评价：{report.get('summary', '')}\n"
@@ -270,18 +335,21 @@ async def generate_training_plan(
                     '"focus_skill":"跳跃基础",'
                     '"days":[{"day":1,"theme":"核心稳定 + 轴心","sessions":[{"id":"d1s1","title":"小企鹅站直线","duration":"6分钟","description":"头顶皇冠站直，家长数到10。","is_office_trainable":true,"completed":false}]}]'
                     "}"
-                ),
-            },
-        ],
-    )
+                    ),
+                },
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Training plan completion failed: %s", exc)
+        raise PlanGenerationError(f"训练计划 AI 调用失败：{exc}") from exc
     cleaned = clean_json_text(raw_content)
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        logger.warning("Training plan JSON parse failed, using child-safe fallback plan: %s", exc)
-        return build_fallback_plan(action_type, report, skater_context)
+        logger.warning("Training plan JSON parse failed: %s | raw: %s", exc, cleaned[:500])
+        raise PlanGenerationError(f"AI 返回的训练计划不是合法 JSON：{exc}") from exc
 
-    return normalize_plan(parsed, action_type, report, skater_context)
+    return normalize_plan(_require_complete_plan_payload(parsed), action_type, report, skater_context)
 
 
 async def extend_training_plan(
@@ -299,8 +367,12 @@ async def extend_training_plan(
     if not remaining_days:
         return normalized_original
 
-    provider = await get_active_provider("report")
-    memory_context = await build_memory_context(skater_id)
+    try:
+        provider = await get_active_provider("report")
+        memory_context = await build_memory_context(skater_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Extended training plan provider setup failed: %s", exc)
+        raise PlanGenerationError(f"训练计划续期 AI 供应商不可用：{exc}") from exc
     system_prompt = EXTEND_PLAN_SYSTEM_PROMPT if not memory_context else f"{EXTEND_PLAN_SYSTEM_PROMPT}\n\n{memory_context}"
 
     completed_sessions_summary = summarize_completed_sessions(normalized_original, valid_completed_days) or "暂无已完成摘要。"
@@ -311,15 +383,16 @@ async def extend_training_plan(
     )
     report_summary = str(report.get("summary", "")).strip() or str(report.get("training_focus", "")).strip() or action_type
 
-    raw_content = await request_text_completion(
-        provider,
-        temperature=0.25,
-        max_tokens=2200,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
+    try:
+        raw_content = await request_text_completion(
+            provider,
+            temperature=0.25,
+            max_tokens=2200,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
                     f"原训练计划已完成前 {valid_completed_days} 天。\n"
                     f"以下是已完成的训练摘要：\n{completed_sessions_summary}\n\n"
                     f"请重新生成第 {remaining_days} 天的训练内容，\n"
@@ -327,18 +400,21 @@ async def extend_training_plan(
                     f"{remaining_theme_lines}\n"
                     "只输出需要更新的天数的 JSON 数组，格式与原计划相同。\n"
                     f"参考原始报告背景：{report_summary}"
-                ),
-            },
-        ],
-    )
+                    ),
+                },
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Extended training plan completion failed: %s", exc)
+        raise PlanGenerationError(f"训练计划续期 AI 调用失败：{exc}") from exc
     cleaned = clean_json_text(raw_content)
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        logger.warning("Extended training plan JSON parse failed, reusing original remaining days: %s", exc)
-        parsed = [day for day in normalized_original["days"] if day["day"] in remaining_days]
+        logger.warning("Extended training plan JSON parse failed: %s | raw: %s", exc, cleaned[:500])
+        raise PlanGenerationError(f"AI 返回的续期计划不是合法 JSON：{exc}") from exc
 
-    regenerated_days = parsed if isinstance(parsed, list) else parsed.get("days", [])
+    regenerated_days = _require_regenerated_days_payload(parsed, remaining_days)
     normalized_regenerated = normalize_plan(
         {
             "title": normalized_original["title"],
