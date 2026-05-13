@@ -485,9 +485,9 @@ export default function SettingsPage() {
               </button>
             </div>
 
-            <div className="settings-row mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+            <div className="mt-5 flex min-h-[76px] items-center justify-between gap-4 rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4">
               <p className="text-sm font-medium text-slate-600">当前 PIN 位数</p>
-              <p className="mt-2 text-3xl font-semibold text-slate-900">{pinLength} 位</p>
+              <p className="shrink-0 text-3xl font-semibold leading-none text-slate-900">{pinLength} 位</p>
             </div>
           </section>
 

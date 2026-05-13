@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
@@ -38,9 +39,16 @@ from app.schemas import (
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
 )
-from app.services.action_profiles import infer_analysis_profile, infer_profile_from_input, infer_profile_hint, normalize_action_subtype
+from app.services.action_profiles import (
+    infer_analysis_profile,
+    infer_jump_subtype_evidence,
+    infer_profile_from_input,
+    infer_profile_hint,
+    normalize_action_subtype,
+)
 from app.services.analysis_errors import (
     AnalysisErrorCode,
+    AnalysisPipelineError,
     classify_ai_failure,
     classify_video_failure,
     friendly_error_title,
@@ -48,7 +56,8 @@ from app.services.analysis_errors import (
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
-from app.services.plan import extend_training_plan, generate_training_plan
+from app.services.bbox_tracker import track_bbox
+from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
@@ -64,16 +73,20 @@ from app.services.target_lock import (
     resolve_manual_candidate,
 )
 from app.services.video import (
+    build_timestamp_map,
     build_processing_frames_dir,
     build_upload_paths,
     cleanup_processing_dir,
+    cut_action_window_clip,
     encode_frames,
     extract_motion_sampled_frames,
+    precheck_video,
     persist_frames,
     restore_sampled_frames,
     save_upload_file,
 )
-from app.services.vision import analyze_frames
+from app.services.vision_dual import analyze_frames_dual, dual_path_summary
+from app.services.providers import get_active_provider
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -85,6 +98,7 @@ SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
 MAX_ANALYSIS_LOG_ENTRIES = 200
+CONFIRMED_TARGET_LOCK_STATUSES = {"locked", "manual"}
 STALE_ANALYSIS_TIMEOUT_SECONDS = 600
 IN_PROGRESS_ANALYSIS_STATUSES = {
     "pending",
@@ -95,12 +109,56 @@ IN_PROGRESS_ANALYSIS_STATUSES = {
 }
 
 
+def _sampling_metadata_from_saved(
+    *,
+    action_window_start: float,
+    action_window_end: float,
+    source_fps: float,
+    is_slow_motion: bool,
+    motion_scores: dict[str, object] | None = None,
+):
+    from app.services.video import MAX_SAMPLED_FRAMES, NORMAL_PLAYBACK_FPS, VideoSamplingMetadata
+
+    selected = motion_scores.get("selected") if isinstance(motion_scores, dict) else None
+    if isinstance(selected, list) and len(selected) >= 2:
+        sample_count = len(selected)
+    elif isinstance(motion_scores, dict):
+        sample_count = int(motion_scores.get("sample_count", 0) or MAX_SAMPLED_FRAMES)
+    else:
+        sample_count = MAX_SAMPLED_FRAMES
+    slow_motion_scale = max(source_fps / NORMAL_PLAYBACK_FPS, 1.0) if is_slow_motion and source_fps > 0 else 1.0
+    video_duration = max(action_window_end - action_window_start, 1e-6)
+    window_seconds = video_duration / slow_motion_scale
+    window_start_sec = action_window_start / slow_motion_scale
+    # 设计说明: 旧任务重试没有 effective_fps 持久字段，只能从已保存动作窗口和采样帧数恢复。
+    effective_fps = (max(sample_count, 2) - 1) / window_seconds
+    return VideoSamplingMetadata(
+        action_window_start=round(action_window_start, 3),
+        action_window_end=round(action_window_end, 3),
+        window_start_sec=round(window_start_sec, 3),
+        window_end_sec=round(window_start_sec + window_seconds, 3),
+        effective_fps=round(effective_fps, 3),
+        source_fps=round(source_fps, 3),
+        is_slow_motion=is_slow_motion,
+    )
+
+
 def _skater_display_name(skater: Skater) -> str:
     return skater.display_name or skater.name
 
 
 def _elapsed_seconds(start_time: float) -> float:
     return round(time.monotonic() - start_time, 2)
+
+
+async def _provider_for_slot(slot: str, fallback_slot: str = "vision"):
+    try:
+        return await get_active_provider(slot)
+    except RuntimeError:
+        if slot == fallback_slot:
+            raise
+        logger.info("Provider slot %s is not configured; falling back to %s", slot, fallback_slot)
+        return await get_active_provider(fallback_slot)
 
 
 def _utc_now_iso() -> str:
@@ -111,6 +169,64 @@ def _normalize_processing_logs(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)][-MAX_ANALYSIS_LOG_ENTRIES:]
+
+
+def _provider_label(provider: Any) -> str:
+    provider_name = str(getattr(provider, "provider", "") or "").strip() or "unknown"
+    model = str(getattr(provider, "vision_model", "") or getattr(provider, "model_id", "") or "").strip()
+    return f"{provider_name}/{model}" if model else provider_name
+
+
+def _count_list(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _build_dual_path_log_detail(
+    *,
+    path_a: dict[str, Any] | None,
+    path_b: dict[str, Any] | None,
+    dual_path_meta: dict[str, Any] | None,
+    provider_path_a: Any,
+    provider_path_b: Any,
+    raw_frame_count: int,
+    annotated_frame_count: int,
+    annotated_dir: Path | None,
+    clip_path: Path | None,
+    used_key_frames: set[str] | None,
+) -> str:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    path_a_data = path_a if isinstance(path_a, dict) else {}
+    path_b_data = path_b if isinstance(path_b, dict) else {}
+    detail = {
+        "path_a": {
+            "provider": _provider_label(provider_path_a),
+            "mode": path_a_data.get("vision_mode") or ("video" if clip_path else "frames"),
+            "input": str(clip_path) if clip_path else f"{raw_frame_count} raw frames",
+            "frame_analysis_count": _count_list(path_a_data.get("frame_analysis")),
+            "phase_segments_count": _count_list(path_a_data.get("phase_segments")),
+            "path_desc": path_a_data.get("path_desc"),
+        },
+        "path_b": {
+            "provider": _provider_label(provider_path_b),
+            "input": f"{annotated_frame_count} annotated frames + biomechanics",
+            "annotated_dir": str(annotated_dir) if annotated_dir else None,
+            "n_frames": path_b_data.get("n_frames") or annotated_frame_count,
+            "key_frames": sorted(used_key_frames or set()),
+            "failed": bool(path_b_data.get("error")),
+            "error": path_b_data.get("error"),
+            "subscores": path_b_data.get("subscores"),
+        },
+        "cross_validation": {
+            "recommended_path": meta.get("recommended_path"),
+            "overall_agreement_rate": meta.get("overall_agreement_rate"),
+            "skeleton_reliability_signal": meta.get("skeleton_reliability_signal"),
+            "conflict_fields": meta.get("conflict_fields"),
+            "conflict_summary": meta.get("conflict_summary"),
+            "weight_a": meta.get("weight_a"),
+            "weight_b": meta.get("weight_b"),
+        },
+    }
+    return json.dumps(detail, ensure_ascii=False, indent=2)
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
@@ -348,8 +464,6 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             retry_from_stage=retry_from_stage,
         )
 
-        from app.services.video import VideoSamplingMetadata
-
         start_idx = PIPELINE_STAGES.index(retry_from_stage) if retry_from_stage else 0
         run_extract_frames = start_idx <= PIPELINE_STAGES.index('extract_frames')
         run_pose = start_idx <= PIPELINE_STAGES.index('pose')
@@ -371,14 +485,15 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             )
             await _set_analysis_status(analysis_id, 'extracting_frames')
             extract_start = time.monotonic()
-            if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' and upload_frames_dir is not None and upload_frames_dir.exists():
+            if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES and upload_frames_dir is not None and upload_frames_dir.exists():
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
-                sampling_metadata = VideoSamplingMetadata(
+                sampling_metadata = _sampling_metadata_from_saved(
                     action_window_start=saved_action_window_start,
                     action_window_end=saved_action_window_end,
                     source_fps=saved_source_fps,
                     is_slow_motion=saved_is_slow_motion,
+                    motion_scores=motion_scores,
                 )
                 await _append_analysis_log(
                     analysis_id,
@@ -389,6 +504,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             else:
                 try:
                     logger.info('Analysis %s extracting frames with profile=%s', analysis_id, analysis_profile_hint)
+                    await precheck_video(video_path)
                     sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
                         video_path,
                         processing_frames_dir,
@@ -414,7 +530,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 persist_frames(sampled_frames, upload_frames_dir)
 
             preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
-            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) == 'locked' else build_target_lock_payload(preview)
+            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES else build_target_lock_payload(preview)
 
             async with AsyncSessionLocal() as session:
                 analysis = await session.get(Analysis, analysis_id)
@@ -431,7 +547,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.retry_from_stage = 'pose'
                 await session.commit()
 
-            if (not existing_target_lock or str(existing_target_lock.get('status')) != 'locked') and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
+            if (not existing_target_lock or str(existing_target_lock.get('status')) not in CONFIRMED_TARGET_LOCK_STATUSES) and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
                 if upload_frames_dir is not None:
                     persist_frames(sampled_frames, upload_frames_dir)
                 timings['total_s'] = _elapsed_seconds(total_start)
@@ -451,11 +567,12 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 raise RuntimeError('?????????????????')
             sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
             motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
-            sampling_metadata = VideoSamplingMetadata(
+            sampling_metadata = _sampling_metadata_from_saved(
                 action_window_start=saved_action_window_start,
                 action_window_end=saved_action_window_end,
                 source_fps=saved_source_fps,
                 is_slow_motion=saved_is_slow_motion,
+                motion_scores=motion_scores,
             )
             preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
             target_lock = existing_target_lock if existing_target_lock else build_target_lock_payload(preview)
@@ -477,13 +594,21 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     message='开始提取姿态关键点。',
                 )
                 pose_start = time.monotonic()
-                pose_data = await asyncio.to_thread(extract_pose, str(processing_frames_dir), target_lock)
+                bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock)
+                pose_data = await asyncio.to_thread(
+                    extract_pose,
+                    str(processing_frames_dir),
+                    target_lock,
+                    bbox_per_frame,
+                    sampling_metadata.effective_fps,
+                )
                 timings['pose_s'] = _elapsed_seconds(pose_start)
                 async with AsyncSessionLocal() as session:
                     analysis = await session.get(Analysis, analysis_id)
                     if analysis is None:
                         return
                     analysis.pose_data = pose_data
+                    analysis.target_lock = target_lock
                     analysis.processing_timings = dict(timings)
                     analysis.retry_from_stage = 'biomechanics'
                     await session.commit()
@@ -532,8 +657,21 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 )
                 biomechanics_start = time.monotonic()
                 analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
-                bio_data = analyze_biomechanics(pose_data, action_type, analysis_profile)
+                bio_data = analyze_biomechanics(
+                    pose_data,
+                    action_type,
+                    analysis_profile,
+                    effective_fps=sampling_metadata.effective_fps,
+                    source_fps=sampling_metadata.source_fps,
+                    window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
+                )
                 if isinstance(bio_data, dict):
+                    if analysis_profile == 'jump':
+                        profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
+                            pose_data,
+                            bio_data.get('key_frames') if isinstance(bio_data.get('key_frames'), dict) else {},
+                            sampling_metadata.effective_fps,
+                        )
                     merged_quality_flags = bio_data.get('quality_flags') if isinstance(bio_data.get('quality_flags'), list) else []
                     merged_quality_flags.extend(
                         flag for flag in profile_evidence.get('quality_flags', []) if flag not in merged_quality_flags
@@ -615,18 +753,58 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             await _set_analysis_status(analysis_id, 'analyzing')
             try:
                 vision_start = time.monotonic()
-                payloads = await encode_frames(sampled_frames)
-                vision_structured = await analyze_frames(
-                    action_type,
-                    payloads,
-                    skater_id,
+                timestamps = build_timestamp_map(motion_scores)
+                raw_payloads = await encode_frames(sampled_frames, timestamps=timestamps)
+                clip_path = None
+                provider_path_a = await _provider_for_slot("vision_path_a")
+                provider_path_b = await _provider_for_slot("vision_path_b")
+                try:
+                    clip_path = await cut_action_window_clip(
+                        video_path,
+                        sampling_metadata.action_window_start,
+                        sampling_metadata.action_window_end,
+                        processing_frames_dir.parent / 'action_window.mp4',
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning('Analysis %s action-window clip failed; Path A will use frames: %s', analysis_id, exc)
+                dual = await analyze_frames_dual(
+                    action_type=action_type,
+                    frame_paths=sampled_frames,
+                    raw_frame_payloads=raw_payloads,
+                    pose_data=pose_data,
+                    bio_data=bio_data,
+                    provider_path_a=provider_path_a,
+                    provider_path_b=provider_path_b,
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
+                    memory_context="",
+                    timestamps=timestamps,
+                    clip_path=clip_path,
+                    window_start_sec=sampling_metadata.action_window_start,
+                )
+                vision_structured = dual.path_a
+                vision_path_a = dual.path_a
+                vision_path_b = dual.path_b
+                dual_path_meta = dual.dual_path_meta
+                cross_validation = {**dual.validation.to_dict(), **dual_path_meta}
+                ui_summary = dual_path_summary(dual)
+                dual_path_log_detail = _build_dual_path_log_detail(
+                    path_a=vision_path_a,
+                    path_b=vision_path_b,
+                    dual_path_meta=dual_path_meta,
+                    provider_path_a=provider_path_a,
+                    provider_path_b=provider_path_b,
+                    raw_frame_count=len(raw_payloads),
+                    annotated_frame_count=ui_summary.get("n_frames_b") if isinstance(ui_summary.get("n_frames_b"), int) else 0,
+                    annotated_dir=getattr(dual, "annotated_dir", None),
+                    clip_path=clip_path,
+                    used_key_frames=getattr(dual, "used_key_frames", set()),
                 )
                 frame_analysis = vision_structured.get('frame_analysis')
                 if isinstance(frame_analysis, list):
-                    vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile)
+                    vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
+                    vision_path_a = vision_structured
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
                 async with AsyncSessionLocal() as session:
@@ -635,6 +813,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         return
                     analysis.vision_raw = vision_raw
                     analysis.vision_structured = vision_structured
+                    analysis.vision_path_a = vision_path_a
+                    analysis.vision_path_b = vision_path_b
+                    analysis.cross_validation = cross_validation
                     analysis.processing_timings = dict(timings)
                     analysis.retry_from_stage = 'report'
                     await session.commit()
@@ -644,6 +825,16 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage='vision', timings=timings)
                 return
             logger.info('Analysis %s received vision result', analysis_id)
+            path_a_mode = vision_path_a.get("vision_mode", "frames") if isinstance(vision_path_a, dict) else "unknown"
+            path_b_failed = isinstance(vision_path_b, dict) and bool(vision_path_b.get("error"))
+            recommended_path = dual_path_meta.get("recommended_path", "unknown") if isinstance(dual_path_meta, dict) else "unknown"
+            await _append_analysis_log(
+                analysis_id,
+                stage='vision',
+                level='info',
+                message=f'Dual-path details: Path A mode={path_a_mode}, Path B={"failed" if path_b_failed else "completed"}, recommended={recommended_path}.',
+                detail=dual_path_log_detail,
+            )
             await _append_analysis_log(
                 analysis_id,
                 stage='vision',
@@ -659,6 +850,10 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     raise RuntimeError('???????????? vision_structured?')
                 vision_structured = analysis.vision_structured
                 vision_raw = analysis.vision_raw or json.dumps(vision_structured, ensure_ascii=False)
+                vision_path_a = analysis.vision_path_a if isinstance(analysis.vision_path_a, dict) else vision_structured
+                vision_path_b = analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None
+                cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+                dual_path_meta = cross_validation
             await _append_analysis_log(
                 analysis_id,
                 stage='vision',
@@ -678,7 +873,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
 
         try:
             report_start = time.monotonic()
-            report = await generate_report(action_type, vision_structured, bio_data, skater_id)
+            report = await generate_report(
+                action_type,
+                vision_structured,
+                bio_data,
+                skater_id,
+                dual_path_meta=dual_path_meta,
+            )
             force_score = calculate_force_score(report)
             timings['report_s'] = _elapsed_seconds(report_start)
             timings['total_s'] = _elapsed_seconds(total_start)
@@ -707,6 +908,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
 
                 analysis.vision_raw = vision_raw
                 analysis.vision_structured = vision_structured
+                analysis.vision_path_a = vision_path_a
+                analysis.vision_path_b = vision_path_b
+                analysis.cross_validation = cross_validation
                 analysis.report = report
                 analysis.pose_data = pose_data
                 analysis.bio_data = bio_data
@@ -715,7 +919,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.analysis_profile = analysis_profile
                 analysis.pipeline_version = CURRENT_PIPELINE_VERSION
                 analysis.target_lock = target_lock
-                analysis.target_lock_status = 'auto_locked'
+                analysis.target_lock_status = str(target_lock.get('status') or 'auto_locked')
                 analysis.action_window_start = sampling_metadata.action_window_start
                 analysis.action_window_end = sampling_metadata.action_window_end
                 analysis.source_fps = sampling_metadata.source_fps
@@ -1003,6 +1207,9 @@ def _detail_from_analysis(
         status=analysis.status,
         vision_raw=analysis.vision_raw,
         vision_structured=analysis.vision_structured,
+        vision_path_a=analysis.vision_path_a,
+        vision_path_b=analysis.vision_path_b,
+        cross_validation=analysis.cross_validation,
         report=analysis.report,
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
@@ -1063,6 +1270,33 @@ def _fallback_motion_payload(frames_dir: Path) -> dict[str, object]:
         "scores": [],
         "source": "legacy_frames",
     }
+
+
+def _append_target_lock_flags(target_lock: dict[str, Any], flags: list[str]) -> dict[str, Any]:
+    existing = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+    merged = list(existing)
+    for flag in flags:
+        if flag not in merged:
+            merged.append(flag)
+    target_lock["quality_flags"] = merged
+    return target_lock
+
+
+def _build_bbox_per_frame(sampled_frames: list[Path], target_lock: dict[str, Any]) -> list[dict[str, float]] | None:
+    selected_bbox = target_lock.get("selected_bbox")
+    if not isinstance(selected_bbox, dict):
+        return None
+    try:
+        bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox)
+        _append_target_lock_flags(target_lock, flags)
+        target_lock["bbox_per_frame"] = bbox_per_frame
+        return bbox_per_frame
+    except Exception:  # noqa: BLE001
+        logger.warning("bbox tracker failed; falling back to static target bbox", exc_info=True)
+        _append_target_lock_flags(target_lock, ["bbox_tracker_failed_fallback"])
+        bbox_per_frame = [selected_bbox for _ in sampled_frames]
+        target_lock["bbox_per_frame"] = bbox_per_frame
+        return bbox_per_frame
 
 
 def _video_path_for_analysis(analysis: Analysis) -> Path:
@@ -1158,7 +1392,20 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
 
     if not pose_frames or not pose_has_keypoints:
         logger.info("Analysis %s is missing pose data, backfilling from existing frames", analysis.id)
-        computed_pose = await asyncio.to_thread(extract_pose, str(frames_dir), analysis.target_lock if isinstance(analysis.target_lock, dict) else None)
+        sampling_metadata = _sampling_metadata_from_saved(
+            action_window_start=float(analysis.action_window_start or 0.0),
+            action_window_end=float(analysis.action_window_end or 0.0),
+            source_fps=float(analysis.source_fps or 30.0),
+            is_slow_motion=bool(analysis.is_slow_motion),
+            motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+        )
+        computed_pose = await asyncio.to_thread(
+            extract_pose,
+            str(frames_dir),
+            analysis.target_lock if isinstance(analysis.target_lock, dict) else None,
+            None,
+            sampling_metadata.effective_fps,
+        )
         analysis.pose_data = computed_pose
         pose_data = computed_pose
         changed = True
@@ -1166,10 +1413,20 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
     if bio_data is None or not bio_data.get("key_frames"):
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
+        sampling_metadata = _sampling_metadata_from_saved(
+            action_window_start=float(analysis.action_window_start or 0.0),
+            action_window_end=float(analysis.action_window_end or 0.0),
+            source_fps=float(analysis.source_fps or 30.0),
+            is_slow_motion=bool(analysis.is_slow_motion),
+            motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+        )
         analysis.bio_data = analyze_biomechanics(
             pose_data or {"connections": [], "frames": []},
             analysis.action_type,
             analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+            effective_fps=sampling_metadata.effective_fps,
+            source_fps=sampling_metadata.source_fps,
+            window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
         )
         changed = True
     else:
@@ -1378,6 +1635,10 @@ async def upload_analysis(
 
     try:
         await save_upload_file(file, video_path)
+        await precheck_video(video_path)
+    except AnalysisPipelineError as exc:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail={"code": exc.code.value, "message": exc.detail}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1583,7 +1844,11 @@ async def create_training_plan(analysis_id: str, session: AsyncSession = Depends
     if analysis.skater_id != skater.id:
         analysis.skater_id = skater.id
 
-    plan_json = await generate_training_plan(analysis.action_type, analysis.report, _skater_context(skater), skater.id)
+    try:
+        plan_json = await generate_training_plan(analysis.action_type, analysis.report, _skater_context(skater), skater.id)
+    except PlanGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     plan = TrainingPlan(
         analysis_id=analysis.id,
         skater_id=skater.id,
@@ -1722,6 +1987,7 @@ async def retry_analysis(
 
 
 @router.get("/{analysis_id}/target-preview", response_model=TargetPreviewResponse)
+@router.get("/{analysis_id}/target_preview", response_model=TargetPreviewResponse)
 async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TargetPreviewResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
@@ -1742,6 +2008,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
 
 
 @router.post("/{analysis_id}/target-lock", response_model=AnalysisDetail)
+@router.post("/{analysis_id}/target_lock", response_model=AnalysisDetail)
 async def confirm_target_lock(
     analysis_id: str,
     payload: TargetLockRequest,
@@ -1754,12 +2021,19 @@ async def confirm_target_lock(
 
     frames_dir = _frames_dir_for_analysis(analysis)
     preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
-    selected = resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
-    if selected is None:
-        raise HTTPException(status_code=400, detail="未能确定要分析的主滑行者，请重新点选。")
+    try:
+        selected = None if payload.manual_bbox is not None else resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
+        if selected is None and payload.manual_bbox is None:
+            raise HTTPException(status_code=400, detail="Unable to resolve target skater; please select again.")
 
-    analysis.target_lock = build_target_lock_payload(preview, selected_candidate=selected, manual=True)
-    analysis.target_lock_status = "locked"
+        analysis.target_lock = (
+            build_target_lock_payload(preview, manual_bbox=payload.manual_bbox.model_dump())
+            if payload.manual_bbox is not None
+            else build_target_lock_payload(preview, selected_candidate=selected, manual=True)
+        )
+    except AnalysisPipelineError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    analysis.target_lock_status = str(analysis.target_lock.get("status") or "locked")
     analysis.retry_from_stage = None
     analysis.status = "pending"
     analysis.updated_at = datetime.now(timezone.utc)
@@ -1905,14 +2179,18 @@ async def extend_plan(
     if len(completed_days) < 3:
         raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
 
-    plan.plan_json = await extend_training_plan(
-        original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
-        completed_days=completed_days,
-        action_type=analysis.action_type,
-        report=analysis.report,
-        skater_context=_skater_context(skater) if skater else None,
-        skater_id=skater.id if skater else None,
-    )
+    try:
+        plan.plan_json = await extend_training_plan(
+            original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
+            completed_days=completed_days,
+            action_type=analysis.action_type,
+            report=analysis.report,
+            skater_context=_skater_context(skater) if skater else None,
+            skater_id=skater.id if skater else None,
+        )
+    except PlanGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     await session.commit()
     await session.refresh(plan)
     return _plan_detail_from_model(plan)

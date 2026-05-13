@@ -89,7 +89,7 @@ export default function BiomechanicsPanel({ bioData, mode, onSelectFrame }: Biom
       </div>
 
       {isChildMode ? (
-        <p className="text-sm leading-6 text-slate-500">坦坦模式会隐藏更复杂的速度、转速与完整生物力学拆解，家长模式可查看全部细节。</p>
+        <p className="text-sm leading-6 text-slate-500">儿童模式会隐藏更复杂的速度、转速与完整生物力学拆解，家长模式可查看全部细节。</p>
       ) : null}
     </div>
   );

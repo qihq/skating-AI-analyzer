@@ -46,19 +46,19 @@ def _scaled_keypoints(scale: float, com_shift: float = 0.0) -> list[dict[str, fl
     )
 
 
-def _spin_keypoints(left_hip_x: float, right_hip_x: float, ankle_y: float = 0.88) -> list[dict[str, float]]:
+def _spin_keypoints(left_hip_x: float, right_hip_x: float, ankle_y: float = 0.88, y_shift: float = 0.0) -> list[dict[str, float]]:
     keypoints: list[dict[str, float]] = [{"id": index, "x": 0.0, "y": 0.0, "z": 0.0, "visibility": 0.0} for index in range(33)]
     visible_points = {
-        11: (0.42, 0.20),
-        12: (0.58, 0.20),
-        15: (0.35, 0.30),
-        16: (0.65, 0.30),
-        23: (left_hip_x, 0.50),
-        24: (right_hip_x, 0.50),
-        25: (0.45, 0.70),
-        26: (0.55, 0.70),
-        27: (0.46, ankle_y),
-        28: (0.54, ankle_y),
+        11: (0.42, 0.20 + y_shift),
+        12: (0.58, 0.20 + y_shift),
+        15: (0.35, 0.30 + y_shift),
+        16: (0.65, 0.30 + y_shift),
+        23: (left_hip_x, 0.50 + y_shift),
+        24: (right_hip_x, 0.50 + y_shift),
+        25: (0.45, 0.70 + y_shift),
+        26: (0.55, 0.70 + y_shift),
+        27: (0.46, ankle_y + y_shift),
+        28: (0.54, ankle_y + y_shift),
     }
     for index, (x_value, y_value) in visible_points.items():
         keypoints[index] = {"id": index, "x": x_value, "y": y_value, "z": 0.0, "visibility": 0.99}
@@ -117,6 +117,22 @@ class BiomechanicsNormalizationTests(unittest.TestCase):
         self.assertNotIn("T", result["key_frames"])
         self.assertNotIn("A", result["key_frames"])
         self.assertNotIn("L", result["key_frames"])
+
+    def test_non_jump_bio_subscores_are_derived_from_discipline_metrics(self) -> None:
+        pose_data = {
+            "frames": [
+                {"frame": "frame_0001.jpg", "keypoints": _spin_keypoints(0.45, 0.55, ankle_y=0.70, y_shift=0.00)},
+                {"frame": "frame_0002.jpg", "keypoints": _spin_keypoints(0.46, 0.56, ankle_y=0.62, y_shift=-0.04)},
+                {"frame": "frame_0003.jpg", "keypoints": _spin_keypoints(0.62, 0.72, ankle_y=0.66, y_shift=0.03)},
+                {"frame": "frame_0004.jpg", "keypoints": _spin_keypoints(0.63, 0.73, ankle_y=0.75, y_shift=0.01)},
+            ]
+        }
+
+        result = analyze_biomechanics(pose_data, action_type="spiral", analysis_profile="spiral")
+
+        self.assertTrue(result["discipline_metrics"])
+        self.assertNotEqual(result["bio_subscores"]["rotation_axis"], 65)
+        self.assertNotEqual(result["bio_subscores"]["landing_absorption"], 65)
 
 
 if __name__ == "__main__":

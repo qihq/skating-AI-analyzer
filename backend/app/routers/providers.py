@@ -6,13 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.models import AIProvider
-from app.schemas import ProviderCreate, ProviderPublic, ProviderTestResponse, ProviderUpdate
+from app.schemas import ProviderCreate, ProviderPublic, ProviderTestResponse, ProviderUpdate, VisionVoteConfig
 from app.services.providers import activate_provider, encrypt_api_key, mask_api_key, test_provider_connectivity
+from app.services.vision_vote_config import load_vision_vote_config, save_vision_vote_config
 
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
-VALID_SLOTS = {"vision", "report"}
+VALID_SLOTS = {"vision", "vision_path_a", "vision_path_b", "report"}
 
 
 def serialize_provider(provider: AIProvider) -> ProviderPublic:
@@ -38,6 +39,31 @@ async def list_providers(session: AsyncSession = Depends(get_session)) -> list[P
         select(AIProvider).order_by(AIProvider.slot.asc(), AIProvider.is_active.desc(), AIProvider.created_at.asc())
     )
     return [serialize_provider(provider) for provider in result.scalars().all()]
+
+
+@router.get("/vision-vote/config", response_model=VisionVoteConfig)
+async def get_vision_vote_config() -> VisionVoteConfig:
+    return VisionVoteConfig(**load_vision_vote_config())
+
+
+@router.put("/vision-vote/config", response_model=VisionVoteConfig)
+async def update_vision_vote_config(
+    payload: VisionVoteConfig,
+    session: AsyncSession = Depends(get_session),
+) -> VisionVoteConfig:
+    provider_ids = [payload.primary_provider_id, payload.secondary_provider_id]
+    unique_ids = {provider_id for provider_id in provider_ids if provider_id}
+    if unique_ids:
+        result = await session.execute(
+            select(AIProvider.id).where(AIProvider.slot == "vision", AIProvider.id.in_(unique_ids))
+        )
+        found_ids = {row[0] for row in result.all()}
+        missing_ids = unique_ids - found_ids
+        if missing_ids:
+            raise HTTPException(status_code=400, detail="vision vote provider must belong to slot=vision.")
+
+    saved = save_vision_vote_config(payload.model_dump())
+    return VisionVoteConfig(**saved)
 
 
 @router.get("/{slot}/active", response_model=ProviderPublic)
@@ -146,3 +172,4 @@ async def test_provider(provider_id: str, session: AsyncSession = Depends(get_se
 
     success, detail = await test_provider_connectivity(provider)
     return ProviderTestResponse(success=success, detail=detail)
+

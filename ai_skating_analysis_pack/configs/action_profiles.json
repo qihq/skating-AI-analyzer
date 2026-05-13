@@ -1,0 +1,104 @@
+{
+  "analysis_profiles": ["jump", "spin", "step", "spiral"],
+  "action_subtype_options": {
+    "跳跃": ["未指定", "单跳", "连跳"],
+    "旋转": ["未指定", "直立旋转", "蹲转", "燕式旋转", "联合旋转", "飞旋"],
+    "步法": ["未指定", "步法序列", "燕式滑行", "螺旋线序列"],
+    "自由滑": ["节目片段"]
+  },
+  "jump_characteristics": {
+    "axel": {
+      "takeoff_edge": "左刀前外刃起跳",
+      "direction": "前向起跳，空中向右旋转",
+      "key_check": "起跳腿（左腿）蹬冰后是否有明显前向跨步",
+      "rotation_note": "单 Axel=1.5圈，双 Axel=2.5圈"
+    },
+    "lutz": {
+      "takeoff_edge": "左刀后外刃起跳（右脚 toe pick 辅助）",
+      "direction": "后向起跳",
+      "key_check": "重点检查是否发生刃型错误（Flutz）",
+      "rotation_note": "常见错误：外刃在起跳前瞬间偷换为内刃"
+    },
+    "flip": {
+      "takeoff_edge": "左刀后内刃起跳（右脚 toe pick 辅助）",
+      "direction": "后向起跳",
+      "key_check": "与 Lutz 外形相似，区别在于起跳前冰刃为内刃",
+      "rotation_note": "常见混淆：与 Lutz 起跳动作相似"
+    },
+    "loop": {
+      "takeoff_edge": "右刀后外刃起跳（无点冰辅助）",
+      "direction": "后向起跳，双腿并拢",
+      "key_check": "起跳时双腿并拢，右腿单腿承重",
+      "rotation_note": "纯刃跳，起跳瞬间双脚短暂并拢是识别标志"
+    },
+    "salchow": {
+      "takeoff_edge": "左刀后内刃起跳（无点冰辅助）",
+      "direction": "后向起跳",
+      "key_check": "自由腿（右腿）向前大幅摆动辅助起跳",
+      "rotation_note": "纯刃跳，自由腿摆动是起跳动力的关键来源"
+    },
+    "toe_loop": {
+      "takeoff_edge": "右刀后外刃起跳（左脚 toe pick 辅助）",
+      "direction": "后向起跳",
+      "key_check": "点冰位置是否准确，点冰后是否快速收腿",
+      "rotation_note": "最常见的跳跃类型，也是连跳的常用后跳"
+    }
+  },
+  "valid_phases": ["准备", "起跳", "腾空", "落冰", "滑出", "旋转入", "旋转中", "旋转出", "步法", "不可分析"],
+  "jump_phase_transitions": {
+    "准备": ["准备", "起跳"],
+    "起跳": ["起跳", "腾空"],
+    "腾空": ["腾空", "落冰"],
+    "落冰": ["落冰", "滑出", "不可分析"],
+    "滑出": ["滑出", "不可分析"],
+    "不可分析": ["准备", "起跳", "腾空", "落冰", "滑出", "不可分析"]
+  },
+  "motion_sampling": {
+    "frame_rate": 5,
+    "max_sampled_frames": 20,
+    "thumb_size": "160x90",
+    "full_size": "854x480",
+    "action_window_sizes": {
+      "跳跃": 3.0,
+      "旋转": 5.0,
+      "步法": 8.0,
+      "自由滑": null
+    }
+  },
+  "profiles": {
+    "jump": {
+      "frame_sample_count": 32,
+      "window_seconds": 3.0,
+      "frame_rate": 12
+    },
+    "spin": {
+      "frame_sample_count": 24,
+      "window_seconds": 6.0,
+      "frame_rate": 8
+    },
+    "step": {
+      "frame_sample_count": 20,
+      "window_seconds": 8.0,
+      "frame_rate": 5
+    },
+    "spiral": {
+      "frame_sample_count": 16,
+      "window_seconds": 6.0,
+      "frame_rate": 6
+    }
+  },
+  "biomechanics_constants": {
+    "fps": 5,
+    "max_air_time_seconds": 1.5,
+    "max_height_cm": 120.0,
+    "max_takeoff_speed_mps": 6.5,
+    "max_rotation_rps": 6.0
+  },
+  "subscore_weights": {
+    "takeoff_power": 0.25,
+    "rotation_axis": 0.25,
+    "arm_coordination": 0.15,
+    "landing_absorption": 0.25,
+    "core_stability": 0.10
+  }
+}

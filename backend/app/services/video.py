@@ -8,7 +8,9 @@ import os
 import subprocess
 import shutil
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 from typing import Sequence
 
 import aiofiles
@@ -17,6 +19,7 @@ import numpy as np
 from fastapi import UploadFile
 
 from app.database import UPLOADS_DIR
+from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
 
 
 logger = logging.getLogger(__name__)
@@ -27,11 +30,18 @@ NORMAL_PLAYBACK_FPS = 30.0
 MAX_SAMPLED_FRAMES = int(os.getenv("FRAME_SAMPLE_COUNT", "20"))
 FRAME_THUMB_SIZE = os.getenv("FRAME_THUMB_SIZE", "160x90")
 FRAME_FULL_SIZE = os.getenv("FRAME_FULL_SIZE", "854x480")
+ACTION_CLIP_SIZE = os.getenv("ACTION_CLIP_SIZE", "854x480")
+ACTION_CLIP_MAX_SECONDS = float(os.getenv("ACTION_CLIP_MAX_SECONDS", "10"))
+ACTION_CLIP_MAX_MB = int(os.getenv("ACTION_CLIP_MAX_MB", "100"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
 ACTION_WINDOW_DETECTION_FPS = 2
 BLUR_THRESHOLD = float(os.getenv("FRAME_BLUR_THRESHOLD", "80.0"))
+MIN_VIDEO_DURATION_SECONDS = 0.5
+MIN_VIDEO_WIDTH = 320
+MIN_VIDEO_HEIGHT = 180
+BLANK_FRAME_VARIANCE_THRESHOLD = 5.0
 MIN_FILTERED_FRAMES = 3
 PROCESSING_ROOT = Path("/tmp/skating-analyzer") if Path("/tmp").exists() else UPLOADS_DIR / "_processing"
 
@@ -41,23 +51,24 @@ ACTION_WINDOW_SIZES: dict[str, float | None] = {
     "步法": 8.0,
     "自由滑": None,
 }
-PROFILE_WINDOW_SIZES: dict[str, float | None] = {
+ACTION_PROFILE_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "action_profiles.json"
+DEFAULT_PROFILE_WINDOW_SIZES: dict[str, float | None] = {
     "jump": 3.0,
     "spin": 5.0,
     "step": 8.0,
     "spiral": 6.0,
 }
-PROFILE_FRAME_RATES: dict[str, int] = {
+DEFAULT_PROFILE_FRAME_RATES: dict[str, int] = {
     "jump": 10,
     "spin": 8,
     "spiral": 6,
     "step": 5,
 }
-PROFILE_MAX_FRAMES: dict[str, int] = {
-    "jump": 15,
-    "spin": 20,
-    "spiral": 18,
-    "step": 24,
+DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
+    "jump": 32,
+    "spin": 24,
+    "spiral": 16,
+    "step": 20,
 }
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
@@ -72,22 +83,65 @@ FFMPEG_RETRYABLE_ERRORS = (
 class FramePayload:
     frame_id: str
     data_url: str
+    timestamp_sec: float = 0.0
 
 
 @dataclass(slots=True)
 class VideoSamplingMetadata:
     action_window_start: float
     action_window_end: float
+    window_start_sec: float
+    window_end_sec: float
+    effective_fps: float
     source_fps: float
     is_slow_motion: bool
 
 
 def get_frame_rate_for_profile(profile: str | None) -> int:
-    return PROFILE_FRAME_RATES.get(profile or "", FRAME_RATE)
+    config = _profile_sampling_config(profile)
+    return int(config.get("frame_rate") or DEFAULT_PROFILE_FRAME_RATES.get(profile or "", FRAME_RATE))
 
 
 def get_max_frames_for_profile(profile: str | None) -> int:
-    return PROFILE_MAX_FRAMES.get(profile or "", MAX_SAMPLED_FRAMES)
+    config = _profile_sampling_config(profile)
+    return int(config.get("frame_sample_count") or DEFAULT_PROFILE_MAX_FRAMES.get(profile or "", MAX_SAMPLED_FRAMES))
+
+
+def get_window_seconds_for_profile(profile: str | None, action_type: str) -> float | None:
+    """Return configured action-window duration on the normal-speed timeline."""
+    config = _profile_sampling_config(profile)
+    value = config.get("window_seconds")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return DEFAULT_PROFILE_WINDOW_SIZES.get(profile or "", ACTION_WINDOW_SIZES.get(action_type))
+
+
+@lru_cache(maxsize=1)
+def _load_action_profile_config() -> dict[str, dict[str, Any]]:
+    try:
+        with ACTION_PROFILE_CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+            payload = json.load(config_file)
+    except OSError as exc:
+        logger.warning("Action profile config missing, using built-in sampling defaults: %s", exc)
+        return {}
+    except json.JSONDecodeError as exc:
+        logger.warning("Action profile config invalid, using built-in sampling defaults: %s", exc)
+        return {}
+
+    profiles = payload.get("profiles")
+    if isinstance(profiles, dict):
+        return {str(key): value for key, value in profiles.items() if isinstance(value, dict)}
+
+    legacy_profiles = payload.get("motion_sampling")
+    if isinstance(legacy_profiles, dict):
+        return {str(key): value for key, value in legacy_profiles.items() if isinstance(value, dict)}
+    return {}
+
+
+def _profile_sampling_config(profile: str | None) -> dict[str, Any]:
+    if not profile:
+        return {}
+    return _load_action_profile_config().get(profile.strip().lower(), {})
 
 
 def get_slow_motion_scale(source_fps: float) -> float:
@@ -101,6 +155,20 @@ def get_source_window_duration(action_window_duration: float, source_fps: float)
     """Map a normal-speed action window onto the source video's playback timeline."""
     scale = get_slow_motion_scale(source_fps) if source_fps >= SLOW_MOTION_THRESHOLD_FPS else 1.0
     return action_window_duration * scale
+
+
+def _effective_sampling_context(
+    start_sec: float,
+    end_sec: float,
+    sample_count: int,
+    slow_motion_scale: float,
+) -> tuple[float, float, float]:
+    effective_duration = max((end_sec - start_sec) / max(slow_motion_scale, 1e-6), 1e-6)
+    window_start_sec = round(start_sec / max(slow_motion_scale, 1e-6), 3)
+    window_end_sec = round(window_start_sec + effective_duration, 3)
+    # 设计说明: N 个采样帧只有 N-1 个时间间隔；慢动作源视频先折算回动作真实时间轴。
+    effective_fps = (max(sample_count, 2) - 1) / effective_duration
+    return window_start_sec, window_end_sec, round(effective_fps, 3)
 
 
 def _frame_dimensions() -> tuple[str, str]:
@@ -119,6 +187,138 @@ def build_upload_paths(analysis_id: str, suffix: str) -> tuple[Path, Path]:
     frames_dir = upload_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     return upload_dir / f"source{suffix}", frames_dir
+
+
+def _has_supported_video_magic(video_path: Path) -> bool:
+    header = video_path.read_bytes()[:16]
+    suffix = video_path.suffix.lower()
+    if suffix in {".mp4", ".mov"}:
+        return len(header) >= 12 and header[4:8] == b"ftyp"
+    if suffix == ".avi":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"AVI "
+    return False
+
+
+def _probe_video(video_path: Path) -> dict[str, object]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "ffprobe cannot read the uploaded video container.",
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "ffprobe returned invalid metadata for the uploaded video.",
+        ) from exc
+
+
+async def _extract_precheck_frames(video_path: Path, frames_dir: Path) -> list[Path]:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    output_pattern = str(frames_dir / "precheck_%02d.jpg")
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "select='eq(n,0)+eq(n,10)+eq(n,20)',scale=160:90",
+            "-vsync",
+            "0",
+            "-frames:v",
+            "3",
+            output_pattern,
+        ]
+    )
+    return sorted(frames_dir.glob("precheck_*.jpg"))
+
+
+async def precheck_video(video_path: Path) -> None:
+    """Validate a video before the expensive analysis pipeline starts.
+
+    Args:
+        video_path: Uploaded mp4/mov/avi file path.
+
+    Returns:
+        None when the container, stream metadata, and sampled frame content are usable.
+
+    Raises:
+        AnalysisPipelineError: VIDEO_FORMAT_INVALID, VIDEO_NO_VIDEO_STREAM,
+            or VIDEO_BLANK_FRAMES when the input cannot be analyzed.
+    """
+    if not video_path.exists() or not _has_supported_video_magic(video_path):
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Uploaded file header does not match mp4/mov/avi video magic bytes.",
+        )
+
+    metadata = _probe_video(video_path)
+    streams = metadata.get("streams") if isinstance(metadata, dict) else None
+    video_stream = next(
+        (stream for stream in streams or [] if isinstance(stream, dict) and stream.get("codec_type") == "video"),
+        None,
+    )
+    if not isinstance(video_stream, dict):
+        raise AnalysisPipelineError(AnalysisErrorCode.VIDEO_NO_VIDEO_STREAM, "Uploaded file has no video stream.")
+
+    try:
+        duration = float(video_stream.get("duration") or (metadata.get("format") or {}).get("duration") or 0.0)
+        width = int(video_stream.get("width") or 0)
+        height = int(video_stream.get("height") or 0)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_NO_VIDEO_STREAM,
+            "Uploaded video stream metadata is incomplete.",
+        ) from exc
+
+    if duration <= MIN_VIDEO_DURATION_SECONDS or width < MIN_VIDEO_WIDTH or height < MIN_VIDEO_HEIGHT:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_NO_VIDEO_STREAM,
+            "Uploaded video is too short or below the minimum 320x180 resolution.",
+        )
+
+    precheck_dir = video_path.parent / "_precheck_frames"
+    try:
+        if precheck_dir.exists():
+            shutil.rmtree(precheck_dir)
+        frames = await _extract_precheck_frames(video_path, precheck_dir)
+        if not frames:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_NO_VIDEO_STREAM,
+                "No frames could be decoded from the uploaded video.",
+            )
+
+        variances: list[float] = []
+        for frame_path in frames:
+            image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
+            if image is not None:
+                variances.append(float(np.var(image)))
+
+        # 设计说明: low luminance variance across several decoded frames catches black-screen videos before pose/LLM work.
+        if not variances or max(variances) <= BLANK_FRAME_VARIANCE_THRESHOLD:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_BLANK_FRAMES,
+                "Decoded sample frames are blank or nearly static black frames.",
+            )
+    finally:
+        if precheck_dir.exists():
+            shutil.rmtree(precheck_dir, ignore_errors=True)
 
 
 def build_processing_frames_dir(analysis_id: str) -> tuple[Path, Path]:
@@ -264,7 +464,7 @@ def _fallback_action_window(action_type: str) -> tuple[float, float]:
 
 
 def _fallback_profile_window(action_type: str, analysis_profile: str | None, source_fps: float = NORMAL_PLAYBACK_FPS) -> tuple[float, float]:
-    window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", ACTION_WINDOW_SIZES.get(action_type))
+    window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if window_size is None:
         return 0.0, float(MAX_SECONDS)
     source_window_size = get_source_window_duration(float(window_size), source_fps)
@@ -293,7 +493,7 @@ def _pick_window_by_profile(
     analysis_profile: str | None,
     source_fps: float,
 ) -> tuple[int, int]:
-    window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", ACTION_WINDOW_SIZES.get(action_type))
+    window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if window_size is None:
         return 0, len(motion_scores)
 
@@ -363,7 +563,7 @@ async def detect_action_window(
         return _fallback_profile_window(action_type, analysis_profile, source_fps)
 
     best_start_frame, best_end_frame = _pick_window_by_profile(motion_scores, action_type, analysis_profile, source_fps)
-    selected_window_size = PROFILE_WINDOW_SIZES.get(analysis_profile or "", window_size)
+    selected_window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if selected_window_size is None:
         return 0.0, float(MAX_SECONDS)
     source_window_size = get_source_window_duration(float(selected_window_size), source_fps)
@@ -425,6 +625,88 @@ async def _run_ffmpeg(args: list[str]) -> None:
         break
 
     raise RuntimeError(f"FFmpeg 处理失败：{last_message}")
+
+
+async def cut_action_window_clip(
+    video_path: Path,
+    window_start_sec: float,
+    window_end_sec: float,
+    out_path: Path,
+) -> Path:
+    """
+    Cut a short action-window clip for native video vision models.
+
+    Args:
+        video_path: Source mp4/mov/avi path.
+        window_start_sec: Source-video window start in seconds.
+        window_end_sec: Source-video window end in seconds.
+        out_path: Output mp4 path.
+
+    Returns:
+        The created clip path.
+
+    Raises:
+        RuntimeError: When ffmpeg cannot create a valid bounded clip.
+    """
+    start = max(0.0, float(window_start_sec))
+    end = max(start + 0.5, float(window_end_sec))
+    if end - start > ACTION_CLIP_MAX_SECONDS:
+        end = start + ACTION_CLIP_MAX_SECONDS
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+
+    try:
+        await _run_ffmpeg(
+            [
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-to",
+                f"{end:.3f}",
+                "-i",
+                str(video_path),
+                "-c",
+                "copy",
+                str(out_path),
+            ]
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Stream-copy action clip failed for %s, transcoding fallback.", video_path, exc_info=True)
+        width, height = _size_tuple(ACTION_CLIP_SIZE)
+        # Design note: transcode fallback bounds upload size and normalizes to <=480p for DashScope video mode.
+        scale_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+        )
+        await _run_ffmpeg(
+            [
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-to",
+                f"{end:.3f}",
+                "-i",
+                str(video_path),
+                "-vf",
+                scale_filter,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "28",
+                "-an",
+                str(out_path),
+            ]
+        )
+
+    max_bytes = ACTION_CLIP_MAX_MB * 1024 * 1024
+    if not out_path.exists() or out_path.stat().st_size <= 0:
+        raise RuntimeError("Action-window clip was not created.")
+    if out_path.stat().st_size > max_bytes:
+        raise RuntimeError(f"Action-window clip exceeds {ACTION_CLIP_MAX_MB}MB.")
+    return out_path
 
 
 async def _extract_thumbnails(video_path: Path, thumbs_dir: Path, frame_rate: int = FRAME_RATE) -> list[Path]:
@@ -496,14 +778,56 @@ def _motion_scores_from_thumbs(thumbs: Sequence[Path]) -> list[float]:
     return scores
 
 
+def _top_local_peak_indices(scores: Sequence[float], limit: int = 2) -> list[int]:
+    """
+    Return the strongest local motion peaks.
+
+    Args:
+        scores: Motion density scores ordered by thumbnail time.
+        limit: Maximum number of peak centers.
+
+    Returns:
+        Peak indices sorted by descending score.
+    """
+    if not scores or limit <= 0:
+        return []
+
+    peaks: list[int] = []
+    for index, score in enumerate(scores):
+        left = scores[index - 1] if index > 0 else float("-inf")
+        right = scores[index + 1] if index < len(scores) - 1 else float("-inf")
+        if score >= left and score >= right and (score > left or score > right):
+            peaks.append(index)
+
+    if not peaks:
+        peaks = list(range(len(scores)))
+    peaks.sort(key=lambda item: (scores[item], -item), reverse=True)
+    return peaks[:limit]
+
+
+def _peak_neighborhood_indices(scores: Sequence[float], radius: int = 1, limit: int = 2) -> set[int]:
+    selected: set[int] = set()
+    for peak in _top_local_peak_indices(scores, limit=limit):
+        for index in range(max(0, peak - radius), min(len(scores), peak + radius + 1)):
+            selected.add(index)
+    return selected
+
+
 def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) -> list[int]:
     total_frames = len(scores)
     if total_frames <= sample_count:
         return list(range(total_frames))
 
+    # 设计说明: top-2 局部运动峰值通常覆盖起跳/落冰瞬间；先锁定 ±1 帧，剩余配额再按运动密度分配。
+    selected: set[int] = _peak_neighborhood_indices(scores, radius=1, limit=2)
+    if len(selected) >= sample_count:
+        return sorted(selected)[:sample_count]
+
     segment_count = min(10, total_frames)
     base_quota = [1 for _ in range(segment_count)]
-    remaining = max(sample_count - segment_count, 0)
+    remaining_after_peaks = max(sample_count - len(selected), 0)
+    base_quota = [0 if remaining_after_peaks < segment_count else 1 for _ in range(segment_count)]
+    remaining = max(remaining_after_peaks - sum(base_quota), 0)
     segment_ranges: list[tuple[int, int]] = []
     segment_weights: list[float] = []
 
@@ -525,16 +849,31 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
         for index in order[:leftovers]:
             extra[index] += 1
 
-    selected: set[int] = set()
     for segment_index, (start, end) in enumerate(segment_ranges):
-        quota = min(base_quota[segment_index] + extra[segment_index], end - start)
+        quota = max(0, min(base_quota[segment_index] + extra[segment_index], end - start))
+        if quota == 0:
+            continue
         segment_indices = list(range(start, end))
         segment_indices.sort(key=lambda index: scores[index], reverse=True)
-        selected.update(segment_indices[:quota])
+        for index in segment_indices:
+            if len([item for item in selected if start <= item < end]) >= quota:
+                break
+            selected.add(index)
 
     if len(selected) < sample_count:
         fallback = [round((index / (sample_count - 1)) * (total_frames - 1)) for index in range(sample_count)]
-        selected.update(fallback)
+        for index in fallback:
+            selected.add(index)
+            if len(selected) >= sample_count:
+                break
+
+    if len(selected) > sample_count:
+        selected_list = sorted(selected)
+        protected = _peak_neighborhood_indices(scores, radius=1, limit=2)
+        overflow = len(selected_list) - sample_count
+        removable = [index for index in selected_list if index not in protected]
+        for index in sorted(removable, key=lambda item: scores[item])[:overflow]:
+            selected.remove(index)
 
     return sorted(selected)[:sample_count]
 
@@ -606,9 +945,18 @@ async def extract_motion_sampled_frames(
     frame_rate = get_frame_rate_for_profile(analysis_profile)
     sample_count = get_max_frames_for_profile(analysis_profile)
     start_sec, end_sec = await detect_action_window(video_path, action_type, source_fps, analysis_profile)
+    window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
+        start_sec,
+        end_sec,
+        sample_count,
+        slow_motion_scale,
+    )
     sampling_metadata = VideoSamplingMetadata(
         action_window_start=round(start_sec, 3),
         action_window_end=round(end_sec, 3),
+        window_start_sec=window_start_sec,
+        window_end_sec=window_end_sec,
+        effective_fps=effective_fps,
         source_fps=round(source_fps, 3),
         is_slow_motion=is_slow_motion,
     )
@@ -624,9 +972,18 @@ async def extract_motion_sampled_frames(
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
         start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
+            start_sec,
+            end_sec,
+            sample_count,
+            slow_motion_scale,
+        )
         sampling_metadata = VideoSamplingMetadata(
             action_window_start=round(start_sec, 3),
             action_window_end=round(end_sec, 3),
+            window_start_sec=window_start_sec,
+            window_end_sec=window_end_sec,
+            effective_fps=effective_fps,
             source_fps=round(source_fps, 3),
             is_slow_motion=is_slow_motion,
         )
@@ -666,7 +1023,7 @@ async def extract_motion_sampled_frames(
             {
                 "frame_id": frame_path.stem,
                 "source_thumb_index": index,
-                "timestamp": round(index / frame_rate, 3),
+                "timestamp": round(start_sec + index / frame_rate, 3),
                 "motion_score": None,
             }
             for index, frame_path in enumerate(output_paths)
@@ -678,6 +1035,9 @@ async def extract_motion_sampled_frames(
         "full_size": FRAME_FULL_SIZE,
         "window_start": round(start_sec, 3),
         "window_end": round(end_sec, 3),
+        "window_start_sec": window_start_sec,
+        "window_end_sec": window_end_sec,
+        "effective_fps": effective_fps,
         "analysis_profile_hint": analysis_profile,
         "source_fps": round(source_fps, 3),
         "is_slow_motion": is_slow_motion,
@@ -693,7 +1053,16 @@ async def extract_motion_sampled_frames(
     return output_paths, motion_payload, sampling_metadata
 
 
-async def encode_frames(frame_paths: Sequence[Path]) -> list[FramePayload]:
+async def encode_frames(
+    frame_paths: Sequence[Path],
+    timestamps: dict[str, float] | None = None,
+) -> list[FramePayload]:
+    """
+    Encode frame paths as vision payloads.
+
+    timestamps maps frame_path.stem to seconds. When omitted, timestamp_sec
+    remains 0.0 for every payload to preserve existing callers.
+    """
     filtered_frame_paths = filter_frames(frame_paths)
     if len(filtered_frame_paths) != len(frame_paths):
         logger.info(
@@ -703,6 +1072,7 @@ async def encode_frames(frame_paths: Sequence[Path]) -> list[FramePayload]:
         )
 
     payloads: list[FramePayload] = []
+    ts_map = timestamps or {}
     for frame_path in filtered_frame_paths:
         async with aiofiles.open(frame_path, "rb") as frame_file:
             binary = await frame_file.read()
@@ -710,6 +1080,31 @@ async def encode_frames(frame_paths: Sequence[Path]) -> list[FramePayload]:
             FramePayload(
                 frame_id=frame_path.stem,
                 data_url=f"data:image/jpeg;base64,{base64.b64encode(binary).decode('utf-8')}",
+                timestamp_sec=ts_map.get(frame_path.stem, 0.0),
             )
         )
     return payloads
+
+
+def build_timestamp_map(sampling_payload: dict[str, object] | None) -> dict[str, float]:
+    """
+    Build frame_id(stem) -> seconds from extract_motion_sampled_frames metadata.
+
+    Fallback timestamps may not include action-window offset, so callers should
+    treat them as ordering/relative-position hints rather than physical time.
+    """
+    if not isinstance(sampling_payload, dict):
+        return {}
+    selected = sampling_payload.get("selected")
+    if not isinstance(selected, list):
+        return {}
+
+    out: dict[str, float] = {}
+    for rec in selected:
+        if not isinstance(rec, dict):
+            continue
+        frame_id = rec.get("frame_id")
+        timestamp = rec.get("timestamp")
+        if isinstance(frame_id, str) and isinstance(timestamp, (int, float)):
+            out[frame_id] = float(timestamp)
+    return out

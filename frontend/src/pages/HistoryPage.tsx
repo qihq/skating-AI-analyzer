@@ -427,13 +427,14 @@ export default function HistoryPage() {
                         ) : null}
 
                         {isAnalysisInProgress(record.status) ? (
-                          <span
+                          <Link
+                            to={`/report/${record.id}`}
                             title="分析进行中"
                             aria-label="分析进行中"
-                            className={`${actionIconClassName} cursor-default border-cyan-300/25 bg-cyan-400/10 text-cyan-100`}
+                            className={`${actionIconClassName} border-cyan-300/25 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-300/20`}
                           >
                             ⏳
-                          </span>
+                          </Link>
                         ) : null}
 
                         {record.status === "failed" && !hideRetry ? (

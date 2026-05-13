@@ -2,47 +2,42 @@
 
 AI-powered figure skating training analysis system built with React, FastAPI, and Docker.
 
-[中文说明](./README.zh.md)
-
-[Contributing](./CONTRIBUTING.md) · [License](./LICENSE) · [Screenshot Guide](./SCREENSHOT_GUIDE.md)
-
-## Banner
-
-Add your repository social preview or hero banner here after screenshots are ready.
-
-```md
-![Skating Analyzer banner](./docs/banner-placeholder.png)
-```
+[Chinese README](./README.zh.md) | [Contributing](./CONTRIBUTING.md) | [License](./LICENSE) | [Screenshot Guide](./SCREENSHOT_GUIDE.md)
 
 ## Overview
 
-Skating Analyzer is a full-stack application for uploading training videos, extracting motion frames, running pose estimation, generating biomechanics metrics, creating AI-assisted reports, and tracking athlete progress through plans, archives, and skill trees.
+Skating Analyzer helps skaters and coaches upload training videos, extract motion frames, run pose estimation, generate biomechanics metrics, create AI-assisted reports, and track training progress through plans, archives, and skill trees.
+
+## Recent Updates
+
+The latest update expands the video analysis pipeline and deployment configuration:
+
+- Dual-path vision analysis with frame-based and video-aware provider flows
+- Target lock and bounding-box tracking for more stable skater selection
+- Pose smoothing, phase voting, and cross-validation between pose signals and AI vision results
+- Jump feature extraction with FPS-aware timing and rotation unwrap handling
+- Frame annotation output for clearer review and debugging
+- Provider retry handling, vision content normalization, and cost-limit settings
+- Video precheck and nginx upload limits for larger review files
+- Expanded backend regression tests for tracking, smoothing, dual-path vision, reports, provider retry, and plan generation
 
 ## Features
 
 - Video upload with async analysis pipeline
 - Motion frame sampling and MediaPipe pose detection
-- Biomechanics metrics and structured scoring
-- AI-generated training reports
+- Optional phase-2 multi-pose tracking with MediaPipe task models
+- Biomechanics metrics, phase smoothing, and structured scoring
+- Dual-path AI vision analysis with fallback handling
+- AI-generated training reports and training plan generation
 - Stage-aware retry flow with cached frame reuse
 - Processing logs, pipeline timing, and in-report debug visibility
 - Automatic stale-task recovery and safer failure handling
+- Blur filtering and video precheck before vision encoding
 - Blur filtering and profile-aware frame sampling for more stable vision input
 - Standalone `skating_vision` package for reuse outside the main app
 - Child mode and parent mode experiences
 - Skill tree, training plan, archive, and progress tracking
 - Docker all-in-one deployment
-
-## Screenshots
-
-Replace these placeholders with actual product screenshots.
-
-```md
-![Skill tree](./docs/screenshots/skill-tree.png)
-![Review upload flow](./docs/screenshots/review-flow.png)
-![Report page](./docs/screenshots/report-page.png)
-![Archive](./docs/screenshots/archive.png)
-```
 
 ## Tech Stack
 
@@ -56,6 +51,28 @@ Replace these placeholders with actual product screenshots.
 
 ```text
 skating-analyzer/
+|-- backend/                  # FastAPI backend
+|   |-- app/
+|   |   |-- configs/          # action profile and prompt configuration
+|   |   |-- routers/          # API routes
+|   |   |-- services/         # analysis, report, provider, vision, pose services
+|   |   |-- main.py
+|   |   |-- models.py
+|   |   `-- schemas.py
+|   |-- tests/                # backend regression tests
+|   `-- requirements.txt
+|-- frontend/                 # React frontend
+|   |-- src/
+|   `-- public/
+|-- docker/
+|   `-- allinone/             # all-in-one image build config
+|-- ai_skating_analysis_pack/ # standalone analysis reference pack
+|-- data/                     # runtime data, ignored by Git
+|-- backups/                  # backup db files, ignored by Git
+|-- models/                   # local model files, ignored by Git
+|-- .env.example
+|-- docker-compose.yml
+`-- README.md
 ├─ backend/                  # FastAPI backend
 │  ├─ app/
 │  │  ├─ routers/            # API routes
@@ -91,8 +108,12 @@ Example:
 
 ```bash
 QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+QWEN_VISION_MODEL=qwen-vl-max-latest
+QWEN_VISION_DAILY_COST_LIMIT_CNY=30
+QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
+
 # Optional: enable phase-2 multi-pose tracking
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
 # POSE_NUM_POSES=4
@@ -100,32 +121,19 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 Notes:
 
-- `.env` is not tracked by Git
-- `.env.example` keeps placeholders only
-- Runtime databases, uploaded videos, and backups are not committed
+- `.env` is not tracked by Git.
+- `.env.example` keeps placeholders only.
+- Runtime databases, uploaded videos, backups, Docker tar archives, and local model files are not committed.
 
-## Phase 2 Pose Model
+## Phase-2 Pose Model
 
 Phase-2 multi-pose tracking is enabled through a host-mounted MediaPipe `.task` model file.
 
-- Put the model file under `./models`, for example `./models/pose_landmarker_heavy.task`
-- Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`
-- Optionally set `POSE_NUM_POSES=4`
-- The `.task` file is not committed to this repository
-- If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline
-
-## Analysis Pipeline Updates
-
-Recent updates focus on making long-running video analysis more observable and easier to recover:
-
-- Stage-based pipeline states for frame extraction, pose, biomechanics, vision, and report generation
-- Retry from the last safe stage instead of always restarting from scratch
-- Processing logs and per-stage timings returned by the API and shown on the report page
-- Automatic detection of stale in-progress analyses, with failed-state recovery hints
-- Reuse of cached sampled frames and restored frames for retry scenarios
-- Profile-aware prompt hints for jump, spin, spiral, and step analysis
-- Jump-specific heuristics for airborne detection, rotation signal, and probable jump characterization
-- Blur filtering before vision encoding to reduce low-quality frame noise
+- Put the model file under `./models`, for example `./models/pose_landmarker_heavy.task`.
+- Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`.
+- Optionally set `POSE_NUM_POSES=4`.
+- The `.task` file is not committed to this repository.
+- If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline.
 
 ## skating_vision Package
 
@@ -188,15 +196,25 @@ Backend regression tests cover the newer pipeline and heuristics, including:
 
 - analysis profile inference from user input
 - stage retry and pipeline version behavior
-- blur filtering and vision fallback handling
-- phase smoothing
-- biomechanics normalization and jump rotation estimation
+- blur filtering, video precheck, and vision fallback handling
+- bbox tracking, target lock, pose smoothing, and phase voting
+- dual-path vision and report generation
+- provider retry and vision content normalization
+- biomechanics normalization, jump timing, and rotation estimation
+- training plan generation
 
-Example:
+Run backend tests:
 
 ```bash
 cd backend
 pytest tests
+```
+
+Build the frontend:
+
+```bash
+cd frontend
+npm run build
 ```
 
 ## Docker
@@ -237,9 +255,9 @@ docker run -d \
 
 Notes:
 
-- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
-- If you configure environment variables directly in NAS / Container Manager, mounting `.env` is optional, but you still need the same environment variable and the mounted `models` directory
-- Older analysis rows that still store Windows absolute paths automatically fall back to `/data/uploads/<analysis_id>/source.*` when the all-in-one container resolves the original video
+- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`.
+- If you configure environment variables directly in NAS or Container Manager, mounting `.env` is optional, but you still need the same environment variable and the mounted `models` directory.
+- Older analysis rows that still store Windows absolute paths automatically fall back to `/data/uploads/<analysis_id>/source.*` when the all-in-one container resolves the original video.
 
 Export:
 
@@ -259,10 +277,10 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 
 ## Privacy
 
-- Runtime data is stored under `./data`
-- Uploaded videos and extracted frames are not committed
-- API keys are stored through in-app encryption
-- Only `.env.example` should be shared publicly
+- Runtime data is stored under `./data`.
+- Uploaded videos and extracted frames are not committed.
+- API keys are stored through in-app encryption.
+- Only `.env.example` should be shared publicly.
 
 ## Repository Notes
 
@@ -272,6 +290,7 @@ This repository does not include:
 - Local databases
 - Training videos or extracted media assets
 - Exported Docker tar archives
+- Local model weights
 - Local worktree metadata such as `.claude/`
 - Deliverable packaging artifacts
 

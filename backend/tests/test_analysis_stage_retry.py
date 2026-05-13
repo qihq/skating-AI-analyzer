@@ -72,6 +72,13 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 },
                 "data_quality": "good",
             }
+            dual = SimpleNamespace(
+                path_a=vision_structured,
+                path_b={"path": "B", "error": "mocked"},
+                validation=SimpleNamespace(to_dict=lambda: {"recommended_path": "A"}),
+                dual_path_meta={"recommended_path": "A", "path_b_failed": True},
+                blend_weights=(1.0, 0.0),
+            )
 
             async with database.AsyncSessionLocal() as session:
                 analysis = models.Analysis(
@@ -104,7 +111,9 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                     "app.routers.analysis.encode_frames",
                     AsyncMock(return_value=[SimpleNamespace(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]),
                 ),
-                patch("app.routers.analysis.analyze_frames", AsyncMock(return_value=vision_structured)),
+                patch("app.routers.analysis.analyze_frames_dual", AsyncMock(return_value=dual)),
+                patch("app.routers.analysis.dual_path_summary", return_value={"recommended": "A"}),
+                patch("app.routers.analysis._provider_for_slot", AsyncMock(return_value=SimpleNamespace())),
                 patch("app.routers.analysis.generate_report", AsyncMock(return_value=report)),
                 patch("app.routers.analysis.calculate_force_score", return_value=80),
                 patch("app.routers.analysis.auto_update_skill_progress", AsyncMock(return_value=None)),
@@ -121,6 +130,9 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.pose_data, pose_data)
                 self.assertEqual(saved.bio_data["key_frames"], bio_data["key_frames"])
                 self.assertIsInstance(saved.vision_structured, dict)
+                self.assertEqual(saved.vision_path_a, vision_structured)
+                self.assertEqual(saved.vision_path_b, {"path": "B", "error": "mocked"})
+                self.assertEqual(saved.cross_validation, {"recommended_path": "A", "path_b_failed": True})
                 self.assertIsInstance(saved.report, dict)
 
 

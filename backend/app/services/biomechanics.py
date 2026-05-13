@@ -1,10 +1,20 @@
+"""花滑生物力学指标计算。
+
+职责: 从姿态关键点估算关键帧、跳跃指标、专项指标与五维生物力学子分。
+输入: MediaPipe 风格 pose_data、动作类型、分析 profile 与采样时间上下文。
+输出: 可持久化的 bio_data 字典，包含 quality_flags、jump_metrics 和 sampling_context。
+"""
+
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any
 
+import numpy as np
 
-FPS = 5
+
+DEFAULT_EFFECTIVE_FPS = 5.0
 MAX_AIR_TIME_SECONDS = 1.5
 MAX_HEIGHT_CM = 120.0
 MAX_TAKEOFF_SPEED_MPS = 6.5
@@ -28,9 +38,11 @@ def _empty_analysis(
     arm_symmetry: list[dict[str, Any]] | None = None,
     *,
     analysis_profile: str = "jump",
+    sampling_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "analysis_profile": analysis_profile,
+        "sampling_context": sampling_context or {},
         "knee_angles": knee_angles or [],
         "trunk_tilts": trunk_tilts or [],
         "arm_symmetry": arm_symmetry or [],
@@ -56,7 +68,10 @@ def _point(keypoints: list[dict[str, Any]], index: int) -> dict[str, float] | No
     if index >= len(keypoints):
         return None
     raw = keypoints[index]
-    if float(raw.get("visibility", 0.0)) < 0.5:
+    if raw.get("x") is None or raw.get("y") is None:
+        return None
+    visibility = float(raw.get("visibility", 0.0))
+    if bool(raw.get("interpolated", False)) and visibility < 0.3:
         return None
     return {"x": float(raw.get("x", 0.0)), "y": float(raw.get("y", 0.0)), "z": float(raw.get("z", 0.0))}
 
@@ -323,7 +338,30 @@ def _normalized_angle_delta(current_angle: float, previous_angle: float) -> floa
     return delta
 
 
-def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int) -> float:
+def _valid_effective_fps(effective_fps: float | None) -> float:
+    try:
+        numeric = float(effective_fps)
+    except (TypeError, ValueError):
+        return DEFAULT_EFFECTIVE_FPS
+    if math.isnan(numeric) or math.isinf(numeric) or numeric <= 0:
+        return DEFAULT_EFFECTIVE_FPS
+    return numeric
+
+
+def _build_sampling_context(
+    effective_fps: float,
+    source_fps: float | None,
+    window_seconds: float | None,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {"effective_fps": round(effective_fps, 3)}
+    if source_fps is not None:
+        context["source_fps"] = round(float(source_fps), 3)
+    if window_seconds is not None:
+        context["window_seconds"] = round(float(window_seconds), 3)
+    return context
+
+
+def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int, effective_fps: float) -> float:
     angles: list[float] = []
     for frame in pose_data.get("frames", []):
         frame_idx = _frame_number(str(frame.get("frame", "")))
@@ -335,12 +373,14 @@ def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int) -
     if len(angles) < 2:
         return 0.0
 
-    total_rotation = 0.0
-    for previous_angle, current_angle in zip(angles, angles[1:]):
-        total_rotation += abs(_normalized_angle_delta(current_angle, previous_angle))
+    # 设计说明: MediaPipe 肩点角度会在 -pi/pi 边界跳变，先解缠绕再按首尾角差估算真实旋转量。
+    unwrapped = np.unwrap(np.array(angles, dtype=float))
+    total_rotation = abs(float(unwrapped[-1] - unwrapped[0]))
+    if total_rotation < 1e-6:
+        total_rotation = sum(abs(_normalized_angle_delta(current, previous)) for previous, current in zip(angles, angles[1:]))
 
     total_turns = total_rotation / (2 * math.pi)
-    duration = max((end_frame - start_frame) / FPS, 1 / FPS)
+    duration = max((len(angles) - 1) / effective_fps, 1 / effective_fps)
     return round(total_turns / duration, 2)
 
 
@@ -485,12 +525,66 @@ def _spiral_discipline_metrics(
     }
 
 
-def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_profile: str = "jump") -> dict[str, Any]:
+def _non_jump_bio_subscores(discipline_metrics: dict[str, Any], arm_symmetry: list[dict[str, Any]]) -> dict[str, int]:
+    symmetries = [float(item["symmetry"]) for item in arm_symmetry if item.get("symmetry") is not None]
+    arm_score = max(40, min(100, round((sum(symmetries) / len(symmetries)) * 100))) if symmetries else 65
+    glide_stability = _to_float(discipline_metrics.get("glide_stability"))
+    support_leg_stability = _to_float(discipline_metrics.get("support_leg_stability"))
+    hip_shoulder_alignment = _to_float(discipline_metrics.get("hip_shoulder_alignment"))
+
+    rotation_axis = round(glide_stability) if glide_stability is not None else 65
+    landing_absorption = round(support_leg_stability) if support_leg_stability is not None else 65
+    core_stability = round(hip_shoulder_alignment) if hip_shoulder_alignment is not None else rotation_axis
+    takeoff_power_values = [value for value in (glide_stability, support_leg_stability) if value is not None]
+    takeoff_power = round(sum(takeoff_power_values) / len(takeoff_power_values)) if takeoff_power_values else 65
+
+    return {
+        "takeoff_power": max(0, min(100, takeoff_power)),
+        "rotation_axis": max(0, min(100, rotation_axis)),
+        "arm_coordination": max(0, min(100, arm_score)),
+        "landing_absorption": max(0, min(100, landing_absorption)),
+        "core_stability": max(0, min(100, core_stability)),
+    }
+
+
+def analyze_biomechanics(
+    pose_data: dict[str, Any],
+    action_type: str,
+    analysis_profile: str = "jump",
+    *,
+    effective_fps: float | None = None,
+    source_fps: float | None = None,
+    window_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Analyze pose landmarks into biomechanics metrics.
+
+    Args:
+        pose_data: Pose payload with per-frame keypoints.
+        action_type: Original action type label from the analysis request.
+        analysis_profile: Normalized profile such as jump, spin, step, or spiral.
+        effective_fps: Sampling frame rate on the real action timeline.
+        source_fps: Source video frame rate for reporting context.
+        window_seconds: Action-window duration on the real action timeline.
+
+    Returns:
+        Sanitized biomechanics payload suitable for persistence and report generation.
+
+    Raises:
+        No expected runtime exceptions; invalid or incomplete pose data returns an empty analysis payload.
+    """
     del action_type
+    if effective_fps is None:
+        warnings.warn(
+            "analyze_biomechanics() default effective_fps=5.0 is deprecated; pass sampling metadata.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    normalized_effective_fps = _valid_effective_fps(effective_fps)
+    sampling_context = _build_sampling_context(normalized_effective_fps, source_fps, window_seconds)
 
     frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
     if not frames:
-        return _empty_analysis(analysis_profile=analysis_profile)
+        return _empty_analysis(analysis_profile=analysis_profile, sampling_context=sampling_context)
 
     knee_angles = []
     trunk_tilts = []
@@ -503,29 +597,23 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
 
     com_trajectory = calc_center_of_mass_trajectory(pose_data)
     if not com_trajectory["points"]:
-        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
+        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile, sampling_context=sampling_context)
 
     if analysis_profile != "jump":
         key_frames = detect_key_frames(com_trajectory, pose_data, analysis_profile)
-        tilt_values = [item["tilt_degrees"] for item in trunk_tilts if item.get("tilt_degrees") is not None]
-        symmetries = [item["symmetry"] for item in arm_symmetry if item.get("symmetry") is not None]
-        bio_subscores = {
-            "takeoff_power": 65,
-            "rotation_axis": 65,
-            "arm_coordination": max(40, min(100, round((sum(symmetries) / len(symmetries)) * 100))) if symmetries else 65,
-            "landing_absorption": 65,
-            "core_stability": _score_from_values(tilt_values, 15, 30),
-        }
+        discipline_metrics = _spiral_discipline_metrics(trunk_tilts, knee_angles, arm_symmetry, com_trajectory)
+        bio_subscores = _non_jump_bio_subscores(discipline_metrics, arm_symmetry)
         return sanitize_biomechanics_data(
             {
                 "analysis_profile": analysis_profile,
+                "sampling_context": sampling_context,
                 "knee_angles": knee_angles,
                 "trunk_tilts": trunk_tilts,
                 "arm_symmetry": arm_symmetry,
                 "com_trajectory": com_trajectory,
                 "rotation_stability": {"average_tilt_degrees": None, "stability_score": 65},
                 "bio_subscores": bio_subscores,
-                "discipline_metrics": _spiral_discipline_metrics(trunk_tilts, knee_angles, arm_symmetry, com_trajectory),
+                "discipline_metrics": discipline_metrics,
                 "quality_flags": [],
                 "key_frames": key_frames,
                 "jump_metrics": None,
@@ -536,7 +624,7 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
 
     key_frames = detect_key_frames(com_trajectory, pose_data, analysis_profile)
     if not key_frames:
-        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile)
+        return _empty_analysis(knee_angles, trunk_tilts, arm_symmetry, analysis_profile=analysis_profile, sampling_context=sampling_context)
 
     start_frame = _frame_number(key_frames.get("T", "frame_0001"))
     end_frame = _frame_number(key_frames.get("L", f"frame_{len(frames):04d}"))
@@ -547,7 +635,7 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
     symmetries = [item["symmetry"] for item in arm_symmetry if item.get("symmetry") is not None]
 
     air_time_frames = max(end_frame - start_frame, 0)
-    air_time_seconds = round(air_time_frames / FPS, 2)
+    air_time_seconds = round(air_time_frames / normalized_effective_fps, 2)
     estimated_height_cm = round(0.5 * 9.8 * (air_time_seconds / 2) ** 2 * 100, 1) if air_time_seconds else None
     takeoff_speed_mps = round((2 * 9.8 * estimated_height_cm / 100) ** 0.5, 2) if estimated_height_cm else None
 
@@ -562,6 +650,7 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
     return sanitize_biomechanics_data(
         {
             "analysis_profile": analysis_profile,
+            "sampling_context": sampling_context,
             "knee_angles": knee_angles,
             "trunk_tilts": trunk_tilts,
             "arm_symmetry": arm_symmetry,
@@ -575,7 +664,7 @@ def analyze_biomechanics(pose_data: dict[str, Any], action_type: str, analysis_p
                 "air_time_seconds": air_time_seconds,
                 "estimated_height_cm": estimated_height_cm,
                 "takeoff_speed_mps": takeoff_speed_mps,
-                "rotation_rps": _rotation_rps(pose_data, start_frame, end_frame),
+                "rotation_rps": _rotation_rps(pose_data, start_frame, end_frame, normalized_effective_fps),
             },
         }
     )

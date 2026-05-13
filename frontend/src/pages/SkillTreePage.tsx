@@ -333,10 +333,10 @@ export default function SkillTreePage() {
   };
 
   return (
-    <div className="space-y-6">
-      <section className="app-card overflow-hidden p-6 tablet:p-8">
-        <div className="grid gap-6 web:grid-cols-[1.15fr_0.85fr]">
-          <div>
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
+        <div className="grid min-w-0 gap-6 web:grid-cols-[1.15fr_0.85fr]">
+          <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Skill Path</p>
             <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">学习路径 + 冰面路线图</h1>
             <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
@@ -344,7 +344,7 @@ export default function SkillTreePage() {
             </p>
           </div>
 
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <label className="block space-y-2">
               <span className="text-sm font-medium text-slate-700">当前练习档案</span>
               <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
@@ -359,15 +359,15 @@ export default function SkillTreePage() {
 
             {selectedSkater ? (
               <div className="app-card-muted rounded-[28px] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+                <div className="flex min-w-0 items-center justify-between gap-4">
+                  <div className="min-w-0">
                     <p className="text-sm text-slate-500">成长卡片</p>
                     <div className="mt-2 flex items-center gap-3">
                       <ZodiacAvatar avatarType={selectedSkater.avatar_type} avatarEmoji={selectedSkater.avatar_emoji} size="lg" animate />
                       <h2 className="text-2xl font-semibold text-slate-900">Lv.{selectedSkater.avatar_level}</h2>
                     </div>
                   </div>
-                  <div className="text-right">
+                  <div className="shrink-0 text-right">
                     <p className="text-sm text-slate-500">当前 XP</p>
                     <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedSkater.total_xp}</p>
                   </div>
@@ -511,8 +511,8 @@ function PathView({
   }, [selectedStage]);
 
   return (
-    <div className="grid gap-6 web:grid-cols-[260px_minmax(0,1fr)]">
-      <aside className="app-card p-4 tablet:p-5">
+    <div className="grid min-w-0 gap-6 overflow-x-hidden web:grid-cols-[260px_minmax(0,1fr)]">
+      <aside className="app-card overflow-hidden p-3 phone:p-4 tablet:p-5">
         <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-2 tablet:mx-0 tablet:grid tablet:overflow-visible tablet:px-0 tablet:pb-0 tablet:grid-cols-4 web:grid-cols-1">
           {path.stages.map((stage) => {
             const isCurrent = stage.stage === path.current_stage;
@@ -524,7 +524,7 @@ function PathView({
                 key={stage.stage}
                 type="button"
                 onClick={() => onSelectStage(stage.stage)}
-                className={`min-w-[140px] shrink-0 rounded-2xl p-4 text-left transition tablet:min-w-0 ${
+                className={`min-w-[112px] shrink-0 rounded-2xl p-3 text-left transition phone:min-w-[140px] phone:p-4 tablet:min-w-0 ${
                   isSelected || isCurrent
                     ? "border border-blue-100 bg-white shadow-soft"
                     : isCompleted
@@ -547,17 +547,17 @@ function PathView({
       </aside>
 
       {stageForDetail ? (
-        <section className="space-y-6">
-          <div className="app-card p-6 tablet:p-7">
+        <section className="min-w-0 space-y-6">
+          <div className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
             <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
-              <div>
+              <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前阶段详情</p>
                 <h2 className="mt-3 text-2xl font-semibold text-slate-900">
                   阶段 {stageForDetail.stage} · {stageForDetail.name}
                 </h2>
                 <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">{stageForDetail.description}</p>
               </div>
-              <div className="rounded-[28px] bg-blue-50 px-5 py-4 text-center">
+              <div className="shrink-0 rounded-[24px] bg-blue-50 px-4 py-4 text-center phone:rounded-[28px] phone:px-5">
                 <p className="text-sm text-blue-500">阶段进度</p>
                 <p className="mt-2 text-4xl font-semibold text-slate-900">{stageForDetail.progress_pct}%</p>
               </div>
@@ -589,7 +589,7 @@ function PathView({
             </div>
           </div>
 
-          <div className="app-card p-6 tablet:p-7">
+          <div className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前阶段节点</p>
             <div className="mt-5 space-y-6">
               {stageForDetail.groups.map((group) => (
@@ -600,7 +600,7 @@ function PathView({
                       {group.nodes_unlocked}/{group.nodes_total}
                     </span>
                   </div>
-                  <div className="mt-4 grid gap-3 grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
+                  <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
                     {group.nodes.map((node) => (
                       <SkillNodeCard key={node.id} node={node} onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
                     ))}
@@ -609,7 +609,7 @@ function PathView({
               ))}
             </div>
 
-            {selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
+            {selectedNode ? <SkillDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} /> : null}
           </div>
         </section>
       ) : null}
@@ -672,9 +672,9 @@ function RoadmapView({
   }, [focusSkill, isParentMode, path]);
 
   return (
-    <section className="app-card p-6 tablet:p-7">
+    <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
       <div className="flex flex-col gap-4 tablet:flex-row tablet:items-end tablet:justify-between">
-        <div>
+        <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Ice Roadmap</p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">整张冰面路线图 ({totalNodeCount} 个节点)</h2>
           <p className="mt-3 text-sm leading-7 text-slate-500">按阶段和群组展开全部技能节点。现在每张卡都可以直接点击，不需要只对准一个小按钮。</p>
@@ -693,7 +693,7 @@ function RoadmapView({
           </div>
           <p className="mt-3 text-sm leading-7 text-slate-600">把推进中和今天聚焦的技能放到最上面，打开就能直接找到。</p>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 tablet:grid-cols-4 web:grid-cols-4">
+          <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
             {topFocusNodes.map((node) => (
               <SkillNodeCard key={`focus-${node.id}`} node={node} highlightTone="focus" onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
             ))}
@@ -703,7 +703,7 @@ function RoadmapView({
 
       <div className="mt-6 space-y-8">
         {path.stages.map((stage) => (
-          <section key={stage.stage} className="rounded-[28px] bg-slate-50 p-4 tablet:p-5">
+          <section key={stage.stage} className="min-w-0 rounded-[24px] bg-slate-50 p-3 phone:rounded-[28px] phone:p-4 tablet:p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm text-slate-400">阶段 {stage.stage}</p>
@@ -714,18 +714,18 @@ function RoadmapView({
 
             <div className="mt-5 space-y-5">
               {stage.groups.map((group) => (
-                <article key={`${stage.stage}-${group.group_name}`} className="rounded-[24px] bg-white p-4">
+                <article key={`${stage.stage}-${group.group_name}`} className="min-w-0 rounded-[22px] bg-white p-3 phone:rounded-[24px] phone:p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div>
+                    <div className="min-w-0">
                       <h4 className="text-base font-semibold text-slate-900">{group.group_name}</h4>
                       <p className={`mt-1 text-sm ${branchTone(group.nodes[0]?.chapter ?? "")}`}>{group.nodes.length} 个节点</p>
                     </div>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
+                    <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
                       {group.nodes_unlocked}/{group.nodes_total}
                     </span>
                   </div>
 
-                  <div className="mt-4 grid gap-3 grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
+                  <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
                     {group.nodes.map((node) => (
                       <SkillNodeCard
                         key={node.id}
@@ -743,76 +743,84 @@ function RoadmapView({
         ))}
       </div>
 
-      {!isParentMode && selectedNode ? <SkillDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} className="mt-6" /> : null}
+      {!isParentMode && selectedNode ? <SkillDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} /> : null}
     </section>
   );
 }
 
-function SkillDetailPanel({
+function SkillDetailModal({
   node,
   onClose,
-  className = "",
 }: {
   node: SkillNode;
   onClose?: () => void;
-  className?: string;
 }) {
   const { consecutive, threshold } = readUnlockTargets(node);
   const remainingAttempts = Math.max(consecutive - Number(node.attempt_count ?? 0), 0);
   const hasAttemptProgress = consecutive > 0;
 
   return (
-    <section className={`rounded-[28px] border border-blue-100 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_44px_rgba(59,130,246,0.08)] ${className}`}>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Skill Detail</p>
-          <h3 className="mt-3 text-2xl font-semibold text-slate-900">
-            <span className="mr-2">{node.emoji}</span>
-            {node.name}
-          </h3>
-          <p className="mt-2 text-sm text-slate-500">
-            阶段 {node.stage} · {node.group_name}
-            {node.action_type ? ` · ${node.action_type}` : ""}
-          </p>
-        </div>
+    <div className="fixed inset-0 z-50 bg-slate-950/36 px-4 py-6 backdrop-blur-sm" onClick={onClose}>
+      <div className="mx-auto flex h-full w-full max-w-3xl items-center justify-center">
+        <section
+          className="max-h-[calc(100vh-3rem)] w-full overflow-y-auto rounded-[28px] border border-blue-100 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_44px_rgba(59,130,246,0.18)] tablet:p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label="技能详情"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Skill Detail</p>
+              <h3 className="mt-3 text-2xl font-semibold text-slate-900">
+                <span className="mr-2">{node.emoji}</span>
+                {node.name}
+              </h3>
+              <p className="mt-2 text-sm text-slate-500">
+                阶段 {node.stage} · {node.group_name}
+                {node.action_type ? ` · ${node.action_type}` : ""}
+              </p>
+            </div>
 
-        <div className="flex items-center gap-3">
-          <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">{skillStatusLabel(node.status)}</span>
-          {onClose ? (
-            <button type="button" onClick={onClose} className="min-h-[44px] rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-              收起
-            </button>
+            <div className="flex items-center gap-3">
+              <span className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">{skillStatusLabel(node.status)}</span>
+              {onClose ? (
+                <button type="button" onClick={onClose} className="min-h-[44px] rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                  关闭
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
+            <span className="rounded-full bg-white px-3 py-2 shadow-sm">XP: {node.xp}</span>
+            <span className="rounded-full bg-white px-3 py-2 shadow-sm">最高分: {node.best_score}</span>
+            {typeof node.last_analysis_score === "number" ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">上次得分: {node.last_analysis_score}</span> : null}
+            {threshold > 0 ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">目标分: {threshold}</span> : null}
+          </div>
+
+          {hasAttemptProgress ? (
+            <div className="mt-5 rounded-[24px] border border-orange-200 bg-orange-50 p-4">
+              <p className="text-sm font-semibold text-orange-500">当前进度</p>
+              <p className="mt-2 text-sm text-slate-600">
+                已达标: {node.attempt_count} / {consecutive} 次
+              </p>
+              <p className="mt-2 text-sm font-medium text-orange-500">
+                {remainingAttempts > 0 ? `再来 ${remainingAttempts} 次就能点亮。` : "已经满足点亮条件，等待分析结果同步。"}
+              </p>
+            </div>
           ) : null}
-        </div>
+
+          {node.unlock_note ? (
+            <div className="mt-5 rounded-[24px] bg-white p-4 text-sm leading-7 text-slate-600 shadow-sm">
+              <p className="font-semibold text-slate-900">备注</p>
+              <p className="mt-2">{node.unlock_note}</p>
+            </div>
+          ) : null}
+
+          {node.requires.length ? <p className="mt-5 text-sm leading-7 text-slate-500">前置技能: {node.requires.join(" / ")}</p> : null}
+        </section>
       </div>
-
-      <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
-        <span className="rounded-full bg-white px-3 py-2 shadow-sm">XP: {node.xp}</span>
-        <span className="rounded-full bg-white px-3 py-2 shadow-sm">最高分: {node.best_score}</span>
-        {typeof node.last_analysis_score === "number" ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">上次得分: {node.last_analysis_score}</span> : null}
-        {threshold > 0 ? <span className="rounded-full bg-white px-3 py-2 shadow-sm">目标分: {threshold}</span> : null}
-      </div>
-
-      {hasAttemptProgress ? (
-        <div className="mt-5 rounded-[24px] border border-orange-200 bg-orange-50 p-4">
-          <p className="text-sm font-semibold text-orange-500">当前进度</p>
-          <p className="mt-2 text-sm text-slate-600">
-            已达标: {node.attempt_count} / {consecutive} 次
-          </p>
-          <p className="mt-2 text-sm font-medium text-orange-500">
-            {remainingAttempts > 0 ? `再来 ${remainingAttempts} 次就能点亮。` : "已经满足点亮条件，等待分析结果同步。"}
-          </p>
-        </div>
-      ) : null}
-
-      {node.unlock_note ? (
-        <div className="mt-5 rounded-[24px] bg-white p-4 text-sm leading-7 text-slate-600 shadow-sm">
-          <p className="font-semibold text-slate-900">备注</p>
-          <p className="mt-2">{node.unlock_note}</p>
-        </div>
-      ) : null}
-
-      {node.requires.length ? <p className="mt-5 text-sm leading-7 text-slate-500">前置技能: {node.requires.join(" / ")}</p> : null}
-    </section>
+    </div>
   );
 }

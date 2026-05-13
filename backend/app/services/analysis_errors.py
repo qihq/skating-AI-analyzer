@@ -25,6 +25,9 @@ except Exception:  # noqa: BLE001
 
 
 class AnalysisErrorCode(str, Enum):
+    VIDEO_FORMAT_INVALID = "VIDEO_FORMAT_INVALID"
+    VIDEO_NO_VIDEO_STREAM = "VIDEO_NO_VIDEO_STREAM"
+    VIDEO_BLANK_FRAMES = "VIDEO_BLANK_FRAMES"
     VIDEO_DECODE_FAILED = "VIDEO_DECODE_FAILED"
     FRAME_EXTRACT_FAILED = "FRAME_EXTRACT_FAILED"
     AI_API_TIMEOUT = "AI_API_TIMEOUT"
@@ -33,10 +36,14 @@ class AnalysisErrorCode(str, Enum):
     AI_API_CONTENT_FILTER = "AI_API_CONTENT_FILTER"
     AI_RESPONSE_PARSE_FAIL = "AI_RESPONSE_PARSE_FAIL"
     REPORT_SAVE_FAILED = "REPORT_SAVE_FAILED"
+    TARGET_BBOX_INVALID = "TARGET_BBOX_INVALID"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
 ERROR_TITLES: dict[AnalysisErrorCode, str] = {
+    AnalysisErrorCode.VIDEO_FORMAT_INVALID: "Video format is invalid",
+    AnalysisErrorCode.VIDEO_NO_VIDEO_STREAM: "Video has no usable video stream",
+    AnalysisErrorCode.VIDEO_BLANK_FRAMES: "Video frames are blank",
     AnalysisErrorCode.VIDEO_DECODE_FAILED: "视频格式无法识别",
     AnalysisErrorCode.FRAME_EXTRACT_FAILED: "视频帧提取失败",
     AnalysisErrorCode.AI_API_TIMEOUT: "AI 分析超时",
@@ -45,6 +52,7 @@ ERROR_TITLES: dict[AnalysisErrorCode, str] = {
     AnalysisErrorCode.AI_API_CONTENT_FILTER: "内容被 AI 安全过滤",
     AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL: "AI 返回格式异常",
     AnalysisErrorCode.REPORT_SAVE_FAILED: "报告保存失败",
+    AnalysisErrorCode.TARGET_BBOX_INVALID: "主滑行者框选无效",
     AnalysisErrorCode.UNKNOWN_ERROR: "未知错误",
 }
 
@@ -104,6 +112,9 @@ def _extract_error_text(exc: Exception) -> str:
 
 
 def classify_video_failure(exc: Exception) -> AnalysisFailure:
+    if isinstance(exc, AnalysisPipelineError):
+        return AnalysisFailure(code=exc.code, detail=exc.detail)
+
     detail = stringify_exception(exc)
     lowered = detail.lower()
     decode_tokens = (

@@ -216,7 +216,7 @@ export default function UploadPage() {
           <section className="frost-panel self-start lg:self-center">
             {!isParentMode ? (
               <div className="mb-5 rounded-[1.5rem] border border-amber-300/30 bg-amber-300/10 p-4 text-amber-50">
-                <p className="font-semibold">坦坦模式下不能上传视频</p>
+                <p className="font-semibold">儿童模式下不能上传视频</p>
                 <p className="mt-2 text-sm leading-6 text-amber-100/85">请由家长输入 PIN 后进入家长模式，再上传训练视频和管理技术复盘。</p>
                 <button type="button" onClick={enterParentMode} className="mt-4 rounded-full bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950">
                   进入家长模式

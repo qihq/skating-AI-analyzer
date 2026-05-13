@@ -201,7 +201,7 @@ function annotateTimeline(skater: Skater, archive: ArchiveResponse | null | unde
 }
 
 const actionIconClassName =
-  "list-row-action inline-flex rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
+  "list-row-action inline-flex shrink-0 rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
 
 export default function ArchivePage() {
   const location = useLocation();
@@ -531,8 +531,8 @@ export default function ArchivePage() {
   );
 
   return (
-    <div className="space-y-6">
-      <section className="app-card overflow-hidden p-6 tablet:p-8">
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
         <div className="flex flex-col gap-5 tablet:flex-row tablet:items-end tablet:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">
@@ -549,7 +549,7 @@ export default function ArchivePage() {
           </div>
 
           {isParentMode ? (
-            <div className="min-w-[280px]">
+            <div className="min-w-0 tablet:min-w-[280px]">
               <p className="text-sm font-medium text-slate-700">查看对象</p>
               <div className="mt-3 flex flex-wrap justify-start gap-2 tablet:justify-end">
                 {viewOptions.map((option) => (
@@ -569,7 +569,7 @@ export default function ArchivePage() {
               </div>
             </div>
           ) : (
-            <label className="block min-w-[220px] space-y-2">
+            <label className="block min-w-0 space-y-2 tablet:min-w-[220px]">
               <span className="text-sm font-medium text-slate-700">当前练习档案</span>
               <select value={activeScope} onChange={(event) => setActiveScope(event.target.value)} className="app-select">
                 {skaters.map((skater) => (
@@ -589,8 +589,8 @@ export default function ArchivePage() {
 
       {isParentMode ? renderStatsGrid : null}
 
-      <div className="grid gap-6 web:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="space-y-6">
+      <div className="grid min-w-0 gap-6 web:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-6">
           {isParentMode ? (
             <section className="app-card p-6">
               <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">
@@ -662,7 +662,7 @@ export default function ArchivePage() {
           {renderFiltersCard}
         </div>
 
-        <section className="app-card p-6 tablet:p-7">
+        <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
           <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Timeline</p>
@@ -697,34 +697,34 @@ export default function ArchivePage() {
                       const hideRetry = missingVideoRetryIds.includes(entry.analysis_id);
 
                       return (
-                        <article key={entry.id} className="content-visibility-auto relative pl-8">
+                        <article key={entry.id} className="content-visibility-auto relative min-w-0 pl-7 phone:pl-8">
                           {index < group.items.length - 1 ? (
                             <div className="absolute left-3 top-10 h-[calc(100%-1rem)] w-px bg-gradient-to-b from-blue-200 to-slate-100" />
                           ) : null}
                           <div className="absolute left-0 top-7 flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-sm">⛸️</div>
 
-                          <div className="list-row rounded-[28px] border border-slate-200 bg-white p-5">
+                          <div className="list-row min-w-0 max-w-full rounded-[24px] border border-slate-200 bg-white p-3 phone:rounded-[28px] phone:p-5">
                             <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
-                              <div>
+                              <div className="min-w-0">
                                 <div className="flex flex-wrap items-center gap-2">
                                   {isParentMode && activeScope === ALL_SKATERS_VIEW ? (
-                                    <span className="rounded-full bg-violet-50 px-3 py-1 text-sm text-violet-600">{entry.skater_name}</span>
+                                    <span className="max-w-full break-words rounded-full bg-violet-50 px-3 py-1 text-sm text-violet-600">{entry.skater_name}</span>
                                   ) : null}
-                                  <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.entry_type}</span>
-                                  <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.action_type}</span>
+                                  <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.entry_type}</span>
+                                  <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.action_type}</span>
                                   {entry.skill_category ? (
-                                    <span className="rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{entry.skill_category}</span>
+                                    <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{entry.skill_category}</span>
                                   ) : null}
-                                  <span className={`rounded-full px-3 py-1 text-sm ${forceScoreTone(entry.force_score)}`}>
+                                  <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${forceScoreTone(entry.force_score)}`}>
                                     {isParentMode ? `AI 评分 ${entry.force_score ?? "--"}` : `星级 ${scoreStars(entry.force_score)}`}
                                   </span>
                                 </div>
                                 <p className="mt-3 text-sm text-slate-400">{formatDate(entry.created_at)}</p>
-                                <p className="mt-4 max-w-3xl leading-7 text-slate-600">{entry.report_snippet}</p>
+                                <p className="mt-4 max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{entry.report_snippet}</p>
                               </div>
 
-                              <div className="flex flex-col gap-3 tablet:items-end">
-                                <div className="flex items-center gap-2 pr-2">
+                              <div className="flex min-w-0 flex-col gap-3 tablet:items-end">
+                                <div className="flex flex-wrap items-center gap-2 pr-0 tablet:justify-end tablet:pr-2">
                                   {entry.status === "completed" || entry.status === "failed" ? (
                                     <>
                                       <Link
@@ -754,13 +754,14 @@ export default function ArchivePage() {
                                   ) : null}
 
                                   {isAnalysisInProgress(entry.status) ? (
-                                    <span
+                                    <Link
+                                      to={`/report/${entry.analysis_id}`}
                                       title="分析进行中"
                                       aria-label="分析进行中"
-                                      className={`${actionIconClassName} cursor-default border-blue-100 bg-blue-50 text-blue-500`}
+                                      className={`${actionIconClassName} border-blue-100 bg-blue-50 text-blue-500 hover:bg-blue-100`}
                                     >
                                       ⏳
-                                    </span>
+                                    </Link>
                                   ) : null}
 
                                   {entry.status === "failed" && !hideRetry ? (

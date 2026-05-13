@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from app.schemas import Severity
-from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
 
+
+logger = logging.getLogger(__name__)
 
 REPORT_SYSTEM_PROMPT = (
     "你是花样滑冰训练报告生成助手。"
@@ -34,6 +37,7 @@ SUBSCORE_WEIGHTS = {
 HIGH_CONF_THRESHOLD = 0.5
 LOW_CONFIDENCE_NOTICE = "低置信度帧较多，结果仅供参考。"
 REPORT_REQUEST_TIMEOUT_SECONDS = 120.0
+REPORT_JSON_MAX_ATTEMPTS = 3
 
 
 def clean_json_text(raw_text: str) -> str:
@@ -142,7 +146,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
 
     bio_subscores = None
     quality_flags: list[str] | None = None
-    if isinstance(bio_data, dict) and bio_data.get("key_frames"):
+    if isinstance(bio_data, dict):
         bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data.get("bio_subscores"), dict) else None
         quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
 
@@ -171,6 +175,39 @@ def _resolve_report_data_quality(payload: dict[str, Any], vision_structured: dic
     if vision_quality == "partial" and report_quality == "good":
         return "partial"
     return report_quality
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        return f"{float(value):.0%}"
+    except (TypeError, ValueError):
+        return "0%"
+
+
+def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> str:
+    if not dual_path_meta:
+        return ""
+
+    conflict_fields = dual_path_meta.get("conflict_fields", [])
+    if not isinstance(conflict_fields, list):
+        conflict_fields = []
+
+    return (
+        "\n\n=== 双路交叉验证参考 ===\n"
+        f"两路一致率：{_format_percent(dual_path_meta.get('overall_agreement_rate'))}\n"
+        f"骨架追踪信号：{dual_path_meta.get('skeleton_reliability_signal', 'unknown')}"
+        "（reliable=可信 / uncertain=存疑 / likely_wrong=追踪有问题）\n"
+        f"推荐参考路径：{dual_path_meta.get('recommended_path', 'blend')}\n"
+        f"冲突维度：{', '.join(str(field) for field in conflict_fields) or '无'}\n"
+        f"分歧描述：{dual_path_meta.get('conflict_summary', '')}\n"
+        "Path B 量化分析子分参考：\n"
+        f"  {json.dumps(dual_path_meta.get('path_b_subscores') or {}, ensure_ascii=False)}\n"
+        "\n注意：subscores 字段由后端融合计算，你不要自行加权。\n"
+        "请根据骨架信号设置 data_quality：\n"
+        "  reliable → good / uncertain → partial / likely_wrong → poor\n"
+        "若 likely_wrong，请在 issues 末尾追加一条 severity=medium 的提示\n"
+        "（category='追踪质量'，description 建议用户重选目标）。\n"
+    )
 
 
 def summarize_vision_for_report(vision_structured: dict[str, Any]) -> dict[str, Any]:
@@ -275,16 +312,113 @@ def _fallback_report(action_type: str, vision_structured: dict[str, Any], bio_da
     return _apply_low_confidence_notice(normalize_report(payload, bio_data), vision_summary)
 
 
+def _fallback_report_after_parse_failure(
+    action_type: str,
+    vision_structured: dict[str, Any],
+    bio_data: dict[str, Any] | None,
+    detail: str,
+) -> dict[str, Any]:
+    report = _fallback_report(action_type, vision_structured, bio_data)
+    report["fallback_reason"] = AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value
+    report["fallback_detail"] = detail[:500]
+    if report.get("data_quality") == "good":
+        report["data_quality"] = "partial"
+    return report
+
+
+QUALITY_FLAG_DESCRIPTIONS = {
+    "vision_ai_unavailable_fallback": "AI 视觉分析暂不可用，报告主要基于生物力学数据。",
+    "pose_smoothing_failed_fallback": "骨架平滑失败，部分姿态指标可信度降低。",
+    "target_tracking_uncertain": "目标跟踪存在不确定性，建议复核选人结果。",
+}
+
+
+def _format_subscore_label(key: str) -> str:
+    labels = {
+        "takeoff_power": "起跳发力",
+        "rotation_axis": "旋转轴心",
+        "arm_coordination": "手臂配合",
+        "landing_absorption": "落冰缓冲",
+        "core_stability": "核心稳定",
+    }
+    return labels.get(key, key)
+
+
+def _fallback_report_after_ai_failure(
+    action_type: str,
+    bio_data: dict[str, Any] | None,
+    detail: str,
+    reason: str = AnalysisErrorCode.AI_API_TIMEOUT.value,
+) -> dict[str, Any]:
+    bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data, dict) else None
+    subscores = {
+        key: _clamp_score((bio_subscores or {}).get(key), _fallback_subscores()[key])
+        for key in SUBSCORE_KEYS
+    }
+    score_text = " / ".join(f"{_format_subscore_label(key)} {subscores[key]}" for key in SUBSCORE_KEYS)
+    quality_flags = bio_data.get("quality_flags") if isinstance(bio_data, dict) and isinstance(bio_data.get("quality_flags"), list) else []
+    issues = [QUALITY_FLAG_DESCRIPTIONS.get(str(flag), str(flag)) for flag in quality_flags if flag]
+
+    return {
+        "summary": f"{action_type}动作生物力学评分:{score_text}",
+        "issues": issues,
+        "improvements": [],
+        "training_focus": [],
+        "subscores": subscores,
+        "data_quality": "degraded_no_ai",
+        "fallback_used": True,
+        "fallback_reason": reason,
+        "fallback_detail": detail[:500],
+    }
+
+
+def _is_deepseek_v4_provider(provider: Any) -> bool:
+    model_id = str(getattr(provider, "model_id", "")).strip().lower()
+    provider_name = str(getattr(provider, "provider", "")).strip().lower()
+    return model_id.startswith("deepseek-v4-") or (provider_name == "deepseek" and model_id.startswith("deepseek-v4"))
+
+
+def _report_response_format(provider: Any) -> dict[str, str] | None:
+    if _is_deepseek_v4_provider(provider):
+        return {"type": "json_object"}
+    return None
+
+
 async def generate_report(
     action_type: str,
     vision_structured: dict[str, Any],
     bio_data: dict[str, Any] | None = None,
     skater_id: str | None = None,
+    *,
+    dual_path_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    provider = await get_active_provider("report")
-    memory_context = await build_memory_context(skater_id)
+    """
+    Generate a structured training report.
+
+    Args:
+        action_type: User-facing action type.
+        vision_structured: Normalized vision analysis payload.
+        bio_data: Optional biomechanics data.
+        skater_id: Optional skater id for memory context.
+        dual_path_meta: Optional dual-path validation metadata.
+
+    Returns:
+        A normalized AI report, or a degraded biomechanics-only report when AI is unavailable.
+
+    Raises:
+        No AI provider exception is intentionally propagated; failures become fallback reports.
+    """
+    try:
+        provider = await get_active_provider("report")
+        memory_context = await build_memory_context(skater_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
+        failure = classify_ai_failure(exc)
+        return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
+
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
     vision_summary = summarize_vision_for_report(vision_structured)
+    dual_block = _build_dual_path_report_context(dual_path_meta)
 
     user_prompt = (
         f"请根据花样滑冰【{action_type}】结构化帧分析和骨骼几何指标，生成结构化训练报告。\n\n"
@@ -303,33 +437,61 @@ async def generate_report(
         "并避免过度肯定的结论。如果 fallback_to_all_frames 为 true，请指出高置信帧不足。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
+        + dual_block
+    )
+    user_prompt += (
+        "\n\nOutput constraints: return exactly one valid JSON object. "
+        "The first character must be { and the last character must be }. "
+        "Do not output reasoning, Markdown, code fences, or any text outside the JSON object."
     )
 
-    raw_content = await request_text_completion(
-        provider,
-        temperature=0.25,
-        max_tokens=1800,
-        timeout=REPORT_REQUEST_TIMEOUT_SECONDS,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    cleaned = clean_json_text(raw_content)
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise AnalysisPipelineError(
-            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
-            f"Report JSON parse failed: {exc}: {cleaned[:500]}",
-        ) from exc
+    response_format = _report_response_format(provider)
+    temperature = 0.15 if _is_deepseek_v4_provider(provider) else 0.25
+    last_failure_detail = "Report JSON parse failed before any model response."
 
-    parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured)
+    for attempt in range(1, REPORT_JSON_MAX_ATTEMPTS + 1):
+        try:
+            raw_content = await request_text_completion(
+                provider,
+                temperature=temperature,
+                max_tokens=1800,
+                timeout=REPORT_REQUEST_TIMEOUT_SECONDS,
+                response_format=response_format,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Report AI request failed after retries, using biomechanics fallback: %s", exc)
+            failure = classify_ai_failure(exc)
+            return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
 
-    report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
-    if not report["summary"] or not report["training_focus"]:
-        raise AnalysisPipelineError(
-            AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
-            f"Report payload missing required fields: {cleaned[:500]}",
+        cleaned = clean_json_text(raw_content)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            last_failure_detail = (
+                f"Report JSON parse failed on attempt {attempt}/{REPORT_JSON_MAX_ATTEMPTS}: "
+                f"{exc}: {cleaned[:500]}"
+            )
+            continue
+
+        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured)
+
+        report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
+        if report["summary"] and report["training_focus"]:
+            if attempt > 1:
+                report["report_retry_count"] = attempt - 1
+            return report
+
+        last_failure_detail = (
+            f"Report payload missing required fields on attempt {attempt}/{REPORT_JSON_MAX_ATTEMPTS}: {cleaned[:500]}"
         )
-    return report
+
+    return _fallback_report_after_parse_failure(
+        action_type,
+        vision_structured,
+        bio_data,
+        last_failure_detail,
+    )

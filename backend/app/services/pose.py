@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.services.smoothing import smooth_keypoint_sequence
 from app.services.target_lock import extract_pose_target_bbox
 
 
@@ -221,7 +222,7 @@ def _map_landmarks_to_keypoints(
                 "x": float(normalized_x),
                 "y": float(normalized_y),
                 "z": float(landmark.z),
-                "visibility": visibility if visibility >= 0.5 else 0.0,
+                "visibility": visibility,
             }
         )
     return keypoints
@@ -235,6 +236,16 @@ def _target_motion_region(target_lock: dict[str, Any] | None) -> dict[str, float
     if not isinstance(target_lock, dict):
         return None
     bbox = target_lock.get("selected_bbox")
+    return bbox if isinstance(bbox, dict) else None
+
+
+def _bbox_for_frame(bbox_per_frame: list[dict[str, float]] | None, frame_index: int) -> dict[str, float] | None:
+    if not bbox_per_frame:
+        return None
+    if frame_index < len(bbox_per_frame):
+        bbox = bbox_per_frame[frame_index]
+        return bbox if isinstance(bbox, dict) else None
+    bbox = bbox_per_frame[-1]
     return bbox if isinstance(bbox, dict) else None
 
 
@@ -313,7 +324,25 @@ def log_pose_runtime_mode() -> None:
     _POSE_MODE_LOGGED = True
 
 
-def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> dict[str, Any]:
+def extract_pose(
+    frames_dir: str,
+    target_lock: dict[str, Any] | None = None,
+    bbox_per_frame: list[dict[str, float]] | None = None,
+    effective_fps: float | None = None,
+) -> dict[str, Any]:
+    """从抽样帧中提取目标选手骨骼关键点。
+
+    Args:
+        frames_dir: 抽样帧目录。
+        target_lock: 兼容旧流程的目标锁定 payload。
+        bbox_per_frame: tracker 输出的逐帧目标 bbox，优先用于裁剪和候选打分。
+
+    Returns:
+        包含 connections、frames 和逐帧目标跟踪信息的 pose payload。
+
+    Raises:
+        无。MediaPipe/OpenCV 不可用时返回空 payload。
+    """
     num_poses, _ = _get_pose_runtime_config()
     frame_paths = sorted(Path(frames_dir).glob("frame_*.jpg"))
     if not frame_paths:
@@ -326,7 +355,7 @@ def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> 
         return _empty_payload()
 
     frames: list[dict[str, Any]] = []
-    seed_bbox = _target_seed_bbox(target_lock)
+    seed_bbox = _bbox_for_frame(bbox_per_frame, 0) or _target_seed_bbox(target_lock)
     motion_bbox = _target_motion_region(target_lock)
     previous_bbox = seed_bbox
     lost_count = 0
@@ -339,14 +368,16 @@ def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> 
     )
 
     try:
-        for frame_path in frame_paths:
+        for frame_index, frame_path in enumerate(frame_paths):
             image = cv2.imread(str(frame_path))
+            current_tracker_bbox = _bbox_for_frame(bbox_per_frame, frame_index)
+            reference_bbox = current_tracker_bbox or previous_bbox or seed_bbox
             if image is None:
                 frames.append(
                     {
                         "frame": frame_path.name,
                         "keypoints": [],
-                        "target_bbox": previous_bbox,
+                        "target_bbox": reference_bbox,
                         "tracking_confidence": 0.0,
                         "tracking_state": "lost",
                     }
@@ -384,12 +415,12 @@ def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> 
                     candidate_results = []
 
             if not candidate_results:
-                left, top, right, bottom = _crop_bounds(image_width, image_height, seed_bbox or previous_bbox)
+                left, top, right, bottom = _crop_bounds(image_width, image_height, reference_bbox)
                 cropped = image[top:bottom, left:right]
                 if cropped.size > 0:
                     result = single_pose.process(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
                     if result.pose_landmarks:
-                        bbox = seed_bbox or previous_bbox or {
+                        bbox = reference_bbox or {
                             "x": round(left / max(image_width, 1), 4),
                             "y": round(top / max(image_height, 1), 4),
                             "width": round((right - left) / max(image_width, 1), 4),
@@ -415,7 +446,12 @@ def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> 
             scored_candidates = [
                 {
                     **candidate,
-                    "score": _score_candidate(candidate.get("bbox"), float(candidate.get("visibility_sum", 0.0)), previous_bbox, motion_bbox),
+                    "score": _score_candidate(
+                        candidate.get("bbox"),
+                        float(candidate.get("visibility_sum", 0.0)),
+                        reference_bbox,
+                        current_tracker_bbox or motion_bbox,
+                    ),
                 }
                 for candidate in candidate_results
             ]
@@ -467,4 +503,14 @@ def extract_pose(frames_dir: str, target_lock: dict[str, Any] | None = None) -> 
         if tasks_landmarker is not None:
             tasks_landmarker.close()
 
-    return {"connections": POSE_CONNECTIONS, "frames": frames}
+    quality_flags: list[str] = []
+    try:
+        frames = smooth_keypoint_sequence(frames, effective_fps or 5.0)
+    except Exception:
+        logger.warning("pose smoothing failed; using raw keypoints", exc_info=True)
+        quality_flags.append("pose_smoothing_failed_fallback")
+
+    payload: dict[str, Any] = {"connections": POSE_CONNECTIONS, "frames": frames}
+    if quality_flags:
+        payload["quality_flags"] = quality_flags
+    return payload

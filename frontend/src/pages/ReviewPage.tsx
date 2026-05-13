@@ -345,6 +345,17 @@ export default function ReviewPage() {
   const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0];
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const processingStage = getAnalysisProcessingStage(processingStatus);
+  const previewItems = useMemo(
+    () => [
+      { label: "练习档案", value: selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..." },
+      { label: "动作大类", value: selectedActionType },
+      { label: "动作子类", value: selectedActionSubtype },
+      { label: "技能分类", value: selectedSkill?.name ?? "尚未选择" },
+      { label: "关联课次", value: selectedSession ? sessionLabel(selectedSession) : "不关联" },
+      { label: "视频文件", value: selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传" },
+    ],
+    [selectedActionSubtype, selectedActionType, selectedFile, selectedSession, selectedSkill?.name, selectedSkater],
+  );
   const analysisSteps = useMemo(
     () => [
       { ...PROCESS_STEPS[0], state: uploadStage === "uploading" ? "active" : uploadStage === "processing" ? "done" : "idle" },
@@ -509,6 +520,9 @@ export default function ReviewPage() {
         setProcessingStatus(response.status);
         setPendingAnalysisId(response.id);
       });
+      if (response.status === "awaiting_target_selection") {
+        navigate(`/report/${response.id}/target`);
+      }
     } catch (requestError) {
       setUploadStage("idle");
       setPendingAnalysisId(null);
@@ -533,18 +547,29 @@ export default function ReviewPage() {
             </p>
           </div>
 
-          <div className="app-card-muted rounded-3xl p-5">
-            <p className="text-sm font-semibold text-slate-900">本次复盘预览</p>
-            <div className="mt-4 space-y-3 text-sm text-slate-500">
-              <p>练习档案：{selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..."}</p>
-              <p>动作大类：{selectedActionType}</p>
-              <p>动作子类：{selectedActionSubtype}</p>
-              <p>技能分类：{selectedSkill?.name ?? "尚未选择"}</p>
-              <p>关联课次：{selectedSession ? sessionLabel(selectedSession) : "不关联"}</p>
-              <p>视频文件：{selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传"}</p>
+          <div className="app-card-muted overflow-hidden rounded-[2rem] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(244,247,252,0.96)_100%)] p-0 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
+            <div className="border-b border-slate-200/80 px-5 py-5 tablet:px-6">
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Preview</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-900">本次复盘预览</h2>
+              <p className="mt-2 text-sm leading-7 text-slate-500">上传前先确认对象、动作范围和视频文件，避免把节目录像挂到错误的技能节点上。</p>
             </div>
-            <div className="mt-5 rounded-3xl bg-blue-50 p-4 text-sm leading-7 text-slate-600">
-              分析完成后，结果会自动进入练习档案时间轴，并可继续生成训练计划。
+
+            <div className="px-5 py-5 tablet:px-6">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {previewItems.map((item) => (
+                  <div key={item.label} className="rounded-[1.35rem] border border-slate-200 bg-white/88 px-4 py-4">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{item.label}</p>
+                    <p className="mt-2 text-sm font-medium leading-7 text-slate-700">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 rounded-[1.4rem] border border-blue-100 bg-[linear-gradient(135deg,rgba(239,246,255,0.95)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4">
+                <p className="text-sm font-semibold text-slate-900">复盘后续动作</p>
+                <p className="mt-2 text-sm leading-7 text-slate-600">
+                  分析完成后，结果会自动进入练习档案时间轴，并可以在报告页继续查看双路视觉、生物力学和训练计划。
+                </p>
+              </div>
             </div>
           </div>
         </div>

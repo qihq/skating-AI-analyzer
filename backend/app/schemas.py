@@ -91,6 +91,9 @@ class AnalysisDetail(BaseModel):
     status: str
     vision_raw: str | None = None
     vision_structured: dict[str, Any] | None = None
+    vision_path_a: dict[str, Any] | None = None
+    vision_path_b: dict[str, Any] | None = None
+    cross_validation: dict[str, Any] | None = None
     report: StructuredReport | dict[str, Any] | None = None
     pose_data: dict[str, Any] | None = None
     bio_data: dict[str, Any] | None = None
@@ -332,6 +335,7 @@ class TargetLockRequest(BaseModel):
     candidate_id: str | None = None
     x: float | None = None
     y: float | None = None
+    manual_bbox: TargetBBox | None = None
 
 
 class PoseResponse(BaseModel):
@@ -384,6 +388,11 @@ class ProviderPublic(BaseModel):
 class ProviderTestResponse(BaseModel):
     success: bool
     detail: str
+
+
+class VisionVoteConfig(BaseModel):
+    primary_provider_id: str | None = None
+    secondary_provider_id: str | None = None
 
 
 class ApiConnectionTestResponse(BaseModel):

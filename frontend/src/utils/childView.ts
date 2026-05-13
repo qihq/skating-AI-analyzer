@@ -16,6 +16,10 @@ export function childViewLabel(childView: ChildView) {
   return childView === "tantan" ? "坦坦" : "昭昭";
 }
 
+export function childViewModeLabel(childView: ChildView) {
+  return childView === "tantan" ? "儿童模式" : `${childViewLabel(childView)}模式`;
+}
+
 export function childViewAvatarType(childView: ChildView): AvatarType {
   return CHILD_VIEW_AVATAR_TYPE[childView];
 }
