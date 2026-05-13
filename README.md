@@ -33,6 +33,8 @@ The latest update expands the video analysis pipeline and deployment configurati
 - Processing logs, pipeline timing, and in-report debug visibility
 - Automatic stale-task recovery and safer failure handling
 - Blur filtering and video precheck before vision encoding
+- Blur filtering and profile-aware frame sampling for more stable vision input
+- Standalone `skating_vision` package for reuse outside the main app
 - Child mode and parent mode experiences
 - Skill tree, training plan, archive, and progress tracking
 - Docker all-in-one deployment
@@ -71,6 +73,27 @@ skating-analyzer/
 |-- .env.example
 |-- docker-compose.yml
 `-- README.md
+├─ backend/                  # FastAPI backend
+│  ├─ app/
+│  │  ├─ routers/            # API routes
+│  │  ├─ services/           # analysis, report, provider, skill services
+│  │  ├─ main.py
+│  │  ├─ models.py
+│  │  └─ schemas.py
+│  └─ requirements.txt
+├─ frontend/                 # React frontend
+│  ├─ src/
+│  └─ public/
+├─ skating_vision/           # standalone vision analysis Python package
+├─ docs/
+│  └─ ai-analysis-flow.md   # full 10-stage pipeline documentation
+├─ docker/
+│  └─ allinone/              # all-in-one image build config
+├─ data/                     # runtime data (ignored)
+├─ backups/                  # backups (db files ignored)
+├─ .env.example
+├─ docker-compose.yml
+└─ README.md
 ```
 
 ## Environment Variables
@@ -111,6 +134,30 @@ Phase-2 multi-pose tracking is enabled through a host-mounted MediaPipe `.task` 
 - Optionally set `POSE_NUM_POSES=4`.
 - The `.task` file is not committed to this repository.
 - If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline.
+
+## skating_vision Package
+
+The `skating_vision` directory is a standalone Python package that extracts the core analysis modules for use outside the main FastAPI app. It provides:
+
+- **video** — frame extraction, motion sampling, action window detection, blur filtering
+- **pose** — MediaPipe pose extraction with multi-candidate fallback
+- **biomechanics** — geometric heuristic metrics, jump rotation estimation
+- **vision** — LLM-based frame-by-frame visual analysis
+- **report** — structured report generation and score fusion
+- **providers** — OpenAI SDK-compatible provider abstraction
+- **target_lock** — primary skater candidate locking
+- **action_profiles** — profile inference for jump, spin, spiral, and step sequences
+
+Install as a local package or import directly:
+
+```python
+from skating_vision.video import extract_motion_sampled_frames
+from skating_vision.pose import extract_pose
+from skating_vision.biomechanics import analyze_biomechanics
+from skating_vision.report import generate_report
+```
+
+See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full 10-stage pipeline documentation.
 
 ## Local Development
 
@@ -253,6 +300,8 @@ This repository does not include:
 - GitHub about/topics copy: [GITHUB_PROFILE_COPY.md](./GITHUB_PROFILE_COPY.md)
 - Screenshot planning: [SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
 - Release body draft: [RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
+- AI analysis flow: [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)
+- Iteration guide: [video-analysis-iteration-guide.md](./video-analysis-iteration-guide%20(1).md)
 
 ## License
 
