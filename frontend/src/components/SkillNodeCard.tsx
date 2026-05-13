@@ -65,7 +65,7 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick, hi
 
   return (
     <div
-      className={`relative flex min-w-[88px] flex-col gap-2 rounded-3xl border-2 p-4 transition-transform ${meta.wrapper} ${highlightClass} ${
+      className={`relative flex min-w-0 flex-col gap-2 rounded-3xl border-2 p-3 transition-transform phone:p-4 ${meta.wrapper} ${highlightClass} ${
         isInteractive ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_16px_36px_rgba(15,23,42,0.12)] focus:outline-none focus:ring-2 focus:ring-blue-300 focus:ring-offset-2" : ""
       } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
       onClick={isInteractive ? onClick : undefined}
@@ -75,12 +75,12 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick, hi
       aria-disabled={disabled || undefined}
     >
       <div className={`absolute left-3 top-3 h-3 w-3 rounded-full ${meta.dot}`} />
-      <span className="pt-2 text-2xl leading-none">{node.emoji}</span>
-      <span className={`text-center text-xs ${meta.title}`}>
+      <span className="pt-2 text-xl leading-none phone:text-2xl">{node.emoji}</span>
+      <span className={`break-words text-center text-[11px] leading-5 phone:text-xs ${meta.title}`}>
         {node.name}
         {unlockedByParent ? " 👑" : ""}
       </span>
-      <span className={`text-center text-xs font-medium ${meta.text}`}>{meta.label}</span>
+      <span className={`break-words text-center text-[11px] font-medium leading-5 phone:text-xs ${meta.text}`}>{meta.label}</span>
 
       {node.status === "attempting" && consecutive > 0 ? (
         <>
@@ -95,12 +95,12 @@ export default function SkillNodeCard({ node, disabled, actionLabel, onClick, hi
 
       {node.unlock_note ? <span className="text-center text-[11px] leading-5 text-slate-500">{node.unlock_note}</span> : null}
       {typeof node.last_analysis_score === "number" ? (
-        <span className="mt-auto text-center text-[11px] leading-5 text-slate-500">上次得分：{node.last_analysis_score}分</span>
+        <span className="mt-auto break-words text-center text-[11px] leading-5 text-slate-500">上次得分：{node.last_analysis_score}分</span>
       ) : null}
 
       {actionLabel ? (
         <span
-          className={`mt-2 inline-flex min-h-[44px] items-center justify-center rounded-full px-3 py-2 text-center text-xs font-semibold transition ${
+          className={`mt-2 inline-flex min-h-[40px] items-center justify-center rounded-full px-2 py-2 text-center text-[11px] font-semibold leading-5 transition phone:min-h-[44px] phone:px-3 phone:text-xs ${
             isInteractive ? "bg-white/80 text-slate-700" : "bg-white/50 text-slate-400"
           }`}
         >

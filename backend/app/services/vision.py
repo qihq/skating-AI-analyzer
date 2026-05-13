@@ -8,7 +8,13 @@ from typing import Any, Literal
 
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.action_profiles import get_jump_characteristics
-from app.services.providers import get_active_provider, request_dashscope_video_completion, request_text_completion
+from app.services.providers import (
+    get_active_provider,
+    get_vision_providers,
+    request_dashscope_video_completion,
+    request_doubao_vision_completion,
+    request_text_completion,
+)
 from app.services.report import clean_json_text
 from app.services.snowball import build_memory_context
 from app.services.video import FramePayload
@@ -271,6 +277,10 @@ def _merge_vision_results(
     from app.services.phase_smoother import VALID_TRANSITIONS
 
     transitions = VALID_TRANSITIONS.get(analysis_profile or "", {})
+    provider_votes = [
+        str(result.get("provider_name") or result.get("provider") or f"vote_{index + 1}")
+        for index, result in enumerate(results)
+    ]
     by_result: list[dict[str, dict[str, Any]]] = []
     for result in results:
         by_frame = {
@@ -354,6 +364,7 @@ def _merge_vision_results(
         "vote_metadata": {
             "n_votes_requested": len(results),
             "n_votes_valid": len(results),
+            "providers": provider_votes,
             "phase_votes": vote_frames,
         },
     }
@@ -429,7 +440,11 @@ async def analyze_frames(
         No provider exception is intentionally propagated; failures are logged and returned as fallback data.
     """
     try:
-        provider = await get_active_provider("vision")
+        try:
+            providers = await get_vision_providers()
+        except Exception:  # noqa: BLE001
+            providers = [await get_active_provider("vision")]
+        provider = providers[0]
         memory_context = await build_memory_context(skater_id)
     except Exception as exc:  # noqa: BLE001
         failure = classify_ai_failure(exc).code.value
@@ -507,40 +522,92 @@ async def analyze_frames(
     )
 
     if mode == "video" and clip_path is not None:
-        try:
-            raw_content = await request_dashscope_video_completion(
-                provider,
-                video_path=clip_path,
-                system_prompt=system_prompt,
-                user_prompt=video_prompt,
-                temperature=0.0,
-                max_tokens=max_tokens,
-                timeout=180.0,
-            )
+        async def _single_video_call(video_provider: Any) -> dict[str, Any]:
+            if getattr(video_provider, "provider", "") == "qwen":
+                raw_content = await request_dashscope_video_completion(
+                    video_provider,
+                    video_path=clip_path,
+                    system_prompt=system_prompt,
+                    user_prompt=video_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=180.0,
+                )
+            elif getattr(video_provider, "provider", "") == "doubao":
+                raw_content = await request_doubao_vision_completion(
+                    video_provider,
+                    video_path=clip_path,
+                    system_prompt=system_prompt,
+                    user_prompt=video_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=180.0,
+                )
+            else:
+                raise RuntimeError(f"Unsupported native video provider: {getattr(video_provider, 'provider', '')}")
+
             cleaned = clean_json_text(raw_content)
             parsed = json.loads(cleaned)
             normalized = normalize_vision_payload(parsed, frame_payloads, window_start_sec=window_start_sec)
+            normalized["provider"] = str(getattr(video_provider, "provider", "unknown"))
+            normalized["provider_name"] = str(getattr(video_provider, "name", normalized["provider"]))
+            return normalized
+
+        video_vote_results = await asyncio.gather(
+            *[_single_video_call(candidate) for candidate in providers],
+            return_exceptions=True,
+        )
+        video_votes: list[dict[str, Any]] = []
+        for result in video_vote_results:
+            if isinstance(result, dict):
+                video_votes.append(result)
+            else:
+                logger.warning("Vision native video provider failed, continuing with remaining slots: %s", result)
+
+        if len(video_votes) == 1:
+            normalized = video_votes[0]
             flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []
             normalized["quality_flags"] = flags
             normalized["vision_mode"] = "video"
+            normalized["vote_metadata"] = {
+                "n_votes_requested": len(providers),
+                "n_votes_valid": 1,
+                "providers": [str(normalized.get("provider_name") or normalized.get("provider") or "vision")],
+                "phase_votes": {
+                    str(frame.get("frame_id", "")): {str(frame.get("phase", "ä¸å¯åˆ†æž")): 1}
+                    for frame in normalized.get("frame_analysis", [])
+                    if isinstance(frame, dict)
+                },
+            }
             return normalized
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Vision native video mode failed, falling back to frames: %s", exc)
+        if len(video_votes) > 1:
+            normalized = _merge_vision_results(video_votes, frame_payloads, analysis_profile)
+            normalized["vote_metadata"]["n_votes_requested"] = len(providers)
+            normalized["vision_mode"] = "video_voted"
+            return normalized
 
-    vote_count = max(1, min(int(n_votes), 5))
+        logger.warning("All vision native video providers failed, falling back to frames.")
+
+    vote_count = len(providers) if len(providers) > 1 else max(1, min(int(n_votes), 5))
+    requested_providers = providers if len(providers) > 1 else [provider for _ in range(vote_count)]
     vote_tasks = [
         _single_frames_vision_call(
-            provider,
+            candidate,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             frame_payloads=frame_payloads,
             max_tokens=max_tokens,
             temperature=vote_temperature if vote_count > 1 else 0.1,
         )
-        for _ in range(vote_count)
+        for candidate in requested_providers
     ]
     vote_results = await asyncio.gather(*vote_tasks, return_exceptions=True)
-    valid_votes = [result for result in vote_results if isinstance(result, dict)]
+    valid_votes: list[dict[str, Any]] = []
+    for candidate, result in zip(requested_providers, vote_results, strict=False):
+        if isinstance(result, dict):
+            result["provider"] = str(getattr(candidate, "provider", "unknown"))
+            result["provider_name"] = str(getattr(candidate, "name", result["provider"]))
+            valid_votes.append(result)
     if not valid_votes:
         first_error = next((result for result in vote_results if isinstance(result, Exception)), RuntimeError("no votes"))
         logger.warning("Vision AI vote requests all failed, using fallback: %s", first_error)
@@ -559,6 +626,7 @@ async def analyze_frames(
         normalized["vote_metadata"] = {
             "n_votes_requested": vote_count,
             "n_votes_valid": 1,
+            "providers": [str(normalized.get("provider_name") or normalized.get("provider") or "vision")],
             "phase_votes": {
                 str(frame.get("frame_id", "")): {str(frame.get("phase", "不可分析")): 1}
                 for frame in normalized.get("frame_analysis", [])
@@ -575,5 +643,5 @@ async def analyze_frames(
         normalized["quality_flags"] = flags
         normalized["vision_mode"] = "frames"
     elif vote_count > 1:
-        normalized["vision_mode"] = "frames_voted"
+        normalized["vision_mode"] = "frames_provider_voted" if len(providers) > 1 else "frames_voted"
     return normalized

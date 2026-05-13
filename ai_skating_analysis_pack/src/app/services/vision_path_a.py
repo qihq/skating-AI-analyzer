@@ -1,3 +1,9 @@
+"""Path A: 纯视觉判断分析。
+
+职责: 不引入任何骨架或测量数据，仅基于画面给出第一直觉判断。
+输入: 原始帧图片 + 结构化 prompt。
+输出: frame_analysis + pure_vision_subscores + action_phase_summary。
+"""
 from __future__ import annotations
 
 import json
@@ -88,12 +94,6 @@ def _normalize_path_a_payload(
     parsed: dict[str, Any],
     frame_payloads: list[FramePayload],
 ) -> dict[str, Any]:
-    """
-    Keep the existing normalized vision schema, then explicitly add Path A fields.
-
-    normalize_vision_payload intentionally preserves only the shared vision keys;
-    this wrapper prevents Path A-only fields from being dropped silently.
-    """
     normalized = normalize_vision_payload(parsed, frame_payloads)
     subs = parsed.get("pure_vision_subscores")
     normalized["pure_vision_subscores"] = subs if isinstance(subs, dict) else {}
@@ -115,9 +115,7 @@ async def analyze_path_a(
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
 ) -> dict[str, Any]:
-    """
-    Path A: pure vision analysis, called opt-in by the host.
-    """
+    """Path A: pure vision analysis."""
     if not frame_payloads:
         raise AnalysisPipelineError(
             AnalysisErrorCode.FRAME_EXTRACT_FAILED,
@@ -131,13 +129,7 @@ async def analyze_path_a(
     )
 
     system_prompt = PATH_A_SYSTEM if not memory_context else f"{PATH_A_SYSTEM}\n\n{memory_context}"
-    user_text = _build_user_prompt(
-        action_type,
-        action_subtype,
-        analysis_profile,
-        profile_evidence,
-        n_frames,
-    )
+    user_text = _build_user_prompt(action_type, action_subtype, analysis_profile, profile_evidence, n_frames)
 
     if mode == "video" and clip_path is not None:
         try:
@@ -145,13 +137,7 @@ async def analyze_path_a(
                 provider,
                 video_path=clip_path,
                 system_prompt=system_prompt,
-                user_prompt=_build_video_user_prompt(
-                    action_type,
-                    action_subtype,
-                    analysis_profile,
-                    profile_evidence,
-                    n_frames,
-                ),
+                user_prompt=_build_video_user_prompt(action_type, action_subtype, analysis_profile, profile_evidence, n_frames),
                 temperature=0.0,
                 max_tokens=max_tokens,
                 timeout=180.0,

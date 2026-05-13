@@ -22,10 +22,10 @@ export default function AppLayout() {
   return (
     <div className="app-shell">
       <BottomNav activeTab={activeTab} />
-      <div className="web:pl-[240px]">
+      <div className="min-w-0 overflow-x-hidden web:pl-[240px]">
         <AppHeader />
 
-        <main className="page-content safe-bottom mx-auto w-full max-w-[1480px] px-4 pt-[96px] phone:px-5 tablet:px-6 tablet:pt-[108px] web:px-8 web:pb-10 web:pt-[112px]">
+        <main className="page-content safe-bottom mx-auto min-w-0 overflow-x-hidden w-full max-w-[1480px] px-4 pt-[96px] phone:px-5 tablet:px-6 tablet:pt-[108px] web:px-8 web:pb-10 web:pt-[112px]">
           <Outlet />
         </main>
       </div>

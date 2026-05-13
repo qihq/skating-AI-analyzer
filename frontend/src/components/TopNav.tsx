@@ -45,7 +45,7 @@ export default function TopNav() {
                 : "border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
             }`}
           >
-            {isParentMode ? "切回坦坦模式" : "进入家长模式"}
+            {isParentMode ? "切回儿童模式" : "进入家长模式"}
           </button>
         </nav>
       </div>

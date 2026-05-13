@@ -93,7 +93,7 @@ router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 plan_router = APIRouter(prefix="/api/plan", tags=["plan"])
 frames_router = APIRouter(prefix="/api/frames", tags=["frames"])
 
-VALID_ACTION_TYPES = {"è·³è·ƒ", "æ—‹è½¬", "æ­¥æ³•", "è‡ªç”±æ»‘"}
+VALID_ACTION_TYPES = {"跳跃", "旋转", "步法", "自由滑"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
@@ -171,6 +171,64 @@ def _normalize_processing_logs(value: object) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, dict)][-MAX_ANALYSIS_LOG_ENTRIES:]
 
 
+def _provider_label(provider: Any) -> str:
+    provider_name = str(getattr(provider, "provider", "") or "").strip() or "unknown"
+    model = str(getattr(provider, "vision_model", "") or getattr(provider, "model_id", "") or "").strip()
+    return f"{provider_name}/{model}" if model else provider_name
+
+
+def _count_list(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _build_dual_path_log_detail(
+    *,
+    path_a: dict[str, Any] | None,
+    path_b: dict[str, Any] | None,
+    dual_path_meta: dict[str, Any] | None,
+    provider_path_a: Any,
+    provider_path_b: Any,
+    raw_frame_count: int,
+    annotated_frame_count: int,
+    annotated_dir: Path | None,
+    clip_path: Path | None,
+    used_key_frames: set[str] | None,
+) -> str:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    path_a_data = path_a if isinstance(path_a, dict) else {}
+    path_b_data = path_b if isinstance(path_b, dict) else {}
+    detail = {
+        "path_a": {
+            "provider": _provider_label(provider_path_a),
+            "mode": path_a_data.get("vision_mode") or ("video" if clip_path else "frames"),
+            "input": str(clip_path) if clip_path else f"{raw_frame_count} raw frames",
+            "frame_analysis_count": _count_list(path_a_data.get("frame_analysis")),
+            "phase_segments_count": _count_list(path_a_data.get("phase_segments")),
+            "path_desc": path_a_data.get("path_desc"),
+        },
+        "path_b": {
+            "provider": _provider_label(provider_path_b),
+            "input": f"{annotated_frame_count} annotated frames + biomechanics",
+            "annotated_dir": str(annotated_dir) if annotated_dir else None,
+            "n_frames": path_b_data.get("n_frames") or annotated_frame_count,
+            "key_frames": sorted(used_key_frames or set()),
+            "failed": bool(path_b_data.get("error")),
+            "error": path_b_data.get("error"),
+            "subscores": path_b_data.get("subscores"),
+        },
+        "cross_validation": {
+            "recommended_path": meta.get("recommended_path"),
+            "overall_agreement_rate": meta.get("overall_agreement_rate"),
+            "skeleton_reliability_signal": meta.get("skeleton_reliability_signal"),
+            "conflict_fields": meta.get("conflict_fields"),
+            "conflict_summary": meta.get("conflict_summary"),
+            "weight_a": meta.get("weight_a"),
+            "weight_b": meta.get("weight_b"),
+        },
+    }
+    return json.dumps(detail, ensure_ascii=False, indent=2)
+
+
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -231,7 +289,7 @@ def _build_stale_analysis_snapshot(analysis: Analysis) -> Analysis | None:
             "timestamp": _utc_now_iso(),
             "stage": "pipeline",
             "level": "error",
-            "message": "åˆ†æžä»»åŠ¡é•¿æ—¶é—´æ— è¿›å±•ï¼Œå·²è‡ªåŠ¨æ ‡è®°ä¸ºå¤±è´¥ï¼Œå¯é‡è¯•ã€‚",
+            "message": "分析任务长时间无进展，已自动标记为失败，可重试。",
             "retry_from_stage": retry_from_stage,
             "error_code": AnalysisErrorCode.UNKNOWN_ERROR.value,
             "detail": detail,
@@ -245,7 +303,7 @@ def _build_stale_analysis_snapshot(analysis: Analysis) -> Analysis | None:
     snapshot.status = "failed"
     snapshot.retry_from_stage = retry_from_stage
     snapshot.error_code = AnalysisErrorCode.UNKNOWN_ERROR.value
-    snapshot.error_message = "åˆ†æžä»»åŠ¡ä¸­æ–­ï¼Œè¯·é‡è¯•ã€‚"
+    snapshot.error_message = "分析任务中断，请重试。"
     snapshot.error_detail = detail
     snapshot.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
     return snapshot
@@ -402,7 +460,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='pipeline',
             level='info',
-            message=f"å¼€å§‹åˆ†æžæµç¨‹ï¼Œä»Ž {retry_from_stage or 'extract_frames'} é˜¶æ®µå¯åŠ¨ã€‚",
+            message=f"开始分析流程，从 {retry_from_stage or 'extract_frames'} 阶段启动。",
             retry_from_stage=retry_from_stage,
         )
 
@@ -422,7 +480,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message='å¼€å§‹æå–å…³é”®å¸§ã€‚',
+                message='开始提取关键帧。',
                 status_value='extracting_frames',
             )
             await _set_analysis_status(analysis_id, 'extracting_frames')
@@ -441,7 +499,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='extract_frames',
                     level='info',
-                    message='å¤ç”¨å·²é”å®šç›®æ ‡åŽçš„ç¼“å­˜å¸§ï¼Œæ— éœ€é‡æ–°æŠ½å¸§ã€‚',
+                    message='复用已锁定目标后的缓存帧，无需重新抽帧。',
                 )
             else:
                 try:
@@ -464,7 +522,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message=f'å…³é”®å¸§æå–å®Œæˆï¼Œå…± {len(sampled_frames)} å¸§ã€‚',
+                message=f'关键帧提取完成，共 {len(sampled_frames)} 帧。',
                 elapsed_s=timings['extract_frames_s'],
                 timings=timings,
             )
@@ -499,7 +557,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='extract_frames',
                     level='warning',
-                    message='è‡ªåŠ¨é”å®šä¸»æ»‘è¡Œè€…ç½®ä¿¡åº¦ä¸è¶³ï¼Œç­‰å¾…æ‰‹åŠ¨ç¡®è®¤ç›®æ ‡ã€‚',
+                    message='自动锁定主滑行者置信度不足，等待手动确认目标。',
                     timings=timings,
                 )
                 await _set_analysis_status(analysis_id, 'awaiting_target_selection')
@@ -522,7 +580,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='extract_frames',
                 level='info',
-                message=f'åˆ†æ®µé‡è¯•å¤ç”¨ç¼“å­˜å…³é”®å¸§ï¼Œå…± {len(sampled_frames)} å¸§ã€‚',
+                message=f'分段重试复用缓存关键帧，共 {len(sampled_frames)} 帧。',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -533,7 +591,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pose',
                     level='info',
-                    message='å¼€å§‹æå–å§¿æ€å…³é”®ç‚¹ã€‚',
+                    message='开始提取姿态关键点。',
                 )
                 pose_start = time.monotonic()
                 bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock)
@@ -558,7 +616,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pose',
                     level='info',
-                    message=f'å§¿æ€æå–å®Œæˆï¼Œå…± {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} å¸§ã€‚',
+                    message=f'姿态提取完成，共 {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} 帧。',
                     elapsed_s=timings['pose_s'],
                     timings=timings,
                 )
@@ -582,7 +640,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='pose',
                 level='info',
-                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰å§¿æ€ç»“æžœã€‚',
+                message='分段重试复用已有姿态结果。',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -595,7 +653,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='biomechanics',
                     level='info',
-                    message='å¼€å§‹è®¡ç®—ç”Ÿç‰©åŠ›å­¦æŒ‡æ ‡ã€‚',
+                    message='开始计算生物力学指标。',
                 )
                 biomechanics_start = time.monotonic()
                 analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
@@ -654,7 +712,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='biomechanics',
                     level='info',
-                    message=f'ç”Ÿç‰©åŠ›å­¦è®¡ç®—å®Œæˆï¼Œprofile={analysis_profile}ã€‚',
+                    message=f'生物力学计算完成，profile={analysis_profile}。',
                     elapsed_s=timings['biomechanics_s'],
                     timings=timings,
                 )
@@ -680,7 +738,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='biomechanics',
                 level='info',
-                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰ç”Ÿç‰©åŠ›å­¦ç»“æžœã€‚',
+                message='分段重试复用已有生物力学结果。',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -689,7 +747,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='å¼€å§‹è°ƒç”¨è§†è§‰æ¨¡åž‹åˆ†æžå…³é”®å¸§ã€‚',
+                message='开始调用视觉模型分析关键帧。',
                 status_value='analyzing',
             )
             await _set_analysis_status(analysis_id, 'analyzing')
@@ -698,6 +756,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 timestamps = build_timestamp_map(motion_scores)
                 raw_payloads = await encode_frames(sampled_frames, timestamps=timestamps)
                 clip_path = None
+                provider_path_a = await _provider_for_slot("vision_path_a")
+                provider_path_b = await _provider_for_slot("vision_path_b")
                 try:
                     clip_path = await cut_action_window_clip(
                         video_path,
@@ -713,8 +773,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     raw_frame_payloads=raw_payloads,
                     pose_data=pose_data,
                     bio_data=bio_data,
-                    provider_path_a=await _provider_for_slot("vision_path_a"),
-                    provider_path_b=await _provider_for_slot("vision_path_b"),
+                    provider_path_a=provider_path_a,
+                    provider_path_b=provider_path_b,
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
@@ -729,6 +789,18 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 dual_path_meta = dual.dual_path_meta
                 cross_validation = {**dual.validation.to_dict(), **dual_path_meta}
                 ui_summary = dual_path_summary(dual)
+                dual_path_log_detail = _build_dual_path_log_detail(
+                    path_a=vision_path_a,
+                    path_b=vision_path_b,
+                    dual_path_meta=dual_path_meta,
+                    provider_path_a=provider_path_a,
+                    provider_path_b=provider_path_b,
+                    raw_frame_count=len(raw_payloads),
+                    annotated_frame_count=ui_summary.get("n_frames_b") if isinstance(ui_summary.get("n_frames_b"), int) else 0,
+                    annotated_dir=getattr(dual, "annotated_dir", None),
+                    clip_path=clip_path,
+                    used_key_frames=getattr(dual, "used_key_frames", set()),
+                )
                 frame_analysis = vision_structured.get('frame_analysis')
                 if isinstance(frame_analysis, list):
                     vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
@@ -753,11 +825,21 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage='vision', timings=timings)
                 return
             logger.info('Analysis %s received vision result', analysis_id)
+            path_a_mode = vision_path_a.get("vision_mode", "frames") if isinstance(vision_path_a, dict) else "unknown"
+            path_b_failed = isinstance(vision_path_b, dict) and bool(vision_path_b.get("error"))
+            recommended_path = dual_path_meta.get("recommended_path", "unknown") if isinstance(dual_path_meta, dict) else "unknown"
             await _append_analysis_log(
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='è§†è§‰åˆ†æžå®Œæˆï¼Œå·²ç”Ÿæˆç»“æž„åŒ–å¸§è§‚å¯Ÿã€‚',
+                message=f'Dual-path details: Path A mode={path_a_mode}, Path B={"failed" if path_b_failed else "completed"}, recommended={recommended_path}.',
+                detail=dual_path_log_detail,
+            )
+            await _append_analysis_log(
+                analysis_id,
+                stage='vision',
+                level='info',
+                message='视觉分析完成，已生成结构化帧观察。',
                 elapsed_s=timings['vision_s'],
                 timings=timings,
             )
@@ -776,7 +858,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_id,
                 stage='vision',
                 level='info',
-                message='åˆ†æ®µé‡è¯•å¤ç”¨å·²æœ‰è§†è§‰åˆ†æžç»“æžœã€‚',
+                message='分段重试复用已有视觉分析结果。',
                 retry_from_stage=retry_from_stage,
             )
 
@@ -784,7 +866,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='report',
             level='info',
-            message='å¼€å§‹ç”Ÿæˆè®­ç»ƒæŠ¥å‘Šã€‚',
+            message='开始生成训练报告。',
             status_value='generating_report',
         )
         await _set_analysis_status(analysis_id, 'generating_report')
@@ -811,7 +893,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis_id,
             stage='report',
             level='info',
-            message=f'æŠ¥å‘Šç”Ÿæˆå®Œæˆï¼ŒForce Score={force_score}ã€‚',
+            message=f'报告生成完成，Force Score={force_score}。',
             elapsed_s=timings['report_s'],
             timings=timings,
         )
@@ -863,7 +945,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_id,
                     stage='pipeline',
                     level='info',
-                    message='åˆ†æžæµç¨‹å·²å®Œæˆã€‚',
+                    message='分析流程已完成。',
                     elapsed_s=timings['total_s'],
                     timings=timings,
                 )
@@ -955,7 +1037,7 @@ async def _resolve_skater(session: AsyncSession, skater_id: str | None) -> Skate
     if skater_id:
         skater = await session.get(Skater, skater_id)
         if skater is None:
-            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„ç»ƒä¹ æ¡£æ¡ˆã€‚")
+            raise HTTPException(status_code=404, detail="未找到对应的练习档案。")
         return skater
 
     return await _get_default_skater(session)
@@ -977,7 +1059,7 @@ def _report_summary(analysis: Analysis) -> str:
         return analysis.error_message
     if analysis.note:
         return analysis.note
-    return "æš‚æ— æŠ¥å‘Šæ‘˜è¦ã€‚"
+    return "暂无报告摘要。"
 
 
 def _score_to_stars(score: object) -> str:
@@ -996,14 +1078,14 @@ def _score_to_stars(score: object) -> str:
         filled = 2
     else:
         filled = 1
-    return ("â˜…" * filled) + ("â˜†" * (5 - filled))
+    return ("★" * filled) + ("☆" * (5 - filled))
 
 
 def _first_nonempty_sentence(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
-    parts = [part.strip("ï¼Œã€‚ï¼›; ") for part in text.replace("ï¼", "ã€‚").replace("ï¼Ÿ", "ã€‚").split("ã€‚")]
+    parts = [part.strip("，。；; ") for part in text.replace("！", "。").replace("？", "。").split("。")]
     for part in parts:
         if part:
             return part
@@ -1014,7 +1096,7 @@ def _join_export_items(items: list[str], fallback: str) -> str:
     cleaned = [item.strip() for item in items if item and item.strip()]
     if not cleaned:
         return fallback
-    return "ï¼Œ".join(cleaned[:2])
+    return "，".join(cleaned[:2])
 
 
 def _build_export_text(analysis: Analysis, skater_name: str | None, session_date: str | None = None) -> str:
@@ -1041,8 +1123,8 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
 
     highlight = _join_export_items(
         positives[:2]
-        or ([f"{strongest_phase}é˜¶æ®µè¡¨çŽ°ç›¸å¯¹ç¨³å®š"] if strongest_phase and strongest_phase != "Ã¤Â¸ÂÃ¥ÂÂ¯Ã¥Ë†â€ Ã¦Å¾Â" else []),
-        "æ•´ä½“åŠ¨ä½œèŠ‚å¥åŸºæœ¬ç¨³å®š",
+        or ([f"{strongest_phase}阶段表现相对稳定"] if strongest_phase and strongest_phase != "ä¸å¯åˆ†æž" else []),
+        "整体动作节奏基本稳定",
     )
 
     issue_texts: list[str] = []
@@ -1062,24 +1144,24 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
         target = str(item.get("target", "")).strip()
         action = _first_nonempty_sentence(item.get("action"))
         if target and action:
-            improvement_actions.append(f"{target}ï¼š{action}")
+            improvement_actions.append(f"{target}：{action}")
         elif action:
             improvement_actions.append(action)
 
     improvement = _join_export_items(
         issue_texts[:1]
         + improvement_actions[:1]
-        + ([f"{weakest_phase}é˜¶æ®µè¿˜å¯ä»¥ç»§ç»­åŠ å¼º"] if weakest_phase and weakest_phase != "Ã¤Â¸ÂÃ¥ÂÂ¯Ã¥Ë†â€ Ã¦Å¾Â" else []),
-        "å»ºè®®ç»§ç»­åŠ å¼ºç¨³å®šæ€§å’ŒåŸºç¡€æŽ§åˆ¶ç»ƒä¹ ",
+        + ([f"{weakest_phase}阶段还可以继续加强"] if weakest_phase and weakest_phase != "ä¸å¯åˆ†æž" else []),
+        "建议继续加强稳定性和基础控制练习",
     )
 
     subscores = report.get("subscores") if isinstance(report.get("subscores"), dict) else {}
     detail_labels = {
-        "takeoff_power": "èµ·è·³å‘åŠ›",
-        "rotation_axis": "æ—‹è½¬è½´å¿ƒ",
-        "arm_coordination": "æ‰‹è‡‚é…åˆ",
-        "landing_absorption": "è½å†°ç¼“å†²",
-        "core_stability": "æ ¸å¿ƒç¨³å®š",
+        "takeoff_power": "起跳发力",
+        "rotation_axis": "旋转轴心",
+        "arm_coordination": "手臂配合",
+        "landing_absorption": "落冰缓冲",
+        "core_stability": "核心稳定",
     }
     detail_parts = [
         f"[{label} {_score_to_stars(subscores.get(key))}]"
@@ -1087,19 +1169,19 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
         if key in subscores
     ]
     if not detail_parts:
-        detail_parts = [f"[ç»¼åˆè¡¨çŽ° {_score_to_stars(analysis.force_score)}]"]
+        detail_parts = [f"[综合表现 {_score_to_stars(analysis.force_score)}]"]
 
     export_date = session_date or analysis.created_at.date().isoformat()
-    skater_label = skater_name or "å°è¿åŠ¨å‘˜"
+    skater_label = skater_name or "小运动员"
     score_label = analysis.force_score if analysis.force_score is not None else "--"
 
     return (
-        f"[å†°å®è¯Šæ–­] {skater_label} Â· {analysis.action_type} Â· {export_date}\n"
-        f"ç»¼åˆè¯„åˆ†ï¼š{score_label}åˆ†\n\n"
-        f"äº®ç‚¹ï¼š{highlight}\n"
-        f"å¾…æ”¹å–„ï¼š{improvement}\n\n"
-        f"æŠ€æœ¯ç»†èŠ‚ï¼š{' '.join(detail_parts)}\n\n"
-        "ç”±å†°å®ï¼ˆIceBuddyï¼‰ç”Ÿæˆ Â· ä»…ä¾›å‚è€ƒ"
+        f"[冰宝诊断] {skater_label} · {analysis.action_type} · {export_date}\n"
+        f"综合评分：{score_label}分\n\n"
+        f"亮点：{highlight}\n"
+        f"待改善：{improvement}\n\n"
+        f"技术细节：{' '.join(detail_parts)}\n\n"
+        "由冰宝（IceBuddy）生成 · 仅供参考"
     )
 
 
@@ -1391,7 +1473,7 @@ def _build_issue_map(report: dict[str, object] | None) -> dict[str, dict[str, st
     for raw_issue in issues:
         if not isinstance(raw_issue, dict):
             continue
-        category = str(raw_issue.get("category", "")).strip() or "æœªåˆ†ç±»é—®é¢˜"
+        category = str(raw_issue.get("category", "")).strip() or "未分类问题"
         issue_map[category] = {
             "category": category,
             "description": str(raw_issue.get("description", "")).strip(),
@@ -1422,7 +1504,7 @@ def _compare_reports(report_a: dict[str, object] | None, report_b: dict[str, obj
                     category=category,
                     before_severity=before_severity,
                     after_severity=None,
-                    description=f"{before['description']} å½“å‰å¤ç›˜ä¸­æœªå†å‡ºçŽ°ã€‚",
+                    description=f"{before['description']} 当前复盘中未再出现。",
                 )
             )
             continue
@@ -1487,12 +1569,12 @@ def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
 
 
 def _skater_context(skater: Skater) -> str:
-    parts = [f"å§“åï¼š{_skater_display_name(skater)}"]
+    parts = [f"姓名：{_skater_display_name(skater)}"]
     if skater.level:
-        parts.append(f"æ°´å¹³ï¼š{skater.level}")
+        parts.append(f"水平：{skater.level}")
     if skater.notes:
-        parts.append(f"å¤‡æ³¨ï¼š{skater.notes}")
-    return "ï¼›".join(parts)
+        parts.append(f"备注：{skater.notes}")
+    return "；".join(parts)
 
 
 async def _get_plan_by_analysis(session: AsyncSession, analysis_id: str) -> TrainingPlan | None:
@@ -1518,7 +1600,7 @@ async def _verify_parent_pin_or_403(session: AsyncSession, pin: str) -> None:
 
     auth = await get_parent_auth(session)
     if auth is None or not verify_pin_hash(normalized_pin, auth.pin_hash):
-        raise HTTPException(status_code=403, detail="å®¶é•¿ PIN éªŒè¯å¤±è´¥ã€‚")
+        raise HTTPException(status_code=403, detail="家长 PIN 验证失败。")
 
 
 @router.post("/upload", response_model=AnalysisUploadResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -1535,7 +1617,7 @@ async def upload_analysis(
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisUploadResponse:
     if action_type not in VALID_ACTION_TYPES:
-        raise HTTPException(status_code=400, detail="action_type å¿…é¡»æ˜¯ è·³è·ƒ / æ—‹è½¬ / æ­¥æ³• / è‡ªç”±æ»‘ ä¹‹ä¸€ã€‚")
+        raise HTTPException(status_code=400, detail="action_type 必须是 跳跃 / 旋转 / 步法 / 自由滑 之一。")
 
     skater = await _resolve_skater(session, skater_id)
     normalized_session_id = _normalize_optional_text(session_id)
@@ -1543,9 +1625,9 @@ async def upload_analysis(
     if normalized_session_id:
         training_session = await session.get(TrainingSession, normalized_session_id)
         if training_session is None:
-            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
+            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
         if skater and training_session.skater_id != skater.id:
-            raise HTTPException(status_code=400, detail="è®­ç»ƒè§†é¢‘åªèƒ½å…³è”åˆ°å½“å‰æ¡£æ¡ˆçš„è®­ç»ƒè¯¾æ¬¡ã€‚")
+            raise HTTPException(status_code=400, detail="训练视频只能关联到当前档案的训练课次。")
 
     analysis_id = str(uuid4())
     suffix = Path(file.filename or "").suffix.lower()
@@ -1595,7 +1677,7 @@ async def update_analysis_session(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     next_session_id = payload.session_id
     if next_session_id is None:
@@ -1603,9 +1685,9 @@ async def update_analysis_session(
     else:
         training_session = await session.get(TrainingSession, next_session_id)
         if training_session is None:
-            raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
+            raise HTTPException(status_code=404, detail="未找到对应的训练课次。")
         if analysis.skater_id and training_session.skater_id != analysis.skater_id:
-            raise HTTPException(status_code=400, detail="åªèƒ½å…³è”åˆ°åŒä¸€æ¡£æ¡ˆä¸‹çš„è®­ç»ƒè¯¾æ¬¡ã€‚")
+            raise HTTPException(status_code=400, detail="只能关联到同一档案下的训练课次。")
         analysis.session_id = training_session.id
 
     await session.commit()
@@ -1674,11 +1756,11 @@ async def compare_analyses(
     analysis_b = await session.get(Analysis, id_b)
 
     if analysis_a is None or analysis_b is None:
-        raise HTTPException(status_code=404, detail="è‡³å°‘æœ‰ä¸€æ¡å¯¹æ¯”è®°å½•ä¸å­˜åœ¨ã€‚")
+        raise HTTPException(status_code=404, detail="至少有一条对比记录不存在。")
     if analysis_a.status != "completed" or analysis_b.status != "completed":
-        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„è®°å½•å¯ä»¥è¿›è¡Œå¯¹æ¯”ã€‚")
+        raise HTTPException(status_code=400, detail="只有 completed 状态的记录可以进行对比。")
     if analysis_a.action_type != analysis_b.action_type:
-        raise HTTPException(status_code=400, detail="ä»…æ”¯æŒåŒåŠ¨ä½œç±»åž‹çš„å¤ç›˜è®°å½•å¯¹æ¯”ã€‚")
+        raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
 
     skater_map = await _get_skater_map(
         session,
@@ -1745,11 +1827,11 @@ async def get_progress(
 async def create_training_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
     if analysis.status != "completed":
-        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„åˆ†æžæ‰èƒ½ç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
     if not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="å½“å‰åˆ†æžç¼ºå°‘ç»“æž„åŒ–æŠ¥å‘Šï¼Œæ— æ³•ç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=400, detail="当前分析缺少结构化报告，无法生成训练计划。")
 
     existing_plan = await _get_plan_by_analysis(session, analysis_id)
     if existing_plan is not None:
@@ -1757,7 +1839,7 @@ async def create_training_plan(analysis_id: str, session: AsyncSession = Depends
 
     skater = await _resolve_skater(session, analysis.skater_id)
     if skater is None:
-        raise HTTPException(status_code=400, detail="å½“å‰ç³»ç»Ÿå°šæœªé…ç½®ç»ƒä¹ æ¡£æ¡ˆã€‚")
+        raise HTTPException(status_code=400, detail="当前系统尚未配置练习档案。")
 
     if analysis.skater_id != skater.id:
         analysis.skater_id = skater.id
@@ -1782,7 +1864,7 @@ async def create_training_plan(analysis_id: str, session: AsyncSession = Depends
 async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     plan = await _get_plan_by_analysis(session, analysis_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="è¯¥åˆ†æžè®°å½•å°šæœªç”Ÿæˆè®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=404, detail="该分析记录尚未生成训练计划。")
     return _plan_detail_from_model(plan)
 
 
@@ -1790,7 +1872,7 @@ async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(ge
 async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PoseResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
@@ -1806,7 +1888,7 @@ async def get_analysis(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
@@ -1822,9 +1904,9 @@ async def get_analysis(
 async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="Ã¦Å“ÂªÃ¦â€°Â¾Ã¥Ë†Â°Ã¨Â¯Â¥Ã¥Ë†â€ Ã¦Å¾ÂÃ¨Â®Â°Ã¥Â½â€¢Ã£â‚¬â€š")
+        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
     if analysis.status != "completed":
-        raise HTTPException(status_code=400, detail="Ã¥ÂÂªÃ¦Å“â€° completed Ã§Å Â¶Ã¦â‚¬ÂÃ§Å¡â€žÃ¥Ë†â€ Ã¦Å¾ÂÃ¦â€°ÂÃ¨Æ’Â½Ã¥Â¯Â¼Ã¥â€¡ÂºÃ¦Å Â¥Ã¥â€˜Å Ã£â‚¬â€š")
+        raise HTTPException(status_code=400, detail="åªæœ‰ completed çŠ¶æ€çš„åˆ†æžæ‰èƒ½å¯¼å‡ºæŠ¥å‘Šã€‚")
 
     skater_name = None
     if analysis.skater_id:
@@ -1909,7 +1991,7 @@ async def retry_analysis(
 async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TargetPreviewResponse:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     frames_dir = _frames_dir_for_analysis(analysis)
     preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
@@ -1935,7 +2017,7 @@ async def confirm_target_lock(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     frames_dir = _frames_dir_for_analysis(analysis)
     preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
@@ -1974,7 +2056,7 @@ async def update_note(
 ) -> AnalysisDetail:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     analysis.note = _normalize_optional_text(payload.note)
     await session.commit()
@@ -1997,9 +2079,9 @@ async def delete_analysis(
 
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
     if analysis.status == "processing":
-        raise HTTPException(status_code=400, detail="åˆ†æžè¿›è¡Œä¸­ï¼Œæ— æ³•åˆ é™¤ã€‚")
+        raise HTTPException(status_code=400, detail="分析进行中，无法删除。")
 
     skater_id = analysis.skater_id
     plan = await _get_plan_by_analysis(session, analysis_id)
@@ -2032,7 +2114,7 @@ async def get_latest_skater_plan(skater_id: str, session: AsyncSession = Depends
 async def get_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
     return _plan_detail_from_model(plan)
 
 
@@ -2045,7 +2127,7 @@ async def update_plan_session(
 ) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
 
     raw_plan = plan.plan_json if isinstance(plan.plan_json, dict) else {}
     days = raw_plan.get("days", [])
@@ -2070,7 +2152,7 @@ async def update_plan_session(
         next_days.append(next_day)
 
     if not found:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°å¯¹åº”çš„è®­ç»ƒé¡¹ç›®ã€‚")
+        raise HTTPException(status_code=404, detail="未找到对应的训练项目。")
 
     plan.plan_json = {**raw_plan, "days": next_days}
     await session.commit()
@@ -2086,16 +2168,16 @@ async def extend_plan(
 ) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è®­ç»ƒè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
 
     analysis = await session.get(Analysis, plan.analysis_id)
     if analysis is None or not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="å½“å‰è®¡åˆ’ç¼ºå°‘åŽŸå§‹åˆ†æžèƒŒæ™¯ï¼Œæ— æ³•ç»­æœŸã€‚")
+        raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
 
     skater = await session.get(Skater, plan.skater_id)
     completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
     if len(completed_days) < 3:
-        raise HTTPException(status_code=400, detail="è‡³å°‘å®Œæˆ 3 å¤©åŽæ‰èƒ½ç»­æœŸè®¡åˆ’ã€‚")
+        raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
 
     try:
         plan.plan_json = await extend_training_plan(
@@ -2117,16 +2199,16 @@ async def extend_plan(
 @frames_router.get("/{analysis_id}/{filename}")
 async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
     if not filename.startswith("frame_") or not filename.endswith(".jpg"):
-        raise HTTPException(status_code=400, detail="æ— æ•ˆçš„å¸§æ–‡ä»¶åã€‚")
+        raise HTTPException(status_code=400, detail="无效的帧文件名。")
 
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥åˆ†æžè®°å½•ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
     frames_root = restored_frames_dir.resolve() if restored_frames_dir.exists() else (UPLOADS_DIR / analysis_id / "frames").resolve()
     frame_path = (frames_root / filename).resolve()
     if frames_root not in frame_path.parents or not frame_path.exists():
-        raise HTTPException(status_code=404, detail="æœªæ‰¾åˆ°è¯¥è§†é¢‘å¸§ã€‚")
+        raise HTTPException(status_code=404, detail="未找到该视频帧。")
 
     return FileResponse(frame_path, media_type="image/jpeg")

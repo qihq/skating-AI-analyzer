@@ -390,6 +390,11 @@ class ProviderTestResponse(BaseModel):
     detail: str
 
 
+class VisionVoteConfig(BaseModel):
+    primary_provider_id: str | None = None
+    secondary_provider_id: str | None = None
+
+
 class ApiConnectionTestResponse(BaseModel):
     status: str
     latency_ms: int | None = None

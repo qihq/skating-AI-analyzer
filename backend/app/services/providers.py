@@ -4,6 +4,7 @@ import base64
 import asyncio
 import hashlib
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -30,10 +31,14 @@ from app.database import AsyncSessionLocal
 from app.models import AIProvider
 from app.schemas import ApiConnectionTestResponse
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError, classify_ai_failure
+from app.services.vision_vote_config import load_vision_vote_config
 
 
 AI_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 DEFAULT_QWEN_VISION_MODEL = "qwen-vl-max-latest"
+DEFAULT_DOUBAO_VISION_MODEL = "doubao-1.5-vision-pro-32k"
+DOUBAO_VISION_MAX_MB = 50
+DOUBAO_VISION_MAX_SECONDS = 60.0
 QWEN_VIDEO_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 _VISION_VIDEO_COST_DAY: date | None = None
 _VISION_VIDEO_COST_CNY = 0.0
@@ -207,6 +212,57 @@ def _resolve_qwen_vision_model(provider: AIProvider) -> str:
     if provider.provider == "qwen" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
         return DEFAULT_QWEN_VISION_MODEL
     return provider.model_id
+
+
+def _resolve_env_vision_model(provider_name: str) -> str:
+    normalized = provider_name.strip().lower()
+    if normalized == "qwen":
+        return os.getenv("QWEN_VISION_MODEL", "").strip() or DEFAULT_QWEN_VISION_MODEL
+    if normalized == "doubao":
+        return os.getenv("DOUBAO_VISION_MODEL", "").strip() or DEFAULT_DOUBAO_VISION_MODEL
+    return os.getenv(f"{normalized.upper()}_VISION_MODEL", "").strip() or normalized
+
+
+def _env_vision_provider_config(provider_name: str) -> ActiveProviderConfig | None:
+    normalized = provider_name.strip().lower()
+    if not normalized:
+        return None
+
+    api_key = _resolve_preset_api_key(normalized)
+    if not api_key:
+        return None
+
+    base_urls = {
+        "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+        "kimi": "https://api.moonshot.cn/v1",
+        "glm": "https://open.bigmodel.cn/api/paas/v4",
+    }
+    return ActiveProviderConfig(
+        id=f"env:vision:{normalized}",
+        slot="vision",
+        name=f"{normalized} vision",
+        provider=normalized,
+        base_url=os.getenv(f"{normalized.upper()}_VISION_BASE_URL", "").strip() or base_urls.get(normalized, ""),
+        model_id=_resolve_env_vision_model(normalized),
+        vision_model=None,
+        api_key=api_key,
+        notes="env VISION_PROVIDERS",
+    )
+
+
+def _active_provider_config_from_model(provider: AIProvider, api_key: str) -> ActiveProviderConfig:
+    return ActiveProviderConfig(
+        id=provider.id,
+        slot=provider.slot,
+        name=provider.name,
+        provider=provider.provider,
+        base_url=provider.base_url,
+        model_id=_resolve_qwen_vision_model(provider),
+        vision_model=provider.vision_model,
+        api_key=api_key,
+        notes=provider.notes,
+    )
 
 
 def _vision_video_daily_limit_cny() -> float:
@@ -594,6 +650,113 @@ async def request_dashscope_video_completion(
     return await _with_completion_retry(operation)
 
 
+def _probe_video_duration_seconds(video_path: Path) -> float | None:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        return float(completed.stdout.strip())
+    except ValueError:
+        return None
+
+
+async def request_doubao_vision_completion(
+    provider: ActiveProviderConfig,
+    *,
+    video_path: Path,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    timeout: float = 180.0,
+) -> str:
+    """
+    Request Doubao vision understanding through Ark's OpenAI-compatible API.
+
+    Args:
+        provider: Active Doubao provider configuration.
+        video_path: Local action-window clip path.
+        system_prompt: System instruction.
+        user_prompt: User instruction paired with the video.
+        temperature: Sampling temperature.
+        max_tokens: Maximum generated tokens.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Assistant text content.
+
+    Raises:
+        AnalysisPipelineError: When provider, file size, or duration constraints are not satisfied.
+        Exception: For non-retryable provider errors.
+    """
+    if provider.provider != "doubao":
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.UNKNOWN_ERROR,
+            "Doubao vision mode requires the doubao provider.",
+        )
+    if not video_path.exists():
+        raise AnalysisPipelineError(AnalysisErrorCode.FRAME_EXTRACT_FAILED, f"Video clip not found: {video_path}")
+
+    size_mb = video_path.stat().st_size / (1024 * 1024)
+    if size_mb > DOUBAO_VISION_MAX_MB:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"Doubao vision video exceeds {DOUBAO_VISION_MAX_MB}MB limit; skipping provider.",
+        )
+
+    duration = _probe_video_duration_seconds(video_path)
+    if duration is not None and duration > DOUBAO_VISION_MAX_SECONDS:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"Doubao vision video exceeds {DOUBAO_VISION_MAX_SECONDS:.0f}s limit; skipping provider.",
+        )
+
+    with video_path.open("rb") as handle:
+        encoded_video = base64.b64encode(handle.read()).decode("ascii")
+
+    async def operation() -> str:
+        client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url, timeout=timeout, max_retries=0)
+        # 设计说明: Ark 的 OpenAI 兼容入口接受 video_url 内容块；本地短片转 data URL 可避免 NAS 部署额外公网对象存储。
+        response = await client.chat.completions.create(
+            model=provider.model_id,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": f"data:video/mp4;base64,{encoded_video}"},
+                        },
+                        {"type": "text", "text": user_prompt},
+                    ],
+                },
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return extract_message_text(response.choices[0].message.content).strip()
+
+    return await _with_completion_retry(operation)
+
+
 async def get_active_provider(slot: str, session: AsyncSession | None = None) -> ActiveProviderConfig:
     owns_session = session is None
     if owns_session:
@@ -611,20 +774,78 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
         if not api_key:
             raise RuntimeError(f"{provider.name} 尚未配置 API Key。")
 
-        return ActiveProviderConfig(
-            id=provider.id,
-            slot=provider.slot,
-            name=provider.name,
-            provider=provider.provider,
-            base_url=provider.base_url,
-            model_id=_resolve_qwen_vision_model(provider),
-            vision_model=provider.vision_model,
-            api_key=api_key,
-            notes=provider.notes,
-        )
+        return _active_provider_config_from_model(provider, api_key)
     finally:
         if owns_session:
             await session.close()
+
+
+async def get_vision_providers(session: AsyncSession | None = None) -> list[ActiveProviderConfig]:
+    """
+    Return the configured ordered vision provider list.
+
+    Args:
+        session: Optional database session used for persisted provider lookup.
+
+    Returns:
+        Ordered active provider configs. `VISION_PROVIDERS=qwen,doubao` enables env-driven multi-provider slots.
+
+    Raises:
+        RuntimeError: When no usable provider can be resolved.
+    """
+    requested = [item.strip().lower() for item in os.getenv("VISION_PROVIDERS", "").split(",") if item.strip()]
+    if requested:
+        providers = [config for name in requested if (config := _env_vision_provider_config(name)) is not None]
+        if providers:
+            return providers
+
+    owns_session = session is None
+    if owns_session:
+        session = AsyncSessionLocal()
+
+    try:
+        vote_config = load_vision_vote_config()
+        selected_ids = [
+            provider_id
+            for provider_id in [vote_config.get("primary_provider_id"), vote_config.get("secondary_provider_id")]
+            if provider_id
+        ]
+        if selected_ids:
+            unique_ids = set(selected_ids)
+            result = await session.execute(
+                select(AIProvider).where(AIProvider.slot == "vision", AIProvider.id.in_(unique_ids))
+            )
+            providers_by_id = {provider.id: provider for provider in result.scalars().all()}
+            providers: list[ActiveProviderConfig] = []
+            for provider_id in selected_ids:
+                provider = providers_by_id.get(provider_id)
+                if provider is None:
+                    continue
+                api_key = decrypt_api_key(provider.api_key)
+                if not api_key:
+                    continue
+                providers.append(_active_provider_config_from_model(provider, api_key))
+            if providers:
+                return providers
+
+        result = await session.execute(
+            select(AIProvider)
+            .where(AIProvider.slot == "vision", AIProvider.is_active.is_(True))
+            .order_by(AIProvider.created_at.asc())
+        )
+        providers: list[ActiveProviderConfig] = []
+        for provider in result.scalars():
+            api_key = decrypt_api_key(provider.api_key)
+            if not api_key:
+                continue
+            providers.append(_active_provider_config_from_model(provider, api_key))
+        if providers:
+            return providers
+    finally:
+        if owns_session:
+            await session.close()
+
+    return [await get_active_provider("vision", None if owns_session else session)]
 
 
 async def seed_preset_providers() -> None:
@@ -683,6 +904,8 @@ async def seed_preset_providers() -> None:
 
             if preset_key and not decrypt_api_key(existing.api_key):
                 existing.api_key = encrypt_api_key(preset_key)
+            if existing.name != preset["name"]:
+                existing.name = preset["name"]
 
         await session.commit()
 

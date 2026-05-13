@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.providers import request_dashscope_video_completion, request_text_completion
+from app.services.providers import (
+    request_dashscope_video_completion,
+    request_doubao_vision_completion,
+    request_text_completion,
+)
 
 
 class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
@@ -116,6 +120,38 @@ class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("daily cost limit", str(caught.exception))
+
+    async def test_doubao_video_rejects_files_over_50mb_before_api_call(self) -> None:
+        provider = SimpleNamespace(
+            id="doubao-provider",
+            slot="vision",
+            name="doubao",
+            provider="doubao",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            model_id="doubao-1.5-vision-pro-32k",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+
+        fake_stat = SimpleNamespace(st_size=51 * 1024 * 1024)
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "stat", return_value=fake_stat),
+            patch("app.services.providers.AsyncOpenAI") as client_cls,
+            self.assertRaises(Exception) as caught,
+        ):
+            await request_doubao_vision_completion(
+                provider,
+                video_path=Path("large.mp4"),
+                system_prompt="system",
+                user_prompt="user",
+                temperature=0,
+                max_tokens=32,
+            )
+
+        self.assertIn("50MB", str(caught.exception))
+        client_cls.assert_not_called()
 
 
 if __name__ == "__main__":

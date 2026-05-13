@@ -22,12 +22,12 @@ from app.services.video import (
 
 class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
     def test_infer_profile_from_axel_input_returns_jump(self) -> None:
-        self.assertEqual(infer_profile_from_input("Ã¨Â·Â³Ã¨Â·Æ’", "Axel Ã¨Â·Â³Ã¨Â·Æ’"), "jump")
+        self.assertEqual(infer_profile_from_input("è·³è·ƒ", "Axel è·³è·ƒ"), "jump")
 
     def test_profile_sampling_configuration_prefers_jump_over_defaults(self) -> None:
         self.assertEqual(get_frame_rate_for_profile("jump"), 12)
         self.assertEqual(get_max_frames_for_profile("jump"), 32)
-        self.assertEqual(get_window_seconds_for_profile("jump", "è·³è·ƒ"), 3.0)
+        self.assertEqual(get_window_seconds_for_profile("jump", "跳跃"), 3.0)
         self.assertEqual(get_max_frames_for_profile("spin"), 24)
         self.assertEqual(get_max_frames_for_profile("spiral"), 16)
         self.assertEqual(get_frame_rate_for_profile("unknown"), 5)
@@ -65,7 +65,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
             ):
                 start_sec, end_sec = await detect_action_window(
                     video_path=video_path,
-                    action_type="ÃƒÂ¨Ã‚Â·Ã‚Â³ÃƒÂ¨Ã‚Â·Ã†â€™",
+                    action_type="Ã¨Â·Â³Ã¨Â·Æ’",
                     source_fps=240.0,
                     analysis_profile="jump",
                 )
@@ -112,7 +112,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
                     video_path=video_path,
                     frames_dir=frames_dir,
-                    action_type="Ã¨Â·Â³Ã¨Â·Æ’",
+                    action_type="è·³è·ƒ",
                     analysis_profile="jump",
                 )
 
@@ -170,7 +170,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
                     video_path=video_path,
                     frames_dir=frames_dir,
-                    action_type="ÃƒÂ¨Ã‚Â·Ã‚Â³ÃƒÂ¨Ã‚Â·Ã†â€™",
+                    action_type="Ã¨Â·Â³Ã¨Â·Æ’",
                     analysis_profile="jump",
                 )
 

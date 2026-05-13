@@ -333,10 +333,10 @@ export default function SkillTreePage() {
   };
 
   return (
-    <div className="space-y-6">
-      <section className="app-card overflow-hidden p-6 tablet:p-8">
-        <div className="grid gap-6 web:grid-cols-[1.15fr_0.85fr]">
-          <div>
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
+        <div className="grid min-w-0 gap-6 web:grid-cols-[1.15fr_0.85fr]">
+          <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Skill Path</p>
             <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">学习路径 + 冰面路线图</h1>
             <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
@@ -344,7 +344,7 @@ export default function SkillTreePage() {
             </p>
           </div>
 
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <label className="block space-y-2">
               <span className="text-sm font-medium text-slate-700">当前练习档案</span>
               <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
@@ -359,15 +359,15 @@ export default function SkillTreePage() {
 
             {selectedSkater ? (
               <div className="app-card-muted rounded-[28px] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+                <div className="flex min-w-0 items-center justify-between gap-4">
+                  <div className="min-w-0">
                     <p className="text-sm text-slate-500">成长卡片</p>
                     <div className="mt-2 flex items-center gap-3">
                       <ZodiacAvatar avatarType={selectedSkater.avatar_type} avatarEmoji={selectedSkater.avatar_emoji} size="lg" animate />
                       <h2 className="text-2xl font-semibold text-slate-900">Lv.{selectedSkater.avatar_level}</h2>
                     </div>
                   </div>
-                  <div className="text-right">
+                  <div className="shrink-0 text-right">
                     <p className="text-sm text-slate-500">当前 XP</p>
                     <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedSkater.total_xp}</p>
                   </div>
@@ -511,8 +511,8 @@ function PathView({
   }, [selectedStage]);
 
   return (
-    <div className="grid gap-6 web:grid-cols-[260px_minmax(0,1fr)]">
-      <aside className="app-card p-4 tablet:p-5">
+    <div className="grid min-w-0 gap-6 overflow-x-hidden web:grid-cols-[260px_minmax(0,1fr)]">
+      <aside className="app-card overflow-hidden p-3 phone:p-4 tablet:p-5">
         <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-2 tablet:mx-0 tablet:grid tablet:overflow-visible tablet:px-0 tablet:pb-0 tablet:grid-cols-4 web:grid-cols-1">
           {path.stages.map((stage) => {
             const isCurrent = stage.stage === path.current_stage;
@@ -524,7 +524,7 @@ function PathView({
                 key={stage.stage}
                 type="button"
                 onClick={() => onSelectStage(stage.stage)}
-                className={`min-w-[140px] shrink-0 rounded-2xl p-4 text-left transition tablet:min-w-0 ${
+                className={`min-w-[112px] shrink-0 rounded-2xl p-3 text-left transition phone:min-w-[140px] phone:p-4 tablet:min-w-0 ${
                   isSelected || isCurrent
                     ? "border border-blue-100 bg-white shadow-soft"
                     : isCompleted
@@ -547,17 +547,17 @@ function PathView({
       </aside>
 
       {stageForDetail ? (
-        <section className="space-y-6">
-          <div className="app-card p-6 tablet:p-7">
+        <section className="min-w-0 space-y-6">
+          <div className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
             <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
-              <div>
+              <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前阶段详情</p>
                 <h2 className="mt-3 text-2xl font-semibold text-slate-900">
                   阶段 {stageForDetail.stage} · {stageForDetail.name}
                 </h2>
                 <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">{stageForDetail.description}</p>
               </div>
-              <div className="rounded-[28px] bg-blue-50 px-5 py-4 text-center">
+              <div className="shrink-0 rounded-[24px] bg-blue-50 px-4 py-4 text-center phone:rounded-[28px] phone:px-5">
                 <p className="text-sm text-blue-500">阶段进度</p>
                 <p className="mt-2 text-4xl font-semibold text-slate-900">{stageForDetail.progress_pct}%</p>
               </div>
@@ -589,7 +589,7 @@ function PathView({
             </div>
           </div>
 
-          <div className="app-card p-6 tablet:p-7">
+          <div className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前阶段节点</p>
             <div className="mt-5 space-y-6">
               {stageForDetail.groups.map((group) => (
@@ -600,7 +600,7 @@ function PathView({
                       {group.nodes_unlocked}/{group.nodes_total}
                     </span>
                   </div>
-                  <div className="mt-4 grid gap-3 grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
+                  <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
                     {group.nodes.map((node) => (
                       <SkillNodeCard key={node.id} node={node} onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
                     ))}
@@ -672,9 +672,9 @@ function RoadmapView({
   }, [focusSkill, isParentMode, path]);
 
   return (
-    <section className="app-card p-6 tablet:p-7">
+    <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
       <div className="flex flex-col gap-4 tablet:flex-row tablet:items-end tablet:justify-between">
-        <div>
+        <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Ice Roadmap</p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">整张冰面路线图 ({totalNodeCount} 个节点)</h2>
           <p className="mt-3 text-sm leading-7 text-slate-500">按阶段和群组展开全部技能节点。现在每张卡都可以直接点击，不需要只对准一个小按钮。</p>
@@ -693,7 +693,7 @@ function RoadmapView({
           </div>
           <p className="mt-3 text-sm leading-7 text-slate-600">把推进中和今天聚焦的技能放到最上面，打开就能直接找到。</p>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 tablet:grid-cols-4 web:grid-cols-4">
+          <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
             {topFocusNodes.map((node) => (
               <SkillNodeCard key={`focus-${node.id}`} node={node} highlightTone="focus" onClick={() => setSelectedNode(node)} actionLabel="查看详情" />
             ))}
@@ -703,7 +703,7 @@ function RoadmapView({
 
       <div className="mt-6 space-y-8">
         {path.stages.map((stage) => (
-          <section key={stage.stage} className="rounded-[28px] bg-slate-50 p-4 tablet:p-5">
+          <section key={stage.stage} className="min-w-0 rounded-[24px] bg-slate-50 p-3 phone:rounded-[28px] phone:p-4 tablet:p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm text-slate-400">阶段 {stage.stage}</p>
@@ -714,18 +714,18 @@ function RoadmapView({
 
             <div className="mt-5 space-y-5">
               {stage.groups.map((group) => (
-                <article key={`${stage.stage}-${group.group_name}`} className="rounded-[24px] bg-white p-4">
+                <article key={`${stage.stage}-${group.group_name}`} className="min-w-0 rounded-[22px] bg-white p-3 phone:rounded-[24px] phone:p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div>
+                    <div className="min-w-0">
                       <h4 className="text-base font-semibold text-slate-900">{group.group_name}</h4>
                       <p className={`mt-1 text-sm ${branchTone(group.nodes[0]?.chapter ?? "")}`}>{group.nodes.length} 个节点</p>
                     </div>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
+                    <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
                       {group.nodes_unlocked}/{group.nodes_total}
                     </span>
                   </div>
 
-                  <div className="mt-4 grid gap-3 grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
+                  <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 phone:grid-cols-3 tablet:grid-cols-4 web:grid-cols-4">
                     {group.nodes.map((node) => (
                       <SkillNodeCard
                         key={node.id}

@@ -2,7 +2,16 @@ import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { activateProvider, fetchProviders, ProviderPublic, testProvider, updateProvider } from "../api/client";
+import {
+  activateProvider,
+  fetchProviders,
+  fetchVisionVoteConfig,
+  ProviderPublic,
+  testProvider,
+  updateProvider,
+  updateVisionVoteConfig,
+  VisionVoteConfig,
+} from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 
 type ProviderTab =
@@ -221,6 +230,11 @@ export default function ApiSettingsPage() {
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [testingKey, setTestingKey] = useState<string | null>(null);
   const [activatingKey, setActivatingKey] = useState<string | null>(null);
+  const [visionVoteConfig, setVisionVoteConfig] = useState<VisionVoteConfig>({
+    primary_provider_id: null,
+    secondary_provider_id: null,
+  });
+  const [savingVisionVote, setSavingVisionVote] = useState(false);
 
   useEffect(() => {
     if (!isParentMode) {
@@ -230,12 +244,13 @@ export default function ApiSettingsPage() {
     let cancelled = false;
     const load = async () => {
       try {
-        const data = await fetchProviders();
+        const [data, voteConfig] = await Promise.all([fetchProviders(), fetchVisionVoteConfig()]);
         if (cancelled) {
           return;
         }
 
         setProviders(data);
+        setVisionVoteConfig(voteConfig);
 
         const nextForms: Record<string, ProviderFormState> = {};
         for (const tab of REPORT_TAB_ORDER) {
@@ -274,6 +289,9 @@ export default function ApiSettingsPage() {
     }),
     [providers],
   );
+  const visionVoteProviders = providersByVisionSlot.vision.filter((provider) => provider.api_key === "***");
+  const primaryVoteProvider = visionVoteProviders.find((provider) => provider.id === visionVoteConfig.primary_provider_id) ?? null;
+  const secondaryVoteProvider = visionVoteProviders.find((provider) => provider.id === visionVoteConfig.secondary_provider_id) ?? null;
 
   const setFormField = (formKey: string, field: keyof ProviderFormState, value: string) => {
     setForms((current) => ({
@@ -390,6 +408,33 @@ export default function ApiSettingsPage() {
       }
     } finally {
       setActivatingKey(null);
+    }
+  };
+
+  const handleVisionVoteSave = async () => {
+    if (!visionVoteConfig.primary_provider_id) {
+      setError("请先选择主视觉投票 provider。");
+      return;
+    }
+    if (!visionVoteConfig.secondary_provider_id) {
+      setError("请先选择辅助视觉投票 provider；如果要用同一家做双路，请选择和主 provider 相同。");
+      return;
+    }
+
+    setSavingVisionVote(true);
+    setError(null);
+    try {
+      const updated = await updateVisionVoteConfig(visionVoteConfig);
+      setVisionVoteConfig(updated);
+      showNotice("视觉投票配置已保存。");
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "视觉投票配置保存失败。"));
+      } else {
+        setError("视觉投票配置保存失败。");
+      }
+    } finally {
+      setSavingVisionVote(false);
     }
   };
 
@@ -606,6 +651,87 @@ export default function ApiSettingsPage() {
           <p className="mt-3 text-sm leading-7 text-slate-500">
             上传视频后，系统会先跑主视觉分析，再按需调用 Path A 和 Path B 做双路交叉验证。未单独配置的双路 slot 会自动回退到主视觉链路。
           </p>
+        </div>
+
+        <div className="mt-8 rounded-[28px] border border-blue-100 bg-blue-50/70 px-5 py-5">
+          <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-500">Provider Voting</p>
+              <h3 className="mt-2 text-xl font-semibold text-slate-900">视觉投票供应商</h3>
+              <p className="mt-2 max-w-3xl text-sm leading-7 text-slate-600">
+                选择主 provider 和辅助 provider 并行分析同一段视频。两个下拉框可以选择同一家，用于单 provider 双路自一致投票。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleVisionVoteSave()}
+              disabled={savingVisionVote || !visionVoteProviders.length}
+              className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {savingVisionVote ? "保存中..." : "保存投票配置"}
+            </button>
+          </div>
+
+          <div className="mt-5 grid gap-4 tablet:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">主 provider</span>
+              <select
+                value={visionVoteConfig.primary_provider_id ?? ""}
+                onChange={(event) =>
+                  setVisionVoteConfig((current) => ({
+                    ...current,
+                    primary_provider_id: event.target.value || null,
+                  }))
+                }
+                className="app-select"
+              >
+                <option value="">请选择主 provider</option>
+                {visionVoteProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name} · {provider.model_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">辅助 provider</span>
+              <select
+                value={visionVoteConfig.secondary_provider_id ?? ""}
+                onChange={(event) =>
+                  setVisionVoteConfig((current) => ({
+                    ...current,
+                    secondary_provider_id: event.target.value || null,
+                  }))
+                }
+                className="app-select"
+              >
+                <option value="">请选择辅助 provider</option>
+                {visionVoteProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name} · {provider.model_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-5 grid gap-3 tablet:grid-cols-2">
+            <div className="rounded-[22px] border border-white/80 bg-white px-4 py-3 text-sm text-slate-600">
+              <p className="font-semibold text-slate-900">主路</p>
+              <p className="mt-1">{primaryVoteProvider ? `${primaryVoteProvider.name} / ${primaryVoteProvider.model_id}` : "尚未选择"}</p>
+            </div>
+            <div className="rounded-[22px] border border-white/80 bg-white px-4 py-3 text-sm text-slate-600">
+              <p className="font-semibold text-slate-900">辅路</p>
+              <p className="mt-1">{secondaryVoteProvider ? `${secondaryVoteProvider.name} / ${secondaryVoteProvider.model_id}` : "尚未选择"}</p>
+            </div>
+          </div>
+
+          {!visionVoteProviders.length ? (
+            <div className="mt-5 rounded-[22px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              请先在下方主视觉 provider 卡片中保存 API Key，然后再选择投票组合。
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-8 space-y-8">

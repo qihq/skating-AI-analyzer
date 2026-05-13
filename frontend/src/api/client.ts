@@ -305,6 +305,11 @@ export interface ProviderUpdatePayload {
   notes?: string | null;
 }
 
+export interface VisionVoteConfig {
+  primary_provider_id: string | null;
+  secondary_provider_id: string | null;
+}
+
 export interface ComparisonChange {
   category: string;
   before_severity: IssueSeverity | null;
@@ -765,6 +770,16 @@ export async function updateSkater(
 
 export async function fetchProviders() {
   const response = await apiClient.get<ProviderPublic[]>("/providers/");
+  return response.data;
+}
+
+export async function fetchVisionVoteConfig() {
+  const response = await apiClient.get<VisionVoteConfig>("/providers/vision-vote/config");
+  return response.data;
+}
+
+export async function updateVisionVoteConfig(payload: VisionVoteConfig) {
+  const response = await apiClient.put<VisionVoteConfig>("/providers/vision-vote/config", payload);
   return response.data;
 }
 
