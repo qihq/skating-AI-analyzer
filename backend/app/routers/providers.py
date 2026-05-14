@@ -97,6 +97,7 @@ async def create_provider(payload: ProviderCreate, session: AsyncSession = Depen
         provider=payload.provider,
         base_url=payload.base_url,
         model_id=payload.model_id,
+        vision_model=payload.vision_model,
         api_key=encrypt_api_key(payload.api_key),
         is_active=(active_count or 0) == 0,
         notes=payload.notes,
@@ -172,4 +173,3 @@ async def test_provider(provider_id: str, session: AsyncSession = Depends(get_se
 
     success, detail = await test_provider_connectivity(provider)
     return ProviderTestResponse(success=success, detail=detail)
-

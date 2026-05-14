@@ -194,9 +194,9 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         create_kwargs = request_mock.await_args.kwargs
         self.assertEqual(create_kwargs["max_tokens"], 5400)
         prompt_text = create_kwargs["messages"][1]["content"][0]["text"]
-        self.assertIn("JUMP_SUBTYPE_EVIDENCE", prompt_text)
-        self.assertIn("每帧的 issues 和 positives 各不超过 2 条，每条不超过 30 字。", prompt_text)
-        self.assertIn("必须只输出 JSON，禁止任何解释文字。", prompt_text)
+        self.assertIn("candidate_key_frames", prompt_text)
+        self.assertIn("Free Skate 1", prompt_text)
+        self.assertIn("JSON schema:", prompt_text)
         self.assertEqual(len(vision_structured["frame_analysis"]), 20)
         self.assertEqual(vision_structured["frame_analysis"][-1]["frame_id"], "frame_0020")
         self.assertEqual(vision_structured["frame_analysis"][-1]["issues"], ["issue-19-1", "issue-19-2"])

@@ -55,7 +55,8 @@ from app.services.analysis_errors import (
     stringify_exception,
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
-from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
+from app.services.auto_eval import AUTO_EVAL_VERSION, build_auto_eval_payload
+from app.services.biomechanics import analyze_biomechanics, attach_key_frame_candidates, sanitize_biomechanics_data
 from app.services.bbox_tracker import track_bbox
 from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
@@ -158,7 +159,16 @@ async def _provider_for_slot(slot: str, fallback_slot: str = "vision"):
         if slot == fallback_slot:
             raise
         logger.info("Provider slot %s is not configured; falling back to %s", slot, fallback_slot)
-        return await get_active_provider(fallback_slot)
+        fallback_provider = await get_active_provider(fallback_slot)
+        try:
+            fallback_provider.notes = (
+                f"fallback_from={slot}; "
+                f"fallback_slot={fallback_slot}; "
+                f"{fallback_provider.notes or ''}"
+            ).strip()
+        except Exception:  # noqa: BLE001
+            pass
+        return fallback_provider
 
 
 def _utc_now_iso() -> str:
@@ -173,8 +183,13 @@ def _normalize_processing_logs(value: object) -> list[dict[str, Any]]:
 
 def _provider_label(provider: Any) -> str:
     provider_name = str(getattr(provider, "provider", "") or "").strip() or "unknown"
-    model = str(getattr(provider, "vision_model", "") or getattr(provider, "model_id", "") or "").strip()
+    model = str(getattr(provider, "model_id", "") or getattr(provider, "vision_model", "") or "").strip()
     return f"{provider_name}/{model}" if model else provider_name
+
+
+def _provider_fallback_note(provider: Any) -> str | None:
+    notes = str(getattr(provider, "notes", "") or "")
+    return notes if "fallback_from=" in notes else None
 
 
 def _count_list(value: object) -> int:
@@ -200,6 +215,7 @@ def _build_dual_path_log_detail(
     detail = {
         "path_a": {
             "provider": _provider_label(provider_path_a),
+            "provider_fallback": _provider_fallback_note(provider_path_a),
             "mode": path_a_data.get("vision_mode") or ("video" if clip_path else "frames"),
             "input": str(clip_path) if clip_path else f"{raw_frame_count} raw frames",
             "frame_analysis_count": _count_list(path_a_data.get("frame_analysis")),
@@ -208,6 +224,7 @@ def _build_dual_path_log_detail(
         },
         "path_b": {
             "provider": _provider_label(provider_path_b),
+            "provider_fallback": _provider_fallback_note(provider_path_b),
             "input": f"{annotated_frame_count} annotated frames + biomechanics",
             "annotated_dir": str(annotated_dir) if annotated_dir else None,
             "n_frames": path_b_data.get("n_frames") or annotated_frame_count,
@@ -227,6 +244,43 @@ def _build_dual_path_log_detail(
         },
     }
     return json.dumps(detail, ensure_ascii=False, indent=2)
+
+
+def _auto_eval_failure_payload(exc: Exception) -> dict[str, Any]:
+    return {
+        "auto_eval_version": AUTO_EVAL_VERSION,
+        "key_frame_order_valid": None,
+        "phase_sequence_valid": None,
+        "high_confidence_conflicts": [],
+        "high_confidence_conflict_rate": 0.0,
+        "data_quality_flags": ["auto_eval_failed"],
+        "key_frame_signature": "missing",
+        "phase_sequence": [],
+        "phase_transition_violations": [],
+        "warning": stringify_exception(exc),
+    }
+
+
+def _attach_auto_eval(
+    cross_validation: dict[str, Any] | None,
+    *,
+    bio_data: dict[str, Any],
+    vision_structured: dict[str, Any],
+    frame_motion_scores: dict[str, Any],
+    analysis_profile: str,
+) -> dict[str, Any]:
+    merged = dict(cross_validation or {})
+    try:
+        merged["auto_eval"] = build_auto_eval_payload(
+            bio_data,
+            vision_structured,
+            frame_motion_scores,
+            analysis_profile,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-eval payload generation failed", exc_info=True)
+        merged["auto_eval"] = _auto_eval_failure_payload(exc)
+    return merged
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
@@ -665,6 +719,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     source_fps=sampling_metadata.source_fps,
                     window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
                 )
+                bio_data = attach_key_frame_candidates(
+                    bio_data,
+                    pose_data,
+                    motion_scores,
+                    analysis_profile,
+                    sampling_metadata.effective_fps,
+                )
                 if isinstance(bio_data, dict):
                     if analysis_profile == 'jump':
                         profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
@@ -775,6 +836,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     bio_data=bio_data,
                     provider_path_a=provider_path_a,
                     provider_path_b=provider_path_b,
+                    frame_motion_scores=motion_scores,
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
@@ -805,6 +867,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 if isinstance(frame_analysis, list):
                     vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
                     vision_path_a = vision_structured
+                cross_validation = _attach_auto_eval(
+                    cross_validation,
+                    bio_data=bio_data,
+                    vision_structured=vision_structured,
+                    frame_motion_scores=motion_scores,
+                    analysis_profile=analysis_profile,
+                )
+                dual_path_meta = cross_validation
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
                 async with AsyncSessionLocal() as session:
@@ -853,6 +923,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 vision_path_a = analysis.vision_path_a if isinstance(analysis.vision_path_a, dict) else vision_structured
                 vision_path_b = analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None
                 cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+                if not isinstance(cross_validation, dict) or not isinstance(cross_validation.get("auto_eval"), dict):
+                    cross_validation = _attach_auto_eval(
+                        cross_validation,
+                        bio_data=bio_data,
+                        vision_structured=vision_structured,
+                        frame_motion_scores=motion_scores,
+                        analysis_profile=analysis_profile,
+                    )
                 dual_path_meta = cross_validation
             await _append_analysis_log(
                 analysis_id,
@@ -1410,6 +1488,11 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
         pose_data = computed_pose
         changed = True
 
+    if analysis.frame_motion_scores is None:
+        logger.info("Analysis %s is missing motion sampling metadata, generating legacy fallback payload", analysis.id)
+        analysis.frame_motion_scores = _fallback_motion_payload(frames_dir)
+        changed = True
+
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
     if bio_data is None or not bio_data.get("key_frames"):
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
@@ -1420,7 +1503,7 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             is_slow_motion=bool(analysis.is_slow_motion),
             motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
         )
-        analysis.bio_data = analyze_biomechanics(
+        computed_bio_data = analyze_biomechanics(
             pose_data or {"connections": [], "frames": []},
             analysis.action_type,
             analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
@@ -1428,18 +1511,39 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             source_fps=sampling_metadata.source_fps,
             window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
         )
+        analysis_profile = analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype)
+        analysis.bio_data = attach_key_frame_candidates(
+            computed_bio_data,
+            pose_data or {"connections": [], "frames": []},
+            analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+            analysis_profile,
+            sampling_metadata.effective_fps,
+        )
         changed = True
     else:
         sanitized_bio_data = sanitize_biomechanics_data(bio_data)
         if sanitized_bio_data != bio_data:
             logger.info("Analysis %s has implausible biomechanics metrics, sanitizing saved payload", analysis.id)
             analysis.bio_data = sanitized_bio_data
+            bio_data = sanitized_bio_data
             changed = True
-
-    if analysis.frame_motion_scores is None:
-        logger.info("Analysis %s is missing motion sampling metadata, generating legacy fallback payload", analysis.id)
-        analysis.frame_motion_scores = _fallback_motion_payload(frames_dir)
-        changed = True
+        if "key_frame_candidates" not in bio_data:
+            logger.info("Analysis %s is missing key-frame candidates, backfilling from saved pose and motion", analysis.id)
+            sampling_metadata = _sampling_metadata_from_saved(
+                action_window_start=float(analysis.action_window_start or 0.0),
+                action_window_end=float(analysis.action_window_end or 0.0),
+                source_fps=float(analysis.source_fps or 30.0),
+                is_slow_motion=bool(analysis.is_slow_motion),
+                motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+            )
+            analysis.bio_data = attach_key_frame_candidates(
+                bio_data,
+                pose_data,
+                analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+                analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+                sampling_metadata.effective_fps,
+            )
+            changed = True
 
     if changed:
         await session.commit()

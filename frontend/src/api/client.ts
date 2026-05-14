@@ -305,6 +305,17 @@ export interface ProviderUpdatePayload {
   notes?: string | null;
 }
 
+export interface ProviderCreatePayload {
+  slot: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model_id: string;
+  vision_model?: string | null;
+  api_key: string;
+  notes?: string | null;
+}
+
 export interface VisionVoteConfig {
   primary_provider_id: string | null;
   secondary_provider_id: string | null;
@@ -780,6 +791,11 @@ export async function fetchVisionVoteConfig() {
 
 export async function updateVisionVoteConfig(payload: VisionVoteConfig) {
   const response = await apiClient.put<VisionVoteConfig>("/providers/vision-vote/config", payload);
+  return response.data;
+}
+
+export async function createProvider(payload: ProviderCreatePayload) {
+  const response = await apiClient.post<ProviderPublic>("/providers/", payload);
   return response.data;
 }
 

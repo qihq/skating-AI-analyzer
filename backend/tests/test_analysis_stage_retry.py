@@ -132,7 +132,9 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(saved.vision_structured, dict)
                 self.assertEqual(saved.vision_path_a, vision_structured)
                 self.assertEqual(saved.vision_path_b, {"path": "B", "error": "mocked"})
-                self.assertEqual(saved.cross_validation, {"recommended_path": "A", "path_b_failed": True})
+                self.assertEqual(saved.cross_validation["recommended_path"], "A")
+                self.assertTrue(saved.cross_validation["path_b_failed"])
+                self.assertIn("auto_eval", saved.cross_validation)
                 self.assertIsInstance(saved.report, dict)
 
 

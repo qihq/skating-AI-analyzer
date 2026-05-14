@@ -75,7 +75,9 @@ class VisionPathATests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_kwargs["temperature"], 0.1)
         self.assertEqual(create_kwargs["max_tokens"], 1360)
         user_content = create_kwargs["messages"][1]["content"]
-        self.assertIn("JUMP_SUBTYPE_EVIDENCE", user_content[0]["text"])
+        self.assertIn("candidate_key_frames", user_content[0]["text"])
+        self.assertIn("Free Skate 1", user_content[0]["text"])
+        self.assertIn("JSON schema:", user_content[0]["text"])
         self.assertIn("时间：1.25s", user_content[1]["text"])
         self.assertIn("时间：1.50s", user_content[3]["text"])
 

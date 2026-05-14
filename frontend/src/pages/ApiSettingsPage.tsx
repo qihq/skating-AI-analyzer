@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import {
   activateProvider,
+  createProvider,
   fetchProviders,
   fetchVisionVoteConfig,
   ProviderPublic,
@@ -29,6 +30,12 @@ type ProviderFormState = {
   model_id: string;
   vision_model: string;
   base_url: string;
+};
+
+type VisionDraftConfig = {
+  provider: "qwen";
+  name: string;
+  notes: string;
 };
 
 type ProviderConfig = {
@@ -219,6 +226,43 @@ function sortVisionProviders(items: ProviderPublic[]) {
   });
 }
 
+function defaultVisionDraftForm(slot: ProviderSlot): ProviderFormState {
+  const modelBySlot: Record<ProviderSlot, string> = {
+    report: "",
+    vision: "qwen3-omni-flash",
+    vision_path_a: "qwen3-omni-flash",
+    vision_path_b: "qwen3.6-plus",
+  };
+  return {
+    api_key: "",
+    model_id: modelBySlot[slot],
+    vision_model: "",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  };
+}
+
+function visionDraftConfig(slot: Exclude<ProviderSlot, "report">): VisionDraftConfig {
+  if (slot === "vision_path_a") {
+    return {
+      provider: "qwen",
+      name: "Path A - Qwen",
+      notes: "默认主视频分析模型，建议使用 qwen3-omni-flash。",
+    };
+  }
+  if (slot === "vision_path_b") {
+    return {
+      provider: "qwen",
+      name: "Path B - Qwen",
+      notes: "默认辅助分析模型，建议使用 qwen3.6-plus。",
+    };
+  }
+  return {
+    provider: "qwen",
+    name: "Primary Vision - Qwen",
+    notes: "主视觉链路默认配置。",
+  };
+}
+
 export default function ApiSettingsPage() {
   const { isParentMode, enterParentMode } = useAppMode();
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
@@ -235,6 +279,11 @@ export default function ApiSettingsPage() {
     secondary_provider_id: null,
   });
   const [savingVisionVote, setSavingVisionVote] = useState(false);
+  const [draftSlots, setDraftSlots] = useState<Record<Exclude<ProviderSlot, "report">, boolean>>({
+    vision: false,
+    vision_path_a: false,
+    vision_path_b: false,
+  });
 
   useEffect(() => {
     if (!isParentMode) {
@@ -260,6 +309,9 @@ export default function ApiSettingsPage() {
         for (const provider of data.filter((item) => item.slot !== "report")) {
           nextForms[`${provider.slot}:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
         }
+        nextForms["draft:vision"] = currentOrDefault(nextForms["draft:vision"], defaultVisionDraftForm("vision"));
+        nextForms["draft:vision_path_a"] = currentOrDefault(nextForms["draft:vision_path_a"], defaultVisionDraftForm("vision_path_a"));
+        nextForms["draft:vision_path_b"] = currentOrDefault(nextForms["draft:vision_path_b"], defaultVisionDraftForm("vision_path_b"));
         setForms(nextForms);
 
         const activeProvider = data.find((item) => item.slot !== "report" && item.is_active);
@@ -329,8 +381,54 @@ export default function ApiSettingsPage() {
       for (const provider of nextProviders.filter((item) => item.slot !== "report")) {
         nextForms[`${provider.slot}:${provider.id}`] = normalizeProvider(provider, buildVisionFallbackConfig(provider));
       }
+      nextForms["draft:vision"] = currentOrDefault(nextForms["draft:vision"], defaultVisionDraftForm("vision"));
+      nextForms["draft:vision_path_a"] = currentOrDefault(nextForms["draft:vision_path_a"], defaultVisionDraftForm("vision_path_a"));
+      nextForms["draft:vision_path_b"] = currentOrDefault(nextForms["draft:vision_path_b"], defaultVisionDraftForm("vision_path_b"));
       return nextForms;
     });
+  };
+
+  const handleCreateVisionProvider = async (slot: Exclude<ProviderSlot, "report">) => {
+    const formKey = `draft:${slot}`;
+    const form = forms[formKey] ?? defaultVisionDraftForm(slot);
+    const draft = visionDraftConfig(slot);
+    if (!form.api_key.trim()) {
+      setError("请先填写 API Key。");
+      return;
+    }
+    if (!form.model_id.trim()) {
+      setError("请先填写模型 ID。");
+      return;
+    }
+
+    setSavingKey(formKey);
+    setError(null);
+    try {
+      const created = await createProvider({
+        slot,
+        name: draft.name,
+        provider: draft.provider,
+        base_url: form.base_url.trim(),
+        model_id: form.model_id.trim(),
+        vision_model: form.vision_model.trim() || null,
+        api_key: form.api_key.trim(),
+        notes: draft.notes,
+      });
+      const nextProviders = [...providers, created];
+      refreshProviders(nextProviders);
+      setDraftSlots((current) => ({ ...current, [slot]: false }));
+      setExpandedProviderKey(`${created.slot}:${created.id}`);
+      showNotice(`${draft.name} 已创建。`);
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "创建 provider 失败，请稍后再试。"));
+      } else {
+        setError("创建 provider 失败，请稍后再试。");
+      }
+    } finally {
+      setSavingKey(formKey);
+      setSavingKey(null);
+    }
   };
 
   const handleSave = async (provider: ProviderPublic, formKey: string, config: ProviderConfig) => {
@@ -413,11 +511,11 @@ export default function ApiSettingsPage() {
 
   const handleVisionVoteSave = async () => {
     if (!visionVoteConfig.primary_provider_id) {
-      setError("请先选择主视觉投票 provider。");
+      setError("请先选择主视觉槽投票 provider。");
       return;
     }
     if (!visionVoteConfig.secondary_provider_id) {
-      setError("请先选择辅助视觉投票 provider；如果要用同一家做双路，请选择和主 provider 相同。");
+      setError("请先选择辅助主视觉槽投票 provider；如果要用同一家做并行投票，请选择和主 provider 相同。");
       return;
     }
 
@@ -573,6 +671,101 @@ export default function ApiSettingsPage() {
     );
   };
 
+  const renderVisionDraftCard = (slot: Exclude<ProviderSlot, "report">) => {
+    const formKey = `draft:${slot}`;
+    const form = forms[formKey] ?? defaultVisionDraftForm(slot);
+    const draft = visionDraftConfig(slot);
+    const config = buildVisionFallbackConfig({
+      id: `draft-${slot}`,
+      slot,
+      name: draft.name,
+      provider: draft.provider,
+      base_url: form.base_url,
+      model_id: form.model_id,
+      vision_model: form.vision_model || null,
+      api_key: "",
+      is_active: false,
+      notes: draft.notes,
+      created_at: "",
+      updated_at: "",
+    });
+
+    return (
+      <div className="rounded-[30px] border border-dashed border-slate-300 bg-white p-6">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-2xl font-semibold text-slate-900">{draft.name}</h3>
+                <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">待创建</span>
+              </div>
+              <p className="mt-3 text-sm leading-7 text-slate-500">{draft.notes}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDraftSlots((current) => ({ ...current, [slot]: false }))}
+              className="app-pill min-h-[46px] px-5 text-sm font-semibold"
+            >
+              收起
+            </button>
+          </div>
+
+          <div className="grid gap-4">
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">API Key</span>
+              <input
+                value={form.api_key}
+                onChange={(event) => setFormField(formKey, "api_key", event.target.value)}
+                className="app-input"
+                placeholder="请输入 API Key"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">{config.modelLabel}</span>
+              <input
+                value={form.model_id}
+                onChange={(event) => setFormField(formKey, "model_id", event.target.value)}
+                className="app-input"
+                placeholder={config.modelPlaceholder}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">备用视觉模型（可选）</span>
+              <input
+                value={form.vision_model}
+                onChange={(event) => setFormField(formKey, "vision_model", event.target.value)}
+                className="app-input"
+                placeholder="可选：填写备用视觉模型名"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">API 根地址</span>
+              <input
+                value={form.base_url}
+                onChange={(event) => setFormField(formKey, "base_url", event.target.value)}
+                className="app-input"
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-3 tablet:flex-row">
+            <button
+              type="button"
+              onClick={() => void handleCreateVisionProvider(slot)}
+              disabled={savingKey === formKey}
+              className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {savingKey === formKey ? "创建中..." : "创建配置"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (!isParentMode) {
     return (
       <section className="app-card mx-auto max-w-3xl p-8 text-center tablet:p-10">
@@ -656,10 +849,11 @@ export default function ApiSettingsPage() {
         <div className="mt-8 rounded-[28px] border border-blue-100 bg-blue-50/70 px-5 py-5">
           <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-500">Provider Voting</p>
-              <h3 className="mt-2 text-xl font-semibold text-slate-900">视觉投票供应商</h3>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-500">Primary Vision Voting</p>
+              <h3 className="mt-2 text-xl font-semibold text-slate-900">主视觉槽并行投票</h3>
               <p className="mt-2 max-w-3xl text-sm leading-7 text-slate-600">
-                选择主 provider 和辅助 provider 并行分析同一段视频。两个下拉框可以选择同一家，用于单 provider 双路自一致投票。
+                这里只配置 <code>vision</code> 主视觉槽内部的并行 provider 投票，用于同一批抽帧结果的交叉表决。
+                它不等同于下方的 <code>Path A</code> / <code>Path B</code> 双路分析，也不会覆盖你为 Path A / Path B 单独指定的模型。
               </p>
             </div>
             <button
@@ -668,13 +862,13 @@ export default function ApiSettingsPage() {
               disabled={savingVisionVote || !visionVoteProviders.length}
               className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {savingVisionVote ? "保存中..." : "保存投票配置"}
+              {savingVisionVote ? "保存中..." : "保存主视觉槽投票配置"}
             </button>
           </div>
 
           <div className="mt-5 grid gap-4 tablet:grid-cols-2">
             <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-700">主 provider</span>
+              <span className="text-sm font-medium text-slate-700">主视觉槽 provider</span>
               <select
                 value={visionVoteConfig.primary_provider_id ?? ""}
                 onChange={(event) =>
@@ -685,17 +879,17 @@ export default function ApiSettingsPage() {
                 }
                 className="app-select"
               >
-                <option value="">请选择主 provider</option>
+                <option value="">请选择主视觉槽 provider</option>
                 {visionVoteProviders.map((provider) => (
                   <option key={provider.id} value={provider.id}>
-                    {provider.name} · {provider.model_id}
+                    {provider.name} / {provider.model_id}
                   </option>
                 ))}
               </select>
             </label>
 
             <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-700">辅助 provider</span>
+              <span className="text-sm font-medium text-slate-700">辅助主视觉槽 provider</span>
               <select
                 value={visionVoteConfig.secondary_provider_id ?? ""}
                 onChange={(event) =>
@@ -706,10 +900,10 @@ export default function ApiSettingsPage() {
                 }
                 className="app-select"
               >
-                <option value="">请选择辅助 provider</option>
+                <option value="">请选择辅助主视觉槽 provider</option>
                 {visionVoteProviders.map((provider) => (
                   <option key={provider.id} value={provider.id}>
-                    {provider.name} · {provider.model_id}
+                    {provider.name} / {provider.model_id}
                   </option>
                 ))}
               </select>
@@ -718,18 +912,23 @@ export default function ApiSettingsPage() {
 
           <div className="mt-5 grid gap-3 tablet:grid-cols-2">
             <div className="rounded-[22px] border border-white/80 bg-white px-4 py-3 text-sm text-slate-600">
-              <p className="font-semibold text-slate-900">主路</p>
+              <p className="font-semibold text-slate-900">主视觉槽</p>
               <p className="mt-1">{primaryVoteProvider ? `${primaryVoteProvider.name} / ${primaryVoteProvider.model_id}` : "尚未选择"}</p>
             </div>
             <div className="rounded-[22px] border border-white/80 bg-white px-4 py-3 text-sm text-slate-600">
-              <p className="font-semibold text-slate-900">辅路</p>
+              <p className="font-semibold text-slate-900">辅助主视觉槽</p>
               <p className="mt-1">{secondaryVoteProvider ? `${secondaryVoteProvider.name} / ${secondaryVoteProvider.model_id}` : "尚未选择"}</p>
             </div>
           </div>
 
+          <div className="mt-5 rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-sm leading-7 text-slate-600">
+            当前推荐用法：主视频分析模型请在下方 <code>Path A</code> 单独设置；辅助分析模型请在 <code>Path B</code> 单独设置。
+            这块“主视觉槽并行投票”只在你需要给主视觉槽增加额外表决时再启用。
+          </div>
+
           {!visionVoteProviders.length ? (
             <div className="mt-5 rounded-[22px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-              请先在下方主视觉 provider 卡片中保存 API Key，然后再选择投票组合。
+              请先在下方主视觉 provider 卡片中保存 API Key，然后再选择主视觉槽投票组合。
             </div>
           ) : null}
         </div>
@@ -737,10 +936,6 @@ export default function ApiSettingsPage() {
         <div className="mt-8 space-y-8">
           {VISION_SECTION_CONFIG.map((section) => {
             const sectionProviders = providersByVisionSlot[section.slot];
-            if (!sectionProviders.length) {
-              return null;
-            }
-
             return (
               <div key={section.slot} className="space-y-4">
                 <div className="rounded-[28px] border border-slate-200 bg-slate-50 px-5 py-5">
@@ -755,9 +950,19 @@ export default function ApiSettingsPage() {
                     ) : null}
                   </div>
                   <p className="mt-3 text-sm leading-7 text-slate-500">{section.note}</p>
+                  <div className="mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setDraftSlots((current) => ({ ...current, [section.slot]: !current[section.slot] }))}
+                      className="app-pill min-h-[44px] px-4 text-sm font-semibold"
+                    >
+                      {draftSlots[section.slot] ? "收起新增配置" : "新增 Qwen 配置"}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid gap-6">
+                  {draftSlots[section.slot] ? renderVisionDraftCard(section.slot) : null}
                   {sectionProviders.map((provider) =>
                     renderProviderCard(
                       provider,
@@ -768,6 +973,13 @@ export default function ApiSettingsPage() {
                       true,
                     ),
                   )}
+                  {!sectionProviders.length && !draftSlots[section.slot] ? (
+                    <div className="rounded-[28px] border border-dashed border-slate-300 bg-slate-50 px-5 py-5 text-sm leading-7 text-slate-500">
+                      当前 slot 还没有独立 provider。你可以直接新增 Qwen 配置。
+                      {section.slot === "vision_path_a" ? " 默认建议模型：qwen3-omni-flash。" : null}
+                      {section.slot === "vision_path_b" ? " 默认建议模型：qwen3.6-plus。" : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );
@@ -776,4 +988,8 @@ export default function ApiSettingsPage() {
       </section>
     </div>
   );
+}
+
+function currentOrDefault(current: ProviderFormState | undefined, fallback: ProviderFormState): ProviderFormState {
+  return current ?? fallback;
 }
