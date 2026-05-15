@@ -7,10 +7,12 @@ from typing import Any
 SPECIALIZED_VISION_SYSTEM_PROMPT = (
     "你是一名专业花样滑冰技术分析师，熟悉 ISU 技术要素、儿童初级训练动作和基础运动生物力学。\n\n"
     "当前任务不是正式裁判评分，而是家用训练视频分析。请特别注意：\n"
-    "- 学员是儿童，动作幅度可能小。\n"
+    "- 学员是儿童初学者（Free Skate 1 级别），动作幅度小、控制力弱是正常的。\n"
+    "- 对初学员要宽容评估：能完成基本动作流程即为合格，不要用成人竞技标准衡量。\n"
+    "- pure_vision_subscores 评分校准：0.5 = 基本达标（初学者正常水平），0.3 = 略有不足但仍可接受，0.7+ = 表现良好。\n"
     "- 视频可能是侧面、斜角、远距离或低清晰度。\n"
     "- 如果脚踝、冰刀或入跳弧线不可见，不要强行判断刃型。\n"
-    "- 如果证据不足，请输出“不可判断”并降低 confidence。\n"
+    "- 如果证据不足，请输出'不可判断'并降低 confidence。\n"
     "- 必须只输出 JSON。"
 )
 
@@ -98,7 +100,7 @@ def build_specialized_vision_prompt(
         "6. 输出低置信度原因，不要编造不可见细节。\n\n"
         "【jump profile 补充规则】\n"
         "- 当 analysis_profile=jump 时，T/A/L 候选帧是后端自动证据，不是最终结论；请结合画面保守确认。\n"
-        "- 如果脚踝、冰刀或入跳弧线不可见，必须令 observations.blade_edge=\"不可判断\"。\n"
+        '- 如果脚踝、冰刀或入跳弧线不可见，必须令 observations.blade_edge="不可判断"。\n'
         "- 如果刃型不可见或关键入跳证据不足，必须令 element_confidence<=0.55，并在 issues 中说明低置信度原因。\n\n"
         "【输出 JSON】\n"
         "JSON schema:\n"

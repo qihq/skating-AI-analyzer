@@ -231,6 +231,54 @@ def _single_path_report(which: str, reason: str, diagnostics: dict[str, Any] | N
     )
 
 
+def _path_a_quality_score(path_a: dict[str, Any] | None) -> float:
+    """Score Path A analysis quality from 0.0 to 1.0.
+
+    Checks:
+    - Whether frame_analysis exists and has entries
+    - Whether frames have meaningful (non-default) phases
+    - Whether frames have diverse phases (not all the same)
+    - Whether issues/positives are varied (not all identical)
+    - Falls back to checking subscores if no frame_analysis
+    """
+    if not isinstance(path_a, dict):
+        return 0.0
+
+    frames = path_a.get("frame_analysis")
+
+    # If no frame_analysis, check if subscores exist (valid legacy case)
+    if not isinstance(frames, list) or not frames:
+        subscores = path_a.get("pure_vision_subscores") or path_a.get("subscores")
+        if isinstance(subscores, dict) and subscores:
+            return 0.5  # Has subscores but no frame detail
+        return 0.0
+
+    n = len(frames)
+    phases = [str(f.get("phase", "")) for f in frames if isinstance(f, dict)]
+    non_default = sum(1 for p in phases if p and p != "不可分析")
+    unique_phases = len(set(p for p in phases if p and p != "不可分析"))
+
+    # Collect unique issues/positives text
+    all_issues: set[str] = set()
+    all_positives: set[str] = set()
+    for f in frames:
+        if not isinstance(f, dict):
+            continue
+        for issue in f.get("issues", []):
+            if isinstance(issue, str) and issue.strip():
+                all_issues.add(issue.strip()[:50])
+        for pos in f.get("positives", []):
+            if isinstance(pos, str) and pos.strip():
+                all_positives.add(pos.strip()[:50])
+
+    # Score components
+    phase_ratio = non_default / n if n > 0 else 0.0
+    diversity = min(unique_phases / 3, 1.0) if unique_phases > 0 else 0.0
+    detail = min((len(all_issues) + len(all_positives)) / 4, 1.0)
+
+    return round(0.4 * phase_ratio + 0.3 * diversity + 0.3 * detail, 3)
+
+
 def cross_validate(
     path_a: dict[str, Any] | None,
     path_b: dict[str, Any] | None,
@@ -277,10 +325,13 @@ def cross_validate(
     else:
         skeleton = "uncertain"
 
+    a_quality = _path_a_quality_score(path_a)
+
     if overall >= 0.75:
         recommended = "blend"
     elif skeleton == "likely_wrong":
-        recommended = "A"
+        # Only recommend A if it has meaningful analysis; otherwise blend
+        recommended = "A" if a_quality >= 0.4 else "blend"
     elif skeleton == "reliable":
         recommended = "blend"
     else:
@@ -294,8 +345,11 @@ def cross_validate(
         "uncertain": f"骨架追踪存疑（{total_majors} 项严重分歧）。",
         "likely_wrong": f"客观维度严重分歧（{objective_majors} 项），建议重选 target_lock。",
     }[skeleton]
+    quality_note = ""
+    if skeleton == "likely_wrong" and a_quality < 0.4:
+        quality_note = f" Path A 分析质量偏低（{a_quality:.0%}），采用融合结果。"
     summary = (
-        f"两路一致率 {overall:.0%}。{signal_text}"
+        f"两路一致率 {overall:.0%}。{signal_text}{quality_note}"
         + (f" 分歧维度：{', '.join(conflict_fields)}。" if conflict_fields else " 无明显分歧。")
     )
 
