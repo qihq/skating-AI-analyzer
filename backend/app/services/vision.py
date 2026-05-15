@@ -126,9 +126,13 @@ def _frame_analysis_from_phase_segments(
     if not isinstance(segments, list):
         return []
 
+    # Detect if segments use absolute timestamps (>= window_start_sec) or relative timestamps (< window_start_sec)
+    first_seg_start = float(segments[0].get("start_sec", 0)) if segments else 0.0
+    use_absolute = first_seg_start >= window_start_sec and window_start_sec > 0
+
     out: list[dict[str, Any]] = []
     for frame in frame_payloads:
-        rel_ts = max(0.0, frame.timestamp_sec - window_start_sec)
+        ts = frame.timestamp_sec if use_absolute else max(0.0, frame.timestamp_sec - window_start_sec)
         selected = next(
             (
                 segment
@@ -136,7 +140,7 @@ def _frame_analysis_from_phase_segments(
                 if isinstance(segment, dict)
                 and isinstance(segment.get("start_sec"), (int, float))
                 and isinstance(segment.get("end_sec"), (int, float))
-                and float(segment["start_sec"]) <= rel_ts <= float(segment["end_sec"])
+                and float(segment["start_sec"]) <= ts <= float(segment["end_sec"])
             ),
             {},
         )
