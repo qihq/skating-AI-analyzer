@@ -143,7 +143,12 @@ async def analyze_frames_dual(
         )
     except asyncio.TimeoutError:
         logger.warning("Dual path total timeout > %.0fs, retrying Path A alone", total_timeout)
-        path_a_result = await _run_a()
+        fallback_timeout = max(30.0, total_timeout * 0.6)
+        try:
+            path_a_result = await asyncio.wait_for(_run_a(), timeout=fallback_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Path A fallback also timed out after %.0fs; using error result", fallback_timeout)
+            path_a_result = {"path": "A", "error": "path_a_timeout"}
         path_b_result = {"path": "B", "error": "total_timeout"}
 
     validation = cross_validate(path_a_result, path_b_result)
