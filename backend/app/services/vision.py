@@ -310,15 +310,46 @@ def _build_specialized_prompts(
 
 
 def _build_specialized_video_prompt(user_prompt: str) -> str:
+    video_rules = (
+        "\n\n【视频模式 - 强制要求】\n"
+        "1. 你必须只输出一个 JSON 对象，不要输出任何 JSON 之外的文字、解释、markdown 或代码块标记。\n"
+        "2. 即使画面模糊、角度不佳、无法判断动作，也必须输出完整 JSON，将 phase 设为“不可分析”、confidence 设为 0。\n"
+        "3. 不要输出自然语言段落代替 JSON。不要在 JSON 前后添加任何说明。\n"
+        "4. 按视频片段内的秒数定位关键事件，不要编造逐帧 frame_id。\n"
+        "5. 优先使用 phase_segments 字段：\n"
+    )
+    example_good = json.dumps(
+        {
+            "phase_segments": [
+                {"start_sec": 0.2, "end_sec": 0.6, "phase": "准备", "observations": {}, "issues": [], "positives": [], "confidence": 0.8}
+            ],
+            "data_quality_hint": "good",
+            "camera_view": "side",
+            "camera_view_confidence": 0.8,
+            "action_phase_summary": {"detected_phases": ["跳跃"], "weakest_phase": "落冰", "strongest_phase": "跳跃"},
+            "overall_raw_text": "2-3句总结",
+        },
+        ensure_ascii=False,
+    )
+    example_poor = json.dumps(
+        {
+            "phase_segments": [],
+            "data_quality_hint": "poor",
+            "camera_view": "unknown",
+            "camera_view_confidence": 0.0,
+            "action_phase_summary": {"detected_phases": [], "weakest_phase": "", "strongest_phase": ""},
+            "overall_raw_text": "你对视频的观察总结",
+        },
+        ensure_ascii=False,
+    )
     return (
         user_prompt
-        + "\n\n视频模式要求：请按视频片段内的秒数定位关键事件，不要编造逐帧 frame_id。"
-        + "返回 JSON 时优先使用 phase_segments："
-        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
-        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
-        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
-        + '"overall_raw_text":"2-3句总结"}'
+        + video_rules
+        + example_good
+        + "\n6. 如果完全无法分析，最低限度输出：\n"
+        + example_poor
     )
+
 
 
 def _choose_phase_with_votes(
@@ -441,7 +472,16 @@ def _merge_vision_results_legacy(
                 quality_flags.append(text)
     quality_flags.append("vision_self_consistency_vote")
 
-    return {
+    data_quality_hints = [str(r.get("data_quality_hint", "")).strip() for r in results if r.get("data_quality_hint")]
+    merged_quality_hint = ""
+    if "poor" in data_quality_hints:
+        merged_quality_hint = "poor"
+    elif "partial" in data_quality_hints:
+        merged_quality_hint = "partial"
+    elif "good" in data_quality_hints:
+        merged_quality_hint = "good"
+
+    merged: dict[str, Any] = {
         "frame_analysis": merged_frames,
         "action_phase_summary": {
             "detected_phases": detected_phases,
@@ -461,6 +501,13 @@ def _merge_vision_results_legacy(
             "phase_votes": vote_frames,
         },
     }
+    if merged_quality_hint:
+        merged["data_quality_hint"] = merged_quality_hint
+    fallback_reasons = [str(r.get("fallback_reason", "")).strip() for r in results if r.get("fallback_reason")]
+    if fallback_reasons:
+        merged["fallback_reason"] = fallback_reasons[0]
+        merged["fallback_used"] = True
+    return merged
 
 
 def _merge_vision_results(
@@ -546,6 +593,81 @@ def _attach_quality_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _extract_json_from_raw(raw_text: str) -> dict[str, Any] | None:
+    """Aggressively extract a JSON object from raw LLM response text.
+
+    Handles cases where the model wraps JSON in markdown, adds preamble text,
+    or returns a partially valid JSON structure.
+    """
+    if not raw_text or not raw_text.strip():
+        return None
+
+    cleaned = clean_json_text(raw_text)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    import re
+
+    json_block_pattern = r"```(?:json)?\s*(\{[\s\S]*?\})\s*```"
+    match = re.search(json_block_pattern, raw_text, re.IGNORECASE)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    brace_starts = [i for i, ch in enumerate(raw_text) if ch == "{"]
+    for start in brace_starts:
+        depth = 0
+        for end in range(start, len(raw_text)):
+            if raw_text[end] == "{":
+                depth += 1
+            elif raw_text[end] == "}":
+                depth -= 1
+            if depth == 0:
+                candidate = raw_text[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    break
+    return None
+
+
+def _build_fallback_from_text(raw_text: str, frame_payloads: list[FramePayload]) -> dict[str, Any]:
+    """Build a minimal structured payload from raw text when JSON extraction fails.
+
+    Preserves the model's textual observations as overall_raw_text and marks
+    all frames as not analyzable with zero confidence.
+    """
+    text = raw_text.strip()
+    if len(text) > 2000:
+        text = text[:2000] + "..."
+
+    return {
+        "frame_analysis": [_fallback_frame(frame.frame_id) for frame in frame_payloads],
+        "action_phase_summary": {
+            "detected_phases": [],
+            "weakest_phase": "",
+            "strongest_phase": "",
+        },
+        "overall_raw_text": text,
+        "data_quality_hint": "poor",
+        "camera_view": "unknown",
+        "camera_view_confidence": 0.0,
+        "fallback_used": True,
+        "fallback_reason": AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value,
+        "quality_flags": ["vision_raw_text_fallback"],
+    }
+
+
 async def _single_frames_vision_call(
     provider: Any,
     *,
@@ -571,12 +693,34 @@ async def _single_frames_vision_call(
         ],
     )
     cleaned = clean_json_text(raw_content)
+    parsed: dict[str, Any] | None = None
+    json_extract_method = "direct"
+
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        logger.warning("Vision JSON parse failed: %s | raw: %s", exc, cleaned[:300])
-        raise
-    return normalize_vision_payload(parsed, frame_payloads)
+        if not isinstance(parsed, dict):
+            parsed = None
+            json_extract_method = "direct_non_dict"
+    except json.JSONDecodeError:
+        parsed = None
+        json_extract_method = "direct_parse_failed"
+
+    if parsed is None:
+        extracted = _extract_json_from_raw(raw_content)
+        if isinstance(extracted, dict):
+            parsed = extracted
+            json_extract_method = "aggressive_extract"
+            logger.info("Frame vision returned non-standard JSON; recovered via aggressive extraction.")
+
+    if parsed is None:
+        logger.warning("Frame vision returned unparseable response; using text fallback. raw: %s", cleaned[:300])
+        parsed = _build_fallback_from_text(raw_content or "", frame_payloads)
+        json_extract_method = "text_fallback"
+
+    normalized = normalize_vision_payload(parsed, frame_payloads)
+    normalized["_raw_response"] = raw_content[:5000] if raw_content else ""
+    normalized["_json_extract_method"] = json_extract_method
+    return normalized
 
 
 async def analyze_frames(
@@ -691,16 +835,6 @@ async def analyze_frames(
             f"  圈数说明：{jump_chars['rotation_note']}\n"
         )
 
-    video_prompt = (
-        user_prompt
-        + "\n\n视频模式要求：请按视频片段内的秒数定位关键事件，不要编造逐帧 frame_id。"
-        + "返回 JSON 时优先使用 phase_segments："
-        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
-        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
-        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
-        + '"overall_raw_text":"2-3句总结"}'
-    )
-
     system_prompt, user_prompt = _build_specialized_prompts(
         action_type,
         action_subtype,
@@ -738,11 +872,46 @@ async def analyze_frames(
             else:
                 raise RuntimeError(f"Unsupported native video provider: {getattr(video_provider, 'provider', '')}")
 
+            provider_name = str(getattr(video_provider, "name", getattr(video_provider, "provider", "unknown")))
+            provider_id = str(getattr(video_provider, "provider", "unknown"))
+
+            parsed: dict[str, Any] | None = None
+            json_extract_method = "direct"
+
             cleaned = clean_json_text(raw_content)
-            parsed = json.loads(cleaned)
+            try:
+                parsed = json.loads(cleaned)
+                if not isinstance(parsed, dict):
+                    parsed = None
+                    json_extract_method = "direct_non_dict"
+            except json.JSONDecodeError:
+                parsed = None
+                json_extract_method = "direct_parse_failed"
+
+            if parsed is None:
+                extracted = _extract_json_from_raw(raw_content)
+                if isinstance(extracted, dict):
+                    parsed = extracted
+                    json_extract_method = "aggressive_extract"
+                    logger.info(
+                        "Video provider %s returned non-standard JSON; recovered via aggressive extraction.",
+                        provider_name,
+                    )
+
+            if parsed is None:
+                logger.warning(
+                    "Video provider %s returned unparseable response (len=%d); using text fallback.",
+                    provider_name,
+                    len(raw_content or ""),
+                )
+                parsed = _build_fallback_from_text(raw_content or "", frame_payloads)
+                json_extract_method = "text_fallback"
+
             normalized = normalize_vision_payload(parsed, frame_payloads, window_start_sec=window_start_sec)
-            normalized["provider"] = str(getattr(video_provider, "provider", "unknown"))
-            normalized["provider_name"] = str(getattr(video_provider, "name", normalized["provider"]))
+            normalized["provider"] = provider_id
+            normalized["provider_name"] = provider_name
+            normalized["_raw_response"] = raw_content[:5000] if raw_content else ""
+            normalized["_json_extract_method"] = json_extract_method
             return normalized
 
         video_vote_results = await asyncio.gather(
@@ -776,6 +945,15 @@ async def analyze_frames(
             normalized = _attach_quality_diagnostics(_merge_vision_results(video_votes, frame_payloads, analysis_profile, bio_data))
             normalized["vote_metadata"]["n_votes_requested"] = len(providers)
             normalized["vision_mode"] = "video_voted"
+            normalized["_raw_responses"] = [
+                {
+                    "provider": str(v.get("provider_name", "")),
+                    "raw": v.get("_raw_response", ""),
+                    "extract_method": v.get("_json_extract_method", "unknown"),
+                }
+                for v in video_votes
+                if isinstance(v, dict)
+            ]
             return normalized
 
         logger.warning("All vision native video providers failed, falling back to frames.")
@@ -830,6 +1008,15 @@ async def analyze_frames(
     else:
         normalized = _attach_quality_diagnostics(_merge_vision_results(valid_votes, frame_payloads, analysis_profile, bio_data))
         normalized["vote_metadata"]["n_votes_requested"] = vote_count
+        normalized["_raw_responses"] = [
+            {
+                "provider": str(v.get("provider_name", "")),
+                "raw": v.get("_raw_response", ""),
+                "extract_method": v.get("_json_extract_method", "unknown"),
+            }
+            for v in valid_votes
+            if isinstance(v, dict)
+        ]
     if mode == "video" and clip_path is not None:
         flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []
         if "vision_fallback_to_frames" not in flags:
