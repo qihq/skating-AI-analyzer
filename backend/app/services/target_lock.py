@@ -9,6 +9,7 @@ from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineErro
 
 TARGET_LOCK_AUTO_THRESHOLD = 0.72
 TARGET_PERSON_MIN_CONFIDENCE = 0.15
+MANUAL_BBOX_MIN_SIDE = 0.02
 
 
 @dataclass(slots=True)
@@ -29,8 +30,8 @@ def _normalized_bbox(x: float, y: float, width: float, height: float) -> dict[st
     return {
         "x": round(_clamp(x, 0.0, 1.0), 4),
         "y": round(_clamp(y, 0.0, 1.0), 4),
-        "width": round(_clamp(width, 0.05, 1.0), 4),
-        "height": round(_clamp(height, 0.05, 1.0), 4),
+        "width": round(_clamp(width, MANUAL_BBOX_MIN_SIDE, 1.0), 4),
+        "height": round(_clamp(height, MANUAL_BBOX_MIN_SIDE, 1.0), 4),
     }
 
 
@@ -59,8 +60,11 @@ def validate_manual_bbox(bbox: dict[str, Any] | None) -> dict[str, float]:
 
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 <= width <= 1.0 and 0.0 <= height <= 1.0):
         raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox values must be normalized to 0-1.")
-    if width < 0.05 or height < 0.05:
-        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox width and height must be at least 0.05.")
+    if width < MANUAL_BBOX_MIN_SIDE or height < MANUAL_BBOX_MIN_SIDE:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.TARGET_BBOX_INVALID,
+            f"manual_bbox width and height must be at least {MANUAL_BBOX_MIN_SIDE}.",
+        )
     if x + width > 1.0 or y + height > 1.0:
         raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox must stay inside the frame.")
 

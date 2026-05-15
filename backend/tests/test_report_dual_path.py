@@ -166,6 +166,70 @@ class ReportDualPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["temperature"], 0.15)
         self.assertIn("Output constraints", kwargs["messages"][1]["content"])
 
+    async def test_generate_report_keeps_technical_conclusion_for_partial_side_view(self) -> None:
+        request_mock = AsyncMock(
+            return_value="""
+            {
+              "summary": "起跳阶段膝关节准备不足，落冰缓冲偏硬，需要先稳定起跳节奏。",
+              "issues": [{"category":"起跳准备","description":"起跳前膝关节压缩不足","severity":"medium","phase":"起跳","frames":["frame_0001"]}],
+              "improvements": [{"target":"起跳准备","action":"做两组慢速压膝起跳节奏练习"}],
+              "training_focus": "先练稳定压膝和落冰缓冲。",
+              "subscores": {
+                "takeoff_power": 74,
+                "rotation_axis": 72,
+                "arm_coordination": 70,
+                "landing_absorption": 68,
+                "core_stability": 73
+              },
+              "data_quality": "good"
+            }
+            """
+        )
+        vision_structured = {
+            "data_quality_hint": "partial",
+            "camera_view": "side",
+            "frame_analysis": [
+                {
+                    "frame_id": "frame_0001",
+                    "phase": "起跳",
+                    "observations": {"knee_bend": "不足"},
+                    "issues": ["起跳前膝关节压缩不足"],
+                    "positives": [],
+                    "confidence": 0.82,
+                },
+                {
+                    "frame_id": "frame_0002",
+                    "phase": "腾空",
+                    "observations": {"axis_alignment": "轻微侧倾"},
+                    "issues": ["腾空轴心略偏"],
+                    "positives": [],
+                    "confidence": 0.74,
+                },
+                {
+                    "frame_id": "frame_0003",
+                    "phase": "落冰",
+                    "observations": {"landing_absorption": "不足"},
+                    "issues": ["落冰缓冲偏硬"],
+                    "positives": [],
+                    "confidence": 0.7,
+                },
+            ],
+            "overall_raw_text": "侧面视角下仍可见起跳和落冰问题。",
+        }
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.build_memory_context", AsyncMock(return_value="")),
+            patch("app.services.report.request_text_completion", request_mock),
+        ):
+            report = await generate_report("jump", vision_structured, bio_data=None)
+
+        prompt = request_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertIn("不要让 summary 只剩画质、视角或骨架不确定性", prompt)
+        self.assertNotIn("低置信度帧较多", report["summary"])
+        self.assertIn("起跳", report["summary"])
+        self.assertEqual(report["data_quality"], "partial")
+
 
 class ReportNormalizeTests(unittest.TestCase):
     def test_bio_subscores_are_fused_without_key_frames(self) -> None:

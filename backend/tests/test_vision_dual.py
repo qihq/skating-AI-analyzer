@@ -188,6 +188,47 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["jump_metrics_text"], "")
         self.assertEqual(result.used_key_frames, set())
 
+    async def test_path_a_receives_bio_data_and_motion_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            bio_data = {
+                "key_frame_candidates": {
+                    "T": {"frame_id": "frame_0001", "confidence": 0.7},
+                    "A": {"frame_id": "frame_0001", "confidence": 0.8},
+                    "L": {"frame_id": "frame_0001", "confidence": 0.6},
+                }
+            }
+            frame_motion_scores = {
+                "sample_count": 3,
+                "scores": [0.1, 0.8, 0.3],
+                "selected": [{"frame_id": "frame_0001", "motion_score": 0.8}],
+            }
+            mock_a = AsyncMock(return_value=_path_a_result())
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=mock_a),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(1))),
+            ):
+                await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(1),
+                    None,
+                    bio_data,
+                    provider,
+                    provider,
+                    frame_motion_scores=frame_motion_scores,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        kwargs = mock_a.await_args.kwargs
+        self.assertEqual(kwargs["bio_data"], bio_data)
+        self.assertEqual(kwargs["motion_features"]["sample_count"], 3)
+        self.assertEqual(kwargs["motion_features"]["score_summary"]["max"], 0.8)
+        self.assertEqual(kwargs["motion_features"]["selected"], frame_motion_scores["selected"])
+
     async def test_timestamps_are_passed_to_annotated_encode_frames(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)

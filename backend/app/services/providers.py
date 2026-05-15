@@ -205,10 +205,12 @@ def _resolve_preset_api_key(provider: str) -> str:
 
 def _resolve_qwen_vision_model(provider: AIProvider) -> str:
     env_model = os.getenv("QWEN_VISION_MODEL", "").strip()
-    if provider.provider == "qwen" and provider.slot in {"vision", "vision_path_a", "vision_path_b"} and env_model:
-        return env_model
     if provider.vision_model:
         return provider.vision_model
+    if provider.provider == "qwen" and provider.slot == "vision" and env_model:
+        return env_model
+    if provider.model_id:
+        return provider.model_id
     if provider.provider == "qwen" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
         return DEFAULT_QWEN_VISION_MODEL
     return provider.model_id

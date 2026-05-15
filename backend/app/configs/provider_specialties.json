@@ -1,0 +1,44 @@
+{
+  "defaults": {
+    "frame_phase_weight": 0.5,
+    "video_temporal_weight": 0.5,
+    "jump_subtype_weight": 0.5,
+    "blade_edge_weight": 0.5,
+    "child_motion_weight": 0.5,
+    "json_reliability_weight": 0.5
+  },
+  "providers": {
+    "qwen": {
+      "frame_phase_weight": 0.78,
+      "video_temporal_weight": 0.86,
+      "jump_subtype_weight": 0.68,
+      "blade_edge_weight": 0.62,
+      "child_motion_weight": 0.72,
+      "json_reliability_weight": 0.74
+    },
+    "doubao": {
+      "frame_phase_weight": 0.74,
+      "video_temporal_weight": 0.8,
+      "jump_subtype_weight": 0.64,
+      "blade_edge_weight": 0.6,
+      "child_motion_weight": 0.76,
+      "json_reliability_weight": 0.72
+    },
+    "deepseek": {
+      "frame_phase_weight": 0.58,
+      "video_temporal_weight": 0.52,
+      "jump_subtype_weight": 0.64,
+      "blade_edge_weight": 0.56,
+      "child_motion_weight": 0.58,
+      "json_reliability_weight": 0.84
+    },
+    "minimax": {
+      "frame_phase_weight": 0.66,
+      "video_temporal_weight": 0.68,
+      "jump_subtype_weight": 0.6,
+      "blade_edge_weight": 0.58,
+      "child_motion_weight": 0.7,
+      "json_reliability_weight": 0.78
+    }
+  }
+}

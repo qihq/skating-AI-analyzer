@@ -21,6 +21,7 @@ from app.database import AsyncSessionLocal, UPLOADS_DIR, get_session
 from app.models import Analysis, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
     AnalysisCompareResponse,
+    AnalysisAutoEvalSnapshot,
     AnalysisDetail,
     AnalysisListItem,
     AnalysisRetryResponse,
@@ -55,7 +56,8 @@ from app.services.analysis_errors import (
     stringify_exception,
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
-from app.services.biomechanics import analyze_biomechanics, sanitize_biomechanics_data
+from app.services.auto_eval import AUTO_EVAL_VERSION, build_auto_eval_payload
+from app.services.biomechanics import analyze_biomechanics, attach_key_frame_candidates, sanitize_biomechanics_data
 from app.services.bbox_tracker import track_bbox
 from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
@@ -158,7 +160,16 @@ async def _provider_for_slot(slot: str, fallback_slot: str = "vision"):
         if slot == fallback_slot:
             raise
         logger.info("Provider slot %s is not configured; falling back to %s", slot, fallback_slot)
-        return await get_active_provider(fallback_slot)
+        fallback_provider = await get_active_provider(fallback_slot)
+        try:
+            fallback_provider.notes = (
+                f"fallback_from={slot}; "
+                f"fallback_slot={fallback_slot}; "
+                f"{fallback_provider.notes or ''}"
+            ).strip()
+        except Exception:  # noqa: BLE001
+            pass
+        return fallback_provider
 
 
 def _utc_now_iso() -> str:
@@ -173,12 +184,53 @@ def _normalize_processing_logs(value: object) -> list[dict[str, Any]]:
 
 def _provider_label(provider: Any) -> str:
     provider_name = str(getattr(provider, "provider", "") or "").strip() or "unknown"
-    model = str(getattr(provider, "vision_model", "") or getattr(provider, "model_id", "") or "").strip()
+    model = str(getattr(provider, "model_id", "") or getattr(provider, "vision_model", "") or "").strip()
     return f"{provider_name}/{model}" if model else provider_name
+
+
+def _provider_fallback_note(provider: Any) -> str | None:
+    notes = str(getattr(provider, "notes", "") or "")
+    return notes if "fallback_from=" in notes else None
 
 
 def _count_list(value: object) -> int:
     return len(value) if isinstance(value, list) else 0
+
+
+DUAL_PATH_RAW_PREVIEW_CHARS = 2400
+DUAL_PATH_FRAME_PREVIEW_LIMIT = 12
+
+
+def _truncate_text(value: object, limit: int = DUAL_PATH_RAW_PREVIEW_CHARS) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...<truncated {len(text) - limit} chars>"
+
+
+def _summarize_path_frames(frames: object, limit: int = DUAL_PATH_FRAME_PREVIEW_LIMIT) -> list[dict[str, Any]]:
+    if not isinstance(frames, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for frame in frames[:limit]:
+        if not isinstance(frame, dict):
+            continue
+        item = {
+            "frame_id": frame.get("frame_id"),
+            "phase": frame.get("phase"),
+            "confidence": frame.get("confidence"),
+        }
+        issues = frame.get("issues")
+        if isinstance(issues, list) and issues:
+            item["issues"] = [str(value) for value in issues[:2]]
+        positives = frame.get("positives")
+        if isinstance(positives, list) and positives:
+            item["positives"] = [str(value) for value in positives[:2]]
+        bio_observations = frame.get("bio_observations")
+        if isinstance(bio_observations, dict) and bio_observations:
+            item["bio_observations"] = bio_observations
+        out.append(item)
+    return out
 
 
 def _build_dual_path_log_detail(
@@ -200,14 +252,19 @@ def _build_dual_path_log_detail(
     detail = {
         "path_a": {
             "provider": _provider_label(provider_path_a),
+            "provider_fallback": _provider_fallback_note(provider_path_a),
             "mode": path_a_data.get("vision_mode") or ("video" if clip_path else "frames"),
             "input": str(clip_path) if clip_path else f"{raw_frame_count} raw frames",
             "frame_analysis_count": _count_list(path_a_data.get("frame_analysis")),
             "phase_segments_count": _count_list(path_a_data.get("phase_segments")),
             "path_desc": path_a_data.get("path_desc"),
+            "action_phase_summary": path_a_data.get("action_phase_summary"),
+            "overall_raw_text": _truncate_text(path_a_data.get("overall_raw_text")),
+            "frame_preview": _summarize_path_frames(path_a_data.get("frame_analysis")),
         },
         "path_b": {
             "provider": _provider_label(provider_path_b),
+            "provider_fallback": _provider_fallback_note(provider_path_b),
             "input": f"{annotated_frame_count} annotated frames + biomechanics",
             "annotated_dir": str(annotated_dir) if annotated_dir else None,
             "n_frames": path_b_data.get("n_frames") or annotated_frame_count,
@@ -215,6 +272,10 @@ def _build_dual_path_log_detail(
             "failed": bool(path_b_data.get("error")),
             "error": path_b_data.get("error"),
             "subscores": path_b_data.get("subscores"),
+            "action_phase_summary": path_b_data.get("action_phase_summary"),
+            "top_issues": path_b_data.get("top_issues"),
+            "top_positives": path_b_data.get("top_positives"),
+            "frame_preview": _summarize_path_frames(path_b_data.get("frame_analysis")),
         },
         "cross_validation": {
             "recommended_path": meta.get("recommended_path"),
@@ -226,7 +287,51 @@ def _build_dual_path_log_detail(
             "weight_b": meta.get("weight_b"),
         },
     }
-    return json.dumps(detail, ensure_ascii=False, indent=2)
+    rendered = json.dumps(detail, ensure_ascii=False, indent=2)
+    logger.info(
+        "Dual-path payload | provider_a=%s provider_b=%s\n%s",
+        detail["path_a"]["provider"],
+        detail["path_b"]["provider"],
+        rendered,
+    )
+    return rendered
+
+
+def _auto_eval_failure_payload(exc: Exception) -> dict[str, Any]:
+    return {
+        "auto_eval_version": AUTO_EVAL_VERSION,
+        "key_frame_order_valid": None,
+        "phase_sequence_valid": None,
+        "high_confidence_conflicts": [],
+        "high_confidence_conflict_rate": 0.0,
+        "data_quality_flags": ["auto_eval_failed"],
+        "key_frame_signature": "missing",
+        "phase_sequence": [],
+        "phase_transition_violations": [],
+        "warning": stringify_exception(exc),
+    }
+
+
+def _attach_auto_eval(
+    cross_validation: dict[str, Any] | None,
+    *,
+    bio_data: dict[str, Any],
+    vision_structured: dict[str, Any],
+    frame_motion_scores: dict[str, Any],
+    analysis_profile: str,
+) -> dict[str, Any]:
+    merged = dict(cross_validation or {})
+    try:
+        merged["auto_eval"] = build_auto_eval_payload(
+            bio_data,
+            vision_structured,
+            frame_motion_scores,
+            analysis_profile,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-eval payload generation failed", exc_info=True)
+        merged["auto_eval"] = _auto_eval_failure_payload(exc)
+    return merged
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
@@ -385,6 +490,95 @@ async def _persist_processing_timings(analysis_id: str, timings: dict[str, float
         logger.exception("Analysis %s failed to persist processing timings", analysis_id)
 
 
+async def _regenerate_report_from_saved_analysis(
+    analysis_id: str,
+    timings: dict[str, float],
+    total_start: float,
+) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            if not isinstance(analysis.vision_structured, dict):
+                raise RuntimeError("report-only retry requires saved vision_structured")
+            if not isinstance(analysis.bio_data, dict):
+                raise RuntimeError("report-only retry requires saved bio_data")
+            action_type = analysis.action_type
+            skater_id = analysis.skater_id
+            vision_structured = analysis.vision_structured
+            bio_data = analysis.bio_data
+            dual_path_meta = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+
+        await _append_analysis_log(
+            analysis_id,
+            stage="report",
+            level="info",
+            message="开始重新生成训练报告，复用已保存的视觉和生物力学结果。",
+            status_value="generating_report",
+            retry_from_stage="report",
+        )
+        await _set_analysis_status(analysis_id, "generating_report")
+
+        report_start = time.monotonic()
+        report = await generate_report(
+            action_type,
+            vision_structured,
+            bio_data,
+            skater_id,
+            dual_path_meta=dual_path_meta,
+        )
+        force_score = calculate_force_score(report)
+        timings["report_s"] = _elapsed_seconds(report_start)
+        timings["total_s"] = _elapsed_seconds(total_start)
+
+        await _append_analysis_log(
+            analysis_id,
+            stage="report",
+            level="info",
+            message=f"报告重新生成完成，Force Score={force_score}。",
+            elapsed_s=timings["report_s"],
+            timings=timings,
+        )
+
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.report = report
+            analysis.force_score = force_score
+            analysis.processing_timings = dict(timings)
+            analysis.pipeline_version = CURRENT_PIPELINE_VERSION
+            analysis.status = "completed"
+            analysis.error_code = None
+            analysis.error_detail = None
+            analysis.error_message = None
+            analysis.retry_from_stage = None
+            await auto_update_skill_progress(analysis_id, session)
+            if analysis.skater_id:
+                await sync_skater_progress(session, analysis.skater_id)
+            await session.commit()
+            if analysis.skater_id:
+                try:
+                    await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
+
+        _log_analysis_timings(analysis_id, timings, context="report_only_retry")
+        await _append_analysis_log(
+            analysis_id,
+            stage="pipeline",
+            level="info",
+            message="报告重生成流程已完成。",
+            elapsed_s=timings["total_s"],
+            timings=timings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        failure = classify_ai_failure(exc)
+        timings["total_s"] = _elapsed_seconds(total_start)
+        await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage="report", timings=timings)
+
+
 def _is_retry_stage(value: str | None) -> bool:
     return value in PIPELINE_STAGES
 
@@ -455,6 +649,10 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             saved_action_window_end = float(analysis.action_window_end or 0.0)
             saved_source_fps = float(analysis.source_fps or 30.0)
             saved_is_slow_motion = bool(analysis.is_slow_motion)
+
+        if retry_from_stage == "report":
+            await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
+            return
 
         await _append_analysis_log(
             analysis_id,
@@ -665,6 +863,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     source_fps=sampling_metadata.source_fps,
                     window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
                 )
+                bio_data = attach_key_frame_candidates(
+                    bio_data,
+                    pose_data,
+                    motion_scores,
+                    analysis_profile,
+                    sampling_metadata.effective_fps,
+                )
                 if isinstance(bio_data, dict):
                     if analysis_profile == 'jump':
                         profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
@@ -775,6 +980,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     bio_data=bio_data,
                     provider_path_a=provider_path_a,
                     provider_path_b=provider_path_b,
+                    frame_motion_scores=motion_scores,
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
@@ -805,6 +1011,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 if isinstance(frame_analysis, list):
                     vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
                     vision_path_a = vision_structured
+                cross_validation = _attach_auto_eval(
+                    cross_validation,
+                    bio_data=bio_data,
+                    vision_structured=vision_structured,
+                    frame_motion_scores=motion_scores,
+                    analysis_profile=analysis_profile,
+                )
+                dual_path_meta = cross_validation
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
                 async with AsyncSessionLocal() as session:
@@ -853,6 +1067,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 vision_path_a = analysis.vision_path_a if isinstance(analysis.vision_path_a, dict) else vision_structured
                 vision_path_b = analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None
                 cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+                if not isinstance(cross_validation, dict) or not isinstance(cross_validation.get("auto_eval"), dict):
+                    cross_validation = _attach_auto_eval(
+                        cross_validation,
+                        bio_data=bio_data,
+                        vision_structured=vision_structured,
+                        frame_motion_scores=motion_scores,
+                        analysis_profile=analysis_profile,
+                    )
                 dual_path_meta = cross_validation
             await _append_analysis_log(
                 analysis_id,
@@ -1233,6 +1455,40 @@ def _detail_from_analysis(
     )
 
 
+def _fusion_diagnostics_summary(cross_validation: dict[str, Any] | None) -> list[str]:
+    if not isinstance(cross_validation, dict):
+        return []
+    diagnostics = cross_validation.get("fusion_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return []
+
+    summary: list[str] = []
+    for key in ("conflict_level", "downgraded_reasons", "needs_human_review", "key_frame_order_invalid"):
+        value = diagnostics.get(key)
+        if value in (None, [], {}, False):
+            continue
+        if isinstance(value, list):
+            summary.extend(str(item) for item in value if item)
+        else:
+            summary.append(f"{key}={value}")
+    return summary
+
+
+def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSnapshot:
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
+    cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+    return AnalysisAutoEvalSnapshot(
+        analysis_id=analysis.id,
+        created_at=analysis.created_at,
+        pipeline_version=analysis.pipeline_version,
+        analysis_profile=analysis.analysis_profile,
+        action_type=analysis.action_type,
+        auto_eval=cross_validation.get("auto_eval") if cross_validation else None,
+        key_frame_candidates=bio_data.get("key_frame_candidates") if bio_data else None,
+        fusion_diagnostics=_fusion_diagnostics_summary(cross_validation),
+    )
+
+
 def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
     safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
     frame_urls = {
@@ -1410,6 +1666,11 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
         pose_data = computed_pose
         changed = True
 
+    if analysis.frame_motion_scores is None:
+        logger.info("Analysis %s is missing motion sampling metadata, generating legacy fallback payload", analysis.id)
+        analysis.frame_motion_scores = _fallback_motion_payload(frames_dir)
+        changed = True
+
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
     if bio_data is None or not bio_data.get("key_frames"):
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
@@ -1420,7 +1681,7 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             is_slow_motion=bool(analysis.is_slow_motion),
             motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
         )
-        analysis.bio_data = analyze_biomechanics(
+        computed_bio_data = analyze_biomechanics(
             pose_data or {"connections": [], "frames": []},
             analysis.action_type,
             analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
@@ -1428,18 +1689,39 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             source_fps=sampling_metadata.source_fps,
             window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
         )
+        analysis_profile = analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype)
+        analysis.bio_data = attach_key_frame_candidates(
+            computed_bio_data,
+            pose_data or {"connections": [], "frames": []},
+            analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+            analysis_profile,
+            sampling_metadata.effective_fps,
+        )
         changed = True
     else:
         sanitized_bio_data = sanitize_biomechanics_data(bio_data)
         if sanitized_bio_data != bio_data:
             logger.info("Analysis %s has implausible biomechanics metrics, sanitizing saved payload", analysis.id)
             analysis.bio_data = sanitized_bio_data
+            bio_data = sanitized_bio_data
             changed = True
-
-    if analysis.frame_motion_scores is None:
-        logger.info("Analysis %s is missing motion sampling metadata, generating legacy fallback payload", analysis.id)
-        analysis.frame_motion_scores = _fallback_motion_payload(frames_dir)
-        changed = True
+        if "key_frame_candidates" not in bio_data:
+            logger.info("Analysis %s is missing key-frame candidates, backfilling from saved pose and motion", analysis.id)
+            sampling_metadata = _sampling_metadata_from_saved(
+                action_window_start=float(analysis.action_window_start or 0.0),
+                action_window_end=float(analysis.action_window_end or 0.0),
+                source_fps=float(analysis.source_fps or 30.0),
+                is_slow_motion=bool(analysis.is_slow_motion),
+                motion_scores=analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+            )
+            analysis.bio_data = attach_key_frame_candidates(
+                bio_data,
+                pose_data,
+                analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+                analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+                sampling_metadata.effective_fps,
+            )
+            changed = True
 
     if changed:
         await session.commit()
@@ -1823,6 +2105,29 @@ async def get_progress(
     return ProgressResponse(points=points, stats=stats)
 
 
+@router.get("/auto-eval/snapshots", response_model=list[AnalysisAutoEvalSnapshot])
+async def list_auto_eval_snapshots(
+    limit: int = Query(default=50, ge=1, le=500),
+    analysis_profile: str | None = Query(default=None),
+    action_type: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisAutoEvalSnapshot]:
+    limit_value = limit if isinstance(limit, int) else 50
+    analysis_profile_value = analysis_profile if isinstance(analysis_profile, str) and analysis_profile.strip() else None
+    action_type_value = action_type if isinstance(action_type, str) and action_type.strip() else None
+
+    query = select(Analysis).where(Analysis.status == "completed")
+    if analysis_profile_value:
+        query = query.where(Analysis.analysis_profile == analysis_profile_value)
+    if action_type_value:
+        query = query.where(Analysis.action_type == action_type_value)
+    query = query.order_by(Analysis.created_at.desc()).limit(limit_value)
+
+    result = await session.execute(query)
+    analyses = list(result.scalars().all())
+    return [_auto_eval_snapshot_from_analysis(analysis) for analysis in analyses]
+
+
 @router.post("/{analysis_id}/plan", response_model=TrainingPlanDetail)
 async def create_training_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     analysis = await session.get(Analysis, analysis_id)
@@ -1955,6 +2260,8 @@ async def retry_analysis(
         retry_from_stage = None
     if retry_from_stage == 'report' and not isinstance(analysis.vision_structured, dict):
         retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) and isinstance(analysis.bio_data, dict) else None
+    if retry_from_stage == 'report' and not isinstance(analysis.bio_data, dict):
+        retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) else None
 
     upload_dir = UPLOADS_DIR / analysis_id
     source_video_path = (
@@ -1965,7 +2272,7 @@ async def retry_analysis(
         if upload_dir.exists()
         else None
     )
-    if source_video_path is None:
+    if source_video_path is None and retry_from_stage != 'report':
         raise HTTPException(status_code=404, detail="????????????????")
 
     analysis.status = "pending"

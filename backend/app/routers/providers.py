@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.models import AIProvider
-from app.schemas import ProviderCreate, ProviderPublic, ProviderTestResponse, ProviderUpdate, VisionVoteConfig
+from app.models import AIProvider, Analysis
+from app.schemas import ProviderCreate, ProviderMetricPublic, ProviderPublic, ProviderTestResponse, ProviderUpdate, VisionVoteConfig
 from app.services.providers import activate_provider, encrypt_api_key, mask_api_key, test_provider_connectivity
+from app.services.provider_metrics import summarize_provider_metrics
 from app.services.vision_vote_config import load_vision_vote_config, save_vision_vote_config
 
 
@@ -39,6 +43,58 @@ async def list_providers(session: AsyncSession = Depends(get_session)) -> list[P
         select(AIProvider).order_by(AIProvider.slot.asc(), AIProvider.is_active.desc(), AIProvider.created_at.asc())
     )
     return [serialize_provider(provider) for provider in result.scalars().all()]
+
+
+@router.get("/metrics", response_model=list[ProviderMetricPublic])
+async def get_provider_metrics(
+    days: int = Query(default=30, ge=1, le=3650),
+    analysis_profile: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderMetricPublic]:
+    day_value = days if isinstance(days, int) else 30
+    profile_value = analysis_profile if isinstance(analysis_profile, str) and analysis_profile.strip() else None
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, day_value))
+    query = (
+        select(Analysis)
+        .where(Analysis.status == "completed", Analysis.created_at >= cutoff)
+        .order_by(Analysis.created_at.desc())
+    )
+    if profile_value:
+        query = query.where(Analysis.analysis_profile == profile_value)
+
+    result = await session.execute(query)
+    analyses = list(result.scalars().all())
+    if not analyses:
+        return []
+
+    vision_structured_items = [analysis.vision_structured if isinstance(analysis.vision_structured, dict) else None for analysis in analyses]
+    cross_validation_items = [analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None for analysis in analyses]
+    metrics_report = summarize_provider_metrics(vision_structured_items, cross_validation_items)
+    providers = metrics_report.get("providers", {}) if isinstance(metrics_report, dict) else {}
+
+    if not isinstance(providers, dict):
+        return []
+
+    recommendations = metrics_report.get("recommendations", []) if isinstance(metrics_report, dict) else []
+    recommendation_map = {
+        str(item).split(":", 1)[-1]: str(item)
+        for item in recommendations
+        if isinstance(item, str) and ":" in item
+    }
+
+    return [
+        ProviderMetricPublic(
+            provider=provider,
+            sample_count=metrics.get("sample_count", 0),
+            json_valid_rate=metrics.get("json_valid_rate", 0.0),
+            avg_effective_weight=metrics.get("avg_effective_weight", 0.0),
+            conflict_rate=metrics.get("conflict_rate", 0.0),
+            failure_rate=metrics.get("failure_rate", 0.0),
+            recommendation=recommendation_map.get(provider),
+        )
+        for provider, metrics in sorted(providers.items())
+        if isinstance(metrics, dict)
+    ]
 
 
 @router.get("/vision-vote/config", response_model=VisionVoteConfig)
@@ -97,6 +153,7 @@ async def create_provider(payload: ProviderCreate, session: AsyncSession = Depen
         provider=payload.provider,
         base_url=payload.base_url,
         model_id=payload.model_id,
+        vision_model=payload.vision_model,
         api_key=encrypt_api_key(payload.api_key),
         is_active=(active_count or 0) == 0,
         notes=payload.notes,
@@ -172,4 +229,3 @@ async def test_provider(provider_id: str, session: AsyncSession = Depends(get_se
 
     success, detail = await test_provider_connectivity(provider)
     return ProviderTestResponse(success=success, detail=detail)
-

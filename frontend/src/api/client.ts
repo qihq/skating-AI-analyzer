@@ -64,6 +64,44 @@ export interface BioData {
   [key: string]: unknown;
 }
 
+export interface FusionDiagnostics {
+  conflict_level?: "none" | "low" | "medium" | "high" | string;
+  downgraded_reasons?: string[];
+  needs_human_review?: boolean;
+  key_frame_order_invalid?: boolean;
+  weighted_fusion?: {
+    available?: boolean;
+    fusion_version?: string | null;
+    conflict_level?: "none" | "low" | "medium" | "high" | string;
+    downgraded_reasons?: string[];
+  };
+  path_a?: Record<string, unknown>;
+  path_b?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface CrossValidationData {
+  fusion_diagnostics?: FusionDiagnostics;
+  conflict_level?: "none" | "low" | "medium" | "high" | string;
+  downgraded_reasons?: string[];
+  needs_human_review?: boolean;
+  auto_eval?: {
+    key_frame_order_valid?: boolean | null;
+    phase_sequence_valid?: boolean | null;
+    data_quality_flags?: string[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface VisionStructuredData {
+  data_quality_hint?: "good" | "partial" | "poor" | string;
+  fusion_version?: string;
+  conflict_level?: "none" | "low" | "medium" | "high" | string;
+  quality_flags?: string[];
+  [key: string]: unknown;
+}
+
 export interface PoseKeypoint {
   id: number;
   name: string;
@@ -110,10 +148,10 @@ export interface AnalysisListItem {
 export interface AnalysisDetail extends AnalysisListItem {
   video_path: string;
   vision_raw: string | null;
-  vision_structured: Record<string, unknown> | null;
+  vision_structured: VisionStructuredData | null;
   vision_path_a: Record<string, unknown> | null;
   vision_path_b: Record<string, unknown> | null;
-  cross_validation: Record<string, unknown> | null;
+  cross_validation: CrossValidationData | null;
   report: StructuredReport | null;
   pose_data: PoseResponse | null;
   bio_data: BioData | null;
@@ -305,9 +343,47 @@ export interface ProviderUpdatePayload {
   notes?: string | null;
 }
 
+export interface ProviderCreatePayload {
+  slot: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model_id: string;
+  vision_model?: string | null;
+  api_key: string;
+  notes?: string | null;
+}
+
 export interface VisionVoteConfig {
   primary_provider_id: string | null;
   secondary_provider_id: string | null;
+}
+
+export interface ProviderMetricPublic {
+  provider: string;
+  sample_count: number;
+  json_valid_rate: number;
+  avg_effective_weight: number;
+  conflict_rate: number;
+  failure_rate: number;
+  recommendation: string | null;
+}
+
+export interface AutoEvalSnapshotSummary {
+  analysis_id: string;
+  created_at: string;
+  pipeline_version: string | null;
+  analysis_profile: string | null;
+  action_type: string;
+  auto_eval: {
+    key_frame_order_valid?: boolean | null;
+    phase_sequence_valid?: boolean | null;
+    high_confidence_conflicts?: number | null;
+    data_quality_flags?: string[] | null;
+    [key: string]: unknown;
+  } | null;
+  key_frame_candidates: Record<string, unknown> | null;
+  fusion_diagnostics: string[];
 }
 
 export interface ComparisonChange {
@@ -586,8 +662,10 @@ export async function fetchAnalysis(id: string, options?: { isParentRequest?: bo
   return response.data;
 }
 
-export async function retryAnalysis(id: string) {
-  const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`);
+export async function retryAnalysis(id: string, options?: { retryFrom?: string | null }) {
+  const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`, undefined, {
+    params: options?.retryFrom ? { retry_from: options.retryFrom } : undefined,
+  });
   return response.data;
 }
 
@@ -778,8 +856,38 @@ export async function fetchVisionVoteConfig() {
   return response.data;
 }
 
+export async function fetchProviderMetrics(params?: { days?: number; analysis_profile?: string | null }) {
+  const response = await apiClient.get<ProviderMetricPublic[]>("/providers/metrics", {
+    params: {
+      days: params?.days ?? 30,
+      analysis_profile: params?.analysis_profile ?? undefined,
+    },
+  });
+  return response.data;
+}
+
+export async function fetchAutoEvalSnapshots(params?: {
+  limit?: number;
+  analysis_profile?: string | null;
+  action_type?: string | null;
+}) {
+  const response = await apiClient.get<AutoEvalSnapshotSummary[]>("/analysis/auto-eval/snapshots", {
+    params: {
+      limit: params?.limit ?? 50,
+      analysis_profile: params?.analysis_profile ?? undefined,
+      action_type: params?.action_type ?? undefined,
+    },
+  });
+  return response.data;
+}
+
 export async function updateVisionVoteConfig(payload: VisionVoteConfig) {
   const response = await apiClient.put<VisionVoteConfig>("/providers/vision-vote/config", payload);
+  return response.data;
+}
+
+export async function createProvider(payload: ProviderCreatePayload) {
+  const response = await apiClient.post<ProviderPublic>("/providers/", payload);
   return response.data;
 }
 

@@ -18,6 +18,9 @@ from app.services.providers import (
 from app.services.report import clean_json_text
 from app.services.snowball import build_memory_context
 from app.services.video import FramePayload
+from app.services.vision_fusion import fuse_vision_results_weighted
+from app.services.vision_quality import apply_low_quality_policy
+from app.services.vision_prompt_templates import build_specialized_vision_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -56,6 +59,9 @@ PROFILE_HINTS: dict[str, str] = {
 
 VALID_PHASES = {"准备", "起跳", "腾空", "落冰", "滑出", "旋转入", "旋转中", "旋转出", "步法", "不可分析"}
 VALID_DATA_QUALITY_HINTS = {"good", "partial", "poor"}
+VALID_CAMERA_VIEWS = {"front", "side", "diagonal_front", "diagonal_back", "unknown"}
+VALID_FRAME_KEY_AGREEMENTS = {"T", "A", "L", "none", "shifted", "disagree", "unavailable"}
+VALID_SUMMARY_KEY_AGREEMENTS = {"agree", "shifted", "disagree", "unavailable"}
 DEFAULT_VISION_N_VOTES = 2
 
 
@@ -87,6 +93,28 @@ def _fallback_unavailable_payload(frame_payloads: list[FramePayload], reason: st
         "data_quality_hint": "poor",
         "quality_flags": ["vision_ai_unavailable_fallback"],
     }
+
+
+def _clamped_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except (TypeError, ValueError):
+        return default
+
+
+def _enum_or(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def _normalize_summary_key_frame_agreement(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized: dict[str, str] = {}
+    for key in ("T", "A", "L"):
+        if key in value:
+            normalized[key] = _enum_or(value.get(key), VALID_SUMMARY_KEY_AGREEMENTS, "unavailable")
+    return normalized or None
 
 
 def _frame_analysis_from_phase_segments(
@@ -156,6 +184,14 @@ def normalize_vision_payload(
                 normalized["confidence"] = max(0.0, min(float(raw.get("confidence", 0.0)), 1.0))
             except (TypeError, ValueError):
                 normalized["confidence"] = 0.0
+            if raw.get("phase_confidence") is not None:
+                normalized["phase_confidence"] = _clamped_float(raw.get("phase_confidence"))
+            if raw.get("key_frame_agreement") is not None:
+                normalized["key_frame_agreement"] = _enum_or(
+                    raw.get("key_frame_agreement"),
+                    VALID_FRAME_KEY_AGREEMENTS,
+                    "unavailable",
+                )
         frame_analysis.append(normalized)
 
     raw_summary = payload.get("action_phase_summary")
@@ -169,6 +205,8 @@ def normalize_vision_payload(
     data_quality_hint = str(payload.get("data_quality_hint", "")).strip().lower()
     if data_quality_hint not in VALID_DATA_QUALITY_HINTS:
         data_quality_hint = ""
+    camera_view = _enum_or(payload.get("camera_view"), VALID_CAMERA_VIEWS, "unknown")
+    camera_view_confidence = _clamped_float(payload.get("camera_view_confidence"))
 
     fallback_reason = str(payload.get("fallback_reason", "")).strip()
 
@@ -179,11 +217,17 @@ def normalize_vision_payload(
     }
     if payload.get("fallback_used") and isinstance(raw_summary, str) and raw_summary.strip():
         normalized_summary = raw_summary.strip()
+    elif isinstance(normalized_summary, dict):
+        key_agreement = _normalize_summary_key_frame_agreement(summary.get("key_frame_agreement"))
+        if key_agreement is not None:
+            normalized_summary["key_frame_agreement"] = key_agreement
 
     normalized_payload = {
         "frame_analysis": frame_analysis,
         "action_phase_summary": normalized_summary,
         "overall_raw_text": str(payload.get("overall_raw_text", "")).strip(),
+        "camera_view": camera_view,
+        "camera_view_confidence": camera_view_confidence,
     }
     if isinstance(payload.get("phase_segments"), list):
         normalized_payload["phase_segments"] = payload["phase_segments"]
@@ -195,6 +239,12 @@ def normalize_vision_payload(
         normalized_payload["fallback_used"] = bool(payload.get("fallback_used"))
     if isinstance(payload.get("quality_flags"), list):
         normalized_payload["quality_flags"] = [str(flag) for flag in payload.get("quality_flags", []) if flag]
+    if payload.get("pose_visibility") is not None:
+        try:
+            normalized_payload["pose_visibility"] = max(0.0, min(float(payload.get("pose_visibility")), 1.0))
+        except (TypeError, ValueError):
+            pass
+
     return normalized_payload
 
 
@@ -228,6 +278,49 @@ def _dedupe_texts(items: list[Any]) -> list[str]:
     return out
 
 
+def _candidate_key_frames_from_bio(bio_data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(bio_data, dict):
+        return {}
+    candidates = bio_data.get("key_frame_candidates")
+    if isinstance(candidates, dict):
+        return candidates
+    key_frames = bio_data.get("key_frames")
+    if isinstance(key_frames, dict):
+        return key_frames
+    return {}
+
+
+def _build_specialized_prompts(
+    action_type: str,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    profile_evidence: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+    motion_features: dict[str, Any] | list[Any] | None,
+) -> tuple[str, str]:
+    return build_specialized_vision_prompt(
+        action_type=action_type,
+        action_subtype=action_subtype,
+        analysis_profile=analysis_profile,
+        candidate_key_frames=_candidate_key_frames_from_bio(bio_data),
+        motion_features=motion_features,
+        biomechanics=bio_data,
+        profile_evidence=profile_evidence,
+    )
+
+
+def _build_specialized_video_prompt(user_prompt: str) -> str:
+    return (
+        user_prompt
+        + "\n\n视频模式要求：请按视频片段内的秒数定位关键事件，不要编造逐帧 frame_id。"
+        + "返回 JSON 时优先使用 phase_segments："
+        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
+        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
+        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
+        + '"overall_raw_text":"2-3句总结"}'
+    )
+
+
 def _choose_phase_with_votes(
     frame_votes: list[str],
     previous_phase: str,
@@ -252,7 +345,7 @@ def _choose_phase_with_votes(
     return candidates[0]
 
 
-def _merge_vision_results(
+def _merge_vision_results_legacy(
     results: list[dict[str, Any]],
     frame_payloads: list[FramePayload],
     analysis_profile: str | None = None,
@@ -370,6 +463,89 @@ def _merge_vision_results(
     }
 
 
+def _merge_vision_results(
+    results: list[dict[str, Any]],
+    frame_payloads: list[FramePayload],
+    analysis_profile: str | None = None,
+    bio_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Merge normalized vision payloads with weighted fusion, falling back to legacy voting.
+
+    The returned frame payload keeps legacy-compatible fields such as phase_votes,
+    averaged confidence, and aggregated issues while using weighted fusion for the
+    final phase decision and audit metadata.
+    """
+    legacy = _merge_vision_results_legacy(results, frame_payloads, analysis_profile)
+    try:
+        fusion = fuse_vision_results_weighted(results, bio_data, analysis_profile)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Weighted vision fusion failed, falling back to legacy vote merge: %s", exc)
+        flags = legacy.get("quality_flags") if isinstance(legacy.get("quality_flags"), list) else []
+        if "vision_weighted_fusion_fallback_to_vote" not in flags:
+            flags.append("vision_weighted_fusion_fallback_to_vote")
+        legacy["quality_flags"] = flags
+        return legacy
+
+    legacy_frames = {
+        str(frame.get("frame_id", "")): frame
+        for frame in legacy.get("frame_analysis", [])
+        if isinstance(frame, dict)
+    }
+    fused_frames: list[dict[str, Any]] = []
+    for frame in fusion.get("final_frame_analysis", []):
+        if not isinstance(frame, dict):
+            continue
+        frame_id = str(frame.get("frame_id", ""))
+        legacy_frame = legacy_frames.get(frame_id, {})
+        fused_frames.append(
+            {
+                **legacy_frame,
+                "frame_id": frame_id,
+                "phase": frame.get("phase", legacy_frame.get("phase", "ä¸å¯åˆ†æž")),
+                "phase_votes": legacy_frame.get("phase_votes", frame.get("phase_votes", {})),
+                "phase_scores": frame.get("phase_scores", {}),
+                "fusion_evidence": frame.get("fusion_evidence", {}),
+                "confidence": legacy_frame.get("confidence", frame.get("confidence", 0.0)),
+            }
+        )
+
+    if not fused_frames:
+        return legacy
+
+    quality_flags = legacy.get("quality_flags") if isinstance(legacy.get("quality_flags"), list) else []
+    if "vision_weighted_fusion" not in quality_flags:
+        quality_flags.append("vision_weighted_fusion")
+
+    vote_metadata = legacy.get("vote_metadata") if isinstance(legacy.get("vote_metadata"), dict) else {}
+    vote_metadata = {
+        **vote_metadata,
+        "fusion_version": fusion.get("fusion_version"),
+        "conflict_level": fusion.get("conflict_level"),
+    }
+
+    return {
+        **legacy,
+        "frame_analysis": fused_frames,
+        "action_phase_summary": fusion.get("action_phase_summary", legacy.get("action_phase_summary")),
+        "quality_flags": quality_flags,
+        "vote_metadata": vote_metadata,
+        "fusion_version": fusion.get("fusion_version"),
+        "fusion_decisions": fusion.get("fusion_decisions", []),
+        "fusion_model_results": fusion.get("model_results", []),
+        "conflict_level": fusion.get("conflict_level", "none"),
+    }
+
+
+def _attach_quality_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    return apply_low_quality_policy(
+        payload,
+        data_quality_hint=payload.get("data_quality_hint"),
+        camera_view=payload.get("camera_view"),
+        pose_visibility=payload.get("pose_visibility"),
+    )
+
+
 async def _single_frames_vision_call(
     provider: Any,
     *,
@@ -411,6 +587,8 @@ async def analyze_frames(
     action_subtype: str | None = None,
     analysis_profile: str | None = None,
     profile_evidence: dict[str, Any] | None = None,
+    bio_data: dict[str, Any] | None = None,
+    motion_features: dict[str, Any] | list[Any] | None = None,
     mode: Literal["frames", "video"] = "video",
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
@@ -427,6 +605,8 @@ async def analyze_frames(
         action_subtype: Optional jump subtype.
         analysis_profile: Inferred profile such as jump/spin/spiral.
         profile_evidence: Rule evidence used by profile inference.
+        bio_data: Optional biomechanics payload used as prompt evidence.
+        motion_features: Optional motion sampling/features payload used as prompt evidence.
         mode: Prefer native short-clip video analysis or legacy frame analysis.
         clip_path: Optional action-window mp4 clip for video mode.
         window_start_sec: Source-video second corresponding to clip-relative 0.0.
@@ -449,7 +629,7 @@ async def analyze_frames(
     except Exception as exc:  # noqa: BLE001
         failure = classify_ai_failure(exc).code.value
         logger.warning("Vision provider unavailable, using fallback: %s", exc)
-        return normalize_vision_payload(_fallback_unavailable_payload(frame_payloads, failure), frame_payloads)
+        return _attach_quality_diagnostics(normalize_vision_payload(_fallback_unavailable_payload(frame_payloads, failure), frame_payloads))
 
     system_prompt = VISION_SYSTEM_PROMPT if not memory_context else f"{VISION_SYSTEM_PROMPT}\n\n{memory_context}"
     max_tokens = min(8000, 400 + len(frame_payloads) * 250)
@@ -521,6 +701,18 @@ async def analyze_frames(
         + '"overall_raw_text":"2-3句总结"}'
     )
 
+    system_prompt, user_prompt = _build_specialized_prompts(
+        action_type,
+        action_subtype,
+        analysis_profile,
+        profile_evidence,
+        bio_data,
+        motion_features,
+    )
+    if memory_context:
+        system_prompt = f"{system_prompt}\n\n{memory_context}"
+    video_prompt = _build_specialized_video_prompt(user_prompt)
+
     if mode == "video" and clip_path is not None:
         async def _single_video_call(video_provider: Any) -> dict[str, Any]:
             if getattr(video_provider, "provider", "") == "qwen":
@@ -565,7 +757,7 @@ async def analyze_frames(
                 logger.warning("Vision native video provider failed, continuing with remaining slots: %s", result)
 
         if len(video_votes) == 1:
-            normalized = video_votes[0]
+            normalized = _attach_quality_diagnostics(video_votes[0])
             flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []
             normalized["quality_flags"] = flags
             normalized["vision_mode"] = "video"
@@ -581,7 +773,7 @@ async def analyze_frames(
             }
             return normalized
         if len(video_votes) > 1:
-            normalized = _merge_vision_results(video_votes, frame_payloads, analysis_profile)
+            normalized = _attach_quality_diagnostics(_merge_vision_results(video_votes, frame_payloads, analysis_profile, bio_data))
             normalized["vote_metadata"]["n_votes_requested"] = len(providers)
             normalized["vision_mode"] = "video_voted"
             return normalized
@@ -616,13 +808,15 @@ async def analyze_frames(
             if isinstance(first_error, json.JSONDecodeError)
             else classify_ai_failure(first_error).code.value
         )
-        return normalize_vision_payload(
-            _fallback_unavailable_payload(frame_payloads, reason),
-            frame_payloads,
+        return _attach_quality_diagnostics(
+            normalize_vision_payload(
+                _fallback_unavailable_payload(frame_payloads, reason),
+                frame_payloads,
+            )
         )
 
     if len(valid_votes) == 1:
-        normalized = valid_votes[0]
+        normalized = _attach_quality_diagnostics(valid_votes[0])
         normalized["vote_metadata"] = {
             "n_votes_requested": vote_count,
             "n_votes_valid": 1,
@@ -634,7 +828,7 @@ async def analyze_frames(
             },
         }
     else:
-        normalized = _merge_vision_results(valid_votes, frame_payloads, analysis_profile)
+        normalized = _attach_quality_diagnostics(_merge_vision_results(valid_votes, frame_payloads, analysis_profile, bio_data))
         normalized["vote_metadata"]["n_votes_requested"] = vote_count
     if mode == "video" and clip_path is not None:
         flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []

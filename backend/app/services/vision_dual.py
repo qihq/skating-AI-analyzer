@@ -28,6 +28,28 @@ logger = logging.getLogger(__name__)
 DUAL_PATH_TOTAL_TIMEOUT = 150.0
 
 
+def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(frame_motion_scores, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("sample_count", "quality_flags", "analysis_profile_hint", "selected"):
+        value = frame_motion_scores.get(key)
+        if value is not None:
+            summary[key] = value
+    scores = frame_motion_scores.get("scores")
+    if isinstance(scores, list):
+        numeric_scores = [float(score) for score in scores if isinstance(score, (int, float))]
+        summary["scores"] = numeric_scores[:20]
+        if numeric_scores:
+            summary["score_summary"] = {
+                "count": len(numeric_scores),
+                "max": round(max(numeric_scores), 4),
+                "min": round(min(numeric_scores), 4),
+                "avg": round(sum(numeric_scores) / len(numeric_scores), 4),
+            }
+    return summary
+
+
 @dataclass(slots=True)
 class DualPathResult:
     path_a: dict[str, Any]
@@ -48,6 +70,7 @@ async def analyze_frames_dual(
     provider_path_a: ActiveProviderConfig,
     provider_path_b: ActiveProviderConfig,
     *,
+    frame_motion_scores: dict[str, Any] | None = None,
     action_subtype: str | None = None,
     analysis_profile: str | None = None,
     profile_evidence: dict[str, Any] | None = None,
@@ -81,6 +104,7 @@ async def analyze_frames_dual(
     key_stems = extract_key_frame_stems(bio_data)
     bio_ctx = build_frame_bio_context(bio_data, frame_stems)
     jump_metrics_text = summarize_jump_metrics(bio_data)
+    motion_features = _motion_features_for_prompt(frame_motion_scores)
 
     async def _run_a() -> dict[str, Any]:
         return await analyze_path_a(
@@ -90,6 +114,8 @@ async def analyze_frames_dual(
             action_subtype=action_subtype,
             analysis_profile=analysis_profile,
             profile_evidence=profile_evidence,
+            bio_data=bio_data,
+            motion_features=motion_features,
             memory_context=memory_context,
             mode="video" if clip_path is not None else "frames",
             clip_path=clip_path,
@@ -122,6 +148,7 @@ async def analyze_frames_dual(
 
     validation = cross_validate(path_a_result, path_b_result)
     weights = compute_blend_weights(validation)
+    fusion_diagnostics = validation.fusion_diagnostics
 
     dual_meta: dict[str, Any] = {
         "overall_agreement_rate": validation.overall_agreement_rate,
@@ -133,6 +160,10 @@ async def analyze_frames_dual(
         "weight_b": weights[1],
         "path_b_subscores": (path_b_result or {}).get("subscores"),
         "path_b_failed": bool(path_b_result and path_b_result.get("error")),
+        "fusion_diagnostics": fusion_diagnostics,
+        "conflict_level": fusion_diagnostics.get("conflict_level", "none"),
+        "downgraded_reasons": fusion_diagnostics.get("downgraded_reasons", []),
+        "needs_human_review": bool(fusion_diagnostics.get("needs_human_review", False)),
     }
 
     return DualPathResult(
@@ -158,6 +189,10 @@ def dual_path_summary(result: DualPathResult) -> dict[str, Any]:
         "conflict_fields": validation.conflict_fields,
         "summary_text": validation.conflict_summary,
         "path_b_failed": result.dual_path_meta.get("path_b_failed", False),
+        "fusion_diagnostics": result.dual_path_meta.get("fusion_diagnostics", {}),
+        "conflict_level": result.dual_path_meta.get("conflict_level", "none"),
+        "downgraded_reasons": result.dual_path_meta.get("downgraded_reasons", []),
+        "needs_human_review": result.dual_path_meta.get("needs_human_review", False),
         "n_frames_a": len(result.path_a.get("frame_analysis") or []),
         "n_frames_b": (result.path_b or {}).get("n_frames", 0),
     }

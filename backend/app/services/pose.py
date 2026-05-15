@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.smoothing import smooth_keypoint_sequence
-from app.services.target_lock import extract_pose_target_bbox
+from app.services.target_lock import MANUAL_BBOX_MIN_SIDE, extract_pose_target_bbox
 
 
 logger = logging.getLogger(__name__)
@@ -133,8 +133,8 @@ def _crop_bounds(image_width: int, image_height: int, bbox: dict[str, float] | N
         return 0, 0, image_width, image_height
     x = int(max(0.0, min(1.0, float(bbox.get("x", 0.0)))) * image_width)
     y = int(max(0.0, min(1.0, float(bbox.get("y", 0.0)))) * image_height)
-    width = int(max(0.05, min(1.0, float(bbox.get("width", 1.0)))) * image_width)
-    height = int(max(0.05, min(1.0, float(bbox.get("height", 1.0)))) * image_height)
+    width = int(max(MANUAL_BBOX_MIN_SIDE, min(1.0, float(bbox.get("width", 1.0)))) * image_width)
+    height = int(max(MANUAL_BBOX_MIN_SIDE, min(1.0, float(bbox.get("height", 1.0)))) * image_height)
     right = min(image_width, x + max(width, 1))
     bottom = min(image_height, y + max(height, 1))
     return x, y, right, bottom
@@ -152,8 +152,8 @@ def _bbox_from_landmarks(landmarks: list[Any]) -> dict[str, float] | None:
     return {
         "x": round(left, 4),
         "y": round(top, 4),
-        "width": round(max(0.05, right - left), 4),
-        "height": round(max(0.05, bottom - top), 4),
+        "width": round(max(MANUAL_BBOX_MIN_SIDE, right - left), 4),
+        "height": round(max(MANUAL_BBOX_MIN_SIDE, bottom - top), 4),
     }
 
 
@@ -254,11 +254,13 @@ def _score_candidate(
     visibility_sum: float,
     previous_bbox: dict[str, float] | None,
     motion_bbox: dict[str, float] | None,
+    seed_bbox: dict[str, float] | None = None,
 ) -> float:
     if not bbox:
         return -1.0
     iou_score = _bbox_iou(previous_bbox, bbox)
     motion_overlap = _bbox_iou(motion_bbox, bbox)
+    seed_overlap = _bbox_iou(seed_bbox, bbox) if seed_bbox else 0.0
     center_x, center_y = _bbox_center(bbox)
     prev_x, prev_y = _bbox_center(previous_bbox if previous_bbox else motion_bbox)
     center_distance = abs(center_x - prev_x) + abs(center_y - prev_y)
@@ -266,14 +268,18 @@ def _score_candidate(
     scale_delta = abs(_bbox_area(bbox) - _bbox_area(previous_bbox or motion_bbox)) if (previous_bbox or motion_bbox) else 0.0
     scale_score = max(0.0, 1.0 - scale_delta * 6.0)
     visibility_score = min(1.0, visibility_sum / 20.0)
-    return round(
-        (iou_score * 0.34)
-        + (continuity_score * 0.22)
-        + (scale_score * 0.14)
-        + (visibility_score * 0.14)
-        + (motion_overlap * 0.16),
-        4,
+    base = (
+        (iou_score * 0.28)
+        + (continuity_score * 0.18)
+        + (scale_score * 0.10)
+        + (visibility_score * 0.12)
+        + (motion_overlap * 0.12)
+        + (seed_overlap * 0.20)
     )
+    # 手动锁定时，如果候选与用户框完全不重叠，强行降权——避免镜头里另一位滑行者抢走骨架。
+    if seed_bbox and seed_overlap <= 0.0:
+        base *= 0.25
+    return round(base, 4)
 
 
 def _resolve_tasks_landmarker() -> Any | None:
@@ -451,6 +457,7 @@ def extract_pose(
                         float(candidate.get("visibility_sum", 0.0)),
                         reference_bbox,
                         current_tracker_bbox or motion_bbox,
+                        seed_bbox=seed_bbox,
                     ),
                 }
                 for candidate in candidate_results

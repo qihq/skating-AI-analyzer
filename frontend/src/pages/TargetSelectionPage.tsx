@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { confirmTargetLock, fetchAnalysis, fetchTargetPreview, TargetBBox, TargetCandidate, TargetPreviewResponse } from "../api/client";
 
 const AUTO_CONFIRM_THRESHOLD = 0.72;
-const MIN_BBOX_SIZE = 0.05;
+const MIN_BBOX_SIZE = 0.02;
 
 function candidateLabel(candidate: TargetCandidate, isAuto: boolean) {
   return `${isAuto ? "自动推荐" : "候选"} · ${(candidate.confidence * 100).toFixed(0)}%`;
