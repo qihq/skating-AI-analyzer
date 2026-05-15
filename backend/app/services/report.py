@@ -35,6 +35,7 @@ SUBSCORE_WEIGHTS = {
 }
 
 HIGH_CONF_THRESHOLD = 0.5
+LOW_CONFIDENCE_NOTICE_THRESHOLD = 0.75
 LOW_CONFIDENCE_NOTICE = "低置信度帧较多，结果仅供参考。"
 REPORT_REQUEST_TIMEOUT_SECONDS = 120.0
 REPORT_JSON_MAX_ATTEMPTS = 3
@@ -210,41 +211,89 @@ def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> st
     )
 
 
+def _frame_confidence(frame: dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(float(frame.get("confidence", 0.0) or 0.0), 1.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_analyzable_frame(frame: dict[str, Any]) -> bool:
+    phase = str(frame.get("phase", "")).strip()
+    if phase and phase != "不可分析":
+        return True
+    for key in ("issues", "positives"):
+        if isinstance(frame.get(key), list) and frame.get(key):
+            return True
+    observations = frame.get("observations")
+    if not isinstance(observations, dict):
+        return False
+    uncertain_values = {"", "不可判断", "不适用", "unknown", "unavailable", "none", "n/a"}
+    return any(str(value).strip().lower() not in uncertain_values for value in observations.values())
+
+
+def _should_apply_low_confidence_notice(
+    *,
+    normalized_frames: list[dict[str, Any]],
+    low_conf_count: int,
+    all_low_confidence: bool,
+    fallback_used: bool,
+) -> bool:
+    if fallback_used or all_low_confidence:
+        return True
+    if not normalized_frames:
+        return False
+    low_conf_ratio = low_conf_count / len(normalized_frames)
+    return low_conf_ratio >= LOW_CONFIDENCE_NOTICE_THRESHOLD
+
+
 def summarize_vision_for_report(vision_structured: dict[str, Any]) -> dict[str, Any]:
     frames = vision_structured.get("frame_analysis", []) if isinstance(vision_structured, dict) else []
     normalized_frames = [frame for frame in frames if isinstance(frame, dict)]
-    high_conf_frames = [
-        frame for frame in normalized_frames if float(frame.get("confidence", 0.0) or 0.0) >= HIGH_CONF_THRESHOLD
-    ]
+    high_conf_frames = [frame for frame in normalized_frames if _frame_confidence(frame) >= HIGH_CONF_THRESHOLD]
     low_conf_count = len(normalized_frames) - len(high_conf_frames)
     fallback_to_all_frames = False
 
     if len(high_conf_frames) < 3:
         high_conf_frames = normalized_frames
-        low_conf_count = 0
         fallback_to_all_frames = True
 
     all_low_confidence = bool(normalized_frames) and all(
-        float(frame.get("confidence", 0.0) or 0.0) < HIGH_CONF_THRESHOLD for frame in normalized_frames
+        _frame_confidence(frame) < HIGH_CONF_THRESHOLD for frame in normalized_frames
+    )
+    analyzable_count = sum(1 for frame in normalized_frames if _is_analyzable_frame(frame))
+    fallback_used = bool(vision_structured.get("fallback_used")) if isinstance(vision_structured, dict) else False
+    apply_low_confidence_notice = _should_apply_low_confidence_notice(
+        normalized_frames=normalized_frames,
+        low_conf_count=low_conf_count,
+        all_low_confidence=all_low_confidence,
+        fallback_used=fallback_used,
     )
 
     summary: dict[str, Any] = {
         "reliable_frames": high_conf_frames,
         "low_confidence_frame_count": low_conf_count,
+        "low_confidence_frame_ratio": round(low_conf_count / len(normalized_frames), 3) if normalized_frames else 0.0,
         "overall_raw_text": vision_structured.get("overall_raw_text", "") if isinstance(vision_structured, dict) else "",
         "total_frame_count": len(normalized_frames),
+        "analyzable_frame_count": analyzable_count,
         "high_confidence_threshold": HIGH_CONF_THRESHOLD,
         "fallback_to_all_frames": fallback_to_all_frames,
         "all_low_confidence": all_low_confidence,
+        "apply_low_confidence_notice": apply_low_confidence_notice,
     }
     if isinstance(vision_structured, dict):
         summary["action_phase_summary"] = vision_structured.get("action_phase_summary", {})
         if vision_structured.get("data_quality_hint") is not None:
             summary["data_quality_hint"] = vision_structured.get("data_quality_hint")
+        if vision_structured.get("camera_view") is not None:
+            summary["camera_view"] = vision_structured.get("camera_view")
+        if vision_structured.get("conservative_policy") is not None:
+            summary["conservative_policy"] = vision_structured.get("conservative_policy")
         if vision_structured.get("fallback_reason") is not None:
             summary["fallback_reason"] = vision_structured.get("fallback_reason")
 
-    if low_conf_count > 0 or all_low_confidence:
+    if apply_low_confidence_notice:
         summary["reliability_note"] = LOW_CONFIDENCE_NOTICE
     elif fallback_to_all_frames:
         summary["reliability_note"] = "高置信度帧不足 3 帧，已退回使用全部帧。"
@@ -260,7 +309,8 @@ def _apply_low_confidence_notice(report: dict[str, Any], vision_summary: dict[st
 
     summary = str(report.get("summary", "")).strip()
     if reliability_note not in summary:
-        report["summary"] = f"{summary} {reliability_note}".strip()
+        summary = f"{summary} {reliability_note}".strip()
+    report["summary"] = summary
 
     if report.get("data_quality") == "good":
         report["data_quality"] = "partial"
@@ -432,9 +482,17 @@ async def generate_report(
         '  "data_quality": "good|partial|poor"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
-        "视觉置信规则：优先使用 reliable_frames 中的高置信帧观察。"
-        "如果 low_confidence_frame_count 大于 0，请在 summary 中明确提醒“低置信度帧较多，结果仅供参考”，"
-        "并避免过度肯定的结论。如果 fallback_to_all_frames 为 true，请指出高置信帧不足。\n\n"
+        "评分对象说明：本系统主要服务青少年/儿童学员。若画面中可见学员体型明显偏小或处于学习阶段，"
+        "请以该学员当前水平的合理基准给分，而不是以成年高水平选手为参照——"
+        "完成 70-80 分表示该技术动作对其年龄段而言达成度尚可；"
+        "只有出现明显技术错误或安全风险才扣到 60 分以下。同时仍按 ISU 体系指出真实存在的技术问题。\n"
+        "视觉置信规则：优先使用 reliable_frames 中的高置信帧观察；"
+        "当 fallback_to_all_frames 为 true 但 reliable_frames 仍包含可分析动作、问题或优点时，必须继续给出可执行的技术结论。\n"
+        "质量表达要求：不要让 summary 只剩画质、视角或骨架不确定性。"
+        "summary 必须先说明可确认的动作阶段、主要技术问题和训练方向；"
+        "质量限制只作为补充说明。只有 apply_low_confidence_notice 为 true 时，才在 summary 末尾加入“低置信度帧较多，结果仅供参考”。\n"
+        "当 data_quality_hint 为 partial/poor 或 camera_view 受限时，请区分“可确认的动作问题”和“不可确认的细节”；"
+        "不可确认的刃型、周数或完成质量可以写入 issues，但不能替代训练建议。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
         + dual_block

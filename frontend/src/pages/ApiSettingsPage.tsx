@@ -14,6 +14,7 @@ import {
   VisionVoteConfig,
 } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
+import ProviderMetricsPanel from "../components/ProviderMetricsPanel";
 
 type ProviderTab =
   | "deepseek"
@@ -986,6 +987,8 @@ export default function ApiSettingsPage() {
           })}
         </div>
       </section>
+
+      <ProviderMetricsPanel />
     </div>
   );
 }

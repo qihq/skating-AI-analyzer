@@ -59,16 +59,16 @@ DEFAULT_PROFILE_WINDOW_SIZES: dict[str, float | None] = {
     "spiral": 6.0,
 }
 DEFAULT_PROFILE_FRAME_RATES: dict[str, int] = {
-    "jump": 10,
-    "spin": 8,
-    "spiral": 6,
-    "step": 5,
+    "jump": 16,
+    "spin": 10,
+    "spiral": 8,
+    "step": 6,
 }
 DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
-    "jump": 32,
-    "spin": 24,
-    "spiral": 16,
-    "step": 20,
+    "jump": 48,
+    "spin": 36,
+    "spiral": 24,
+    "step": 28,
 }
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
@@ -778,6 +778,24 @@ def _motion_scores_from_thumbs(thumbs: Sequence[Path]) -> list[float]:
     return scores
 
 
+def _smooth_motion_scores(scores: Sequence[float], window: int = 3) -> list[float]:
+    """Apply a small moving-average to motion scores to suppress noise spikes.
+
+    Why: 单帧抖动/噪声会让 peak 选错；3 帧均值能稳定起跳/落冰瞬间的位置，
+    使切帧密度更贴合真实动作节奏。
+    """
+    if window <= 1 or not scores:
+        return [float(value) for value in scores]
+    half = window // 2
+    out: list[float] = []
+    for index in range(len(scores)):
+        left = max(0, index - half)
+        right = min(len(scores), index + half + 1)
+        window_slice = scores[left:right]
+        out.append(sum(float(value) for value in window_slice) / max(len(window_slice), 1))
+    return out
+
+
 def _top_local_peak_indices(scores: Sequence[float], limit: int = 2) -> list[int]:
     """
     Return the strongest local motion peaks.
@@ -818,8 +836,10 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
     if total_frames <= sample_count:
         return list(range(total_frames))
 
-    # 设计说明: top-2 局部运动峰值通常覆盖起跳/落冰瞬间；先锁定 ±1 帧，剩余配额再按运动密度分配。
-    selected: set[int] = _peak_neighborhood_indices(scores, radius=1, limit=2)
+    smoothed = _smooth_motion_scores(scores, window=3)
+    # 设计说明: top-3 局部运动峰值通常覆盖准备/起跳/落冰瞬间；
+    # 先锁定 ±2 帧的邻域保护区，剩余配额再按运动密度分配。
+    selected: set[int] = _peak_neighborhood_indices(smoothed, radius=2, limit=3)
     if len(selected) >= sample_count:
         return sorted(selected)[:sample_count]
 
@@ -837,7 +857,7 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
         if end <= start:
             end = min(start + 1, total_frames)
         segment_ranges.append((start, end))
-        segment_weights.append(sum(scores[start:end]) + 0.001)
+        segment_weights.append(sum(smoothed[start:end]) + 0.001)
 
     total_weight = sum(segment_weights)
     extra = [0 for _ in range(segment_count)]
@@ -854,7 +874,7 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
         if quota == 0:
             continue
         segment_indices = list(range(start, end))
-        segment_indices.sort(key=lambda index: scores[index], reverse=True)
+        segment_indices.sort(key=lambda index: smoothed[index], reverse=True)
         for index in segment_indices:
             if len([item for item in selected if start <= item < end]) >= quota:
                 break
@@ -869,10 +889,10 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
 
     if len(selected) > sample_count:
         selected_list = sorted(selected)
-        protected = _peak_neighborhood_indices(scores, radius=1, limit=2)
+        protected = _peak_neighborhood_indices(smoothed, radius=2, limit=3)
         overflow = len(selected_list) - sample_count
         removable = [index for index in selected_list if index not in protected]
-        for index in sorted(removable, key=lambda item: scores[item])[:overflow]:
+        for index in sorted(removable, key=lambda item: smoothed[item])[:overflow]:
             selected.remove(index)
 
     return sorted(selected)[:sample_count]

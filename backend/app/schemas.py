@@ -117,6 +117,19 @@ class AnalysisDetail(BaseModel):
     updated_at: datetime
 
 
+class AnalysisAutoEvalSnapshot(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    analysis_id: str
+    created_at: datetime
+    pipeline_version: str | None = None
+    analysis_profile: str | None = None
+    action_type: str
+    auto_eval: dict[str, Any] | None = None
+    key_frame_candidates: dict[str, Any] | None = None
+    fusion_diagnostics: list[str] = Field(default_factory=list)
+
+
 class NoteUpdateRequest(BaseModel):
     note: str | None = None
 
@@ -383,6 +396,16 @@ class ProviderPublic(BaseModel):
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ProviderMetricPublic(BaseModel):
+    provider: str
+    sample_count: int
+    json_valid_rate: float
+    avg_effective_weight: float
+    conflict_rate: float
+    failure_rate: float
+    recommendation: str | None = None
 
 
 class ProviderTestResponse(BaseModel):

@@ -19,6 +19,7 @@ from app.services.report import clean_json_text
 from app.services.snowball import build_memory_context
 from app.services.video import FramePayload
 from app.services.vision_fusion import fuse_vision_results_weighted
+from app.services.vision_quality import apply_low_quality_policy
 from app.services.vision_prompt_templates import build_specialized_vision_prompt
 
 
@@ -238,6 +239,12 @@ def normalize_vision_payload(
         normalized_payload["fallback_used"] = bool(payload.get("fallback_used"))
     if isinstance(payload.get("quality_flags"), list):
         normalized_payload["quality_flags"] = [str(flag) for flag in payload.get("quality_flags", []) if flag]
+    if payload.get("pose_visibility") is not None:
+        try:
+            normalized_payload["pose_visibility"] = max(0.0, min(float(payload.get("pose_visibility")), 1.0))
+        except (TypeError, ValueError):
+            pass
+
     return normalized_payload
 
 
@@ -530,6 +537,15 @@ def _merge_vision_results(
     }
 
 
+def _attach_quality_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    return apply_low_quality_policy(
+        payload,
+        data_quality_hint=payload.get("data_quality_hint"),
+        camera_view=payload.get("camera_view"),
+        pose_visibility=payload.get("pose_visibility"),
+    )
+
+
 async def _single_frames_vision_call(
     provider: Any,
     *,
@@ -613,7 +629,7 @@ async def analyze_frames(
     except Exception as exc:  # noqa: BLE001
         failure = classify_ai_failure(exc).code.value
         logger.warning("Vision provider unavailable, using fallback: %s", exc)
-        return normalize_vision_payload(_fallback_unavailable_payload(frame_payloads, failure), frame_payloads)
+        return _attach_quality_diagnostics(normalize_vision_payload(_fallback_unavailable_payload(frame_payloads, failure), frame_payloads))
 
     system_prompt = VISION_SYSTEM_PROMPT if not memory_context else f"{VISION_SYSTEM_PROMPT}\n\n{memory_context}"
     max_tokens = min(8000, 400 + len(frame_payloads) * 250)
@@ -741,7 +757,7 @@ async def analyze_frames(
                 logger.warning("Vision native video provider failed, continuing with remaining slots: %s", result)
 
         if len(video_votes) == 1:
-            normalized = video_votes[0]
+            normalized = _attach_quality_diagnostics(video_votes[0])
             flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []
             normalized["quality_flags"] = flags
             normalized["vision_mode"] = "video"
@@ -757,7 +773,7 @@ async def analyze_frames(
             }
             return normalized
         if len(video_votes) > 1:
-            normalized = _merge_vision_results(video_votes, frame_payloads, analysis_profile, bio_data)
+            normalized = _attach_quality_diagnostics(_merge_vision_results(video_votes, frame_payloads, analysis_profile, bio_data))
             normalized["vote_metadata"]["n_votes_requested"] = len(providers)
             normalized["vision_mode"] = "video_voted"
             return normalized
@@ -792,13 +808,15 @@ async def analyze_frames(
             if isinstance(first_error, json.JSONDecodeError)
             else classify_ai_failure(first_error).code.value
         )
-        return normalize_vision_payload(
-            _fallback_unavailable_payload(frame_payloads, reason),
-            frame_payloads,
+        return _attach_quality_diagnostics(
+            normalize_vision_payload(
+                _fallback_unavailable_payload(frame_payloads, reason),
+                frame_payloads,
+            )
         )
 
     if len(valid_votes) == 1:
-        normalized = valid_votes[0]
+        normalized = _attach_quality_diagnostics(valid_votes[0])
         normalized["vote_metadata"] = {
             "n_votes_requested": vote_count,
             "n_votes_valid": 1,
@@ -810,7 +828,7 @@ async def analyze_frames(
             },
         }
     else:
-        normalized = _merge_vision_results(valid_votes, frame_payloads, analysis_profile, bio_data)
+        normalized = _attach_quality_diagnostics(_merge_vision_results(valid_votes, frame_payloads, analysis_profile, bio_data))
         normalized["vote_metadata"]["n_votes_requested"] = vote_count
     if mode == "video" and clip_path is not None:
         flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []

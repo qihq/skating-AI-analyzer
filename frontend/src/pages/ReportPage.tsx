@@ -22,6 +22,7 @@ import {
   SkillNode,
 } from "../api/client";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
+import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
@@ -533,6 +534,7 @@ export default function ReportPage() {
   const [hideRetryAfterMissingVideo, setHideRetryAfterMissingVideo] = useState(false);
   const [isRetryConfirmOpen, setIsRetryConfirmOpen] = useState(false);
   const [isRetryPinOpen, setIsRetryPinOpen] = useState(false);
+  const [retryMode, setRetryMode] = useState<"analysis" | "report">("analysis");
   const [isSharing, setIsSharing] = useState(false);
   const canUseNativeShare =
     typeof window !== "undefined" &&
@@ -856,10 +858,11 @@ export default function ReportPage() {
     if (!id) {
       return;
     }
+    const isReportOnlyRetry = retryMode === "report";
     setIsRetryingAnalysis(true);
     setError(null);
     try {
-      await retryAnalysis(id);
+      await retryAnalysis(id, isReportOnlyRetry ? { retryFrom: "report" } : undefined);
       setPose(null);
       setPlanId(null);
       startTransition(() => {
@@ -878,7 +881,7 @@ export default function ReportPage() {
         );
       });
       setHideRetryAfterMissingVideo(false);
-      showNotice("已重新提交，请稍候");
+      showNotice(isReportOnlyRetry ? "已提交报告重生成，请稍候" : "已重新提交，请稍候");
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
         if (requestError.response?.status === 404) {
@@ -937,11 +940,12 @@ export default function ReportPage() {
     }
   };
 
-  const requestRetryAnalysis = () => {
+  const requestRetryAnalysis = (mode: "analysis" | "report" = "analysis") => {
     if (!deferredAnalysis || isAnalysisInProgress(deferredAnalysis.status) || isRetryingAnalysis) {
       return;
     }
 
+    setRetryMode(mode);
     if (isParentMode) {
       setIsRetryConfirmOpen(true);
       return;
@@ -1001,11 +1005,19 @@ export default function ReportPage() {
               </Link>
               <button
                 type="button"
-                onClick={requestRetryAnalysis}
+                onClick={() => requestRetryAnalysis("report")}
                 disabled={isRetryingAnalysis}
                 className="min-h-[44px] rounded-full border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-600 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isRetryingAnalysis ? "提交中..." : "🔄 再次分析"}
+                {isRetryingAnalysis ? "提交中..." : "🔄 重新生成报告"}
+              </button>
+              <button
+                type="button"
+                onClick={() => requestRetryAnalysis("analysis")}
+                disabled={isRetryingAnalysis}
+                className="min-h-[44px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                完整重新分析
               </button>
             </>
           ) : null}
@@ -1038,7 +1050,7 @@ export default function ReportPage() {
             isParentMode={isParentMode}
             isRetrying={isRetryingAnalysis}
             hideRetry={hideRetryAfterMissingVideo}
-            onRetry={requestRetryAnalysis}
+            onRetry={() => requestRetryAnalysis("analysis")}
             onReupload={() =>
               navigate("/review", {
                 state: deferredAnalysis.skater_id ? { skaterId: deferredAnalysis.skater_id } : undefined,
@@ -1116,6 +1128,8 @@ export default function ReportPage() {
               <ReportCard title="总体评价" eyebrow="Summary">
                 <p className="max-w-3xl text-base leading-8 text-slate-600">{deferredAnalysis.report?.summary ?? "暂无总体评价。"}</p>
               </ReportCard>
+
+              {isParentMode ? <AnalysisQualityPanel analysis={deferredAnalysis} /> : null}
 
               {subscores || reportDataQuality !== "good" ? (
                 <ReportCard title="分项评分" eyebrow="Subscores">
@@ -1333,7 +1347,8 @@ export default function ReportPage() {
       {isRetryConfirmOpen ? (
         <RetryAnalysisConfirmSheet
           isSubmitting={isRetryingAnalysis}
-          retryFromStage={deferredAnalysis?.retry_from_stage}
+          retryFromStage={retryMode === "report" ? "report" : deferredAnalysis?.retry_from_stage}
+          mode={retryMode}
           onClose={() => {
             if (!isRetryingAnalysis) {
               setIsRetryConfirmOpen(false);

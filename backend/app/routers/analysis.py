@@ -21,6 +21,7 @@ from app.database import AsyncSessionLocal, UPLOADS_DIR, get_session
 from app.models import Analysis, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
     AnalysisCompareResponse,
+    AnalysisAutoEvalSnapshot,
     AnalysisDetail,
     AnalysisListItem,
     AnalysisRetryResponse,
@@ -196,6 +197,42 @@ def _count_list(value: object) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
+DUAL_PATH_RAW_PREVIEW_CHARS = 2400
+DUAL_PATH_FRAME_PREVIEW_LIMIT = 12
+
+
+def _truncate_text(value: object, limit: int = DUAL_PATH_RAW_PREVIEW_CHARS) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...<truncated {len(text) - limit} chars>"
+
+
+def _summarize_path_frames(frames: object, limit: int = DUAL_PATH_FRAME_PREVIEW_LIMIT) -> list[dict[str, Any]]:
+    if not isinstance(frames, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for frame in frames[:limit]:
+        if not isinstance(frame, dict):
+            continue
+        item = {
+            "frame_id": frame.get("frame_id"),
+            "phase": frame.get("phase"),
+            "confidence": frame.get("confidence"),
+        }
+        issues = frame.get("issues")
+        if isinstance(issues, list) and issues:
+            item["issues"] = [str(value) for value in issues[:2]]
+        positives = frame.get("positives")
+        if isinstance(positives, list) and positives:
+            item["positives"] = [str(value) for value in positives[:2]]
+        bio_observations = frame.get("bio_observations")
+        if isinstance(bio_observations, dict) and bio_observations:
+            item["bio_observations"] = bio_observations
+        out.append(item)
+    return out
+
+
 def _build_dual_path_log_detail(
     *,
     path_a: dict[str, Any] | None,
@@ -221,6 +258,9 @@ def _build_dual_path_log_detail(
             "frame_analysis_count": _count_list(path_a_data.get("frame_analysis")),
             "phase_segments_count": _count_list(path_a_data.get("phase_segments")),
             "path_desc": path_a_data.get("path_desc"),
+            "action_phase_summary": path_a_data.get("action_phase_summary"),
+            "overall_raw_text": _truncate_text(path_a_data.get("overall_raw_text")),
+            "frame_preview": _summarize_path_frames(path_a_data.get("frame_analysis")),
         },
         "path_b": {
             "provider": _provider_label(provider_path_b),
@@ -232,6 +272,10 @@ def _build_dual_path_log_detail(
             "failed": bool(path_b_data.get("error")),
             "error": path_b_data.get("error"),
             "subscores": path_b_data.get("subscores"),
+            "action_phase_summary": path_b_data.get("action_phase_summary"),
+            "top_issues": path_b_data.get("top_issues"),
+            "top_positives": path_b_data.get("top_positives"),
+            "frame_preview": _summarize_path_frames(path_b_data.get("frame_analysis")),
         },
         "cross_validation": {
             "recommended_path": meta.get("recommended_path"),
@@ -243,7 +287,14 @@ def _build_dual_path_log_detail(
             "weight_b": meta.get("weight_b"),
         },
     }
-    return json.dumps(detail, ensure_ascii=False, indent=2)
+    rendered = json.dumps(detail, ensure_ascii=False, indent=2)
+    logger.info(
+        "Dual-path payload | provider_a=%s provider_b=%s\n%s",
+        detail["path_a"]["provider"],
+        detail["path_b"]["provider"],
+        rendered,
+    )
+    return rendered
 
 
 def _auto_eval_failure_payload(exc: Exception) -> dict[str, Any]:
@@ -439,6 +490,95 @@ async def _persist_processing_timings(analysis_id: str, timings: dict[str, float
         logger.exception("Analysis %s failed to persist processing timings", analysis_id)
 
 
+async def _regenerate_report_from_saved_analysis(
+    analysis_id: str,
+    timings: dict[str, float],
+    total_start: float,
+) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            if not isinstance(analysis.vision_structured, dict):
+                raise RuntimeError("report-only retry requires saved vision_structured")
+            if not isinstance(analysis.bio_data, dict):
+                raise RuntimeError("report-only retry requires saved bio_data")
+            action_type = analysis.action_type
+            skater_id = analysis.skater_id
+            vision_structured = analysis.vision_structured
+            bio_data = analysis.bio_data
+            dual_path_meta = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+
+        await _append_analysis_log(
+            analysis_id,
+            stage="report",
+            level="info",
+            message="开始重新生成训练报告，复用已保存的视觉和生物力学结果。",
+            status_value="generating_report",
+            retry_from_stage="report",
+        )
+        await _set_analysis_status(analysis_id, "generating_report")
+
+        report_start = time.monotonic()
+        report = await generate_report(
+            action_type,
+            vision_structured,
+            bio_data,
+            skater_id,
+            dual_path_meta=dual_path_meta,
+        )
+        force_score = calculate_force_score(report)
+        timings["report_s"] = _elapsed_seconds(report_start)
+        timings["total_s"] = _elapsed_seconds(total_start)
+
+        await _append_analysis_log(
+            analysis_id,
+            stage="report",
+            level="info",
+            message=f"报告重新生成完成，Force Score={force_score}。",
+            elapsed_s=timings["report_s"],
+            timings=timings,
+        )
+
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return
+            analysis.report = report
+            analysis.force_score = force_score
+            analysis.processing_timings = dict(timings)
+            analysis.pipeline_version = CURRENT_PIPELINE_VERSION
+            analysis.status = "completed"
+            analysis.error_code = None
+            analysis.error_detail = None
+            analysis.error_message = None
+            analysis.retry_from_stage = None
+            await auto_update_skill_progress(analysis_id, session)
+            if analysis.skater_id:
+                await sync_skater_progress(session, analysis.skater_id)
+            await session.commit()
+            if analysis.skater_id:
+                try:
+                    await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
+
+        _log_analysis_timings(analysis_id, timings, context="report_only_retry")
+        await _append_analysis_log(
+            analysis_id,
+            stage="pipeline",
+            level="info",
+            message="报告重生成流程已完成。",
+            elapsed_s=timings["total_s"],
+            timings=timings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        failure = classify_ai_failure(exc)
+        timings["total_s"] = _elapsed_seconds(total_start)
+        await _mark_analysis_failed(analysis_id, failure.code, failure.detail, stage="report", timings=timings)
+
+
 def _is_retry_stage(value: str | None) -> bool:
     return value in PIPELINE_STAGES
 
@@ -509,6 +649,10 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             saved_action_window_end = float(analysis.action_window_end or 0.0)
             saved_source_fps = float(analysis.source_fps or 30.0)
             saved_is_slow_motion = bool(analysis.is_slow_motion)
+
+        if retry_from_stage == "report":
+            await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
+            return
 
         await _append_analysis_log(
             analysis_id,
@@ -1311,6 +1455,40 @@ def _detail_from_analysis(
     )
 
 
+def _fusion_diagnostics_summary(cross_validation: dict[str, Any] | None) -> list[str]:
+    if not isinstance(cross_validation, dict):
+        return []
+    diagnostics = cross_validation.get("fusion_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return []
+
+    summary: list[str] = []
+    for key in ("conflict_level", "downgraded_reasons", "needs_human_review", "key_frame_order_invalid"):
+        value = diagnostics.get(key)
+        if value in (None, [], {}, False):
+            continue
+        if isinstance(value, list):
+            summary.extend(str(item) for item in value if item)
+        else:
+            summary.append(f"{key}={value}")
+    return summary
+
+
+def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSnapshot:
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
+    cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+    return AnalysisAutoEvalSnapshot(
+        analysis_id=analysis.id,
+        created_at=analysis.created_at,
+        pipeline_version=analysis.pipeline_version,
+        analysis_profile=analysis.analysis_profile,
+        action_type=analysis.action_type,
+        auto_eval=cross_validation.get("auto_eval") if cross_validation else None,
+        key_frame_candidates=bio_data.get("key_frame_candidates") if bio_data else None,
+        fusion_diagnostics=_fusion_diagnostics_summary(cross_validation),
+    )
+
+
 def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
     safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
     frame_urls = {
@@ -1927,6 +2105,29 @@ async def get_progress(
     return ProgressResponse(points=points, stats=stats)
 
 
+@router.get("/auto-eval/snapshots", response_model=list[AnalysisAutoEvalSnapshot])
+async def list_auto_eval_snapshots(
+    limit: int = Query(default=50, ge=1, le=500),
+    analysis_profile: str | None = Query(default=None),
+    action_type: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisAutoEvalSnapshot]:
+    limit_value = limit if isinstance(limit, int) else 50
+    analysis_profile_value = analysis_profile if isinstance(analysis_profile, str) and analysis_profile.strip() else None
+    action_type_value = action_type if isinstance(action_type, str) and action_type.strip() else None
+
+    query = select(Analysis).where(Analysis.status == "completed")
+    if analysis_profile_value:
+        query = query.where(Analysis.analysis_profile == analysis_profile_value)
+    if action_type_value:
+        query = query.where(Analysis.action_type == action_type_value)
+    query = query.order_by(Analysis.created_at.desc()).limit(limit_value)
+
+    result = await session.execute(query)
+    analyses = list(result.scalars().all())
+    return [_auto_eval_snapshot_from_analysis(analysis) for analysis in analyses]
+
+
 @router.post("/{analysis_id}/plan", response_model=TrainingPlanDetail)
 async def create_training_plan(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     analysis = await session.get(Analysis, analysis_id)
@@ -2059,6 +2260,8 @@ async def retry_analysis(
         retry_from_stage = None
     if retry_from_stage == 'report' and not isinstance(analysis.vision_structured, dict):
         retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) and isinstance(analysis.bio_data, dict) else None
+    if retry_from_stage == 'report' and not isinstance(analysis.bio_data, dict):
+        retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) else None
 
     upload_dir = UPLOADS_DIR / analysis_id
     source_video_path = (
@@ -2069,7 +2272,7 @@ async def retry_analysis(
         if upload_dir.exists()
         else None
     )
-    if source_video_path is None:
+    if source_video_path is None and retry_from_stage != 'report':
         raise HTTPException(status_code=404, detail="????????????????")
 
     analysis.status = "pending"

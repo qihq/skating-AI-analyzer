@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.services.target_lock import MANUAL_BBOX_MIN_SIDE
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +19,16 @@ def _normalize_bbox(bbox: dict[str, Any]) -> dict[str, float]:
     height = float(bbox.get("height", bbox.get("h", 0.0)))
     x = _clamp(float(bbox.get("x", 0.0)), 0.0, 1.0)
     y = _clamp(float(bbox.get("y", 0.0)), 0.0, 1.0)
-    width = _clamp(width, 0.05, 1.0 - x)
-    height = _clamp(height, 0.05, 1.0 - y)
+    width = _clamp(width, MANUAL_BBOX_MIN_SIDE, 1.0 - x)
+    height = _clamp(height, MANUAL_BBOX_MIN_SIDE, 1.0 - y)
     return {"x": round(x, 4), "y": round(y, 4), "width": round(width, 4), "height": round(height, 4)}
 
 
 def _to_pixel_bbox(bbox: dict[str, float], image_width: int, image_height: int) -> tuple[int, int, int, int]:
     x = int(_clamp(bbox["x"], 0.0, 1.0) * image_width)
     y = int(_clamp(bbox["y"], 0.0, 1.0) * image_height)
-    width = int(_clamp(bbox["width"], 0.05, 1.0) * image_width)
-    height = int(_clamp(bbox["height"], 0.05, 1.0) * image_height)
+    width = int(_clamp(bbox["width"], MANUAL_BBOX_MIN_SIDE, 1.0) * image_width)
+    height = int(_clamp(bbox["height"], MANUAL_BBOX_MIN_SIDE, 1.0) * image_height)
     return x, y, max(width, 1), max(height, 1)
 
 

@@ -7,6 +7,7 @@ VALID_DATA_QUALITY_HINTS = {"good", "partial", "poor"}
 UNCERTAIN_BLADE_EDGES = {"", "不可判断", "不适用", "unknown", "unavailable", "none", "n/a"}
 SPECIFIC_BLADE_EDGES = {"外刃", "内刃", "平刃", "outside", "inside", "flat", "outside_edge", "inside_edge", "flat_edge"}
 HIGH_CONFIDENCE_THRESHOLD = 0.75
+LOW_QUALITY_NOTICE = "视频质量有限，建议保守解读。"
 
 
 def _to_float(value: Any) -> float | None:
@@ -52,6 +53,67 @@ def _frame_completeness(frame: Any) -> float:
         isinstance(frame.get("observations"), dict),
     ]
     return sum(1 for item in checks if item) / len(checks)
+
+
+def apply_low_quality_policy(
+    vision_payload: dict[str, Any] | None,
+    *,
+    data_quality_hint: str | None = None,
+    camera_view: str | None = None,
+    pose_visibility: float | None = None,
+) -> dict[str, Any]:
+    """
+    Attach conservative diagnostics for poor or partial video inputs.
+
+    The function never mutates the input payload and intentionally does not
+    rewrite frame observations or confidence values. Downstream consumers can
+    use the flags for weighting and display without losing usable evidence.
+    """
+    payload = dict(vision_payload or {})
+    quality_hint = str(data_quality_hint or payload.get("data_quality_hint", "")).strip().lower()
+    camera_view_value = str(camera_view or payload.get("camera_view", "")).strip().lower()
+    pose_visibility_value = _to_float(pose_visibility if pose_visibility is not None else payload.get("pose_visibility"))
+
+    is_low_quality = quality_hint in {"poor", "partial"} or (
+        pose_visibility_value is not None and pose_visibility_value < 0.65
+    )
+    if not is_low_quality:
+        return payload
+
+    payload["quality_flags"] = _merge_quality_flags(
+        payload.get("quality_flags"),
+        [
+            "vision_low_quality_conservative_policy",
+            "vision_low_quality_diagnostic_only",
+        ],
+    )
+    payload["conservative_policy"] = {
+        "applied": True,
+        "data_quality_hint": quality_hint or None,
+        "camera_view": camera_view_value or None,
+        "pose_visibility": round(pose_visibility_value, 3) if pose_visibility_value is not None else None,
+        "notice": LOW_QUALITY_NOTICE,
+        "mode": "diagnostic_only",
+    }
+    if quality_hint == "poor":
+        payload["quality_flags"] = _merge_quality_flags(
+            payload.get("quality_flags"),
+            ["vision_low_quality_poor"],
+        )
+    elif quality_hint == "partial":
+        payload["quality_flags"] = _merge_quality_flags(
+            payload.get("quality_flags"),
+            ["vision_low_quality_partial"],
+        )
+    return payload
+
+
+def _merge_quality_flags(existing: Any, additions: list[str]) -> list[str]:
+    flags = [str(flag) for flag in existing if isinstance(existing, list) and flag] if isinstance(existing, list) else []
+    for flag in additions:
+        if flag not in flags:
+            flags.append(flag)
+    return flags
 
 
 def evaluate_vision_payload_quality(vision_payload: dict[str, Any]) -> dict[str, Any]:
@@ -111,4 +173,16 @@ def evaluate_vision_payload_quality(vision_payload: dict[str, Any]) -> dict[str,
         "json_validity_factor": round(_clamp(json_validity_factor), 3),
         "warnings": _dedupe(warnings),
         "schema_completeness": schema_completeness,
+    }
+
+
+def build_low_quality_policy_summary(vision_payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = vision_payload if isinstance(vision_payload, dict) else {}
+    hint = str(payload.get("data_quality_hint", "")).strip().lower()
+    return {
+        "applied": hint in {"poor", "partial"},
+        "data_quality_hint": hint or None,
+        "camera_view": str(payload.get("camera_view", "")).strip().lower() or None,
+        "pose_visibility": _to_float(payload.get("pose_visibility")),
+        "notice": LOW_QUALITY_NOTICE if hint in {"poor", "partial"} else "",
     }

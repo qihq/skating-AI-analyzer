@@ -37,6 +37,31 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["fallback_to_all_frames"])
         self.assertIn("仅供参考", summary["reliability_note"])
 
+    def test_summarize_vision_for_report_does_not_warn_for_mixed_partial_quality(self) -> None:
+        vision_structured = {
+            "data_quality_hint": "partial",
+            "camera_view": "side",
+            "frame_analysis": [
+                {
+                    "frame_id": f"frame_{index:04d}",
+                    "phase": "起跳" if index < 4 else "落冰",
+                    "observations": {"knee_bend": "不足"},
+                    "issues": ["起跳膝关节准备不足"],
+                    "positives": [],
+                    "confidence": confidence,
+                }
+                for index, confidence in enumerate([0.82, 0.76, 0.68, 0.42, 0.37], start=1)
+            ],
+            "overall_raw_text": "可见起跳和落冰阶段。",
+        }
+
+        summary = summarize_vision_for_report(vision_structured)
+
+        self.assertEqual(len(summary["reliable_frames"]), 3)
+        self.assertEqual(summary["low_confidence_frame_count"], 2)
+        self.assertFalse(summary["apply_low_confidence_notice"])
+        self.assertNotIn("仅供参考", summary["reliability_note"])
+
     async def test_invalid_vision_json_falls_back_and_marks_report_poor(self) -> None:
         frame_payloads = [
             FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA"),
