@@ -34,7 +34,7 @@ SUBSCORE_WEIGHTS = {
     "core_stability": 0.10,
 }
 
-HIGH_CONF_THRESHOLD = 0.5
+HIGH_CONF_THRESHOLD = 0.3
 LOW_CONFIDENCE_NOTICE = "低置信度帧较多，结果仅供参考。"
 REPORT_REQUEST_TIMEOUT_SECONDS = 120.0
 REPORT_JSON_MAX_ATTEMPTS = 3
@@ -432,9 +432,8 @@ async def generate_report(
         '  "data_quality": "good|partial|poor"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
-        "视觉置信规则：优先使用 reliable_frames 中的高置信帧观察。"
-        "如果 low_confidence_frame_count 大于 0，请在 summary 中明确提醒“低置信度帧较多，结果仅供参考”，"
-        "并避免过度肯定的结论。如果 fallback_to_all_frames 为 true，请指出高置信帧不足。\n\n"
+        "分析要求：基于 available frames 生成实质性分析，给出具体的技术问题和改进建议。"
+        "如果数据确实不足，在 data_quality 字段中标记即可，不必在 summary 中反复强调数据质量问题。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
         + dual_block
