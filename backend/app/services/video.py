@@ -65,10 +65,10 @@ DEFAULT_PROFILE_FRAME_RATES: dict[str, int] = {
     "step": 6,
 }
 DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
-    "jump": 48,
-    "spin": 36,
-    "spiral": 24,
-    "step": 28,
+    "jump": 32,
+    "spin": 24,
+    "spiral": 16,
+    "step": 20,
 }
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
