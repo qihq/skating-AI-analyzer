@@ -292,6 +292,9 @@ def summarize_vision_for_report(vision_structured: dict[str, Any]) -> dict[str, 
             summary["conservative_policy"] = vision_structured.get("conservative_policy")
         if vision_structured.get("fallback_reason") is not None:
             summary["fallback_reason"] = vision_structured.get("fallback_reason")
+        pure_vision_subscores = vision_structured.get("pure_vision_subscores")
+        if isinstance(pure_vision_subscores, dict) and pure_vision_subscores:
+            summary["pure_vision_subscores"] = pure_vision_subscores
 
     if apply_low_confidence_notice:
         summary["reliability_note"] = LOW_CONFIDENCE_NOTICE
@@ -482,6 +485,9 @@ async def generate_report(
         '  "data_quality": "good|partial|poor"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
+        "视觉评分参考：视觉摘要中的 pure_vision_subscores（0-1 小数）是纯视觉分析的评分，"
+        "请将其乘以 100 作为重要参考，与骨骼几何指标综合判断。"
+        "当骨骼数据缺失时，以视觉评分为主要依据。\n"
         "当 jump_metrics 中某项指标为 null 时，说明该指标无法从视频中测量，不代表技术差——"
         "请根据可见的动作阶段和姿态给分，不要因为数据缺失而扣分。"
         "例如 rotation_axis 指标缺失时，应根据空中姿态判断，给 50-60 分作为中性基线。\n"
