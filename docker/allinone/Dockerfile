@@ -27,7 +27,8 @@ COPY --from=frontend-build /build/frontend/dist /usr/share/nginx/html
 COPY docker/allinone/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/allinone/start.sh /start.sh
 
-RUN mkdir -p /data/uploads /data/archive /backups /var/log/nginx \
+RUN sed -i 's/\r$//' /start.sh \
+    && mkdir -p /data/uploads /data/archive /backups /var/log/nginx \
     && rm -f /etc/nginx/sites-enabled/default \
     && rm -f /etc/nginx/sites-available/default \
     && chmod +x /start.sh
