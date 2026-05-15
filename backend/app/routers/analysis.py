@@ -973,6 +973,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning('Analysis %s action-window clip failed; Path A will use frames: %s', analysis_id, exc)
+                # Build memory context: long-term memory + user note
+                from app.services.snowball import build_memory_context
+                memory_context = await build_memory_context(skater_id)
+                if analysis.note:
+                    note_block = f"---\n用户上传时的备注：{analysis.note}\n---"
+                    memory_context = f"{memory_context}\n\n{note_block}" if memory_context else note_block
+
                 dual = await analyze_frames_dual(
                     action_type=action_type,
                     frame_paths=sampled_frames,
@@ -985,7 +992,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
-                    memory_context="",
+                    memory_context=memory_context,
                     timestamps=timestamps,
                     clip_path=clip_path,
                     window_start_sec=sampling_metadata.action_window_start,
