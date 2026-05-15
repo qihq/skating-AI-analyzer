@@ -637,6 +637,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             action_subtype = normalize_action_subtype(analysis.action_type, analysis.action_subtype)
             analysis_profile_hint = analysis.analysis_profile or infer_profile_hint(action_type, action_subtype)
             skater_id = analysis.skater_id
+            skill_category = analysis.skill_category
             video_path = _video_path_for_analysis(analysis)
             upload_frames_dir = video_path.parent / 'frames'
             _, processing_frames_dir = build_processing_frames_dir(analysis_id)
@@ -988,6 +989,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     timestamps=timestamps,
                     clip_path=clip_path,
                     window_start_sec=sampling_metadata.action_window_start,
+                    skill_category=skill_category,
                 )
                 vision_structured = dual.path_a
                 vision_path_a = dual.path_a

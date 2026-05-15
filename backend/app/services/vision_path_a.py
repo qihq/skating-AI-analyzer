@@ -104,6 +104,7 @@ def _build_specialized_prompts(
     profile_evidence: dict[str, Any] | None,
     bio_data: dict[str, Any] | None,
     motion_features: dict[str, Any] | list[Any] | None,
+    skill_category: str | None = None,
 ) -> tuple[str, str]:
     return build_specialized_vision_prompt(
         action_type=action_type,
@@ -113,6 +114,7 @@ def _build_specialized_prompts(
         motion_features=motion_features,
         biomechanics=bio_data,
         profile_evidence=profile_evidence,
+        skill_category=skill_category,
     )
 
 
@@ -161,6 +163,7 @@ async def analyze_path_a(
     mode: Literal["frames", "video"] = "video",
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
+    skill_category: str | None = None,
 ) -> dict[str, Any]:
     """
     Path A: pure vision analysis, called opt-in by the host.
@@ -184,6 +187,7 @@ async def analyze_path_a(
         profile_evidence,
         bio_data,
         motion_features,
+        skill_category=skill_category,
     )
     if memory_context:
         system_prompt = f"{system_prompt}\n\n{memory_context}"

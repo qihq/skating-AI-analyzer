@@ -80,6 +80,7 @@ async def analyze_frames_dual(
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
     total_timeout: float = DUAL_PATH_TOTAL_TIMEOUT,
+    skill_category: str | None = None,
 ) -> DualPathResult:
     """
     Run dual-path analysis and cross validation.
@@ -120,6 +121,7 @@ async def analyze_frames_dual(
             mode="video" if clip_path is not None else "frames",
             clip_path=clip_path,
             window_start_sec=window_start_sec,
+            skill_category=skill_category,
         )
 
     async def _run_b() -> dict[str, Any]:

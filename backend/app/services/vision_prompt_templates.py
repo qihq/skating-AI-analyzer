@@ -71,6 +71,7 @@ def build_specialized_vision_prompt(
     motion_features: dict[str, Any] | list[Any] | None = None,
     biomechanics: dict[str, Any] | None = None,
     profile_evidence: dict[str, Any] | None = None,
+    skill_category: str | None = None,
 ) -> tuple[str, str]:
     """Build a reusable figure-skating specialized vision prompt.
 
@@ -85,6 +86,7 @@ def build_specialized_vision_prompt(
         f"action_type: {action_type}\n"
         f"action_subtype: {normalized_subtype}\n"
         f"analysis_profile: {normalized_profile}\n"
+        f"skill_category: {skill_category or '未指定'}\n"
         "skater_level: Free Skate 1\n\n"
         "【后端自动关键帧候选】\n"
         "candidate_key_frames:\n"
