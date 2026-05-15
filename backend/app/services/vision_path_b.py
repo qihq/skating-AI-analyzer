@@ -108,6 +108,11 @@ def _build_user_prompt(
         f"分析【{action_type}】动作（共 {n_frames} 帧，骨架已叠加，按时间顺序）。\n"
         f"动作子类型：{action_subtype or '未指定'}\n\n"
         "每帧图像前附有该帧测量值，请结合数值和图像综合判断。\n\n"
+        "【subscores 评分标准（0-1 浮点数）】\n"
+        "0.6-0.7 = 基本达标（Free Skate 1 初学者正常水平）\n"
+        "0.4-0.5 = 略有不足，但动作流程完整\n"
+        "0.8+ = 表现良好\n"
+        "0.2-0.3 = 明显不足，需要重点改进\n\n"
         "输出严格符合下方 schema 的 JSON：\n"
         '{"frame_analysis":[{"frame_id":"frame_0001",'
         '"phase":"准备|起跳|腾空|落冰|滑出|旋转入|旋转中|旋转出|步法|不可分析",'
@@ -116,8 +121,8 @@ def _build_user_prompt(
         '"overall_bio_quality":"<=25字"},'
         '"confidence":0.0}],'
         '"action_phase_summary":{"detected_phases":[],"weakest_phase":"","strongest_phase":""},'
-        '"subscores":{"takeoff_power":0,"rotation_axis":0,'
-        '"arm_coordination":0,"landing_absorption":0,"core_stability":0},'
+        '"subscores":{"takeoff_power":0.5,"rotation_axis":0.5,'
+        '"arm_coordination":0.5,"landing_absorption":0.5,"core_stability":0.5},'
         '"top_issues":["最多3条，必须引用具体测量数值"],'
         '"top_positives":["最多2条，结合量化数据"]}\n\n'
         "必须只输出 JSON。"
