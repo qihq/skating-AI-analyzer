@@ -9,7 +9,6 @@ import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
-import TopNav from "../components/TopNav";
 import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkaterIdForChildView } from "../utils/childView";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
@@ -25,15 +24,15 @@ function formatDate(dateString: string) {
 
 function scoreColor(score: number | null) {
   if (score === null) {
-    return "bg-slate-500/20 text-slate-200";
+    return "bg-slate-100 text-slate-500";
   }
   if (score < 60) {
-    return "bg-rose-500/15 text-rose-100";
+    return "bg-rose-50 text-rose-500";
   }
   if (score <= 80) {
-    return "bg-amber-400/15 text-amber-50";
+    return "bg-amber-50 text-amber-600";
   }
-  return "bg-emerald-400/15 text-emerald-50";
+  return "bg-emerald-50 text-emerald-600";
 }
 
 function statusLabel(status: AnalysisListItem["status"]) {
@@ -51,16 +50,16 @@ function statusLabel(status: AnalysisListItem["status"]) {
 
 function statusTone(status: AnalysisListItem["status"]) {
   if (status === "completed") {
-    return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
+    return "bg-emerald-50 text-emerald-600";
   }
   if (status === "failed") {
-    return "border-rose-400/25 bg-rose-500/10 text-rose-100";
+    return "bg-rose-50 text-rose-500";
   }
-  return "border-cyan-300/25 bg-cyan-400/10 text-cyan-100";
+  return "bg-blue-50 text-blue-500";
 }
 
 const actionIconClassName =
-  "list-row-action inline-flex rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
+  "list-row-action inline-flex shrink-0 rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
 
 export default function HistoryPage() {
   const location = useLocation();
@@ -313,57 +312,60 @@ export default function HistoryPage() {
   };
 
   return (
-    <main className="page-shell page-scroll-container page-content min-h-screen">
-      <div className="absolute inset-0 -z-10 overflow-hidden">
-        <div className="ice-orb left-[10%] top-[8%]" />
-        <div className="ice-orb bottom-[10%] right-[6%]" />
-        <div className="grid-ice h-full w-full" />
-      </div>
-
-      <section className="page-content mx-auto min-h-screen w-full max-w-6xl px-6 py-6 lg:px-10">
-        <TopNav />
-
-        <header className="frost-panel">
-          <p className="text-sm uppercase tracking-[0.3em] text-cyan-200/80">History</p>
-          <div className="mt-3 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <h2 className="text-3xl font-semibold text-white">训练历史与复盘对比</h2>
-              <p className="mt-2 max-w-3xl text-slate-300">
-                按动作类型查看历史复盘记录，选择两条同动作类型的 completed 记录做进步对比。
-              </p>
-            </div>
-
-            <div className="flex flex-wrap gap-3">
-              <Link to="/progress" className="pill-link">
-                查看进步趋势
-              </Link>
-            </div>
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
+        <div className="flex flex-col gap-5 tablet:flex-row tablet:items-end tablet:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">History</p>
+            <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">训练历史与复盘对比</h1>
+            <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
+              按动作类型查看历史复盘记录，选择两条同动作类型的 completed 记录做进步对比。
+            </p>
           </div>
-        </header>
 
-        <div className="mt-6 flex flex-wrap gap-3">
+          <div className="flex flex-wrap gap-3">
+            <Link to="/progress" className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-200 hover:text-blue-600">
+              查看进步趋势
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <section className="app-card p-6">
+        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">动作筛选</p>
+        <div className="mt-4 flex flex-wrap gap-2">
           {FILTER_OPTIONS.map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setActiveFilter(option)}
-              className={`rounded-full px-4 py-2 text-sm transition ${
-                activeFilter === option ? "bg-cyan-300 text-slate-950" : "bg-white/6 text-slate-200 hover:bg-white/12"
+              className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
+                activeFilter === option ? "bg-blue-500 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
               }`}
             >
               {option}
             </button>
           ))}
         </div>
+      </section>
 
-        {notice ? <div className="mt-4 rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
-        {error ? <div className="mt-4 text-sm text-rose-200">{error}</div> : null}
+      {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
+      {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
 
-        <div className="mt-6 space-y-4">
-          {isLoading ? (
-            <div className="frost-panel text-slate-300">正在加载历史记录…</div>
-          ) : records.length ? (
-            records.map((record) => {
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
+        <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Records</p>
+            <h2 className="mt-2 text-2xl font-semibold text-slate-900">历史记录</h2>
+          </div>
+          <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">{records.length} 条</span>
+        </div>
+
+        {isLoading ? (
+          <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载历史记录…</div>
+        ) : records.length ? (
+          <div className="mt-6 space-y-4">
+            {records.map((record) => {
               const isSelected = selectedIds.includes(record.id);
               const isRetrying = retryingRecordId === record.id;
               const hideRetry = missingVideoRetryIds.includes(record.id);
@@ -371,59 +373,55 @@ export default function HistoryPage() {
               return (
                 <article
                   key={record.id}
-                  className={`frost-panel list-row transition ${isSelected ? "ring-1 ring-cyan-300/70" : "hover:bg-white/6"}`}
+                  className={`list-row min-w-0 max-w-full rounded-[24px] border p-3 phone:rounded-[28px] phone:p-5 transition ${isSelected ? "border-blue-300 bg-blue-50/40" : "border-slate-200 bg-white hover:bg-slate-50"}`}
                 >
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <span className="rounded-full bg-white/8 px-3 py-1 text-sm text-white">{record.action_type}</span>
-                        <span className={`rounded-full px-3 py-1 text-sm ${scoreColor(record.force_score)}`}>
+                  <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+                    <div className="min-w-0 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{record.action_type}</span>
+                        <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${scoreColor(record.force_score)}`}>
                           评分 {record.force_score ?? "--"}
                         </span>
-                        <span className={`rounded-full border px-3 py-1 text-sm ${statusTone(record.status)}`}>
+                        <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${statusTone(record.status)}`}>
                           {statusLabel(record.status)}
                         </span>
                         {record.skill_category ? (
-                          <span className="rounded-full bg-sky-400/10 px-3 py-1 text-sm text-sky-100">{record.skill_category}</span>
+                          <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{record.skill_category}</span>
                         ) : null}
                       </div>
 
-                      <div className="text-sm text-slate-300">
+                      <div className="text-sm text-slate-400">
                         <span>{formatDate(record.created_at)}</span>
                         {record.skater_name ? <span className="ml-3">练习档案：{record.skater_name}</span> : null}
                       </div>
 
-                      <p className="max-w-3xl text-slate-100/90">{record.note || "本次记录未填写训练备注。"}</p>
+                      <p className="max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{record.note || "本次记录未填写训练备注。"}</p>
                     </div>
 
-                    <div className="flex flex-col gap-3 lg:items-end">
-                      <div className="flex items-center gap-2 pr-2">
+                    <div className="flex min-w-0 flex-col gap-3 tablet:items-end">
+                      <div className="flex flex-wrap items-center gap-2 pr-0 tablet:justify-end tablet:pr-2">
                         {record.status === "completed" || record.status === "failed" ? (
-                          <>
-                            <Link
-                              to={`/report/${record.id}`}
-                              title="查看分析报告"
-                              aria-label="查看分析报告"
-                              className={`${actionIconClassName} border-cyan-300/30 bg-cyan-300/10 text-cyan-100 hover:bg-cyan-300/20`}
-                            >
-                              📄
-                            </Link>
-                          </>
+                          <Link
+                            to={`/report/${record.id}`}
+                            title="查看分析报告"
+                            aria-label="查看分析报告"
+                            className={`${actionIconClassName} border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100`}
+                          >
+                            📄
+                          </Link>
                         ) : null}
 
                         {record.status === "completed" ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => requestReanalysis(record)}
-                              disabled={isRetrying}
-                              title="再次分析"
-                              aria-label="再次分析"
-                              className={`${actionIconClassName} border-orange-300/30 bg-orange-500/10 text-orange-100 hover:bg-orange-500/20`}
-                            >
-                              {isRetrying ? "…" : "🔄"}
-                            </button>
-                          </>
+                          <button
+                            type="button"
+                            onClick={() => requestReanalysis(record)}
+                            disabled={isRetrying}
+                            title="再次分析"
+                            aria-label="再次分析"
+                            className={`${actionIconClassName} border-orange-200 bg-orange-50 text-orange-600 hover:bg-orange-100`}
+                          >
+                            {isRetrying ? "…" : "🔄"}
+                          </button>
                         ) : null}
 
                         {isAnalysisInProgress(record.status) ? (
@@ -431,7 +429,7 @@ export default function HistoryPage() {
                             to={`/report/${record.id}`}
                             title="分析进行中"
                             aria-label="分析进行中"
-                            className={`${actionIconClassName} border-cyan-300/25 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-300/20`}
+                            className={`${actionIconClassName} border-blue-100 bg-blue-50 text-blue-500 hover:bg-blue-100`}
                           >
                             ⏳
                           </Link>
@@ -444,14 +442,14 @@ export default function HistoryPage() {
                             disabled={isRetrying}
                             title="分析失败，点击重试"
                             aria-label="分析失败，点击重试"
-                            className={`${actionIconClassName} border-rose-300/30 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20`}
+                            className={`${actionIconClassName} border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100`}
                           >
                             {isRetrying ? "…" : "❌"}
                           </button>
                         ) : null}
                       </div>
 
-                      <div className="flex flex-wrap gap-3 lg:justify-end">
+                      <div className="flex flex-wrap gap-3 tablet:justify-end">
                         {record.status === "failed" && hideRetry ? (
                           <button
                             type="button"
@@ -460,7 +458,7 @@ export default function HistoryPage() {
                                 state: record.skater_id ? { skaterId: record.skater_id } : undefined,
                               })
                             }
-                            className="rounded-full border border-white/20 bg-white/8 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/12"
+                            className="list-row-action inline-flex min-w-[44px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                           >
                             📤 重新上传
                           </button>
@@ -476,13 +474,13 @@ export default function HistoryPage() {
                                 ? "分析进行中，无法删除"
                                 : "删除这条分析记录"
                             }
-                            className="list-row-action inline-flex rounded-full border border-rose-300/25 bg-rose-500/10 text-lg text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="list-row-action inline-flex shrink-0 rounded-full border border-rose-200 bg-rose-50 text-lg text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             🗑️
                           </button>
                         ) : null}
 
-                        <button type="button" onClick={() => toggleSelect(record)} className="pill-link">
+                        <button type="button" onClick={() => toggleSelect(record)} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-200 hover:text-blue-600">
                           {isSelected ? "取消对比" : "加入对比"}
                         </button>
                       </div>
@@ -490,46 +488,47 @@ export default function HistoryPage() {
                   </div>
                 </article>
               );
-            })
-          ) : (
-            <div className="frost-panel flex flex-col items-center px-6 py-10 text-center">
-              <ZodiacAvatar
-                avatarType={currentSkater?.avatar_type ?? childViewAvatarType(childView)}
-                avatarEmoji={currentSkater?.avatar_emoji}
-                size="lg"
-                animate
-              />
-              <h3 className="mt-5 text-2xl font-semibold text-white">{emptyStateName}还没有训练记录</h3>
-              <p className="mt-3 max-w-md text-base leading-7 text-slate-300">拍一段练习视频，让冰宝来分析 🎬</p>
-              <button
-                type="button"
-                onClick={handleUploadFirstVideo}
-                className="mt-6 inline-flex min-h-[48px] items-center justify-center rounded-full bg-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200"
-              >
-                + 上传第一个视频
-              </button>
-            </div>
-          )}
-        </div>
-
-        {selectedIds.length ? (
-          <div className="fixed inset-x-0 bottom-4 z-30 px-4">
-            <div className="mx-auto flex max-w-3xl flex-col gap-3 rounded-[1.75rem] border border-cyan-300/25 bg-slate-950/88 p-4 shadow-[0_20px_70px_rgba(2,8,23,0.42)] backdrop-blur md:flex-row md:items-center md:justify-between">
-              <div>
-                <p className="text-sm font-medium text-white">已选择 {selectedIds.length}/2 条记录</p>
-                <p className="mt-1 text-sm text-slate-400">只能选择同动作类型的 completed 记录进行对比。</p>
-              </div>
-              <button
-                type="button"
-                disabled={selectedRecords.length !== 2}
-                onClick={() => navigate(`/compare/${selectedRecords[0].id}/${selectedRecords[1].id}`)}
-                className="rounded-full bg-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                开始对比
-              </button>
-            </div>
+            })}
           </div>
-        ) : null}
+        ) : (
+          <div className="mt-6 flex flex-col items-center rounded-[28px] bg-slate-50 px-6 py-10 text-center">
+            <ZodiacAvatar
+              avatarType={currentSkater?.avatar_type ?? childViewAvatarType(childView)}
+              avatarEmoji={currentSkater?.avatar_emoji}
+              size="lg"
+              animate
+            />
+            <h3 className="mt-5 text-2xl font-semibold text-slate-900">{emptyStateName}还没有训练记录</h3>
+            <p className="mt-3 max-w-md text-base leading-7 text-slate-500">拍一段练习视频，让冰宝来分析 🎬</p>
+            <button
+              type="button"
+              onClick={handleUploadFirstVideo}
+              className="mt-6 inline-flex min-h-[48px] items-center justify-center rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
+            >
+              + 上传第一个视频
+            </button>
+          </div>
+        )}
+      </section>
+
+      {selectedIds.length ? (
+        <div className="fixed inset-x-0 bottom-4 z-30 px-4">
+          <div className="mx-auto flex max-w-3xl flex-col gap-3 rounded-[1.75rem] border border-slate-200 bg-white p-4 shadow-lg md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-900">已选择 {selectedIds.length}/2 条记录</p>
+              <p className="mt-1 text-sm text-slate-500">只能选择同动作类型的 completed 记录进行对比。</p>
+            </div>
+            <button
+              type="button"
+              disabled={selectedRecords.length !== 2}
+              onClick={() => navigate(`/compare/${selectedRecords[0].id}/${selectedRecords[1].id}`)}
+              className="rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              开始对比
+            </button>
+          </div>
+        </div>
+      ) : null}
 
         {deletingRecordId ? (
           <DeleteAnalysisModal
@@ -572,7 +571,6 @@ export default function HistoryPage() {
             }
           />
         ) : null}
-      </section>
-    </main>
+    </div>
   );
 }

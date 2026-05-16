@@ -27,7 +27,13 @@ from app.schemas import (
     AnalysisRetryResponse,
     AnalysisSessionUpdateRequest,
     AnalysisUploadResponse,
+    CompareDelta,
+    CompareKeyframePair,
+    CompareKeyframeSide,
+    CompareQualityPayload,
     CompareSummary,
+    CompareVideoPayload,
+    CompareVideoSide,
     ComparisonChange,
     ExtendPlanBody,
     NoteUpdateRequest,
@@ -89,7 +95,7 @@ from app.services.video import (
     save_upload_file,
 )
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
-from app.services.providers import get_active_provider
+from app.services.providers import get_active_provider, request_text_completion
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -98,6 +104,27 @@ frames_router = APIRouter(prefix="/api/frames", tags=["frames"])
 
 VALID_ACTION_TYPES = {"跳跃", "旋转", "步法", "自由滑"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+SUBSCORE_COMPARE_LABELS = {
+    "takeoff_power": "起跳发力",
+    "rotation_axis": "旋转轴心",
+    "arm_coordination": "手臂配合",
+    "landing_absorption": "落冰缓冲",
+    "core_stability": "核心稳定",
+}
+JUMP_METRIC_COMPARE_LABELS = {
+    "air_time_seconds": ("滞空时间", "s"),
+    "estimated_height_cm": ("跳跃高度", "cm"),
+    "takeoff_speed_mps": ("起跳速度", "m/s"),
+    "rotation_rps": ("转速", "rev/s"),
+    "estimated_rotations": ("估算周数", "圈"),
+}
+NON_JUMP_METRIC_LABELS = {
+    "glide_stability": ("滑行稳定", "分"),
+    "support_leg_stability": ("支撑腿稳定", "分"),
+    "hip_shoulder_alignment": ("髋肩对齐", "分"),
+    "trunk_pitch_degrees": ("躯干倾角", "°"),
+}
+COMPARE_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
 MAX_ANALYSIS_LOG_ENTRIES = 200
@@ -1615,11 +1642,51 @@ def _video_path_for_analysis(analysis: Analysis) -> Path:
     return fallback_video_path
 
 
+def _archived_video_path_for_analysis(analysis: Analysis) -> Path | None:
+    raw_video_path = Path(analysis.video_path)
+    archive_dir = UPLOADS_DIR.parent / "archive" / analysis.id
+    candidates = []
+    if raw_video_path.name:
+        candidates.append(archive_dir / raw_video_path.name)
+    candidates.extend(sorted(archive_dir.glob("source.*")) if archive_dir.exists() else [])
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def _frames_dir_for_analysis(analysis: Analysis) -> Path:
     frames_dir = _video_path_for_analysis(analysis).parent / "frames"
     if frames_dir.exists():
         return frames_dir
     return UPLOADS_DIR / analysis.id / "frames"
+
+
+def _safe_video_response_path(analysis: Analysis) -> Path | None:
+    candidate = _video_path_if_available(analysis)
+    if candidate is None:
+        return None
+    resolved = candidate.resolve()
+    allowed_roots = [UPLOADS_DIR.resolve(), (UPLOADS_DIR.parent / "archive").resolve()]
+    if not any(root == resolved or root in resolved.parents for root in allowed_roots):
+        logger.warning("Blocked unsafe video path for analysis %s: %s", analysis.id, resolved)
+        return None
+    if resolved.suffix.lower() not in COMPARE_VIDEO_SUFFIXES:
+        return None
+    return resolved
+
+
+def _video_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".webm":
+        return "video/webm"
+    if suffix == ".mov":
+        return "video/quicktime"
+    if suffix == ".avi":
+        return "video/x-msvideo"
+    if suffix == ".mkv":
+        return "video/x-matroska"
+    return "video/mp4"
 
 
 def _can_backfill_artifacts(status_value: str | None) -> bool:
@@ -1886,6 +1953,353 @@ def _compare_reports(report_a: dict[str, object] | None, report_b: dict[str, obj
     return CompareSummary(improved=improved, added=added, unchanged=unchanged)
 
 
+def _to_number(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def _round_delta_value(value: float | None, digits: int = 2) -> float | None:
+    if value is None:
+        return None
+    rounded = round(value, digits)
+    return int(rounded) if float(rounded).is_integer() else rounded
+
+
+def _delta_trend(delta: float | None) -> str:
+    if delta is None:
+        return "unavailable"
+    if delta > 0:
+        return "up"
+    if delta < 0:
+        return "down"
+    return "flat"
+
+
+def _build_delta(key: str, label: str, before: object, after: object, unit: str | None = None) -> CompareDelta:
+    before_value = _to_number(before)
+    after_value = _to_number(after)
+    delta = after_value - before_value if before_value is not None and after_value is not None else None
+    return CompareDelta(
+        key=key,
+        label=label,
+        before=_round_delta_value(before_value),
+        after=_round_delta_value(after_value),
+        delta=_round_delta_value(delta),
+        unit=unit,
+        trend=_delta_trend(delta),
+        available=before_value is not None and after_value is not None,
+    )
+
+
+def _report_subscores(analysis: Analysis) -> dict[str, Any]:
+    report = analysis.report if isinstance(analysis.report, dict) else {}
+    subscores = report.get("subscores")
+    return subscores if isinstance(subscores, dict) else {}
+
+
+def _bio_dict(analysis: Analysis) -> dict[str, Any]:
+    return analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+
+
+def _build_subscore_deltas(analysis_a: Analysis, analysis_b: Analysis) -> list[CompareDelta]:
+    before = _report_subscores(analysis_a)
+    after = _report_subscores(analysis_b)
+    return [
+        _build_delta(key, label, before.get(key), after.get(key), "分")
+        for key, label in SUBSCORE_COMPARE_LABELS.items()
+    ]
+
+
+def _build_metric_deltas(analysis_a: Analysis, analysis_b: Analysis) -> list[CompareDelta]:
+    before_bio = _bio_dict(analysis_a)
+    after_bio = _bio_dict(analysis_b)
+    before_jump = before_bio.get("jump_metrics") if isinstance(before_bio.get("jump_metrics"), dict) else {}
+    after_jump = after_bio.get("jump_metrics") if isinstance(after_bio.get("jump_metrics"), dict) else {}
+    if before_jump or after_jump or analysis_a.analysis_profile == "jump" or analysis_b.analysis_profile == "jump":
+        return [
+            _build_delta(key, label, before_jump.get(key), after_jump.get(key), unit)
+            for key, (label, unit) in JUMP_METRIC_COMPARE_LABELS.items()
+        ]
+
+    before_metrics = before_bio.get("discipline_metrics") if isinstance(before_bio.get("discipline_metrics"), dict) else {}
+    after_metrics = after_bio.get("discipline_metrics") if isinstance(after_bio.get("discipline_metrics"), dict) else {}
+    before_subscores = before_bio.get("bio_subscores") if isinstance(before_bio.get("bio_subscores"), dict) else {}
+    after_subscores = after_bio.get("bio_subscores") if isinstance(after_bio.get("bio_subscores"), dict) else {}
+    metric_deltas = [
+        _build_delta(key, label, before_metrics.get(key), after_metrics.get(key), unit)
+        for key, (label, unit) in NON_JUMP_METRIC_LABELS.items()
+    ]
+    metric_deltas.extend(
+        _build_delta(key, label, before_subscores.get(key), after_subscores.get(key), "分")
+        for key, label in SUBSCORE_COMPARE_LABELS.items()
+    )
+    return [item for item in metric_deltas if item.available]
+
+
+def _frame_timestamp_map(analysis: Analysis) -> dict[str, float]:
+    return build_timestamp_map(analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None)
+
+
+def _normalize_frame_stem(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text[:-4] if text.lower().endswith(".jpg") else text
+
+
+def _keyframe_candidate_map(analysis: Analysis) -> dict[str, dict[str, Any]]:
+    bio_data = _bio_dict(analysis)
+    candidates = bio_data.get("key_frame_candidates")
+    return candidates if isinstance(candidates, dict) else {}
+
+
+def _legacy_keyframes(analysis: Analysis) -> dict[str, Any]:
+    bio_data = _bio_dict(analysis)
+    keyframes = bio_data.get("key_frames")
+    return keyframes if isinstance(keyframes, dict) else {}
+
+
+def _frame_exists_for_analysis(analysis: Analysis, frame_id: str) -> bool:
+    frames_dir = _frames_dir_for_analysis(analysis)
+    return (frames_dir / f"{frame_id}.jpg").exists()
+
+
+def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
+    candidates = _keyframe_candidate_map(analysis)
+    candidate = candidates.get(key) if isinstance(candidates.get(key), dict) else None
+    legacy = _legacy_keyframes(analysis)
+    frame_id = _normalize_frame_stem(candidate.get("frame_id")) if candidate else None
+    if frame_id is None:
+        frame_id = _normalize_frame_stem(legacy.get(key))
+    if frame_id is None:
+        return CompareKeyframeSide(available=False, missing_reason="未识别到该阶段关键帧")
+
+    timestamps = _frame_timestamp_map(analysis)
+    timestamp = _to_number(candidate.get("timestamp")) if candidate else None
+    if timestamp is None:
+        timestamp = timestamps.get(frame_id)
+    confidence = _to_number(candidate.get("confidence")) if candidate else None
+    frame_exists = _frame_exists_for_analysis(analysis, frame_id)
+    return CompareKeyframeSide(
+        frame_id=frame_id,
+        frame_url=f"/api/frames/{analysis.id}/{frame_id}.jpg" if frame_exists else None,
+        timestamp=_round_delta_value(timestamp, 3),
+        confidence=_round_delta_value(confidence, 3),
+        available=frame_exists,
+        missing_reason=None if frame_exists else "关键帧图片不可用",
+    )
+
+
+def _keyframe_labels_for_profile(profile: str | None) -> list[tuple[str, str]]:
+    if profile == "spin":
+        return [("旋转入", "旋转入"), ("旋转中", "旋转中"), ("旋转出", "旋转出")]
+    if profile == "spiral":
+        return [("峰值", "姿态峰值")]
+    return [("T", "起跳"), ("A", "腾空"), ("L", "落冰")]
+
+
+def _build_keyframe_compare(analysis_a: Analysis, analysis_b: Analysis) -> list[CompareKeyframePair]:
+    profile = analysis_b.analysis_profile or analysis_a.analysis_profile
+    return [
+        CompareKeyframePair(
+            key=key,
+            label=label,
+            before=_build_keyframe_side(analysis_a, key),
+            after=_build_keyframe_side(analysis_b, key),
+        )
+        for key, label in _keyframe_labels_for_profile(profile)
+    ]
+
+
+def _video_path_if_available(analysis: Analysis) -> Path | None:
+    try:
+        path = _video_path_for_analysis(analysis)
+    except Exception:  # noqa: BLE001
+        return None
+    if path.exists() and path.is_file() and path.suffix.lower() in COMPARE_VIDEO_SUFFIXES:
+        return path
+    archived = _archived_video_path_for_analysis(analysis)
+    if archived is not None and archived.suffix.lower() in COMPARE_VIDEO_SUFFIXES:
+        return archived
+    return None
+
+
+def _build_video_side(analysis: Analysis) -> CompareVideoSide:
+    path = _video_path_if_available(analysis)
+    start = _to_number(analysis.action_window_start)
+    end = _to_number(analysis.action_window_end)
+    duration = round(end - start, 3) if start is not None and end is not None and end > start else None
+    return CompareVideoSide(
+        analysis_id=analysis.id,
+        video_url=f"/api/analysis/{analysis.id}/video" if path is not None else None,
+        available=path is not None,
+        missing_reason=None if path is not None else "原视频已清理或不可用",
+        action_window_start=_round_delta_value(start, 3),
+        action_window_end=_round_delta_value(end, 3),
+        action_window_duration=_round_delta_value(duration, 3),
+        sync_start=_round_delta_value(start or 0.0, 3),
+        is_slow_motion=bool(analysis.is_slow_motion),
+        source_fps=_round_delta_value(_to_number(analysis.source_fps), 3),
+    )
+
+
+def _build_video_compare(analysis_a: Analysis, analysis_b: Analysis) -> CompareVideoPayload:
+    return CompareVideoPayload(
+        before=_build_video_side(analysis_a),
+        after=_build_video_side(analysis_b),
+        sync_mode="action_window_start",
+    )
+
+
+def _quality_flags(analysis: Analysis) -> list[str]:
+    flags: list[str] = []
+    bio_data = _bio_dict(analysis)
+    for value in bio_data.get("quality_flags", []) if isinstance(bio_data.get("quality_flags"), list) else []:
+        if value:
+            flags.append(str(value))
+    target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else {}
+    for value in target_lock.get("quality_flags", []) if isinstance(target_lock.get("quality_flags"), list) else []:
+        if value and str(value) not in flags:
+            flags.append(str(value))
+    cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else {}
+    auto_eval = cross_validation.get("auto_eval") if isinstance(cross_validation.get("auto_eval"), dict) else {}
+    for value in auto_eval.get("data_quality_flags", []) if isinstance(auto_eval.get("data_quality_flags"), list) else []:
+        if value and str(value) not in flags:
+            flags.append(str(value))
+    return flags
+
+
+def _report_data_quality(analysis: Analysis) -> str | None:
+    report = analysis.report if isinstance(analysis.report, dict) else {}
+    value = report.get("data_quality")
+    return str(value) if value is not None else None
+
+
+def _build_compare_quality(analysis_a: Analysis, analysis_b: Analysis) -> CompareQualityPayload:
+    before_flags = _quality_flags(analysis_a)
+    after_flags = _quality_flags(analysis_b)
+    warnings: list[str] = []
+    if _report_data_quality(analysis_a) == "poor" or _report_data_quality(analysis_b) == "poor":
+        warnings.append("存在数据质量较弱的记录，变化结论需要保守解读。")
+    if before_flags or after_flags:
+        warnings.append("部分姿态或目标追踪信号存在不确定性，建议结合原视频复核。")
+    return CompareQualityPayload(
+        before_data_quality=_report_data_quality(analysis_a),
+        after_data_quality=_report_data_quality(analysis_b),
+        before_flags=before_flags,
+        after_flags=after_flags,
+        warnings=warnings,
+    )
+
+
+def _fallback_compare_narrative(
+    *,
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    score_delta: int,
+    subscore_deltas: list[CompareDelta],
+    metric_deltas: list[CompareDelta],
+    summary: CompareSummary,
+) -> str:
+    improving = [item for item in subscore_deltas if isinstance(item.delta, (int, float)) and item.delta > 0]
+    best = max(improving, key=lambda item: float(item.delta or 0), default=None)
+    metric = max(
+        (item for item in metric_deltas if isinstance(item.delta, (int, float)) and item.delta > 0),
+        key=lambda item: float(item.delta or 0),
+        default=None,
+    )
+    direction = "提高" if score_delta > 0 else "基本持平" if score_delta == 0 else "下降"
+    parts = [
+        f"这两次{analysis_b.action_subtype or analysis_b.action_type}对比中，综合评分{direction}{abs(score_delta)}分。",
+    ]
+    if best:
+        parts.append(f"最明显的变化在{best.label}，从{best.before}到{best.after}，说明这一环节有进步信号。")
+    if metric:
+        parts.append(f"量化指标里，{metric.label}提升了{metric.delta}{metric.unit or ''}，可以作为本次动作改变的客观参考。")
+    if summary.improved:
+        parts.append(f"之前的“{summary.improved[0].category}”问题这次有所改善。")
+    if summary.added:
+        parts.append(f"同时也出现或加重了“{summary.added[0].category}”，下次训练仍要重点观察。")
+    parts.append("建议把这次对比作为趋势参考，继续结合教练现场观察和稳定拍摄角度复盘。")
+    return "".join(parts)
+
+
+async def _build_ai_compare_narrative(
+    *,
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    score_delta: int,
+    subscore_deltas: list[CompareDelta],
+    metric_deltas: list[CompareDelta],
+    summary: CompareSummary,
+    quality: CompareQualityPayload,
+) -> str:
+    fallback = _fallback_compare_narrative(
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        score_delta=score_delta,
+        subscore_deltas=subscore_deltas,
+        metric_deltas=metric_deltas,
+        summary=summary,
+    )
+    try:
+        provider = await get_active_provider("report")
+        payload = {
+            "action_type": analysis_b.action_type,
+            "action_subtype": analysis_b.action_subtype,
+            "score_delta": score_delta,
+            "subscores": [item.model_dump() for item in subscore_deltas],
+            "metrics": [item.model_dump() for item in metric_deltas],
+            "summary": summary.model_dump(),
+            "quality": quality.model_dump(),
+        }
+        raw = await request_text_completion(
+            provider,
+            temperature=0.2,
+            max_tokens=420,
+            timeout=45,
+            messages=[
+                {"role": "system", "content": "你是儿童花样滑冰复盘助手。用中文给家长解释两次同动作对比，只输出自然语言，不要 Markdown。"},
+                {
+                    "role": "user",
+                    "content": (
+                        "请基于以下结构化差异，写3-5句家长可读的进步解读。"
+                        "不要夸大低质量数据；不要声称重新看过视频；包含一个下一次训练重点。\n"
+                        f"{json.dumps(payload, ensure_ascii=False)}"
+                    ),
+                },
+            ],
+        )
+        cleaned = raw.strip()
+        return cleaned[:600] if cleaned else fallback
+    except Exception:  # noqa: BLE001
+        logger.info("Compare AI narrative unavailable, using fallback.", exc_info=True)
+        return fallback
+
+
+def _can_compare_same_subtype(analysis_a: Analysis, analysis_b: Analysis) -> bool:
+    subtype_a = _normalize_optional_text(analysis_a.action_subtype)
+    subtype_b = _normalize_optional_text(analysis_b.action_subtype)
+    if subtype_a or subtype_b:
+        return subtype_a == subtype_b
+    skill_a = _normalize_optional_text(analysis_a.skill_node_id)
+    skill_b = _normalize_optional_text(analysis_b.skill_node_id)
+    return bool(skill_a and skill_a == skill_b)
+
+
+def _ordered_compare_pair(analysis_a: Analysis, analysis_b: Analysis) -> tuple[Analysis, Analysis]:
+    if analysis_a.created_at <= analysis_b.created_at:
+        return analysis_a, analysis_b
+    return analysis_b, analysis_a
+
+
 def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
     return TrainingPlanDetail(
         id=plan.id,
@@ -2087,12 +2501,37 @@ async def compare_analyses(
         raise HTTPException(status_code=404, detail="至少有一条对比记录不存在。")
     if analysis_a.status != "completed" or analysis_b.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的记录可以进行对比。")
+    if analysis_a.skater_id != analysis_b.skater_id:
+        raise HTTPException(status_code=400, detail="只能比较同一位小朋友的训练记录。")
     if analysis_a.action_type != analysis_b.action_type:
         raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
+    if not _can_compare_same_subtype(analysis_a, analysis_b):
+        raise HTTPException(status_code=400, detail="请只选择同一动作小项或同一技能节点的记录进行对比。")
+
+    analysis_a, analysis_b = _ordered_compare_pair(analysis_a, analysis_b)
 
     skater_map = await _get_skater_map(
         session,
         {analysis.skater_id for analysis in (analysis_a, analysis_b) if analysis.skater_id},
+    )
+    summary = _compare_reports(
+        analysis_a.report if isinstance(analysis_a.report, dict) else None,
+        analysis_b.report if isinstance(analysis_b.report, dict) else None,
+    )
+    score_delta = (analysis_b.force_score or 0) - (analysis_a.force_score or 0)
+    subscore_deltas = _build_subscore_deltas(analysis_a, analysis_b)
+    metric_deltas = _build_metric_deltas(analysis_a, analysis_b)
+    keyframe_compare = _build_keyframe_compare(analysis_a, analysis_b)
+    video_compare = _build_video_compare(analysis_a, analysis_b)
+    quality = _build_compare_quality(analysis_a, analysis_b)
+    ai_narrative = await _build_ai_compare_narrative(
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        score_delta=score_delta,
+        subscore_deltas=subscore_deltas,
+        metric_deltas=metric_deltas,
+        summary=summary,
+        quality=quality,
     )
 
     return AnalysisCompareResponse(
@@ -2104,11 +2543,14 @@ async def compare_analyses(
             analysis_b,
             _skater_display_name(skater_map[analysis_b.skater_id]) if analysis_b.skater_id in skater_map else None,
         ),
-        score_delta=(analysis_b.force_score or 0) - (analysis_a.force_score or 0),
-        summary=_compare_reports(
-            analysis_a.report if isinstance(analysis_a.report, dict) else None,
-            analysis_b.report if isinstance(analysis_b.report, dict) else None,
-        ),
+        score_delta=score_delta,
+        summary=summary,
+        subscore_deltas=subscore_deltas,
+        metric_deltas=metric_deltas,
+        keyframe_compare=keyframe_compare,
+        video_compare=video_compare,
+        quality=quality,
+        ai_narrative=ai_narrative,
     )
 
 
@@ -2229,6 +2671,22 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
     return _build_pose_response(analysis_id, analysis.pose_data)
+
+
+@router.get("/{analysis_id}/video")
+async def get_analysis_video(analysis_id: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    video_path = _safe_video_response_path(analysis)
+    if video_path is None:
+        raise HTTPException(status_code=404, detail="原视频已清理或不可用。")
+    return FileResponse(
+        video_path,
+        media_type=_video_media_type(video_path),
+        filename=video_path.name,
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 @router.get("/{analysis_id}", response_model=AnalysisDetail)

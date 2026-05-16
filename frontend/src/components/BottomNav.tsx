@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 
 import { useAppMode } from "./AppModeContext";
 
-export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "settings" | "debug";
+export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "history" | "settings" | "debug";
 
 type BottomNavProps = {
   activeTab?: PrimaryTab;
@@ -18,6 +18,7 @@ const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings" | "debug">;
 const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon: string }> = [
   { tab: "review", to: "/review", label: "分析", icon: "📹" },
   { tab: "path", to: "/path", label: "计划", icon: "📋" },
+  { tab: "history", to: "/history", label: "历史", icon: "📜" },
   { tab: "archive", to: "/archive", label: "进展", icon: "📊" },
   { tab: "debug", to: "/debug", label: "调试", icon: "🧪" },
   { tab: "settings", to: "/settings", label: "设置", icon: "⚙️" },
@@ -34,7 +35,7 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         aria-label="主导航"
         className="bottom-nav fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB] bg-white/96 backdrop-blur web:hidden"
       >
-        <div className={`mx-auto grid h-full max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : "grid-cols-5"}`}>
+        <div className={`mx-auto grid h-full max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : mobileNavItems.length === 5 ? "grid-cols-5" : "grid-cols-6"}`}>
           {mobileNavItems.map((item) => (
             <NavLink
               key={item.tab}

@@ -8,6 +8,7 @@ const TAB_MATCHERS: Array<{ tab: PrimaryTab; paths: string[] }> = [
   { tab: "snowball", paths: ["/snowball"] },
   { tab: "review", paths: ["/review", "/report"] },
   { tab: "archive", paths: ["/archive"] },
+  { tab: "history", paths: ["/history"] },
   { tab: "settings", paths: ["/settings"] },
   { tab: "debug", paths: ["/debug"] },
 ];

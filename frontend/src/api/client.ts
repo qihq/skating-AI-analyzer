@@ -395,6 +395,60 @@ export interface ComparisonChange {
   description: string;
 }
 
+export interface CompareDelta {
+  key: string;
+  label: string;
+  before: number | null;
+  after: number | null;
+  delta: number | null;
+  unit: string | null;
+  trend: "up" | "down" | "flat" | "unavailable" | string;
+  available: boolean;
+}
+
+export interface CompareKeyframeSide {
+  frame_id: string | null;
+  frame_url: string | null;
+  timestamp: number | null;
+  confidence: number | null;
+  available: boolean;
+  missing_reason: string | null;
+}
+
+export interface CompareKeyframePair {
+  key: string;
+  label: string;
+  before: CompareKeyframeSide;
+  after: CompareKeyframeSide;
+}
+
+export interface CompareVideoSide {
+  analysis_id: string;
+  video_url: string | null;
+  available: boolean;
+  missing_reason: string | null;
+  action_window_start: number | null;
+  action_window_end: number | null;
+  action_window_duration: number | null;
+  sync_start: number | null;
+  is_slow_motion: boolean;
+  source_fps: number | null;
+}
+
+export interface CompareVideoPayload {
+  before: CompareVideoSide;
+  after: CompareVideoSide;
+  sync_mode: string;
+}
+
+export interface CompareQualityPayload {
+  before_data_quality: string | null;
+  after_data_quality: string | null;
+  before_flags: string[];
+  after_flags: string[];
+  warnings: string[];
+}
+
 export interface AnalysisCompareResponse {
   analysis_a: AnalysisDetail;
   analysis_b: AnalysisDetail;
@@ -404,6 +458,12 @@ export interface AnalysisCompareResponse {
     added: ComparisonChange[];
     unchanged: ComparisonChange[];
   };
+  subscore_deltas: CompareDelta[];
+  metric_deltas: CompareDelta[];
+  keyframe_compare: CompareKeyframePair[];
+  video_compare: CompareVideoPayload | null;
+  quality: CompareQualityPayload | null;
+  ai_narrative: string | null;
 }
 
 export interface ProgressPoint {

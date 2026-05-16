@@ -188,11 +188,71 @@ class CompareSummary(BaseModel):
     unchanged: list[ComparisonChange] = Field(default_factory=list)
 
 
+class CompareDelta(BaseModel):
+    key: str
+    label: str
+    before: float | int | None = None
+    after: float | int | None = None
+    delta: float | int | None = None
+    unit: str | None = None
+    trend: str = "unavailable"
+    available: bool = False
+
+
+class CompareKeyframeSide(BaseModel):
+    frame_id: str | None = None
+    frame_url: str | None = None
+    timestamp: float | None = None
+    confidence: float | None = None
+    available: bool = False
+    missing_reason: str | None = None
+
+
+class CompareKeyframePair(BaseModel):
+    key: str
+    label: str
+    before: CompareKeyframeSide
+    after: CompareKeyframeSide
+
+
+class CompareVideoSide(BaseModel):
+    analysis_id: str
+    video_url: str | None = None
+    available: bool = False
+    missing_reason: str | None = None
+    action_window_start: float | None = None
+    action_window_end: float | None = None
+    action_window_duration: float | None = None
+    sync_start: float | None = None
+    is_slow_motion: bool = False
+    source_fps: float | None = None
+
+
+class CompareVideoPayload(BaseModel):
+    before: CompareVideoSide
+    after: CompareVideoSide
+    sync_mode: str = "action_window_start"
+
+
+class CompareQualityPayload(BaseModel):
+    before_data_quality: str | None = None
+    after_data_quality: str | None = None
+    before_flags: list[str] = Field(default_factory=list)
+    after_flags: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AnalysisCompareResponse(BaseModel):
     analysis_a: AnalysisDetail
     analysis_b: AnalysisDetail
     score_delta: int
     summary: CompareSummary
+    subscore_deltas: list[CompareDelta] = Field(default_factory=list)
+    metric_deltas: list[CompareDelta] = Field(default_factory=list)
+    keyframe_compare: list[CompareKeyframePair] = Field(default_factory=list)
+    video_compare: CompareVideoPayload | None = None
+    quality: CompareQualityPayload | None = None
+    ai_narrative: str | None = None
 
 
 class TrainingPlanSession(BaseModel):

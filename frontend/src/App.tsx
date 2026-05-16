@@ -123,16 +123,15 @@ export default function App() {
           <Route path="/snowball" element={<SnowballPage />} />
           <Route path="/review" element={<ReviewPage />} />
           <Route path="/archive" element={<ArchivePage />} />
+          <Route path="/history" element={<HistoryPage />} />
+          <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
           <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />
           <Route path="/debug" element={<DebugPage />} />
         </Route>
-
-        <Route path="/history" element={<HistoryPage />} />
         <Route path="/parent/setup" element={<ParentSetupPage />} />
-        <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
         <Route path="/plan/:plan_id" element={<PlanPage />} />
       </Routes>
     </>

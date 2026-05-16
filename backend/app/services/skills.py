@@ -12,6 +12,7 @@ from app.models import Analysis, Skater, SkaterSkill, SkillNode
 
 
 UNLOCKED_STATUSES = {"unlocked"}
+PARENT_LOCKED_STATUS = "locked_parent"
 LEVEL_THRESHOLDS = [
     (1, 0, "冰场小企鹅", "🐧"),
     (2, 200, "冰上小熊猫", "🐼"),
@@ -125,6 +126,12 @@ def is_unlocked(status: str | None) -> bool:
     return status in UNLOCKED_STATUSES or status in {"unlocked_ai", "unlocked_parent"}
 
 
+def public_skill_status(status: str | None) -> str:
+    if status == PARENT_LOCKED_STATUS:
+        return "locked"
+    return status or "locked"
+
+
 def avatar_level_for_xp(total_xp: int) -> int:
     level = 1
     for avatar_level, threshold, _, _ in LEVEL_THRESHOLDS:
@@ -231,7 +238,7 @@ async def refresh_skater_skill_states(session: AsyncSession, skater_id: str) -> 
                 row.unlocked_at = datetime.now(timezone.utc)
         else:
             row.unlocked_at = None
-            if row.status == "locked":
+            if row.status in {"locked", PARENT_LOCKED_STATUS}:
                 row.unlocked_by = None
 
 
@@ -326,7 +333,7 @@ def serialize_skill(node: SkillNode, row: SkaterSkill, last_analysis_score: int 
         "action_type": node.action_type,
         "xp": node.xp,
         "requires": node.requires or [],
-        "status": row.status,
+        "status": public_skill_status(row.status),
         "attempt_count": row.attempt_count,
         "best_score": row.best_score,
         "unlocked_by": row.unlocked_by,
@@ -389,12 +396,12 @@ async def lock_skill(session: AsyncSession, skater_id: str, skill_id: str) -> di
     row = row_result.scalar_one_or_none()
     if row is None:
         raise ValueError("该选手尚未初始化技能树。")
-    row.status = "locked"
+    row.status = PARENT_LOCKED_STATUS
     row.attempt_count = 0
     row.unlocked_by = None
     row.unlocked_at = None
     row.unlock_note = None
-    await sync_skater_progress(session, skater_id)
+    await refresh_skater_profile(session, skater_id)
     await session.flush()
     return serialize_skill(node, row)
 
