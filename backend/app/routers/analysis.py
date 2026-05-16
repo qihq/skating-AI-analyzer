@@ -198,22 +198,11 @@ def _count_list(value: object) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
-DUAL_PATH_RAW_PREVIEW_CHARS = 2400
-DUAL_PATH_FRAME_PREVIEW_LIMIT = 12
-
-
-def _truncate_text(value: object, limit: int = DUAL_PATH_RAW_PREVIEW_CHARS) -> str:
-    text = str(value or "")
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"...<truncated {len(text) - limit} chars>"
-
-
-def _summarize_path_frames(frames: object, limit: int = DUAL_PATH_FRAME_PREVIEW_LIMIT) -> list[dict[str, Any]]:
+def _summarize_path_frames(frames: object) -> list[dict[str, Any]]:
     if not isinstance(frames, list):
         return []
     out: list[dict[str, Any]] = []
-    for frame in frames[:limit]:
+    for frame in frames:
         if not isinstance(frame, dict):
             continue
         item = {
@@ -260,8 +249,8 @@ def _build_dual_path_log_detail(
             "phase_segments_count": _count_list(path_a_data.get("phase_segments")),
             "path_desc": path_a_data.get("path_desc"),
             "action_phase_summary": path_a_data.get("action_phase_summary"),
-            "overall_raw_text": _truncate_text(path_a_data.get("overall_raw_text")),
-            "frame_preview": _summarize_path_frames(path_a_data.get("frame_analysis")),
+            "overall_raw_text": path_a_data.get("overall_raw_text"),
+            "frame_analysis": _summarize_path_frames(path_a_data.get("frame_analysis")),
         },
         "path_b": {
             "provider": _provider_label(provider_path_b),
@@ -276,7 +265,7 @@ def _build_dual_path_log_detail(
             "action_phase_summary": path_b_data.get("action_phase_summary"),
             "top_issues": path_b_data.get("top_issues"),
             "top_positives": path_b_data.get("top_positives"),
-            "frame_preview": _summarize_path_frames(path_b_data.get("frame_analysis")),
+            "frame_analysis": _summarize_path_frames(path_b_data.get("frame_analysis")),
         },
         "cross_validation": {
             "recommended_path": meta.get("recommended_path"),

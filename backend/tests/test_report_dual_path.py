@@ -307,6 +307,14 @@ class ReportNormalizeTests(unittest.TestCase):
 
         self.assertEqual(apply_child_score_floor(58, report, {}), 70)
 
+    def test_child_score_floor_lifts_good_report_with_medium_issues_to_70(self) -> None:
+        report = {
+            "issues": [{"severity": "medium", "category": "起跳", "description": "压膝不足"}],
+            "data_quality": "good",
+        }
+
+        self.assertEqual(apply_child_score_floor(58, report, {}), 70)
+
     def test_child_score_floor_lifts_partial_report_with_medium_issues_to_65(self) -> None:
         report = {
             "issues": [{"severity": "medium", "category": "起跳", "description": "压膝不足"}],

@@ -135,10 +135,10 @@ def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: 
     if has_high_or_safety_risk:
         return score
 
-    if data_quality in {"good", "partial"} and issues:
-        return max(score, 65)
-    if data_quality in {"good", "partial"}:
+    if data_quality == "good":
         return max(score, 70)
+    if data_quality == "partial":
+        return max(score, 65)
     return score
 
 
