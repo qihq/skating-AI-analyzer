@@ -1,22 +1,22 @@
 {
   "profiles": {
     "jump": {
-      "frame_sample_count": 48,
+      "frame_sample_count": 32,
       "window_seconds": 3.5,
       "frame_rate": 16
     },
     "spin": {
-      "frame_sample_count": 36,
+      "frame_sample_count": 28,
       "window_seconds": 6.0,
       "frame_rate": 10
     },
     "step": {
-      "frame_sample_count": 28,
+      "frame_sample_count": 24,
       "window_seconds": 8.0,
       "frame_rate": 6
     },
     "spiral": {
-      "frame_sample_count": 24,
+      "frame_sample_count": 20,
       "window_seconds": 6.0,
       "frame_rate": 8
     }

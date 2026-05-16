@@ -380,6 +380,10 @@ def compute_blend_weights(v: CrossValidationReport) -> tuple[float, float]:
         "likely_wrong": (0.75, 0.25),
         "unknown": (0.50, 0.50),
     }[v.skeleton_reliability_signal]
+    diagnostics = v.fusion_diagnostics if isinstance(v.fusion_diagnostics, dict) else {}
+    reasons = diagnostics.get("downgraded_reasons") if isinstance(diagnostics.get("downgraded_reasons"), list) else []
+    if any("target_tracking_uncertain" in str(reason) for reason in reasons):
+        base = (max(base[0], 0.65), min(base[1], 0.35))
     a, b = base
     bonus = (v.overall_agreement_rate - 0.5) * 0.2
     b = round(min(0.75, max(0.25, b + bonus)), 3)

@@ -14,6 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+from app.services.llm_context import AnalysisPromptContext
 from app.services.video import FramePayload
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 
@@ -253,6 +254,54 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(mock_encode.await_args.kwargs["timestamps"], timestamps)
+
+    async def test_prompt_context_is_passed_to_both_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            mock_a = AsyncMock(return_value=_path_a_result())
+            mock_b = AsyncMock(return_value=_path_b_result())
+            context = AnalysisPromptContext(
+                action_type="跳跃",
+                action_subtype="Axel",
+                skill_category="前进燕式",
+                analysis_profile="jump",
+                profile_evidence={"source": "test"},
+                motion_features={"sample_count": 32},
+                bio_data={"quality_flags": []},
+                user_note="今天起跳有点犹豫",
+                memory_context="长期训练目标：稳定落冰。",
+            )
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=mock_a),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(1))),
+            ):
+                await analyze_frames_dual(
+                    "跳跃",
+                    frame_paths,
+                    _payloads(1),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    skill_category="前进燕式",
+                    prompt_context=context,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        context_text_a = mock_a.await_args.kwargs["memory_context"]
+        context_text_b = mock_b.await_args.kwargs["memory_context"]
+        self.assertIn("action_type: 跳跃", context_text_a)
+        self.assertIn("action_subtype: Axel", context_text_a)
+        self.assertIn("skill_category: 前进燕式", context_text_a)
+        self.assertIn("上传备注/额外 comments: 今天起跳有点犹豫", context_text_a)
+        self.assertIn("长期训练目标：稳定落冰", context_text_a)
+        self.assertEqual(context_text_a, context_text_b)
+        self.assertEqual(mock_b.await_args.kwargs["skill_category"], "前进燕式")
 
 
 if __name__ == "__main__":

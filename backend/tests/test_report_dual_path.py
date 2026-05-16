@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.report import generate_report, normalize_report
+from app.services.llm_context import AnalysisPromptContext
+from app.services.report import apply_child_score_floor, generate_report, normalize_report
 
 
 def _provider() -> SimpleNamespace:
@@ -230,6 +231,35 @@ class ReportDualPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("起跳", report["summary"])
         self.assertEqual(report["data_quality"], "partial")
 
+    async def test_generate_report_prompt_context_avoids_duplicate_memory_fetch(self) -> None:
+        request_mock = AsyncMock(return_value=_report_json())
+        memory_mock = AsyncMock(return_value="should-not-be-used")
+        context = AnalysisPromptContext(
+            action_type="跳跃",
+            action_subtype="Axel",
+            skill_category="Axel 入门",
+            analysis_profile="jump",
+            profile_evidence={"source": "test"},
+            motion_features={"sample_count": 32},
+            bio_data={},
+            user_note="今天状态不错",
+            memory_context="长期训练目标：稳定落冰。",
+        )
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.build_memory_context", memory_mock),
+            patch("app.services.report.request_text_completion", request_mock),
+        ):
+            await generate_report("跳跃", {"frame_analysis": []}, bio_data=None, prompt_context=context)
+
+        memory_mock.assert_not_awaited()
+        prompt = request_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertIn("action_subtype: Axel", prompt)
+        self.assertIn("skill_category: Axel 入门", prompt)
+        self.assertIn("上传备注/额外 comments: 今天状态不错", prompt)
+        self.assertIn("长期训练目标：稳定落冰", prompt)
+
 
 class ReportNormalizeTests(unittest.TestCase):
     def test_bio_subscores_are_fused_without_key_frames(self) -> None:
@@ -261,6 +291,36 @@ class ReportNormalizeTests(unittest.TestCase):
         )
 
         self.assertEqual(report["subscores"]["takeoff_power"], 80)
+
+    def test_child_score_floor_lifts_completed_good_quality_report(self) -> None:
+        report = {
+            "issues": [],
+            "data_quality": "good",
+            "subscores": {
+                "takeoff_power": 58,
+                "rotation_axis": 58,
+                "arm_coordination": 58,
+                "landing_absorption": 58,
+                "core_stability": 58,
+            },
+        }
+
+        self.assertEqual(apply_child_score_floor(58, report, {}), 70)
+
+    def test_child_score_floor_lifts_partial_report_with_medium_issues_to_65(self) -> None:
+        report = {
+            "issues": [{"severity": "medium", "category": "起跳", "description": "压膝不足"}],
+            "data_quality": "partial",
+        }
+
+        self.assertEqual(apply_child_score_floor(58, report, {}), 65)
+
+    def test_child_score_floor_does_not_lift_poor_or_likely_wrong(self) -> None:
+        self.assertEqual(apply_child_score_floor(58, {"issues": [], "data_quality": "poor"}, {}), 58)
+        self.assertEqual(
+            apply_child_score_floor(58, {"issues": [], "data_quality": "good"}, {"skeleton_reliability_signal": "likely_wrong"}),
+            58,
+        )
 
 
 if __name__ == "__main__":

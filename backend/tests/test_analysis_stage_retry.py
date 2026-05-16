@@ -79,17 +79,20 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 analysis = models.Analysis(
                     id=analysis_id,
                     action_type="跳跃",
-                    action_subtype="2A",
+                    action_subtype="单跳",
+                    skill_category="Axel 入门",
                     analysis_profile="jump",
                     retry_from_stage="report",
                     pipeline_version=CURRENT_PIPELINE_VERSION,
                     video_path=str(upload_dir / "source.mp4"),
                     vision_structured=vision_structured,
                     bio_data=bio_data,
+                    frame_motion_scores={"sample_count": 32},
                     cross_validation={"recommended_path": "A"},
                     report=old_report,
                     status="completed",
                     force_score=60,
+                    note="今天手动上传时备注：落冰有点紧张。",
                 )
                 session.add(analysis)
                 await session.commit()
@@ -98,6 +101,10 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.routers.analysis.extract_pose", side_effect=AssertionError("pose should not rerun")),
                 patch("app.routers.analysis.analyze_frames_dual", side_effect=AssertionError("vision should not rerun")),
                 patch("app.routers.analysis.generate_report", AsyncMock(return_value=new_report)) as report_mock,
+                patch(
+                    "app.routers.analysis.build_analysis_prompt_context",
+                    AsyncMock(return_value=SimpleNamespace(marker="prompt-context")),
+                ) as context_mock,
                 patch("app.routers.analysis.calculate_force_score", return_value=80),
                 patch("app.routers.analysis.auto_update_skill_progress", AsyncMock(return_value=None)),
                 patch("app.routers.analysis.sync_skater_progress", AsyncMock(return_value=None)),
@@ -106,6 +113,14 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 await analysis_router.process_analysis(analysis_id, retry_from="report")
 
             report_mock.assert_awaited_once()
+            context_mock.assert_awaited_once()
+            self.assertEqual(context_mock.await_args.kwargs["action_type"], "跳跃")
+            self.assertEqual(context_mock.await_args.kwargs["action_subtype"], "单跳")
+            self.assertEqual(context_mock.await_args.kwargs["skill_category"], "Axel 入门")
+            self.assertEqual(context_mock.await_args.kwargs["analysis_profile"], "jump")
+            self.assertEqual(context_mock.await_args.kwargs["motion_features"], {"sample_count": 32})
+            self.assertEqual(context_mock.await_args.kwargs["user_note"], "今天手动上传时备注：落冰有点紧张。")
+            self.assertEqual(report_mock.await_args.kwargs["prompt_context"].marker, "prompt-context")
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)
                 self.assertIsNotNone(saved)

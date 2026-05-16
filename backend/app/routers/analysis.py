@@ -64,7 +64,8 @@ from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
-from app.services.report import calculate_force_score, generate_report
+from app.services.llm_context import build_analysis_prompt_context
+from app.services.report import apply_child_score_floor, calculate_force_score, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
@@ -505,10 +506,16 @@ async def _regenerate_report_from_saved_analysis(
             if not isinstance(analysis.bio_data, dict):
                 raise RuntimeError("report-only retry requires saved bio_data")
             action_type = analysis.action_type
+            action_subtype = analysis.action_subtype
+            skill_category = analysis.skill_category
+            analysis_profile = analysis.analysis_profile
             skater_id = analysis.skater_id
             vision_structured = analysis.vision_structured
             bio_data = analysis.bio_data
             dual_path_meta = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
+            frame_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+            user_note = analysis.note
+            profile_evidence = bio_data.get("profile_evidence") if isinstance(bio_data.get("profile_evidence"), dict) else None
 
         await _append_analysis_log(
             analysis_id,
@@ -527,8 +534,19 @@ async def _regenerate_report_from_saved_analysis(
             bio_data,
             skater_id,
             dual_path_meta=dual_path_meta,
+            prompt_context=await build_analysis_prompt_context(
+                action_type=action_type,
+                action_subtype=action_subtype,
+                skill_category=skill_category,
+                analysis_profile=analysis_profile,
+                profile_evidence=profile_evidence,
+                motion_features=frame_motion_scores,
+                bio_data=bio_data,
+                skater_id=skater_id,
+                user_note=user_note,
+            ),
         )
-        force_score = calculate_force_score(report)
+        force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
         timings["report_s"] = _elapsed_seconds(report_start)
         timings["total_s"] = _elapsed_seconds(total_start)
 
@@ -882,6 +900,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     merged_quality_flags.extend(
                         flag for flag in profile_evidence.get('quality_flags', []) if flag not in merged_quality_flags
                     )
+                    target_flags = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+                    merged_quality_flags.extend(flag for flag in target_flags if flag not in merged_quality_flags)
                     bio_data['quality_flags'] = merged_quality_flags
                     bio_data['profile_evidence'] = profile_evidence
                     if 'jump_gate_not_passed' in merged_quality_flags:
@@ -973,12 +993,17 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning('Analysis %s action-window clip failed; Path A will use frames: %s', analysis_id, exc)
-                # Build memory context: long-term memory + user note
-                from app.services.snowball import build_memory_context
-                memory_context = await build_memory_context(skater_id)
-                if analysis.note:
-                    note_block = f"---\n用户上传时的备注：{analysis.note}\n---"
-                    memory_context = f"{memory_context}\n\n{note_block}" if memory_context else note_block
+                prompt_context = await build_analysis_prompt_context(
+                    action_type=action_type,
+                    action_subtype=action_subtype,
+                    skill_category=skill_category,
+                    analysis_profile=analysis_profile,
+                    profile_evidence=profile_evidence,
+                    motion_features=motion_scores if isinstance(motion_scores, dict) else None,
+                    bio_data=bio_data,
+                    skater_id=skater_id,
+                    user_note=analysis.note,
+                )
 
                 dual = await analyze_frames_dual(
                     action_type=action_type,
@@ -992,11 +1017,12 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     action_subtype=action_subtype,
                     analysis_profile=analysis_profile,
                     profile_evidence=profile_evidence,
-                    memory_context=memory_context,
+                    memory_context="",
                     timestamps=timestamps,
                     clip_path=clip_path,
                     window_start_sec=sampling_metadata.action_window_start,
                     skill_category=skill_category,
+                    prompt_context=prompt_context,
                 )
                 vision_structured = dual.path_a
                 vision_path_a = dual.path_a
@@ -1110,8 +1136,21 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 bio_data,
                 skater_id,
                 dual_path_meta=dual_path_meta,
+                prompt_context=(
+                    await build_analysis_prompt_context(
+                        action_type=action_type,
+                        action_subtype=action_subtype,
+                        skill_category=skill_category,
+                        analysis_profile=analysis_profile,
+                        profile_evidence=profile_evidence,
+                        motion_features=motion_scores if isinstance(motion_scores, dict) else None,
+                        bio_data=bio_data,
+                        skater_id=skater_id,
+                        user_note=analysis.note,
+                    )
+                ),
             )
-            force_score = calculate_force_score(report)
+            force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
             timings['report_s'] = _elapsed_seconds(report_start)
             timings['total_s'] = _elapsed_seconds(total_start)
         except Exception as exc:  # noqa: BLE001
@@ -1551,8 +1590,13 @@ def _build_bbox_per_frame(sampled_frames: list[Path], target_lock: dict[str, Any
     selected_bbox = target_lock.get("selected_bbox")
     if not isinstance(selected_bbox, dict):
         return None
+    preview_frame_index = target_lock.get("preview_frame_index")
     try:
-        bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox)
+        anchor_index = int(preview_frame_index) if preview_frame_index is not None else 0
+    except (TypeError, ValueError):
+        anchor_index = 0
+    try:
+        bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox, initial_frame_index=anchor_index)
         _append_target_lock_flags(target_lock, flags)
         target_lock["bbox_per_frame"] = bbox_per_frame
         return bbox_per_frame
@@ -1668,7 +1712,11 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             extract_pose,
             str(frames_dir),
             analysis.target_lock if isinstance(analysis.target_lock, dict) else None,
-            None,
+            (
+                analysis.target_lock.get("bbox_per_frame")
+                if isinstance(analysis.target_lock, dict) and isinstance(analysis.target_lock.get("bbox_per_frame"), list)
+                else None
+            ),
             sampling_metadata.effective_fps,
         )
         analysis.pose_data = computed_pose
@@ -2318,6 +2366,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
         lock_confidence=preview.lock_confidence,
         preview_frame=preview.preview_frame,
         preview_frame_url=preview.preview_frame_url,
+        preview_frame_index=preview.preview_frame_index,
         candidates=preview.candidates,
         target_lock_status=analysis.target_lock_status,
     )

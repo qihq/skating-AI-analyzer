@@ -2,13 +2,13 @@ import { NavLink } from "react-router-dom";
 
 import { useAppMode } from "./AppModeContext";
 
-export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "settings";
+export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "settings" | "debug";
 
 type BottomNavProps = {
   activeTab?: PrimaryTab;
 };
 
-const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings">; to: string; label: string; icon: string }> = [
+const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings" | "debug">; to: string; label: string; icon: string }> = [
   { tab: "path", to: "/path", label: "路径", icon: "⛸️" },
   { tab: "snowball", to: "/snowball", label: "冰宝", icon: "❄️" },
   { tab: "review", to: "/review", label: "复盘", icon: "🎬" },
@@ -19,6 +19,7 @@ const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon
   { tab: "review", to: "/review", label: "分析", icon: "📹" },
   { tab: "path", to: "/path", label: "计划", icon: "📋" },
   { tab: "archive", to: "/archive", label: "进展", icon: "📊" },
+  { tab: "debug", to: "/debug", label: "调试", icon: "🧪" },
   { tab: "settings", to: "/settings", label: "设置", icon: "⚙️" },
 ];
 

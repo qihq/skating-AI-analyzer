@@ -9,6 +9,7 @@ const TAB_MATCHERS: Array<{ tab: PrimaryTab; paths: string[] }> = [
   { tab: "review", paths: ["/review", "/report"] },
   { tab: "archive", paths: ["/archive"] },
   { tab: "settings", paths: ["/settings"] },
+  { tab: "debug", paths: ["/debug"] },
 ];
 
 function activeTabForPath(pathname: string): PrimaryTab | undefined {

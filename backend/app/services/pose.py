@@ -282,6 +282,20 @@ def _score_candidate(
     return round(base, 4)
 
 
+def _has_target_overlap(
+    bbox: dict[str, float] | None,
+    previous_bbox: dict[str, float] | None,
+    tracker_bbox: dict[str, float] | None,
+    seed_bbox: dict[str, float] | None,
+) -> bool:
+    if not bbox:
+        return False
+    references = [item for item in (tracker_bbox, previous_bbox, seed_bbox) if item]
+    if not references:
+        return True
+    return any(_bbox_iou(bbox, reference) > 0.0 for reference in references)
+
+
 def _resolve_tasks_landmarker() -> Any | None:
     num_poses, task_model_path = _get_pose_runtime_config()
     if not task_model_path:
@@ -461,6 +475,12 @@ def extract_pose(
                     ),
                 }
                 for candidate in candidate_results
+                if _has_target_overlap(
+                    candidate.get("bbox"),
+                    previous_bbox,
+                    current_tracker_bbox,
+                    seed_bbox,
+                )
             ]
             scored_candidates.sort(key=lambda item: float(item.get("score", -1.0)), reverse=True)
             best_candidate = scored_candidates[0] if scored_candidates and float(scored_candidates[0].get("score", -1.0)) >= 0.15 else None

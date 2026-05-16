@@ -16,6 +16,7 @@ MANUAL_BBOX_MIN_SIDE = 0.02
 class TargetPreview:
     preview_frame: str | None
     preview_frame_url: str | None
+    preview_frame_index: int | None
     auto_candidate_id: str | None
     lock_confidence: float
     candidates: list[dict[str, Any]]
@@ -86,7 +87,14 @@ def build_target_preview(
     *,
     existing_target_lock: dict[str, Any] | None = None,
 ) -> TargetPreview:
-    preview_frame = frame_names[0] if frame_names else None
+    frame_list = list(frame_names)
+    existing_preview_frame = (
+        str(existing_target_lock.get("preview_frame"))
+        if isinstance(existing_target_lock, dict) and existing_target_lock.get("preview_frame")
+        else None
+    )
+    preview_frame = existing_preview_frame if existing_preview_frame in frame_list else (frame_list[0] if frame_list else None)
+    preview_frame_index = frame_list.index(preview_frame) if preview_frame in frame_list else None
     candidates = _fallback_candidates(frame_names)
 
     if isinstance(existing_target_lock, dict) and existing_target_lock.get("candidates"):
@@ -114,6 +122,7 @@ def build_target_preview(
     return TargetPreview(
         preview_frame=preview_frame,
         preview_frame_url=f"/api/frames/{analysis_id}/{preview_frame}" if preview_frame else None,
+        preview_frame_index=preview_frame_index,
         auto_candidate_id=auto_candidate_id or None,
         lock_confidence=round(lock_confidence, 4),
         candidates=candidates,
@@ -159,6 +168,7 @@ def build_target_lock_payload(
         selected_bbox = validate_manual_bbox(manual_bbox)
         return {
             "preview_frame": preview.preview_frame,
+            "preview_frame_index": preview.preview_frame_index,
             "candidates": preview.candidates,
             "selected_candidate_id": None,
             "selected_bbox": selected_bbox,
@@ -174,6 +184,7 @@ def build_target_lock_payload(
 
     return {
         "preview_frame": preview.preview_frame,
+        "preview_frame_index": preview.preview_frame_index,
         "candidates": preview.candidates,
         "selected_candidate_id": chosen.get("id") if isinstance(chosen, dict) else preview.auto_candidate_id,
         "selected_bbox": chosen.get("bbox") if isinstance(chosen, dict) else None,

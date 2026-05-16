@@ -4,6 +4,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import AppLayout from "./components/AppLayout";
 import ApiSettingsPage from "./pages/ApiSettingsPage";
 import ComparePage from "./pages/ComparePage";
+import DebugPage from "./pages/DebugPage";
 import ArchivePage from "./pages/ArchivePage";
 import HistoryPage from "./pages/HistoryPage";
 import ParentSetupPage from "./pages/ParentSetupPage";
@@ -126,6 +127,7 @@ export default function App() {
           <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />
+          <Route path="/debug" element={<DebugPage />} />
         </Route>
 
         <Route path="/history" element={<HistoryPage />} />

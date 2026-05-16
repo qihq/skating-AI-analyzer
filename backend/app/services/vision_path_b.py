@@ -90,6 +90,7 @@ def _build_user_prompt(
     profile_evidence: dict[str, Any] | None,
     jump_metrics_text: str,
     n_frames: int,
+    skill_category: str | None = None,
 ) -> str:
     blocks: list[str] = []
     if analysis_profile or profile_evidence:
@@ -107,6 +108,7 @@ def _build_user_prompt(
     body = (
         f"分析【{action_type}】动作（共 {n_frames} 帧，骨架已叠加，按时间顺序）。\n"
         f"动作子类型：{action_subtype or '未指定'}\n\n"
+        f"技能分类：{skill_category or '未指定'}\n\n"
         "每帧图像前附有该帧测量值，请结合数值和图像综合判断。\n\n"
         "【subscores 评分标准（0-1 浮点数）】\n"
         "0.6-0.7 = 基本达标（Free Skate 1 初学者正常水平）\n"
@@ -154,6 +156,7 @@ async def analyze_path_b(
     analysis_profile: str | None = None,
     profile_evidence: dict[str, Any] | None = None,
     memory_context: str = "",
+    skill_category: str | None = None,
 ) -> dict[str, Any]:
     """
     Path B: annotated skeleton frames plus biomechanical numeric grounding.
@@ -182,6 +185,7 @@ async def analyze_path_b(
             profile_evidence,
             jump_metrics_text,
             n_frames,
+            skill_category,
         )
 
         bio_context = frame_bio_context or {}

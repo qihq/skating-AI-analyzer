@@ -423,7 +423,7 @@ export default function SkillTreePage() {
                 查看 provider JSON 合法率、冲突率、失败率和最近自动评测快照，用于回放评测和手动调权。
               </p>
             </div>
-            <Link to="/settings/api#replay-metrics" className="app-pill min-h-[46px] shrink-0 px-5 text-sm font-semibold">
+            <Link to="/debug" className="app-pill min-h-[46px] shrink-0 px-5 text-sm font-semibold">
               查看质量监控
             </Link>
           </div>

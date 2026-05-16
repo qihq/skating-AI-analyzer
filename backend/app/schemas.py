@@ -340,6 +340,7 @@ class TargetPreviewResponse(BaseModel):
     lock_confidence: float
     preview_frame: str | None = None
     preview_frame_url: str | None = None
+    preview_frame_index: int | None = None
     candidates: list[TargetCandidate] = Field(default_factory=list)
     target_lock_status: str | None = None
 

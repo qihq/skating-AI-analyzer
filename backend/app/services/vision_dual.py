@@ -17,6 +17,7 @@ from app.services.cross_validator import (
     cross_validate,
 )
 from app.services.frame_annotator import annotate_frames_batch, build_pose_by_stem
+from app.services.llm_context import AnalysisPromptContext, render_prompt_context
 from app.services.providers import ActiveProviderConfig
 from app.services.video import FramePayload, encode_frames
 from app.services.vision_path_a import analyze_path_a
@@ -81,6 +82,7 @@ async def analyze_frames_dual(
     window_start_sec: float = 0.0,
     total_timeout: float = DUAL_PATH_TOTAL_TIMEOUT,
     skill_category: str | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
 ) -> DualPathResult:
     """
     Run dual-path analysis and cross validation.
@@ -106,6 +108,11 @@ async def analyze_frames_dual(
     bio_ctx = build_frame_bio_context(bio_data, frame_stems)
     jump_metrics_text = summarize_jump_metrics(bio_data)
     motion_features = _motion_features_for_prompt(frame_motion_scores)
+    rendered_context = (
+        render_prompt_context(prompt_context, include_bio=True)
+        if prompt_context is not None
+        else memory_context
+    )
 
     async def _run_a() -> dict[str, Any]:
         return await analyze_path_a(
@@ -117,7 +124,7 @@ async def analyze_frames_dual(
             profile_evidence=profile_evidence,
             bio_data=bio_data,
             motion_features=motion_features,
-            memory_context=memory_context,
+            memory_context=rendered_context,
             mode="video" if clip_path is not None else "frames",
             clip_path=clip_path,
             window_start_sec=window_start_sec,
@@ -135,7 +142,8 @@ async def analyze_frames_dual(
             action_subtype=action_subtype,
             analysis_profile=analysis_profile,
             profile_evidence=profile_evidence,
-            memory_context=memory_context,
+            memory_context=rendered_context,
+            skill_category=skill_category,
         )
 
     try:

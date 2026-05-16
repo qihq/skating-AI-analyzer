@@ -138,6 +138,7 @@ export interface AnalysisListItem {
   action_type: string;
   action_subtype: string | null;
   analysis_profile: string | null;
+  pipeline_version: string | null;
   status: AnalysisStatus;
   force_score: number | null;
   note: string | null;
@@ -214,6 +215,7 @@ export interface TargetPreviewResponse {
   auto_candidate_id: string | null;
   lock_confidence: number;
   preview_frame: string | null;
+  preview_frame_index: number | null;
   preview_frame_url: string | null;
   candidates: TargetCandidate[];
   target_lock_status: string | null;

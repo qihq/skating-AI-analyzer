@@ -9,6 +9,7 @@ from app.schemas import Severity
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
+from app.services.llm_context import AnalysisPromptContext, render_prompt_context
 
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,32 @@ def calculate_force_score(report: dict[str, Any]) -> int:
     for issue in report.get("issues", []):
         score -= penalties.get(str(issue.get("severity", "")).lower(), 0)
     return max(score, 0)
+
+
+def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: dict[str, Any] | None = None) -> int:
+    data_quality = str(report.get("data_quality", "partial") or "partial").strip().lower()
+    skeleton_signal = str((dual_path_meta or {}).get("skeleton_reliability_signal", "") or "").strip().lower()
+    if data_quality == "poor" or skeleton_signal == "likely_wrong":
+        return score
+
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    has_high_or_safety_risk = False
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        severity = str(issue.get("severity", "")).strip().lower()
+        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
+        if severity == Severity.high.value or "安全" in text or "摔" in text or "risk" in text or "danger" in text:
+            has_high_or_safety_risk = True
+            break
+    if has_high_or_safety_risk:
+        return score
+
+    if data_quality in {"good", "partial"} and issues:
+        return max(score, 65)
+    if data_quality in {"good", "partial"}:
+        return max(score, 70)
+    return score
 
 
 def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -444,6 +471,7 @@ async def generate_report(
     skater_id: str | None = None,
     *,
     dual_path_meta: dict[str, Any] | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
 ) -> dict[str, Any]:
     """
     Generate a structured training report.
@@ -463,13 +491,18 @@ async def generate_report(
     """
     try:
         provider = await get_active_provider("report")
-        memory_context = await build_memory_context(skater_id)
+        memory_context = "" if prompt_context is not None else await build_memory_context(skater_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
         failure = classify_ai_failure(exc)
         return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
 
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
+    context_block = (
+        "\n\n=== 统一分析上下文 ===\n" + render_prompt_context(prompt_context, include_bio=False)
+        if prompt_context is not None
+        else ""
+    )
     vision_summary = summarize_vision_for_report(vision_structured)
     dual_block = _build_dual_path_report_context(dual_path_meta)
 
@@ -504,6 +537,7 @@ async def generate_report(
         "不可确认的刃型、周数或完成质量可以写入 issues，但不能替代训练建议。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
+        + context_block
         + dual_block
     )
     user_prompt += (
