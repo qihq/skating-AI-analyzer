@@ -186,7 +186,7 @@ class SemanticFrameAnnotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(mock_b.await_args.kwargs["annotated_frame_payloads"]), 12)
         self.assertEqual(result.dual_path_meta["annotated_frame_count"], 12)
 
-    async def test_skeleton_fallback_semantic_frames_use_semantic_path_b_flow(self) -> None:
+    async def test_unreliable_skeleton_fallback_does_not_use_semantic_path_b_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             frame_path = root / "semantic_0001.jpg"
@@ -212,6 +212,50 @@ class SemanticFrameAnnotationTests(unittest.IsolatedAsyncioTestCase):
                     _provider(),
                     annotated_dir=root / "annotated",
                     resolved_keyframes={"source": "skeleton_fallback", "selected": [{"frame_id": "semantic_0001", "timestamp": 1.2, "phase_code": "takeoff"}]},
+                )
+
+        pose_mock.assert_not_called()
+        self.assertFalse(mock_b.await_args.kwargs["preserve_all_frames"])
+        self.assertEqual(result.dual_path_meta["path_b_annotation_source"], "main_pose")
+
+    async def test_reliable_skeleton_fallback_semantic_frames_use_semantic_path_b_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths = []
+            for index in range(1, 4):
+                frame_path = root / f"semantic_{index:04d}.jpg"
+                frame_path.write_bytes(b"frame")
+                frame_paths.append(frame_path)
+            main_pose = {"frames": [{"frame": "frame_0001.jpg", "keypoints": [{"source": "main"}]}], "connections": []}
+            semantic_pose = {
+                "frames": [{"frame": path.name, "keypoints": [{"source": "semantic"}]} for path in frame_paths],
+                "connections": [],
+            }
+            mock_b = AsyncMock(return_value=_path_b())
+
+            selected = [
+                {"frame_id": "semantic_0001", "timestamp": 1.0, "phase_code": "takeoff", "confidence": 0.8},
+                {"frame_id": "semantic_0002", "timestamp": 1.3, "phase_code": "air", "confidence": 0.8},
+                {"frame_id": "semantic_0003", "timestamp": 1.6, "phase_code": "landing", "confidence": 0.8},
+            ]
+
+            with (
+                patch("app.services.vision_dual._semantic_pose_for_annotation", return_value=semantic_pose) as pose_mock,
+                patch("app.services.vision_dual.annotate_frames_batch", return_value=frame_paths),
+                patch("app.services.vision_dual.encode_frames", AsyncMock(return_value=_semantic_payload())),
+                patch("app.services.vision_dual.analyze_path_a", AsyncMock(return_value=_path_a())),
+                patch("app.services.vision_dual.analyze_path_b", mock_b),
+            ):
+                result = await analyze_frames_dual(
+                    "è·³è·ƒ",
+                    frame_paths,
+                    _semantic_payload(),
+                    main_pose,
+                    {"quality_flags": []},
+                    _provider(),
+                    _provider(),
+                    annotated_dir=root / "annotated",
+                    resolved_keyframes={"source": "skeleton_fallback", "selected": selected},
                 )
 
         pose_mock.assert_called_once()

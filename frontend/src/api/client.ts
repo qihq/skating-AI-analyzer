@@ -191,6 +191,8 @@ export interface VideoTemporalDiagnostics {
   video_ai_model?: string | null;
   video_ai_provider?: string | null;
   video_ai_confidence?: number | null;
+  video_ai_ran?: boolean;
+  video_ai_video_url?: string | null;
   timestamp_source?: string | null;
   resolved_confidence?: number | null;
   selected_semantic_frames?: SelectedSemanticFrame[];

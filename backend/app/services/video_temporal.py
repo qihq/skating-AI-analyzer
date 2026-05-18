@@ -111,9 +111,11 @@ SPIN_RESOLVER_PHASES = ("spin_entry", "spin_main", "spin_exit")
 SPIRAL_RESOLVER_PHASES = ("spiral_entry", "spiral_hold", "spiral_exit")
 MAX_RESOLVED_KEYFRAMES = 12
 SKELETON_ANCHOR_CONFIDENCE = 0.65
+SKELETON_FALLBACK_CONFIDENCE = 0.65
 MOTION_SNAP_TOLERANCE_SECONDS = 0.18
 FALLBACK_MOTION_WINDOW_SECONDS = 0.30
 MOTION_PEAK_PHASES = {"takeoff", "landing"}
+SEMANTIC_ORDER_MIN_GAP_SECONDS = 0.02
 
 
 def _configured_max_resolved_keyframes() -> int:
@@ -123,6 +125,76 @@ def _configured_max_resolved_keyframes() -> int:
     except ValueError:
         return MAX_RESOLVED_KEYFRAMES
     return max(1, min(value, MAX_RESOLVED_KEYFRAMES))
+
+
+def _semantic_key_from_record(record: dict[str, Any]) -> str | None:
+    key_moment = str(record.get("key_moment") or "")
+    if key_moment.startswith("T_"):
+        return "T"
+    if key_moment.startswith("A_"):
+        return "A"
+    if key_moment.startswith("L_"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "")
+    if phase_code == "takeoff":
+        return "T"
+    if phase_code == "air":
+        return "A"
+    if phase_code == "landing":
+        return "L"
+    return None
+
+
+def semantic_keyframes_are_reliable(resolved_keyframes: dict[str, Any] | None) -> bool:
+    if not isinstance(resolved_keyframes, dict):
+        return False
+    selected = resolved_keyframes.get("selected")
+    if not isinstance(selected, list) or not selected:
+        return False
+    quality_flags = [flag for flag in (resolved_keyframes.get("quality_flags") or []) if isinstance(flag, str)]
+    if any(
+        flag
+        in {
+            "semantic_frame_extract_failed",
+            "semantic_keyframe_refinement_order_rejected",
+            "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+        }
+        for flag in quality_flags
+    ):
+        return False
+    source = resolved_keyframes.get("source")
+    anchors: dict[str, float] = {}
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        key = _semantic_key_from_record(item)
+        timestamp = _to_float(item.get("timestamp"))
+        if key in {"T", "A", "L"} and timestamp is not None:
+            anchors[key] = timestamp
+    if {"T", "A", "L"}.issubset(anchors) and not (
+        anchors["T"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["A"]
+        and anchors["A"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["L"]
+    ):
+        return False
+    if source in {"video_ai_refined", "blended"}:
+        return True
+    if source != "skeleton_fallback":
+        return False
+
+    anchors = {}
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        key = _semantic_key_from_record(item)
+        timestamp = _to_float(item.get("timestamp"))
+        confidence = _candidate_confidence(item)
+        if key in {"T", "A", "L"} and timestamp is not None and confidence >= SKELETON_FALLBACK_CONFIDENCE:
+            anchors[key] = timestamp
+    return (
+        {"T", "A", "L"}.issubset(anchors)
+        and anchors["T"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["A"]
+        and anchors["A"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["L"]
+    )
 
 
 def _to_float(value: Any) -> float | None:
@@ -767,7 +839,8 @@ def _resolve_skeleton_candidate_timestamp(
 
     phase_code = _phase_code_for_skeleton_label(label)
     confidence = _candidate_confidence(candidate)
-    if confidence < SKELETON_ANCHOR_CONFIDENCE and not fallback:
+    required_confidence = SKELETON_FALLBACK_CONFIDENCE if fallback else SKELETON_ANCHOR_CONFIDENCE
+    if confidence < required_confidence:
         flags.append(f"video_temporal_resolver_skeleton_{label.lower()}_below_anchor_confidence")
         return None, "skeleton_candidate_below_anchor_confidence", flags
 
@@ -779,7 +852,7 @@ def _resolve_skeleton_candidate_timestamp(
         reason = "skeleton_fallback_candidate" if fallback else f"video_phase_range_skeleton_{phase_code}_anchor"
         return timestamp, reason, flags
 
-    if confidence >= SKELETON_ANCHOR_CONFIDENCE or fallback:
+    if confidence >= required_confidence:
         reason = "skeleton_fallback_apex_preserved" if fallback else "video_phase_range_skeleton_apex"
         return timestamp, reason, flags
 
@@ -793,8 +866,9 @@ def _fallback_skeleton_selected(
     video_duration_sec: float,
     max_frames: int,
     motion_records: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     selected: list[dict[str, Any]] = []
+    flags: list[str] = []
     for index, (label, key_moment) in enumerate(
         (("T", "T_takeoff_sec"), ("A", "A_air_sec"), ("L", "L_landing_sec")),
         start=1,
@@ -807,7 +881,7 @@ def _fallback_skeleton_selected(
             continue
         start = max(0.0, raw_timestamp - FALLBACK_MOTION_WINDOW_SECONDS)
         end = min(video_duration_sec, raw_timestamp + FALLBACK_MOTION_WINDOW_SECONDS)
-        timestamp, reason, _ = _resolve_skeleton_candidate_timestamp(
+        timestamp, reason, candidate_flags = _resolve_skeleton_candidate_timestamp(
             label=label,
             candidate=candidate,
             motion_records=motion_records,
@@ -815,6 +889,7 @@ def _fallback_skeleton_selected(
             end=end,
             fallback=True,
         )
+        flags.extend(candidate_flags)
         if timestamp is None:
             continue
         phase_code = _phase_code_for_skeleton_label(label)
@@ -831,7 +906,7 @@ def _fallback_skeleton_selected(
         )
         if len(selected) >= max_frames:
             break
-    return selected
+    return selected, flags
 
 
 def _valid_video_temporal_for_resolver(video_ai_result: dict[str, Any] | None, duration_sec: float) -> dict[str, Any] | None:
@@ -945,12 +1020,13 @@ def resolve_semantic_keyframes(
     motion_records = _motion_records_from_scores(motion_scores)
 
     confidence = _clamp_confidence(normalized_video.get("confidence") if isinstance(normalized_video, dict) else 0.0)
-    fallback_selected = _fallback_skeleton_selected(
+    fallback_selected, fallback_flags = _fallback_skeleton_selected(
         skeleton_candidates,
         video_duration_sec=duration,
         max_frames=max_frames,
         motion_records=motion_records,
     )
+    flags.extend(fallback_flags)
     validation = normalized_video.get("validation") if isinstance(normalized_video, dict) and isinstance(normalized_video.get("validation"), dict) else {}
     explicit_video_fallback = (
         isinstance(normalized_video, dict)

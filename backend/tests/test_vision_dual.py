@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import cv2
 import numpy as np
+import base64
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -254,6 +255,118 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(mock_encode.await_args.kwargs["timestamps"], timestamps)
+
+    async def test_path_b_timeout_preserves_annotated_frame_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 2)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+
+            async def slow_b(*args: object, **kwargs: object) -> dict:
+                await asyncio.sleep(0.05)
+                return _path_b_result()
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())) as mock_a,
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(side_effect=slow_b)),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(2))),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(2),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                    path_b_timeout=0.001,
+                )
+
+        self.assertEqual(result.path_b["error"], "path_b_timeout")
+        self.assertEqual(result.path_b["n_frames"], 2)
+        self.assertEqual(result.path_b["annotated_frame_count"], 2)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 2)
+        self.assertEqual(mock_a.await_count, 1)
+
+    async def test_sampled_fallback_limits_path_b_payload_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 32)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 10})
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(32))),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(32),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        self.assertEqual(len(mock_b.await_args.kwargs["annotated_frame_payloads"]), 10)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 10)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count_raw"], 32)
+
+    async def test_path_b_payloads_are_compressed_without_changing_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths = []
+            for index in range(6):
+                path = root / "frames" / f"semantic_{index + 1:04d}.jpg"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                image = np.full((720, 1280, 3), 255 - index, dtype=np.uint8)
+                self.assertTrue(cv2.imwrite(str(path), image, [int(cv2.IMWRITE_JPEG_QUALITY), 95]))
+                frame_paths.append(path)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            selected = [
+                {"frame_id": "semantic_0001", "timestamp": 1.0, "phase_code": "takeoff", "confidence": 0.8},
+                {"frame_id": "semantic_0002", "timestamp": 1.2, "phase_code": "air", "confidence": 0.8},
+                {"frame_id": "semantic_0003", "timestamp": 1.4, "phase_code": "landing", "confidence": 0.8},
+            ]
+            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 6})
+            encoded_payloads = [
+                FramePayload(
+                    frame_id=f"semantic_{index + 1:04d}",
+                    data_url="data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii"),
+                    timestamp_sec=float(index),
+                )
+                for index, path in enumerate(frame_paths)
+            ]
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual._semantic_pose_for_annotation", return_value={"frames": [], "connections": []}),
+                patch("app.services.vision_dual.annotate_frames_batch", return_value=frame_paths),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=encoded_payloads)),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(6),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=root / "annotated",
+                    resolved_keyframes={"source": "video_ai_refined", "selected": selected},
+                )
+
+        payloads = mock_b.await_args.kwargs["annotated_frame_payloads"]
+        self.assertEqual(len(payloads), 6)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 6)
+        raw = base64.b64decode(payloads[0].data_url.split(",", maxsplit=1)[1])
+        decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertLessEqual(decoded.shape[1], 640)
 
     async def test_prompt_context_is_passed_to_both_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

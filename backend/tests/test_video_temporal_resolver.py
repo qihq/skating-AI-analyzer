@@ -125,6 +125,27 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertEqual([item["timestamp"] for item in plan["selected"]], [1.3, 1.55, 1.95])
         self.assertEqual(plan["selected"][0]["selection_reason"], "skeleton_fallback_motion_peak")
 
+    def test_low_confidence_skeleton_fallback_rejects_weak_candidates(self) -> None:
+        skeleton = {
+            "key_frame_candidates": {
+                "T": {"frame_id": "frame_0002", "timestamp": 1.2, "confidence": 0.52},
+                "A": {"frame_id": "frame_0004", "timestamp": 1.55, "confidence": 0.79},
+                "L": {"frame_id": "frame_0005", "timestamp": 1.95, "confidence": 0.34},
+            }
+        }
+        plan = resolve_semantic_keyframes(
+            _validated_video(0.42),
+            skeleton,
+            _motion_scores(),
+            video_duration_sec=3.0,
+            analysis_profile="jump",
+        )
+
+        self.assertEqual(plan["source"], "skeleton_fallback")
+        self.assertEqual([item["phase_code"] for item in plan["selected"]], ["air"])
+        self.assertIn("video_temporal_resolver_skeleton_t_below_anchor_confidence", plan["quality_flags"])
+        self.assertIn("video_temporal_resolver_skeleton_l_below_anchor_confidence", plan["quality_flags"])
+
     def test_no_motion_score_uses_key_frame_hint_when_skeleton_missing(self) -> None:
         plan = resolve_semantic_keyframes(
             _validated_video(0.86),

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import cv2
 
 from app.services.bio_context import (
     build_frame_bio_context,
@@ -23,13 +26,17 @@ from app.services.providers import ActiveProviderConfig
 from app.services.pose import extract_pose
 from app.services.video import FramePayload, encode_frames
 from app.services.vision_path_a import analyze_path_a
-from app.services.vision_path_b import analyze_path_b
+from app.services.vision_path_b import PATH_B_MAX_FRAMES, analyze_path_b, sample_frames_path_b
+from app.services.video_temporal import semantic_keyframes_are_reliable
 from app.services.vision_video_context import build_video_context_by_frame
 
 
 logger = logging.getLogger(__name__)
 
 DUAL_PATH_TOTAL_TIMEOUT = 150.0
+PATH_B_TIMEOUT = 120.0
+PATH_B_IMAGE_MAX_WIDTH = 640
+PATH_B_IMAGE_JPEG_QUALITY = 72
 
 
 def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> dict[str, Any]:
@@ -55,24 +62,7 @@ def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> d
 
 
 def _uses_semantic_keyframes(resolved_keyframes: dict[str, Any] | None) -> bool:
-    if not isinstance(resolved_keyframes, dict):
-        return False
-    selected = resolved_keyframes.get("selected")
-    if not isinstance(selected, list) or not selected:
-        return False
-    if resolved_keyframes.get("source") in {"video_ai_refined", "blended"}:
-        return True
-    if resolved_keyframes.get("source") != "skeleton_fallback":
-        return False
-    return any(
-        isinstance(item, dict)
-        and (
-            str(item.get("key_moment") or "").startswith(("T_", "A_", "L_"))
-            or str(item.get("phase_code") or "") in {"takeoff", "air", "landing"}
-        )
-        and item.get("timestamp") is not None
-        for item in selected
-    )
+    return semantic_keyframes_are_reliable(resolved_keyframes)
 
 
 def _semantic_pose_for_annotation(
@@ -107,6 +97,42 @@ def _semantic_pose_for_annotation(
     return pose_payload if isinstance(pose_payload, dict) else {"frames": [], "connections": []}
 
 
+def _compress_frame_payloads_for_path_b(
+    frame_paths: list[Path],
+    payloads: list[FramePayload],
+    *,
+    max_width: int = PATH_B_IMAGE_MAX_WIDTH,
+    jpeg_quality: int = PATH_B_IMAGE_JPEG_QUALITY,
+) -> list[FramePayload]:
+    by_stem = {path.stem: path for path in frame_paths}
+    compressed: list[FramePayload] = []
+    for payload in payloads:
+        frame_path = by_stem.get(payload.frame_id)
+        if frame_path is None:
+            compressed.append(payload)
+            continue
+        image = cv2.imread(str(frame_path))
+        if image is None:
+            compressed.append(payload)
+            continue
+        height, width = image.shape[:2]
+        if width > max_width:
+            scale = max_width / float(width)
+            image = cv2.resize(image, (max_width, max(1, int(round(height * scale)))), interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+        if not ok:
+            compressed.append(payload)
+            continue
+        compressed.append(
+            FramePayload(
+                frame_id=payload.frame_id,
+                data_url=f"data:image/jpeg;base64,{base64.b64encode(encoded.tobytes()).decode('utf-8')}",
+                timestamp_sec=payload.timestamp_sec,
+            )
+        )
+    return compressed
+
+
 @dataclass(slots=True)
 class DualPathResult:
     path_a: dict[str, Any]
@@ -137,6 +163,7 @@ async def analyze_frames_dual(
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
     total_timeout: float = DUAL_PATH_TOTAL_TIMEOUT,
+    path_b_timeout: float = PATH_B_TIMEOUT,
     skill_category: str | None = None,
     prompt_context: AnalysisPromptContext | None = None,
     video_temporal: dict[str, Any] | None = None,
@@ -181,6 +208,7 @@ async def analyze_frames_dual(
         connections=connections if isinstance(connections, list) else None,
     )
     annotated_payloads = await encode_frames(annotated_paths, timestamps=timestamps)
+    compressed_annotated_payloads = _compress_frame_payloads_for_path_b(annotated_paths, annotated_payloads)
     video_context_by_frame = build_video_context_by_frame(
         raw_frame_payloads,
         video_temporal=video_temporal,
@@ -189,6 +217,11 @@ async def analyze_frames_dual(
 
     frame_stems = [payload.frame_id for payload in raw_frame_payloads]
     key_stems = extract_key_frame_stems(bio_data)
+    path_b_payloads = (
+        compressed_annotated_payloads
+        if uses_semantic_keyframes
+        else sample_frames_path_b(compressed_annotated_payloads, key_stems, max_frames=PATH_B_MAX_FRAMES)
+    )
     bio_ctx = build_frame_bio_context(bio_data, frame_stems)
     jump_metrics_text = summarize_jump_metrics(bio_data)
     motion_features = _motion_features_for_prompt(frame_motion_scores)
@@ -217,9 +250,16 @@ async def analyze_frames_dual(
         )
 
     async def _run_b() -> dict[str, Any]:
+        if not path_b_payloads:
+            return {
+                "path": "B",
+                "error": "skipped_no_annotated_frames",
+                "n_frames": 0,
+                "frame_analysis": [],
+            }
         return await analyze_path_b(
             action_type=action_type,
-            annotated_frame_payloads=annotated_payloads,
+            annotated_frame_payloads=path_b_payloads,
             provider=provider_path_b,
             frame_bio_context=bio_ctx,
             key_frame_stems=key_stems,
@@ -233,20 +273,25 @@ async def analyze_frames_dual(
             preserve_all_frames=uses_semantic_keyframes,
         )
 
+    path_a_task = asyncio.create_task(_run_a())
+    path_b_task = asyncio.create_task(_run_b())
     try:
-        path_a_result, path_b_result = await asyncio.wait_for(
-            asyncio.gather(_run_a(), _run_b()),
-            timeout=total_timeout,
-        )
+        path_b_result = await asyncio.wait_for(path_b_task, timeout=path_b_timeout)
     except asyncio.TimeoutError:
-        logger.warning("Dual path total timeout > %.0fs, retrying Path A alone", total_timeout)
-        fallback_timeout = max(30.0, total_timeout * 0.6)
-        try:
-            path_a_result = await asyncio.wait_for(_run_a(), timeout=fallback_timeout)
-        except asyncio.TimeoutError:
-            logger.warning("Path A fallback also timed out after %.0fs; using error result", fallback_timeout)
-            path_a_result = {"path": "A", "error": "path_a_timeout"}
-        path_b_result = {"path": "B", "error": "total_timeout"}
+        logger.warning("Path B timeout > %.0fs; continuing with Path A result", path_b_timeout)
+        path_b_result = {
+            "path": "B",
+            "error": "path_b_timeout",
+            "timeout_seconds": round(float(path_b_timeout), 3),
+            "n_frames": len(path_b_payloads),
+            "annotated_frame_count": len(path_b_payloads),
+            "frame_analysis": [],
+        }
+    try:
+        path_a_result = await asyncio.wait_for(path_a_task, timeout=total_timeout)
+    except asyncio.TimeoutError:
+        logger.warning("Path A timeout > %.0fs; using error result", total_timeout)
+        path_a_result = {"path": "A", "error": "path_a_timeout"}
 
     validation = cross_validate(path_a_result, path_b_result)
     weights = compute_blend_weights(validation)
@@ -265,7 +310,8 @@ async def analyze_frames_dual(
         "path_b_annotation_source": annotation_source,
         "path_b_preserve_all_frames": uses_semantic_keyframes,
         "raw_frame_count": len(raw_frame_payloads),
-        "annotated_frame_count": len(annotated_payloads),
+        "annotated_frame_count": len(path_b_payloads),
+        "annotated_frame_count_raw": len(annotated_payloads),
         "fusion_diagnostics": fusion_diagnostics,
         "conflict_level": fusion_diagnostics.get("conflict_level", "none"),
         "downgraded_reasons": fusion_diagnostics.get("downgraded_reasons", []),

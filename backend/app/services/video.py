@@ -1018,6 +1018,41 @@ def _refinement_fps(source_fps: float | None) -> float:
     return max(1.0, min(float(source_fps), 60.0))
 
 
+def _semantic_record_timestamp(record: dict[str, object]) -> float | None:
+    try:
+        return float(record.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _semantic_order_anchors(records: Sequence[dict[str, object]]) -> dict[str, float]:
+    anchors: dict[str, float] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = _semantic_key_moment(record)
+        timestamp = _semantic_record_timestamp(record)
+        if key in {"T", "A", "L"} and timestamp is not None:
+            anchors[key] = timestamp
+    return anchors
+
+
+def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.02) -> bool:
+    if key == "T":
+        apex = anchors.get("A")
+        landing = anchors.get("L")
+        return (apex is not None and timestamp >= apex - min_gap_sec) or (landing is not None and timestamp >= landing - min_gap_sec)
+    if key == "A":
+        takeoff = anchors.get("T")
+        landing = anchors.get("L")
+        return (takeoff is not None and timestamp <= takeoff + min_gap_sec) or (landing is not None and timestamp >= landing - min_gap_sec)
+    if key == "L":
+        takeoff = anchors.get("T")
+        apex = anchors.get("A")
+        return (takeoff is not None and timestamp <= takeoff + min_gap_sec) or (apex is not None and timestamp <= apex + min_gap_sec)
+    return False
+
+
 async def _refine_motion_peak_timestamp(
     video_path: Path,
     work_dir: Path,
@@ -1072,6 +1107,7 @@ async def refine_semantic_keyframe_timestamps(
     """
     refined_records: list[dict[str, object]] = []
     quality_flags: list[str] = []
+    order_anchors = _semantic_order_anchors(selected_records)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     for record in selected_records:
@@ -1112,6 +1148,15 @@ async def refine_semantic_keyframe_timestamps(
                 video_duration_sec=video_duration_sec,
                 window_seconds=window_seconds,
             )
+            if _violates_semantic_order(key, refined_ts, order_anchors):
+                output["timestamp"] = round(timestamp, 3)
+                output["refinement_method"] = "local_motion_peak_order_rejected"
+                output["refinement_delta_sec"] = 0.0
+                output["refinement_fps"] = round(fps, 3)
+                output["refinement_motion_score"] = motion_score
+                quality_flags.append("semantic_keyframe_refinement_order_rejected")
+                refined_records.append(output)
+                continue
             output["timestamp"] = refined_ts
             output["refinement_method"] = "local_motion_peak"
             output["refinement_delta_sec"] = round(refined_ts - timestamp, 3)

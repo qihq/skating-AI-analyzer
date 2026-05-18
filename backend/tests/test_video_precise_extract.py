@@ -116,6 +116,30 @@ class VideoPreciseExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refined[0]["refinement_method"], "refinement_failed_preserved")
         self.assertIn("semantic_keyframe_refinement_failed", flags)
 
+    async def test_refinement_rejects_motion_peak_that_breaks_tal_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            video_path = root / "synthetic.mp4"
+            video_path.write_bytes(b"fake")
+            records = [
+                {"timestamp": 3.0, "phase_code": "takeoff", "key_moment": "T_takeoff_sec"},
+                {"timestamp": 4.1, "phase_code": "air", "key_moment": "A_air_sec"},
+                {"timestamp": 4.2, "phase_code": "landing", "key_moment": "L_landing_sec"},
+            ]
+
+            with patch("app.services.video._refine_motion_peak_timestamp", AsyncMock(side_effect=[(3.08, 30.0, 0.7), (4.04, 30.0, 0.9)])):
+                refined, flags = await refine_semantic_keyframe_timestamps(
+                    video_path,
+                    root / "work",
+                    records,
+                    source_fps=30.0,
+                    video_duration_sec=5.0,
+                )
+
+        self.assertEqual([item["timestamp"] for item in refined], [3.08, 4.1, 4.2])
+        self.assertEqual(refined[2]["refinement_method"], "local_motion_peak_order_rejected")
+        self.assertIn("semantic_keyframe_refinement_order_rejected", flags)
+
 
 if __name__ == "__main__":
     unittest.main()
