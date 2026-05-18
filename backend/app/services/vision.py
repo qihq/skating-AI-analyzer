@@ -21,6 +21,7 @@ from app.services.video import FramePayload
 from app.services.vision_fusion import fuse_vision_results_weighted
 from app.services.vision_quality import apply_low_quality_policy
 from app.services.vision_prompt_templates import build_specialized_vision_prompt
+from app.services.vision_video_context import normalize_video_context_fields
 
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,7 @@ def normalize_vision_payload(
                     VALID_FRAME_KEY_AGREEMENTS,
                     "unavailable",
                 )
+            normalize_video_context_fields(normalized, raw)
         frame_analysis.append(normalized)
 
     raw_summary = payload.get("action_phase_summary")

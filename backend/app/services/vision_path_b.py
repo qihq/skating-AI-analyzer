@@ -7,6 +7,7 @@ from typing import Any
 from app.services.providers import ActiveProviderConfig, request_text_completion
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
+from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
 
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ def _build_user_prompt(
     jump_metrics_text: str,
     n_frames: int,
     skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     blocks: list[str] = []
     if analysis_profile or profile_evidence:
@@ -129,7 +131,7 @@ def _build_user_prompt(
         '"top_positives":["最多2条，结合量化数据"]}\n\n'
         "必须只输出 JSON。"
     )
-    return grounding + body
+    return grounding + body + format_video_context_prompt_block(video_context_by_frame)
 
 
 def _fallback(error: str) -> dict[str, Any]:
@@ -157,6 +159,8 @@ async def analyze_path_b(
     profile_evidence: dict[str, Any] | None = None,
     memory_context: str = "",
     skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
+    preserve_all_frames: bool = False,
 ) -> dict[str, Any]:
     """
     Path B: annotated skeleton frames plus biomechanical numeric grounding.
@@ -167,7 +171,7 @@ async def analyze_path_b(
         return _fallback("no frames")
 
     try:
-        frames = sample_frames_path_b(annotated_frame_payloads, key_frame_stems)
+        frames = list(annotated_frame_payloads) if preserve_all_frames else sample_frames_path_b(annotated_frame_payloads, key_frame_stems)
         n_frames = len(frames)
         if n_frames == 0:
             return _fallback("sampling produced 0 frames")
@@ -186,6 +190,7 @@ async def analyze_path_b(
             jump_metrics_text,
             n_frames,
             skill_category,
+            video_context_by_frame,
         )
 
         bio_context = frame_bio_context or {}
@@ -195,6 +200,9 @@ async def analyze_path_b(
             bio_text = _build_bio_text(bio_context.get(frame.frame_id))
             if bio_text:
                 label += "\n" + bio_text
+            context_label = video_context_label(frame.frame_id, video_context_by_frame)
+            if context_label:
+                label += "\n" + context_label
             content.append({"type": "text", "text": label})
             content.append({"type": "image_url", "image_url": {"url": frame.data_url}})
 

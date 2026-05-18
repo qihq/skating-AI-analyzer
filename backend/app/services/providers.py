@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import asyncio
 import hashlib
+import logging
 import os
 import subprocess
 import time
@@ -34,8 +35,10 @@ from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineErro
 from app.services.vision_vote_config import load_vision_vote_config
 
 
+logger = logging.getLogger(__name__)
 AI_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
-DEFAULT_QWEN_VISION_MODEL = "qwen-vl-max-latest"
+DEFAULT_QWEN_VISION_MODEL = "qwen3.6-plus"
+DEPRECATED_QWEN_VISION_MODELS = {"qwen-vl-max-latest"}
 DEFAULT_DOUBAO_VISION_MODEL = "doubao-1.5-vision-pro-32k"
 DOUBAO_VISION_MAX_MB = 50
 DOUBAO_VISION_MAX_SECONDS = 60.0
@@ -205,6 +208,11 @@ def _resolve_preset_api_key(provider: str) -> str:
 
 def _resolve_qwen_vision_model(provider: AIProvider) -> str:
     env_model = os.getenv("QWEN_VISION_MODEL", "").strip()
+    if env_model in DEPRECATED_QWEN_VISION_MODELS:
+        logger.warning(
+            "QWEN_VISION_MODEL=%s is deprecated; qwen3.6-plus is the default vision model.",
+            env_model,
+        )
     if provider.vision_model:
         return provider.vision_model
     if provider.provider == "qwen" and provider.slot == "vision" and env_model:
@@ -219,7 +227,13 @@ def _resolve_qwen_vision_model(provider: AIProvider) -> str:
 def _resolve_env_vision_model(provider_name: str) -> str:
     normalized = provider_name.strip().lower()
     if normalized == "qwen":
-        return os.getenv("QWEN_VISION_MODEL", "").strip() or DEFAULT_QWEN_VISION_MODEL
+        env_model = os.getenv("QWEN_VISION_MODEL", "").strip()
+        if env_model in DEPRECATED_QWEN_VISION_MODELS:
+            logger.warning(
+                "QWEN_VISION_MODEL=%s is deprecated; qwen3.6-plus is the default vision model.",
+                env_model,
+            )
+        return env_model or DEFAULT_QWEN_VISION_MODEL
     if normalized == "doubao":
         return os.getenv("DOUBAO_VISION_MODEL", "").strip() or DEFAULT_DOUBAO_VISION_MODEL
     return os.getenv(f"{normalized.upper()}_VISION_MODEL", "").strip() or normalized

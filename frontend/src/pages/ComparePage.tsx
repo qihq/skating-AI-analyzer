@@ -320,7 +320,16 @@ function KeyframeImage({ side, title }: { side: CompareKeyframeSide; title: stri
           </div>
         )}
       </div>
-      <p className="px-4 py-3 text-xs text-slate-400">{side.frame_id ?? "无关键帧"}</p>
+      <div className="space-y-1 px-4 py-3 text-xs text-slate-400">
+        <p>{side.frame_id ?? "无关键帧"}</p>
+        {side.source || side.phase_label || side.selection_reason ? (
+          <p>
+            {side.source ? `来源：${side.source}` : ""}
+            {side.phase_label ? ` · 阶段：${side.phase_label}` : ""}
+            {side.selection_reason ? ` · ${side.selection_reason}` : ""}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -98,6 +98,7 @@ class AnalysisDetail(BaseModel):
     pose_data: dict[str, Any] | None = None
     bio_data: dict[str, Any] | None = None
     frame_motion_scores: dict[str, Any] | None = None
+    video_temporal_diagnostics: dict[str, Any] | None = None
     processing_timings: dict[str, float] | None = None
     processing_logs: list[AnalysisLogEntry] = Field(default_factory=list)
     target_lock: dict[str, Any] | None = None
@@ -204,6 +205,9 @@ class CompareKeyframeSide(BaseModel):
     frame_url: str | None = None
     timestamp: float | None = None
     confidence: float | None = None
+    source: str | None = None
+    phase_label: str | None = None
+    selection_reason: str | None = None
     available: bool = False
     missing_reason: str | None = None
 

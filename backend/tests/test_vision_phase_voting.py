@@ -90,7 +90,7 @@ class VisionPhaseVotingTests(unittest.IsolatedAsyncioTestCase):
             name="qwen",
             provider="qwen",
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            model_id="qwen-vl-max-latest",
+            model_id="qwen3.6-plus",
             vision_model=None,
             api_key="qwen-key",
             notes=None,

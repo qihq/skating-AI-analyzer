@@ -82,10 +82,13 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         upload_dir = Path(self.tmp.name) / "uploads" / analysis_id
         frames_dir = upload_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
+        semantic_dir = upload_dir / "semantic_frames"
+        semantic_dir.mkdir(parents=True, exist_ok=True)
         video_path = upload_dir / "source.mp4"
         video_path.write_bytes(b"fake-video")
         for index in range(1, 4):
             (frames_dir / f"frame_{index:04d}.jpg").write_bytes(b"fake-frame")
+            (semantic_dir / f"semantic_{index:04d}.jpg").write_bytes(b"fake-semantic-frame")
         return video_path
 
     async def _insert_analysis(
@@ -118,7 +121,40 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
                             {"frame_id": "frame_0001", "timestamp": 0.1},
                             {"frame_id": "frame_0002", "timestamp": 0.2},
                             {"frame_id": "frame_0003", "timestamp": 0.3},
-                        ]
+                        ],
+                        "resolved_keyframes": {
+                            "source": "video_ai_refined",
+                            "confidence": 0.88,
+                            "selected": [
+                                {
+                                    "frame_id": "semantic_0001",
+                                    "timestamp": 0.12,
+                                    "phase_code": "takeoff",
+                                    "phase_label": "起跳",
+                                    "key_moment": "T_takeoff_sec",
+                                    "selection_reason": "video_phase_range_motion_peak",
+                                    "confidence": 0.86,
+                                },
+                                {
+                                    "frame_id": "semantic_0002",
+                                    "timestamp": 0.24,
+                                    "phase_code": "air",
+                                    "phase_label": "腾空",
+                                    "key_moment": "A_air_sec",
+                                    "selection_reason": "video_phase_range_key_moment_motion_nearby",
+                                    "confidence": 0.87,
+                                },
+                                {
+                                    "frame_id": "semantic_0003",
+                                    "timestamp": 0.36,
+                                    "phase_code": "landing",
+                                    "phase_label": "落冰",
+                                    "key_moment": "L_landing_sec",
+                                    "selection_reason": "video_phase_range_skeleton_candidate",
+                                    "confidence": 0.88,
+                                },
+                            ],
+                        },
                     },
                     action_window_start=0.1,
                     action_window_end=0.9,
@@ -161,7 +197,10 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.score_delta, 12)
         self.assertEqual(result.subscore_deltas[0].delta, 12)
         self.assertTrue(result.metric_deltas[0].available)
-        self.assertEqual(result.keyframe_compare[0].before.frame_id, "frame_0001")
+        self.assertEqual(result.keyframe_compare[0].before.frame_id, "semantic_0001")
+        self.assertEqual(result.keyframe_compare[0].before.source, "resolved_keyframes")
+        self.assertEqual(result.keyframe_compare[0].before.phase_label, "起跳")
+        self.assertEqual(result.keyframe_compare[0].before.selection_reason, "video_phase_range_motion_peak")
         self.assertTrue(result.keyframe_compare[0].before.available)
         self.assertIsNotNone(result.video_compare)
         assert result.video_compare is not None

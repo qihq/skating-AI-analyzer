@@ -994,6 +994,7 @@ export default function ReportPage() {
             logs={deferredAnalysis.processing_logs ?? []}
             timings={deferredAnalysis.processing_timings}
             pipelineVersion={deferredAnalysis.pipeline_version}
+            videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
           />
         </>
       ) : deferredAnalysis.status !== "completed" ? (
@@ -1004,6 +1005,7 @@ export default function ReportPage() {
             logs={deferredAnalysis.processing_logs ?? []}
             timings={deferredAnalysis.processing_timings}
             pipelineVersion={deferredAnalysis.pipeline_version}
+            videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
           />
         </>
       ) : (
@@ -1124,6 +1126,7 @@ export default function ReportPage() {
                 logs={deferredAnalysis.processing_logs ?? []}
                 timings={deferredAnalysis.processing_timings}
                 pipelineVersion={deferredAnalysis.pipeline_version}
+                videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
               />
             </div>
 

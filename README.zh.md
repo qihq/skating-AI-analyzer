@@ -21,6 +21,9 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 ## 功能概览
 
 - 视频上传与异步分析
+- Qwen 3.6 Plus 视频语义时间定位，输出阶段区间和 key_frame_hint
+- 时间戳仲裁层结合视频 AI 区间、运动密度和骨架候选，再由 FFmpeg 精准抽取语义关键帧
+- 语义关键帧图片 AI 精析，prompt 中携带 `video_context`
 - 关键帧抽取与 MediaPipe 姿态识别
 - 生物力学指标计算与结构化评分
 - AI 训练诊断报告
@@ -91,6 +94,10 @@ cp .env.example .env
 
 ```bash
 QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+QWEN_VISION_MODEL=qwen3.6-plus
+QWEN_VISION_DAILY_COST_LIMIT_CNY=30
+QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
+# VIDEO_TEMPORAL_MAX_FRAMES=12
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
 # 可选：启用二期多姿态跟踪
@@ -102,6 +109,8 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 - `.env` 不会提交到 Git 仓库
 - `.env.example` 只保留占位符
+- 默认视觉模型为 `qwen3.6-plus`；`qwen-vl-max-latest` 仅作为历史迁移兼容输入，不再推荐作为默认模型
+- `QWEN_VISION_DAILY_COST_LIMIT_CNY` 控制每日视觉成本上限，`QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` 用于估算单次视频语义定位成本，`VIDEO_TEMPORAL_MAX_FRAMES` 控制进入图片 AI 的语义帧预算
 - 运行期数据库、上传视频和备份文件不会被提交
 
 ## 二期姿态模型启用
@@ -116,8 +125,12 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 ## 分析管线更新
 
-最近的迭代聚焦于让长时间运行的视频分析更可观测、更容易恢复：
+最近的迭代聚焦于让关键帧更准确、长时间运行的视频分析更可观测、更容易恢复：
 
+- 视频 AI 先做语义阶段定位，不直接充当逐帧裁判
+- 时间戳仲裁层在阶段区间内结合运动峰值和 MediaPipe 骨架候选确认最终切帧点
+- 图片 AI 分析仲裁后的语义关键帧，并可对视频上下文做 agree / shifted / disagree / uncertain 验证
+- 报告层融合视频宏观评价、图片微观帧级观察和 MediaPipe 生物力学数值，冲突时保守表达
 - 基于阶段的管线状态（抽帧、姿态、生物力学、视觉、报告生成）
 - 从最后一个安全阶段重试，而非每次从头开始
 - API 和报告页返回处理日志与各阶段耗时

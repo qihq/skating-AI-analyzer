@@ -11,6 +11,7 @@ from app.services.report import clean_json_text
 from app.services.video import FramePayload
 from app.services.vision import normalize_vision_payload
 from app.services.vision_prompt_templates import build_specialized_vision_prompt
+from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
 
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ async def analyze_path_a(
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
     skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Path A: pure vision analysis, called opt-in by the host.
@@ -189,6 +191,9 @@ async def analyze_path_a(
         motion_features,
         skill_category=skill_category,
     )
+    context_block = format_video_context_prompt_block(video_context_by_frame)
+    if context_block:
+        user_text = f"{user_text}{context_block}"
     if memory_context:
         system_prompt = f"{system_prompt}\n\n{memory_context}"
 
@@ -217,6 +222,9 @@ async def analyze_path_a(
     content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
     for frame in frame_payloads:
         content.append({"type": "text", "text": f"帧编号：{frame.frame_id} | 时间：{frame.timestamp_sec:.2f}s"})
+        context_label = video_context_label(frame.frame_id, video_context_by_frame)
+        if context_label:
+            content.append({"type": "text", "text": context_label})
         content.append({"type": "image_url", "image_url": {"url": frame.data_url}})
 
     raw = await request_text_completion(

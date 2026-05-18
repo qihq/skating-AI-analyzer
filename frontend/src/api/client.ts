@@ -157,6 +157,7 @@ export interface AnalysisDetail extends AnalysisListItem {
   pose_data: PoseResponse | null;
   bio_data: BioData | null;
   frame_motion_scores: Record<string, unknown> | null;
+  video_temporal_diagnostics: VideoTemporalDiagnostics | null;
   pipeline_version: string | null;
   retry_from_stage: string | null;
   processing_timings: Record<string, number> | null;
@@ -172,6 +173,28 @@ export interface AnalysisDetail extends AnalysisListItem {
   error_code: AnalysisErrorCode | null;
   error_detail: string | null;
   error_message: string | null;
+}
+
+export interface SelectedSemanticFrame {
+  frame_id?: string | null;
+  timestamp?: number | null;
+  phase_code?: string | null;
+  phase_label?: string | null;
+  key_moment?: string | null;
+  selection_reason?: string | null;
+}
+
+export interface VideoTemporalDiagnostics {
+  video_ai_model?: string | null;
+  video_ai_provider?: string | null;
+  video_ai_confidence?: number | null;
+  timestamp_source?: string | null;
+  resolved_confidence?: number | null;
+  selected_semantic_frames?: SelectedSemanticFrame[];
+  fallback_reason?: string | null;
+  quality_flags?: string[];
+  used_semantic_frames?: boolean;
+  used_legacy_sampled_frames?: boolean;
 }
 
 export interface AnalysisLogEntry {
@@ -411,6 +434,9 @@ export interface CompareKeyframeSide {
   frame_url: string | null;
   timestamp: number | null;
   confidence: number | null;
+  source?: string | null;
+  phase_label?: string | null;
+  selection_reason?: string | null;
   available: boolean;
   missing_reason: string | null;
 }

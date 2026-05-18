@@ -456,6 +456,26 @@ def detect_video_fps(video_path: Path) -> float:
     return 30.0
 
 
+def detect_video_duration(video_path: Path) -> float | None:
+    try:
+        metadata = _probe_video(video_path)
+        streams = metadata.get("streams") if isinstance(metadata, dict) else None
+        video_stream = next(
+            (stream for stream in streams or [] if isinstance(stream, dict) and stream.get("codec_type") == "video"),
+            None,
+        )
+        if isinstance(video_stream, dict):
+            value = video_stream.get("duration")
+            if value is not None:
+                return max(0.0, float(value))
+        format_payload = metadata.get("format") if isinstance(metadata, dict) else None
+        if isinstance(format_payload, dict) and format_payload.get("duration") is not None:
+            return max(0.0, float(format_payload.get("duration")))
+    except Exception:  # noqa: BLE001
+        logger.warning("Unable to detect duration for %s", video_path, exc_info=True)
+    return None
+
+
 def _fallback_action_window(action_type: str) -> tuple[float, float]:
     window_size = ACTION_WINDOW_SIZES.get(action_type)
     if window_size is None:
@@ -917,6 +937,90 @@ async def _extract_full_frame_at(video_path: Path, timestamp: float, target_path
             str(target_path),
         ]
     )
+
+
+async def _extract_precise_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
+    width, height = _frame_dimensions()
+    scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{timestamp:.3f}",
+            "-frames:v",
+            "1",
+            "-vf",
+            scale_filter,
+            "-pix_fmt",
+            "yuvj420p",
+            str(target_path),
+        ]
+    )
+
+
+async def extract_precise_frames_at_timestamps(
+    video_path: Path,
+    frames_dir: Path,
+    selected_records: Sequence[dict[str, object]],
+    prefix: str = "semantic",
+) -> tuple[list[Path], list[dict[str, object]]]:
+    """
+    Extract semantic keyframes at resolved timestamps with accurate FFmpeg seek.
+
+    Uses output-side -ss after -i to avoid depending only on fast GOP seek. The
+    returned records are compatible with build_timestamp_map({"selected": ...}).
+    """
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    if not video_path.exists():
+        raise AnalysisPipelineError(AnalysisErrorCode.FRAME_EXTRACT_FAILED, f"Video not found: {video_path}")
+
+    valid_records: list[dict[str, object]] = []
+    for record in selected_records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < 0:
+            continue
+        valid_records.append({**record, "timestamp": round(timestamp, 3)})
+
+    if not valid_records:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.FRAME_EXTRACT_FAILED,
+            "No valid semantic timestamps were provided for precise extraction.",
+        )
+
+    for existing_frame in frames_dir.glob(f"{prefix}_*.jpg"):
+        existing_frame.unlink(missing_ok=True)
+
+    output_paths: list[Path] = []
+    output_records: list[dict[str, object]] = []
+    try:
+        for output_index, record in enumerate(valid_records, start=1):
+            timestamp = float(record["timestamp"])
+            frame_id = f"{prefix}_{output_index:04d}"
+            target_path = frames_dir / f"{frame_id}.jpg"
+            await _extract_precise_full_frame_at(video_path, timestamp, target_path)
+            if not target_path.exists() or target_path.stat().st_size <= 0:
+                raise RuntimeError(f"Semantic frame was not created: {target_path}")
+            output_paths.append(target_path)
+            output_record = {**record, "frame_id": frame_id, "timestamp": round(timestamp, 3)}
+            output_records.append(output_record)
+    except Exception as exc:  # noqa: BLE001
+        for path in output_paths:
+            path.unlink(missing_ok=True)
+        if isinstance(exc, AnalysisPipelineError):
+            raise
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.FRAME_EXTRACT_FAILED,
+            f"Precise semantic frame extraction failed: {exc}",
+        ) from exc
+
+    return output_paths, output_records
 
 
 async def restore_sampled_frames(

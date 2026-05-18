@@ -231,6 +231,7 @@ export default function DebugPage() {
                 logs={selectedDetail.processing_logs}
                 timings={selectedDetail.processing_timings}
                 pipelineVersion={selectedDetail.pipeline_version}
+                videoTemporalDiagnostics={selectedDetail.video_temporal_diagnostics}
               />
             </div>
           ) : null}

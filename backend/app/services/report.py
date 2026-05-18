@@ -192,7 +192,11 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
     }
 
 
-def _resolve_report_data_quality(payload: dict[str, Any], vision_structured: dict[str, Any]) -> str:
+def _resolve_report_data_quality(
+    payload: dict[str, Any],
+    vision_structured: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None = None,
+) -> str:
     report_quality = str(payload.get("data_quality", "partial")).strip().lower() or "partial"
     if report_quality not in {"good", "partial", "poor"}:
         report_quality = "partial"
@@ -201,6 +205,11 @@ def _resolve_report_data_quality(payload: dict[str, Any], vision_structured: dic
     if vision_quality == "poor":
         return "poor"
     if vision_quality == "partial" and report_quality == "good":
+        return "partial"
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    conflict_level = str(meta.get("conflict_level", "")).strip().lower()
+    needs_human_review = bool(meta.get("needs_human_review"))
+    if (needs_human_review or conflict_level in {"high", "severe"}) and report_quality == "good":
         return "partial"
     return report_quality
 
@@ -235,6 +244,111 @@ def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> st
         "  reliable → good / uncertain → partial / likely_wrong → poor\n"
         "若 likely_wrong，请在 issues 末尾追加一条 severity=medium 的提示\n"
         "（category='追踪质量'，description 建议用户重选目标）。\n"
+    )
+
+
+def _compact_video_temporal_payload(video_temporal: dict[str, Any]) -> dict[str, Any]:
+    action_confirmation = video_temporal.get("action_confirmation")
+    macro_assessment = video_temporal.get("macro_assessment")
+    return {
+        "schema_version": video_temporal.get("schema_version"),
+        "provider": video_temporal.get("provider"),
+        "model": video_temporal.get("model"),
+        "confidence": video_temporal.get("confidence"),
+        "fallback_recommendation": video_temporal.get("fallback_recommendation"),
+        "quality_flags": video_temporal.get("quality_flags") if isinstance(video_temporal.get("quality_flags"), list) else [],
+        "camera_view": video_temporal.get("camera_view"),
+        "data_quality_hint": video_temporal.get("data_quality_hint"),
+        "action_confirmation": action_confirmation if isinstance(action_confirmation, dict) else {},
+        "key_moments": video_temporal.get("key_moments") if isinstance(video_temporal.get("key_moments"), dict) else {},
+        "phase_segments": [
+            {
+                "phase_code": segment.get("phase_code"),
+                "phase_label": segment.get("phase_label"),
+                "time_start": segment.get("time_start"),
+                "time_end": segment.get("time_end"),
+                "key_frame_hint": segment.get("key_frame_hint"),
+                "confidence": segment.get("confidence"),
+            }
+            for segment in (video_temporal.get("phase_segments") or [])
+            if isinstance(segment, dict)
+        ][:8],
+        "macro_assessment": macro_assessment if isinstance(macro_assessment, dict) else {},
+        "overall_impression": video_temporal.get("overall_impression", ""),
+    }
+
+
+def _compact_resolved_keyframes_payload(resolved_keyframes: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": resolved_keyframes.get("source"),
+        "confidence": resolved_keyframes.get("confidence"),
+        "quality_flags": resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else [],
+        "selected": [
+            {
+                "frame_id": item.get("frame_id"),
+                "timestamp": item.get("timestamp"),
+                "phase_code": item.get("phase_code"),
+                "phase_label": item.get("phase_label"),
+                "key_moment": item.get("key_moment"),
+                "selection_reason": item.get("selection_reason"),
+            }
+            for item in (resolved_keyframes.get("selected") or [])
+            if isinstance(item, dict)
+        ][:12],
+    }
+
+
+def _collect_video_context_conflicts(vision_structured: dict[str, Any]) -> list[dict[str, Any]]:
+    frames = vision_structured.get("frame_analysis") if isinstance(vision_structured, dict) else None
+    if not isinstance(frames, list):
+        return []
+    conflicts: list[dict[str, Any]] = []
+    for frame in frames:
+        if not isinstance(frame, dict) or not bool(frame.get("conflict_with_video_context")):
+            continue
+        conflicts.append(
+            {
+                "frame_id": frame.get("frame_id"),
+                "phase": frame.get("phase"),
+                "conflict_with_video_context": True,
+                "phase_verification": frame.get("phase_verification", "uncertain"),
+                "video_context_note": frame.get("video_context_note", ""),
+                "issues": frame.get("issues") if isinstance(frame.get("issues"), list) else [],
+            }
+        )
+    return conflicts[:8]
+
+
+def _build_video_temporal_report_context(
+    vision_structured: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None,
+) -> str:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    video_temporal = meta.get("video_temporal")
+    resolved_keyframes = meta.get("resolved_keyframes")
+    conflicts = _collect_video_context_conflicts(vision_structured)
+
+    if not isinstance(video_temporal, dict) and not isinstance(resolved_keyframes, dict) and not conflicts:
+        return ""
+
+    payload: dict[str, Any] = {
+        "video_temporal": _compact_video_temporal_payload(video_temporal) if isinstance(video_temporal, dict) else {},
+        "resolved_keyframes": (
+            _compact_resolved_keyframes_payload(resolved_keyframes) if isinstance(resolved_keyframes, dict) else {}
+        ),
+        "image_video_context_conflicts": conflicts,
+    }
+    return (
+        "\n\n=== 视频语义时序融合参考 ===\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+        "三层证据使用规则：\n"
+        "1. 视频路 video_temporal.macro_assessment 和 overall_impression 只负责动作时序、节奏、速度流动、整体轴心与出入动作质量。\n"
+        "2. 图片路 frame_analysis 负责语义关键帧上的姿态、刃面、轴心、膝踝缓冲、手臂协调等帧级微观结论。\n"
+        "3. MediaPipe/bio_data 负责角度、重心、旋转、稳定性等数值证据；不要把视频 AI 当作逐帧裁判。\n"
+        "冲突处理：若 conflict_with_video_context 为 true 或 phase_verification 为 shifted/disagree，"
+        "图片路优先但保留差异，报告中说明视频路宏观判断与图片帧级观察的不同。\n"
+        "若冲突严重、resolved_keyframes.source 为 skeleton_fallback 或数据质量标记较多，"
+        "请将 data_quality 降为 partial 或 poor，避免输出过度确定结论。\n"
     )
 
 
@@ -505,6 +619,7 @@ async def generate_report(
     )
     vision_summary = summarize_vision_for_report(vision_structured)
     dual_block = _build_dual_path_report_context(dual_path_meta)
+    video_temporal_block = _build_video_temporal_report_context(vision_structured, dual_path_meta)
 
     user_prompt = (
         f"请根据花样滑冰【{action_type}】结构化帧分析和骨骼几何指标，生成结构化训练报告。\n\n"
@@ -539,6 +654,7 @@ async def generate_report(
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
         + context_block
         + dual_block
+        + video_temporal_block
     )
     user_prompt += (
         "\n\nOutput constraints: return exactly one valid JSON object. "
@@ -578,7 +694,7 @@ async def generate_report(
             )
             continue
 
-        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured)
+        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
 
         report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
         if report["summary"] and report["training_focus"]:
