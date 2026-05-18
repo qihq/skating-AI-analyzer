@@ -960,6 +960,176 @@ async def _extract_precise_full_frame_at(video_path: Path, timestamp: float, tar
     )
 
 
+async def _extract_local_motion_thumbnails(
+    video_path: Path,
+    thumbs_dir: Path,
+    start_sec: float,
+    end_sec: float,
+    frame_rate: float,
+) -> list[Path]:
+    width, height = _size_tuple(FRAME_THUMB_SIZE)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    output_pattern = str(thumbs_dir / "refine_%05d.jpg")
+    scale_filter = (
+        f"fps={frame_rate:.3f},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{max(0.0, start_sec):.3f}",
+            "-t",
+            f"{max(end_sec - start_sec, 0.001):.3f}",
+            "-vf",
+            scale_filter,
+            "-pix_fmt",
+            "yuvj420p",
+            output_pattern,
+        ]
+    )
+    return sorted(thumbs_dir.glob("refine_*.jpg"))
+
+
+def _semantic_key_moment(record: dict[str, object]) -> str | None:
+    key_moment = str(record.get("key_moment") or "")
+    if key_moment.startswith("T_"):
+        return "T"
+    if key_moment.startswith("A_"):
+        return "A"
+    if key_moment.startswith("L_"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "")
+    if phase_code == "takeoff":
+        return "T"
+    if phase_code == "air":
+        return "A"
+    if phase_code == "landing":
+        return "L"
+    return None
+
+
+def _refinement_fps(source_fps: float | None) -> float:
+    if source_fps is None or source_fps <= 0:
+        return 60.0
+    return max(1.0, min(float(source_fps), 60.0))
+
+
+async def _refine_motion_peak_timestamp(
+    video_path: Path,
+    work_dir: Path,
+    timestamp: float,
+    *,
+    source_fps: float | None,
+    video_duration_sec: float | None,
+    window_seconds: float,
+) -> tuple[float, float, float]:
+    fps = _refinement_fps(source_fps)
+    duration = video_duration_sec if video_duration_sec is not None and video_duration_sec > 0 else None
+    start = max(0.0, timestamp - window_seconds)
+    end = timestamp + window_seconds
+    if duration is not None:
+        end = min(duration, end)
+    if end <= start:
+        return round(timestamp, 3), fps, 0.0
+
+    thumbs_dir = work_dir / f"refine_{int(timestamp * 1000):08d}"
+    if thumbs_dir.exists():
+        shutil.rmtree(thumbs_dir, ignore_errors=True)
+    try:
+        thumbs = await _extract_local_motion_thumbnails(video_path, thumbs_dir, start, end, fps)
+        scores = _motion_scores_from_thumbs(thumbs)
+    finally:
+        shutil.rmtree(thumbs_dir, ignore_errors=True)
+
+    if not scores:
+        return round(timestamp, 3), fps, 0.0
+
+    best_index = max(range(len(scores)), key=lambda index: (scores[index], -abs((start + index / fps) - timestamp)))
+    refined = start + (best_index / fps)
+    if duration is not None:
+        refined = min(duration, refined)
+    return round(max(0.0, refined), 3), fps, round(float(scores[best_index]), 4)
+
+
+async def refine_semantic_keyframe_timestamps(
+    video_path: Path,
+    work_dir: Path,
+    selected_records: Sequence[dict[str, object]],
+    *,
+    source_fps: float | None = None,
+    video_duration_sec: float | None = None,
+    window_seconds: float = 0.18,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """
+    Refine semantic T/L timestamps with a short high-fps local motion scan.
+
+    Apex frames are intentionally preserved because the highest COM point does
+    not usually coincide with the strongest motion impulse.
+    """
+    refined_records: list[dict[str, object]] = []
+    quality_flags: list[str] = []
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    for record in selected_records:
+        if not isinstance(record, dict):
+            continue
+        output: dict[str, object] = dict(record)
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            output["refinement_method"] = "invalid_timestamp_preserved"
+            quality_flags.append("semantic_keyframe_refinement_invalid_timestamp")
+            refined_records.append(output)
+            continue
+
+        key = _semantic_key_moment(record)
+        output["pre_refine_timestamp"] = round(timestamp, 3)
+        if key == "A":
+            output["refinement_method"] = "apex_preserved"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            refined_records.append(output)
+            continue
+        if key not in {"T", "L"}:
+            output["refinement_method"] = "not_applicable"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            refined_records.append(output)
+            continue
+
+        try:
+            refined_ts, fps, motion_score = await _refine_motion_peak_timestamp(
+                video_path,
+                work_dir,
+                timestamp,
+                source_fps=source_fps,
+                video_duration_sec=video_duration_sec,
+                window_seconds=window_seconds,
+            )
+            output["timestamp"] = refined_ts
+            output["refinement_method"] = "local_motion_peak"
+            output["refinement_delta_sec"] = round(refined_ts - timestamp, 3)
+            output["refinement_fps"] = round(fps, 3)
+            output["refinement_motion_score"] = motion_score
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Semantic keyframe local refinement failed at %.3fs: %s", timestamp, exc)
+            output["timestamp"] = round(timestamp, 3)
+            output["refinement_method"] = "refinement_failed_preserved"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            quality_flags.append("semantic_keyframe_refinement_failed")
+        refined_records.append(output)
+
+    return refined_records, sorted(set(quality_flags))
+
+
 async def extract_precise_frames_at_timestamps(
     video_path: Path,
     frames_dir: Path,

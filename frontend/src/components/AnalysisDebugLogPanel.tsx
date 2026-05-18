@@ -90,6 +90,7 @@ export default function AnalysisDebugLogPanel({
                       <th className="py-1 pr-3 font-medium">Time</th>
                       <th className="py-1 pr-3 font-medium">Phase</th>
                       <th className="py-1 pr-3 font-medium">Reason</th>
+                      <th className="py-1 pr-3 font-medium">Refine</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -99,6 +100,10 @@ export default function AnalysisDebugLogPanel({
                         <td className="py-1.5 pr-3">{formatDuration(frame.timestamp)}</td>
                         <td className="py-1.5 pr-3">{frame.phase_label ?? frame.phase_code ?? "-"}</td>
                         <td className="py-1.5 pr-3">{frame.selection_reason ?? "-"}</td>
+                        <td className="py-1.5 pr-3">
+                          {frame.refinement_method ?? "-"}
+                          {typeof frame.refinement_delta_sec === "number" ? ` (${frame.refinement_delta_sec.toFixed(3)}s)` : ""}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

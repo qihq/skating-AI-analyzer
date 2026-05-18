@@ -110,6 +110,10 @@ PHASE_KEY_MOMENTS = {
 SPIN_RESOLVER_PHASES = ("spin_entry", "spin_main", "spin_exit")
 SPIRAL_RESOLVER_PHASES = ("spiral_entry", "spiral_hold", "spiral_exit")
 MAX_RESOLVED_KEYFRAMES = 12
+SKELETON_ANCHOR_CONFIDENCE = 0.65
+MOTION_SNAP_TOLERANCE_SECONDS = 0.18
+FALLBACK_MOTION_WINDOW_SECONDS = 0.30
+MOTION_PEAK_PHASES = {"takeoff", "landing"}
 
 
 def _configured_max_resolved_keyframes() -> int:
@@ -389,7 +393,8 @@ def build_video_temporal_prompts(
         "4. 目标学员为 5-8 岁儿童，评价要使用儿童训练标准，不使用成人竞技标准。\n"
         "5. 你只负责视频宏观时序和整体质量判断，不输出骨架测量数值。\n"
         "6. 对高速跳跃动作，给出阶段区间，不要假装能锁定单个绝对精确帧。\n"
-        "7. 时间保留一位或两位小数即可，允许约 0.5-1 秒误差。"
+        "7. 时间保留两位小数，尽量精确到 0.1 秒以内；T/A/L 关键时刻误差应尽量控制在 0.2 秒以内。\n"
+        "8. T = 最后一只脚离冰的瞬间，A = 身体重心达到最高点的瞬间，L = 冰刀首次接触冰面的瞬间。"
     )
 
     schema_hint = {
@@ -447,7 +452,7 @@ def build_video_temporal_prompts(
         "1. 确认实际动作类型和子类型。\n"
         "2. 输出每个动作阶段的 time_start/time_end。\n"
         "3. 对每个关键阶段输出 key_frame_hint，表示该阶段最有代表性的时间点。\n"
-        "4. 对跳跃给出 T/A/L 建议时间：T = 起跳离冰附近，A = 腾空最高或最稳定旋转附近，L = 落冰触冰附近。\n"
+        "4. 对跳跃给出 T/A/L 建议时间：T = 最后一只脚离冰的瞬间，A = 身体重心达到最高点的瞬间，L = 冰刀首次接触冰面的瞬间。\n"
         "5. 输出宏观技术评价：节奏、速度、轴心、入跳/入转、落冰/出转/滑出、整体流畅度。\n"
         "6. 输出整体印象和置信度。\n"
         "7. 如果主滑行者不清楚、多人遮挡、画面太远或动作不完整，请降低 confidence 并说明原因。\n\n"
@@ -683,6 +688,30 @@ def _motion_selected_records(motion_scores: dict[str, Any] | None) -> list[dict[
     return []
 
 
+def _motion_records_from_scores(motion_scores: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(motion_scores, dict):
+        return []
+
+    scores = [
+        float(score)
+        for score in motion_scores.get("scores", [])
+        if isinstance(score, (int, float)) and not math.isnan(float(score)) and not math.isinf(float(score))
+    ]
+    frame_rate = _to_float(motion_scores.get("frame_rate"))
+    window_start = _to_float(motion_scores.get("window_start"))
+    if scores and frame_rate is not None and frame_rate > 0 and window_start is not None:
+        return [
+            {
+                "timestamp": round(window_start + (index / frame_rate), 3),
+                "motion_score": round(score, 4),
+                "source": "motion_score_series",
+            }
+            for index, score in enumerate(scores)
+        ]
+
+    return _motion_selected_records(motion_scores)
+
+
 def _motion_score_value(record: dict[str, Any]) -> float:
     value = _to_float(record.get("motion_score"))
     return value if value is not None else 0.0
@@ -705,15 +734,57 @@ def _motion_peak_in_range(records: list[dict[str, Any]], start: float, end: floa
     return _to_float(best.get("timestamp"))
 
 
-def _nearest_motion_to(records: list[dict[str, Any]], target: float, start: float, end: float, tolerance: float = 0.18) -> float | None:
-    candidates = _records_in_range(records, start, end)
+def _motion_peak_near(records: list[dict[str, Any]], target: float, start: float, end: float, tolerance: float = MOTION_SNAP_TOLERANCE_SECONDS) -> float | None:
+    candidates = _records_in_range(records, max(start, target - tolerance), min(end, target + tolerance))
     if not candidates:
         return None
-    best = min(candidates, key=lambda item: abs((_to_float(item.get("timestamp")) or target) - target))
+    best = max(candidates, key=lambda item: (_motion_score_value(item), -abs((_to_float(item.get("timestamp")) or target) - target)))
+    phase_peak = max((_motion_score_value(item) for item in _records_in_range(records, start, end)), default=0.0)
+    best_score = _motion_score_value(best)
+    if phase_peak > 0 and best_score < max(0.35, phase_peak * 0.50):
+        return None
     timestamp = _to_float(best.get("timestamp"))
-    if timestamp is not None and abs(timestamp - target) <= tolerance:
-        return timestamp
-    return None
+    return timestamp if timestamp is not None and abs(timestamp - target) <= tolerance else None
+
+
+def _phase_code_for_skeleton_label(label: str) -> str:
+    return {"T": "takeoff", "A": "air", "L": "landing"}[label]
+
+
+def _resolve_skeleton_candidate_timestamp(
+    *,
+    label: str,
+    candidate: dict[str, Any],
+    motion_records: list[dict[str, Any]],
+    start: float,
+    end: float,
+    fallback: bool = False,
+) -> tuple[float | None, str, list[str]]:
+    flags: list[str] = []
+    timestamp = _candidate_timestamp(candidate)
+    if timestamp is None or timestamp < start or timestamp > end:
+        return None, "skeleton_candidate_invalid", flags
+
+    phase_code = _phase_code_for_skeleton_label(label)
+    confidence = _candidate_confidence(candidate)
+    if confidence < SKELETON_ANCHOR_CONFIDENCE and not fallback:
+        flags.append(f"video_temporal_resolver_skeleton_{label.lower()}_below_anchor_confidence")
+        return None, "skeleton_candidate_below_anchor_confidence", flags
+
+    if phase_code in MOTION_PEAK_PHASES:
+        snapped = _motion_peak_near(motion_records, timestamp, start, end)
+        if snapped is not None:
+            reason = "skeleton_fallback_motion_peak" if fallback else f"video_phase_range_skeleton_{phase_code}_motion_peak"
+            return snapped, reason, flags
+        reason = "skeleton_fallback_candidate" if fallback else f"video_phase_range_skeleton_{phase_code}_anchor"
+        return timestamp, reason, flags
+
+    if confidence >= SKELETON_ANCHOR_CONFIDENCE or fallback:
+        reason = "skeleton_fallback_apex_preserved" if fallback else "video_phase_range_skeleton_apex"
+        return timestamp, reason, flags
+
+    flags.append(f"video_temporal_resolver_skeleton_{label.lower()}_below_anchor_confidence")
+    return None, "skeleton_candidate_below_anchor_confidence", flags
 
 
 def _fallback_skeleton_selected(
@@ -721,6 +792,7 @@ def _fallback_skeleton_selected(
     *,
     video_duration_sec: float,
     max_frames: int,
+    motion_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for index, (label, key_moment) in enumerate(
@@ -728,17 +800,32 @@ def _fallback_skeleton_selected(
         start=1,
     ):
         candidate = candidates.get(label)
-        timestamp = _candidate_timestamp(candidate)
-        if timestamp is None or timestamp < 0 or timestamp > video_duration_sec:
+        if not isinstance(candidate, dict):
             continue
+        raw_timestamp = _candidate_timestamp(candidate)
+        if raw_timestamp is None or raw_timestamp < 0 or raw_timestamp > video_duration_sec:
+            continue
+        start = max(0.0, raw_timestamp - FALLBACK_MOTION_WINDOW_SECONDS)
+        end = min(video_duration_sec, raw_timestamp + FALLBACK_MOTION_WINDOW_SECONDS)
+        timestamp, reason, _ = _resolve_skeleton_candidate_timestamp(
+            label=label,
+            candidate=candidate,
+            motion_records=motion_records,
+            start=start,
+            end=end,
+            fallback=True,
+        )
+        if timestamp is None:
+            continue
+        phase_code = _phase_code_for_skeleton_label(label)
         selected.append(
             {
                 "frame_id": f"semantic_{index:04d}",
                 "timestamp": round(timestamp, 3),
-                "phase_code": {"T": "takeoff", "A": "air", "L": "landing"}[label],
-                "phase_label": PHASE_LABELS[{"T": "takeoff", "A": "air", "L": "landing"}[label]],
+                "phase_code": phase_code,
+                "phase_label": PHASE_LABELS[phase_code],
                 "key_moment": key_moment,
-                "selection_reason": "skeleton_fallback_candidate",
+                "selection_reason": reason,
                 "confidence": _candidate_confidence(candidate),
             }
         )
@@ -792,21 +879,38 @@ def _resolve_segment_timestamp(
 
     key_moment = PHASE_KEY_MOMENTS.get(phase_code)
     skeleton_label = {"T_takeoff_sec": "T", "A_air_sec": "A", "L_landing_sec": "L"}.get(key_moment or "")
-    skeleton_ts = _candidate_timestamp(skeleton_candidates.get(skeleton_label or ""))
-    skeleton_conf = _candidate_confidence(skeleton_candidates.get(skeleton_label or ""))
-    if skeleton_ts is not None and start <= skeleton_ts <= end and skeleton_conf >= 0.55:
-        return skeleton_ts, "video_phase_range_skeleton_candidate", key_moment, flags
+    skeleton_candidate = skeleton_candidates.get(skeleton_label or "")
+    if isinstance(skeleton_candidate, dict):
+        skeleton_ts = _candidate_timestamp(skeleton_candidate)
+        skeleton_conf = _candidate_confidence(skeleton_candidate)
+        if skeleton_ts is not None and start <= skeleton_ts <= end:
+            timestamp, reason, skeleton_flags = _resolve_skeleton_candidate_timestamp(
+                label=skeleton_label or "",
+                candidate=skeleton_candidate,
+                motion_records=motion_records,
+                start=start,
+                end=end,
+            )
+            flags.extend(skeleton_flags)
+            if timestamp is not None:
+                return timestamp, reason, key_moment, flags
+            if skeleton_conf < SKELETON_ANCHOR_CONFIDENCE:
+                flags.append("video_temporal_resolver_skeleton_candidate_not_used")
 
     if source == "video_ai_refined":
         key_value = _to_float(video_ai_result.get("key_moments", {}).get(key_moment)) if key_moment else None
         if key_value is not None and start <= key_value <= end:
-            nearest = _nearest_motion_to(motion_records, key_value, start, end)
-            if nearest is not None:
-                return nearest, "video_phase_range_key_moment_motion_nearby", key_moment, flags
+            if phase_code in MOTION_PEAK_PHASES:
+                nearest = _motion_peak_near(motion_records, key_value, start, end)
+                if nearest is not None:
+                    return nearest, "video_phase_range_key_moment_motion_peak", key_moment, flags
+            else:
+                return key_value, "video_phase_range_key_moment_apex", key_moment, flags
 
-    peak = _motion_peak_in_range(motion_records, start, end)
-    if peak is not None:
-        return peak, "video_phase_range_motion_peak", key_moment, flags
+    if phase_code in MOTION_PEAK_PHASES:
+        peak = _motion_peak_in_range(motion_records, start, end)
+        if peak is not None:
+            return peak, "video_phase_range_motion_peak", key_moment, flags
 
     if hint is not None and start <= hint <= end:
         return hint, "video_phase_range_key_hint", key_moment, flags
@@ -838,10 +942,15 @@ def resolve_semantic_keyframes(
 
     normalized_video = _valid_video_temporal_for_resolver(video_ai_result, duration) if duration > 0 else None
     skeleton_candidates = _skeleton_candidates(skeleton_timestamps)
-    motion_records = _motion_selected_records(motion_scores)
+    motion_records = _motion_records_from_scores(motion_scores)
 
     confidence = _clamp_confidence(normalized_video.get("confidence") if isinstance(normalized_video, dict) else 0.0)
-    fallback_selected = _fallback_skeleton_selected(skeleton_candidates, video_duration_sec=duration, max_frames=max_frames)
+    fallback_selected = _fallback_skeleton_selected(
+        skeleton_candidates,
+        video_duration_sec=duration,
+        max_frames=max_frames,
+        motion_records=motion_records,
+    )
     validation = normalized_video.get("validation") if isinstance(normalized_video, dict) and isinstance(normalized_video.get("validation"), dict) else {}
     explicit_video_fallback = (
         isinstance(normalized_video, dict)

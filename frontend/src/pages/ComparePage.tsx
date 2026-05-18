@@ -134,7 +134,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
   const getActionWindow = useCallback(
     (side: CompareVideoSide) => {
       const start = side.sync_start ?? side.action_window_start ?? 0;
-      const duration = side.action_window_duration ?? (side.action_window_end != null && side.action_window_start != null
+      const duration = side.sync_duration ?? side.action_window_duration ?? (side.action_window_end != null && side.action_window_start != null
         ? side.action_window_end - side.action_window_start
         : null);
       return { start, duration: duration && duration > 0 ? duration : null };
@@ -327,6 +327,13 @@ function KeyframeImage({ side, title }: { side: CompareKeyframeSide; title: stri
             {side.source ? `来源：${side.source}` : ""}
             {side.phase_label ? ` · 阶段：${side.phase_label}` : ""}
             {side.selection_reason ? ` · ${side.selection_reason}` : ""}
+          </p>
+        ) : null}
+        {side.refinement_method ? (
+          <p>
+            精修：{side.refinement_method}
+            {side.refinement_delta_sec != null ? ` · ${signedValue(side.refinement_delta_sec, "s")}` : ""}
+            {side.pre_refine_timestamp != null ? ` · 原 ${side.pre_refine_timestamp.toFixed(2)}s` : ""}
           </p>
         ) : null}
       </div>

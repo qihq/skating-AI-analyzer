@@ -133,6 +133,9 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
                                     "phase_label": "起跳",
                                     "key_moment": "T_takeoff_sec",
                                     "selection_reason": "video_phase_range_motion_peak",
+                                    "pre_refine_timestamp": 0.1,
+                                    "refinement_method": "local_motion_peak",
+                                    "refinement_delta_sec": 0.02,
                                     "confidence": 0.86,
                                 },
                                 {
@@ -142,6 +145,9 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
                                     "phase_label": "腾空",
                                     "key_moment": "A_air_sec",
                                     "selection_reason": "video_phase_range_key_moment_motion_nearby",
+                                    "pre_refine_timestamp": 0.24,
+                                    "refinement_method": "apex_preserved",
+                                    "refinement_delta_sec": 0.0,
                                     "confidence": 0.87,
                                 },
                                 {
@@ -201,10 +207,15 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.keyframe_compare[0].before.source, "resolved_keyframes")
         self.assertEqual(result.keyframe_compare[0].before.phase_label, "起跳")
         self.assertEqual(result.keyframe_compare[0].before.selection_reason, "video_phase_range_motion_peak")
+        self.assertEqual(result.keyframe_compare[0].before.pre_refine_timestamp, 0.1)
+        self.assertEqual(result.keyframe_compare[0].before.refinement_method, "local_motion_peak")
+        self.assertEqual(result.keyframe_compare[0].before.refinement_delta_sec, 0.02)
         self.assertTrue(result.keyframe_compare[0].before.available)
         self.assertIsNotNone(result.video_compare)
         assert result.video_compare is not None
         self.assertTrue(result.video_compare.before.available)
+        self.assertEqual(result.video_compare.sync_mode, "semantic_keyframe")
+        self.assertEqual(result.video_compare.sync_anchor_key, "T")
         self.assertEqual(result.ai_narrative, "孩子这次动作更稳定。")
 
     async def test_compare_rejects_different_skater_or_subtype(self) -> None:

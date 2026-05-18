@@ -182,6 +182,9 @@ export interface SelectedSemanticFrame {
   phase_label?: string | null;
   key_moment?: string | null;
   selection_reason?: string | null;
+  pre_refine_timestamp?: number | null;
+  refinement_method?: string | null;
+  refinement_delta_sec?: number | null;
 }
 
 export interface VideoTemporalDiagnostics {
@@ -437,6 +440,10 @@ export interface CompareKeyframeSide {
   source?: string | null;
   phase_label?: string | null;
   selection_reason?: string | null;
+  pre_refine_timestamp?: number | null;
+  refinement_method?: string | null;
+  refinement_delta_sec?: number | null;
+  quality_flags?: string[];
   available: boolean;
   missing_reason: string | null;
 }
@@ -457,6 +464,7 @@ export interface CompareVideoSide {
   action_window_end: number | null;
   action_window_duration: number | null;
   sync_start: number | null;
+  sync_duration?: number | null;
   is_slow_motion: boolean;
   source_fps: number | null;
 }
@@ -465,6 +473,7 @@ export interface CompareVideoPayload {
   before: CompareVideoSide;
   after: CompareVideoSide;
   sync_mode: string;
+  sync_anchor_key?: string | null;
 }
 
 export interface CompareQualityPayload {

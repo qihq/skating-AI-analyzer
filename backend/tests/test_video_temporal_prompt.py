@@ -35,6 +35,10 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("T_takeoff_sec", combined)
         self.assertIn("A_air_sec", combined)
         self.assertIn("L_landing_sec", combined)
+        self.assertNotIn("0.5-1 秒误差", combined)
+        self.assertIn("最后一只脚离冰", combined)
+        self.assertIn("身体重心达到最高点", combined)
+        self.assertIn("冰刀首次接触冰面", combined)
 
     def test_deprecated_model_argument_is_normalized_in_prompt(self) -> None:
         _, user_prompt = build_video_temporal_prompts(

@@ -94,6 +94,7 @@ from app.services.video import (
     extract_motion_sampled_frames,
     precheck_video,
     persist_frames,
+    refine_semantic_keyframe_timestamps,
     restore_sampled_frames,
     save_upload_file,
 )
@@ -411,9 +412,21 @@ def _video_temporal_diagnostics(frame_motion_scores: dict[str, Any] | None) -> d
     fallback_reason = None
     if isinstance(video_temporal, dict):
         fallback_reason = video_temporal.get("fallback_reason") or video_temporal.get("fallback_recommendation")
+    has_semantic_moments = any(
+        isinstance(item, dict)
+        and (
+            str(item.get("key_moment") or "").startswith(("T_", "A_", "L_"))
+            or str(item.get("phase_code") or "") in {"takeoff", "air", "landing"}
+        )
+        and item.get("timestamp") is not None
+        for item in selected
+    ) if isinstance(selected, list) else False
     used_semantic_frames = (
         isinstance(resolved_keyframes, dict)
-        and resolved_keyframes.get("source") in {"video_ai_refined", "blended"}
+        and (
+            resolved_keyframes.get("source") in {"video_ai_refined", "blended"}
+            or (resolved_keyframes.get("source") == "skeleton_fallback" and has_semantic_moments)
+        )
         and isinstance(selected, list)
         and bool(selected)
         and not any(flag == "semantic_frame_extract_failed" for flag in quality_flags)
@@ -1149,7 +1162,6 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     video_duration_sec=max(
                         float(video_temporal_duration_sec or 0.0),
                         float(sampling_metadata.action_window_end or 0.0),
-                        float(sampling_metadata.window_end_sec or 0.0),
                         0.001,
                     ),
                     analysis_profile=analysis_profile,
@@ -1192,14 +1204,41 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     if isinstance(resolved_keyframes, dict) and isinstance(resolved_keyframes.get("selected"), list)
                     else []
                 )
+                has_semantic_moments = any(
+                    isinstance(item, dict)
+                    and (
+                        str(item.get("key_moment") or "").startswith(("T_", "A_", "L_"))
+                        or str(item.get("phase_code") or "") in {"takeoff", "air", "landing"}
+                    )
+                    and item.get("timestamp") is not None
+                    for item in selected_for_vision
+                )
                 use_semantic_frames = (
                     isinstance(resolved_keyframes, dict)
-                    and resolved_keyframes.get("source") in {"video_ai_refined", "blended"}
+                    and (
+                        resolved_keyframes.get("source") in {"video_ai_refined", "blended"}
+                        or (resolved_keyframes.get("source") == "skeleton_fallback" and has_semantic_moments)
+                    )
                     and bool(selected_for_vision)
                 )
                 if use_semantic_frames:
                     try:
                         semantic_dir = processing_frames_dir.parent / "semantic_frames"
+                        refined_records, refinement_flags = await refine_semantic_keyframe_timestamps(
+                            video_path,
+                            processing_frames_dir.parent / "semantic_refinement",
+                            selected_for_vision,
+                            source_fps=sampling_metadata.source_fps,
+                            video_duration_sec=max(
+                                float(video_temporal_duration_sec or 0.0),
+                                float(sampling_metadata.action_window_end or 0.0),
+                                0.001,
+                            ),
+                        )
+                        if refinement_flags:
+                            flags = resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else []
+                            resolved_keyframes["quality_flags"] = [*flags, *refinement_flags]
+                        selected_for_vision = refined_records
                         semantic_frames, semantic_records = await extract_precise_frames_at_timestamps(
                             video_path,
                             semantic_dir,
@@ -2395,6 +2434,8 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
         frame_id = _normalize_frame_stem(semantic.get("frame_id"))
         timestamp = _to_number(semantic.get("timestamp"))
         confidence = _to_number(semantic.get("confidence"))
+        semantic_flags = semantic.get("quality_flags")
+        quality_flags = [str(value) for value in semantic_flags if value] if isinstance(semantic_flags, list) else []
         if frame_id:
             frame_exists, frame_url = _frame_exists_and_url(analysis, frame_id)
             return CompareKeyframeSide(
@@ -2405,6 +2446,10 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
                 source="resolved_keyframes",
                 phase_label=str(semantic.get("phase_label") or ""),
                 selection_reason=str(semantic.get("selection_reason") or ""),
+                pre_refine_timestamp=_round_delta_value(_to_number(semantic.get("pre_refine_timestamp")), 3),
+                refinement_method=str(semantic.get("refinement_method") or "") or None,
+                refinement_delta_sec=_round_delta_value(_to_number(semantic.get("refinement_delta_sec")), 3),
+                quality_flags=quality_flags,
                 available=frame_exists,
                 missing_reason=None if frame_exists else "语义关键帧图片不可用",
             )
@@ -2432,6 +2477,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
         source="skeleton_candidate" if candidate else "legacy_keyframe",
         phase_label=None,
         selection_reason=None,
+        quality_flags=[],
         available=frame_exists,
         missing_reason=None if frame_exists else "关键帧图片不可用",
     )
@@ -2485,17 +2531,41 @@ def _build_video_side(analysis: Analysis) -> CompareVideoSide:
         action_window_end=_round_delta_value(end, 3),
         action_window_duration=_round_delta_value(duration, 3),
         sync_start=_round_delta_value(start or 0.0, 3),
+        sync_duration=_round_delta_value(duration, 3),
         is_slow_motion=bool(analysis.is_slow_motion),
         source_fps=_round_delta_value(_to_number(analysis.source_fps), 3),
     )
 
 
+def _semantic_timestamp_for_key(analysis: Analysis, key: str) -> float | None:
+    record = _semantic_keyframe_record(analysis, key)
+    return _to_number(record.get("timestamp")) if isinstance(record, dict) else None
+
+
+def _semantic_sync_duration(analysis: Analysis) -> float | None:
+    takeoff = _semantic_timestamp_for_key(analysis, "T")
+    landing = _semantic_timestamp_for_key(analysis, "L")
+    if takeoff is not None and landing is not None and landing > takeoff:
+        return max(landing - takeoff + 0.70, 0.70)
+    start = _to_number(analysis.action_window_start)
+    end = _to_number(analysis.action_window_end)
+    if start is not None and end is not None and end > start:
+        return end - start
+    return None
+
+
 def _build_video_compare(analysis_a: Analysis, analysis_b: Analysis) -> CompareVideoPayload:
-    return CompareVideoPayload(
-        before=_build_video_side(analysis_a),
-        after=_build_video_side(analysis_b),
-        sync_mode="action_window_start",
-    )
+    before = _build_video_side(analysis_a)
+    after = _build_video_side(analysis_b)
+    before_t = _semantic_timestamp_for_key(analysis_a, "T")
+    after_t = _semantic_timestamp_for_key(analysis_b, "T")
+    if before_t is not None and after_t is not None:
+        before.sync_start = _round_delta_value(max(0.0, before_t - 0.35), 3)
+        after.sync_start = _round_delta_value(max(0.0, after_t - 0.35), 3)
+        before.sync_duration = _round_delta_value(_semantic_sync_duration(analysis_a), 3)
+        after.sync_duration = _round_delta_value(_semantic_sync_duration(analysis_b), 3)
+        return CompareVideoPayload(before=before, after=after, sync_mode="semantic_keyframe", sync_anchor_key="T")
+    return CompareVideoPayload(before=before, after=after, sync_mode="action_window_start")
 
 
 def _quality_flags(analysis: Analysis) -> list[str]:

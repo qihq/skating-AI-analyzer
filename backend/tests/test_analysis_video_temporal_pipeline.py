@@ -149,6 +149,27 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch("app.routers.analysis.infer_jump_subtype_evidence", return_value={}))
                 stack.enter_context(patch("app.routers.analysis.analyze_video_temporal", AsyncMock(return_value=video_temporal)))
                 stack.enter_context(patch("app.routers.analysis.resolve_semantic_keyframes", return_value=resolved))
+                refine_mock = stack.enter_context(
+                    patch(
+                        "app.routers.analysis.refine_semantic_keyframe_timestamps",
+                        AsyncMock(
+                            return_value=(
+                                [
+                                    {
+                                        "frame_id": "semantic_0001",
+                                        "timestamp": 1.24,
+                                        "phase_code": "takeoff",
+                                        "phase_label": "起跳",
+                                        "pre_refine_timestamp": 1.2,
+                                        "refinement_method": "local_motion_peak",
+                                        "refinement_delta_sec": 0.04,
+                                    }
+                                ],
+                                [],
+                            )
+                        ),
+                    )
+                )
                 stack.enter_context(patch("app.routers.analysis.extract_precise_frames_at_timestamps", AsyncMock(return_value=(semantic_paths, semantic_records))))
                 encode_mock = stack.enter_context(
                     patch(
@@ -169,6 +190,7 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                 await analysis_router.process_analysis(analysis_id)
 
             self.assertEqual(encode_mock.await_args.args[0], semantic_paths)
+            self.assertEqual(refine_mock.await_args.args[2][0]["timestamp"], 1.2)
             self.assertEqual(dual_mock.await_args.kwargs["frame_paths"], semantic_paths)
             self.assertIsNone(dual_mock.await_args.kwargs["clip_path"])
             async with database.AsyncSessionLocal() as session:

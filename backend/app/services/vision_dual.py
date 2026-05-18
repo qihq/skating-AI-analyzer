@@ -57,7 +57,22 @@ def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> d
 def _uses_semantic_keyframes(resolved_keyframes: dict[str, Any] | None) -> bool:
     if not isinstance(resolved_keyframes, dict):
         return False
-    return resolved_keyframes.get("source") in {"video_ai_refined", "blended"} and isinstance(resolved_keyframes.get("selected"), list)
+    selected = resolved_keyframes.get("selected")
+    if not isinstance(selected, list) or not selected:
+        return False
+    if resolved_keyframes.get("source") in {"video_ai_refined", "blended"}:
+        return True
+    if resolved_keyframes.get("source") != "skeleton_fallback":
+        return False
+    return any(
+        isinstance(item, dict)
+        and (
+            str(item.get("key_moment") or "").startswith(("T_", "A_", "L_"))
+            or str(item.get("phase_code") or "") in {"takeoff", "air", "landing"}
+        )
+        and item.get("timestamp") is not None
+        for item in selected
+    )
 
 
 def _semantic_pose_for_annotation(

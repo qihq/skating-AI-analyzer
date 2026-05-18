@@ -208,6 +208,10 @@ class CompareKeyframeSide(BaseModel):
     source: str | None = None
     phase_label: str | None = None
     selection_reason: str | None = None
+    pre_refine_timestamp: float | None = None
+    refinement_method: str | None = None
+    refinement_delta_sec: float | None = None
+    quality_flags: list[str] = Field(default_factory=list)
     available: bool = False
     missing_reason: str | None = None
 
@@ -228,6 +232,7 @@ class CompareVideoSide(BaseModel):
     action_window_end: float | None = None
     action_window_duration: float | None = None
     sync_start: float | None = None
+    sync_duration: float | None = None
     is_slow_motion: bool = False
     source_fps: float | None = None
 
@@ -236,6 +241,7 @@ class CompareVideoPayload(BaseModel):
     before: CompareVideoSide
     after: CompareVideoSide
     sync_mode: str = "action_window_start"
+    sync_anchor_key: str | None = None
 
 
 class CompareQualityPayload(BaseModel):
