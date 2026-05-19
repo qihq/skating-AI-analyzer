@@ -8,6 +8,75 @@ AI-powered figure skating training analysis system built with React, FastAPI, an
 
 Skating Analyzer helps skaters and coaches upload training videos, extract motion frames, run pose estimation, generate biomechanics metrics, create AI-assisted reports, and track training progress through plans, archives, and skill trees.
 
+## Current Video Analysis Pipeline
+
+The system implements a 10-stage end-to-end pipeline from raw video to structured ISU-aligned report:
+
+```
+Video Upload → Precheck → Video AI Temporal Localization → Action Window Detection
+    → Motion-Weighted Frame Sampling → Target Lock → Pose Estimation
+    → Profile Inference → Biomechanics → Timestamp Arbitration + Semantic Keyframe Extraction
+    → Dual-Path Vision Analysis → LLM Report Fusion → Score Fusion
+```
+
+### Stage 1-1A: Upload & Video AI Semantic Temporal Localization
+
+- Accepts mp4/mov/avi, validates magic bytes, codec, resolution, and blank-frame check
+- **Video AI** (`qwen3.6-plus`) analyzes the full video to produce `phase_segments` (approach/preparation/takeoff/air/landing/glide_out), action confirmation, T/A/L timestamp hints, and macro assessment
+- Cost-controlled via daily budget (`QWEN_VISION_DAILY_COST_LIMIT_CNY`) and per-call estimate
+
+### Stage 2-3: Action Window Detection & Motion-Weighted Sampling
+
+- 2fps thumbnail extraction → frame-difference motion density curve
+- Profile-aware sliding window: jump=3s, spin=5s, step=8s, spiral=6s (stability-optimized)
+- Motion-weighted sampling: top-3 local peak neighborhoods protected, remaining quota distributed by segment motion weight
+- Slow-motion videos (≥60fps) are scaled back to real-time timeline before window selection
+
+### Stage 4-5: Target Lock & Pose Estimation
+
+- Multi-person detection via motion-based bbox candidates with IoU/center-distance/scale continuity scoring
+- Confidence ≥0.72 auto-locks; below triggers manual selection on frontend
+- MediaPipe 33-point 3D pose extraction (single or multi-pose mode with `.task` model)
+- Pose smoothing, phase voting, and cross-validation between skeleton signals and AI vision
+
+### Stage 6-7: Profile Inference & Biomechanics
+
+- Automatic profile inference (jump/spin/step/spiral) from COM vertical range, motion scores, and user hint
+- Knee angles, trunk tilt, arm symmetry, jump height (`h=0.5g(t/2)²`), rotation speed
+- Sub-scores: takeoff_power, rotation_axis, arm_coordination, landing_absorption, core_stability
+
+### Stage 7A: Timestamp Arbitration & Semantic Keyframe Extraction
+
+- Three-way arbitration: video AI phase intervals + motion density peaks + skeleton T/A/L candidates
+- Confidence-gated: ≥0.80 use video timestamps (refined), ≥0.55 blended, <0.55 skeleton fallback
+- FFmpeg precise extraction at resolved timestamps → `semantic_0001.jpg` etc.
+- Local motion-peak refinement for T/L frames (±0.18s window at source fps)
+
+### Stage 8: Dual-Path Vision Analysis
+
+- **Path A** (frame-based): semantic keyframes → multimodal LLM with `video_context` per frame → phase verification
+- **Path B** (video-aware): action-window clip → native video model → structured output
+- Cross-validation fusion with configurable blend weights; conflict detection between paths
+- Per-frame output includes `phase_verification` (agree/shifted/disagree/uncertain) against video AI context
+
+### Stage 9-10: Report Generation & Score Fusion
+
+- LLM synthesizes vision analysis + biomechanics + athlete memory → structured training report
+- Force Score: `ai_score × 0.4 + bio_score × 0.6`, weighted by sub-component importance
+- Full debug trace: pipeline timing, provider metrics, quality flags, frame annotations
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Video AI as semantic layer, not frame judge | Avoids hallucinated per-frame labels; provides phase intervals for arbitration |
+| Motion-peak neighborhood protection | Ensures takeoff/landing frames are never sampled away |
+| Dual-path with cross-validation | Single-path LLM analysis is unreliable; fusion catches errors |
+| Confidence-gated timestamp arbitration | Prevents low-quality video AI from corrupting frame extraction |
+| Profile-aware sampling rates | Jumps need 16fps (fast motion), spirals need 8fps (slow sustained) |
+
+See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full 10-stage pipeline documentation.
+
 ## Recent Updates
 
 The latest update expands the video analysis pipeline and deployment configuration:
@@ -307,6 +376,7 @@ This repository does not include:
 - Screenshot planning: [SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
 - Release body draft: [RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
 - AI analysis flow: [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)
+- Deep review & iteration plan: [docs/video-analysis-deep-review.md](./docs/video-analysis-deep-review.md)
 - Iteration guide: [video-analysis-iteration-guide.md](./video-analysis-iteration-guide%20(1).md)
 
 ## License
