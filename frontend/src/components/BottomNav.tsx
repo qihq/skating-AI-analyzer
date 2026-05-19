@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 
+import { useAppearance } from "./AppearanceContext";
 import { useAppMode } from "./AppModeContext";
 
 export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "history" | "settings" | "debug";
@@ -26,6 +27,7 @@ const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon
 
 export default function BottomNav({ activeTab }: BottomNavProps) {
   const { isParentMode } = useAppMode();
+  const { isIceGlass } = useAppearance();
   const mobileNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
   const desktopNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
 
@@ -33,7 +35,11 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
     <>
       <nav
         aria-label="主导航"
-        className="bottom-nav fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB] bg-white/96 backdrop-blur web:hidden"
+        className={`bottom-nav fixed inset-x-0 bottom-0 z-30 backdrop-blur web:hidden ${
+          isIceGlass
+            ? "border-t border-white/10 bg-slate-950/68 shadow-[0_-18px_48px_rgba(2,6,23,0.32)]"
+            : "border-t border-[#E5E7EB] bg-white/96"
+        }`}
       >
         <div className={`mx-auto grid h-full max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : mobileNavItems.length === 5 ? "grid-cols-5" : "grid-cols-6"}`}>
           {mobileNavItems.map((item) => (
@@ -42,7 +48,7 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
               to={item.to}
               className={({ isActive }) => {
                 const selected = isActive || activeTab === item.tab;
-                return `bottom-nav-item text-[#9CA3AF] transition ${selected ? "active" : ""}`;
+                return `bottom-nav-item transition ${isIceGlass ? "text-slate-400" : "text-[#9CA3AF]"} ${selected ? "active" : ""}`;
               }}
             >
               <span className="icon">{item.icon}</span>
@@ -52,11 +58,17 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         </div>
       </nav>
 
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-[240px] border-r border-[#E5E7EB] bg-white/92 px-5 py-8 backdrop-blur web:flex web:flex-col">
+      <aside
+        className={`fixed inset-y-0 left-0 z-20 hidden w-[240px] px-5 py-8 backdrop-blur web:flex web:flex-col ${
+          isIceGlass
+            ? "border-r border-white/10 bg-slate-950/48 shadow-[22px_0_70px_rgba(2,6,23,0.3)]"
+            : "border-r border-[#E5E7EB] bg-white/92"
+        }`}
+      >
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-kid-primary">IceBuddy</p>
-          <h1 className="mt-3 text-2xl font-semibold text-slate-900">花样滑冰训练分析系统</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-500">为家庭训练复盘、陪练建议和成长记录准备的滑冰助手。</p>
+          <p className={`text-xs font-semibold uppercase tracking-[0.3em] ${isIceGlass ? "text-cyan-200" : "text-kid-primary"}`}>IceBuddy</p>
+          <h1 className={`mt-3 text-2xl font-semibold ${isIceGlass ? "text-white" : "text-slate-900"}`}>花样滑冰训练分析系统</h1>
+          <p className={`mt-3 text-sm leading-6 ${isIceGlass ? "text-slate-300" : "text-slate-500"}`}>为家庭训练复盘、陪练建议和成长记录准备的滑冰助手。</p>
         </div>
 
         <div className="mt-10 space-y-2">
@@ -66,6 +78,11 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
               to={item.to}
               className={({ isActive }) => {
                 const selected = isActive || activeTab === item.tab;
+                if (isIceGlass) {
+                  return `flex min-h-[56px] items-center gap-3 rounded-[20px] px-4 text-sm font-medium transition ${
+                    selected ? "bg-white/14 text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]" : "text-slate-300 hover:bg-white/8 hover:text-white"
+                  }`;
+                }
                 return `flex min-h-[56px] items-center gap-3 rounded-[20px] px-4 text-sm font-medium transition ${
                   selected ? "bg-blue-50 text-[#3B82F6]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
                 }`;
@@ -77,9 +94,9 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
           ))}
         </div>
 
-        <div className="mt-auto rounded-[24px] border border-blue-100 bg-blue-50/80 p-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">家庭模式</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">
+        <div className={`mt-auto rounded-[24px] border p-4 ${isIceGlass ? "border-white/12 bg-white/8" : "border-blue-100 bg-blue-50/80"}`}>
+          <p className={`text-xs font-semibold uppercase tracking-[0.24em] ${isIceGlass ? "text-cyan-100" : "text-blue-500"}`}>家庭模式</p>
+          <p className={`mt-2 text-sm leading-6 ${isIceGlass ? "text-slate-300" : "text-slate-600"}`}>
             手机与 iPad 使用底部导航，网页端使用左侧固定导航。进入家长模式后，会显示分析、计划、进展与设置四个入口。
           </p>
         </div>

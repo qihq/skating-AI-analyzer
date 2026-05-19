@@ -1,4 +1,5 @@
 import ModeToggle from "./ModeToggle";
+import UiThemeToggle from "./UiThemeToggle";
 
 export default function AppHeader() {
   return (
@@ -10,7 +11,10 @@ export default function AppHeader() {
             <h1 className="truncate text-base font-semibold text-slate-900 tablet:text-lg">花样滑冰训练分析系统</h1>
           </div>
 
-          <ModeToggle />
+          <div className="flex shrink-0 items-center gap-2">
+            <UiThemeToggle />
+            <ModeToggle />
+          </div>
         </div>
       </div>
     </header>

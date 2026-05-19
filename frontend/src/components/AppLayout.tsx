@@ -1,5 +1,6 @@
 import { Outlet, useLocation } from "react-router-dom";
 
+import { useAppearance } from "./AppearanceContext";
 import AppHeader from "./AppHeader";
 import BottomNav, { PrimaryTab } from "./BottomNav";
 
@@ -19,10 +20,11 @@ function activeTabForPath(pathname: string): PrimaryTab | undefined {
 
 export default function AppLayout() {
   const location = useLocation();
+  const { theme } = useAppearance();
   const activeTab = activeTabForPath(location.pathname);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-ui-theme={theme}>
       <BottomNav activeTab={activeTab} />
       <div className="min-w-0 overflow-x-hidden web:pl-[240px]">
         <AppHeader />

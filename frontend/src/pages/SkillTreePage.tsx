@@ -16,6 +16,7 @@ import {
   unlockSkaterSkill,
 } from "../api/client";
 import SkillNodeCard from "../components/SkillNodeCard";
+import UiThemeToggle from "../components/UiThemeToggle";
 import UnlockCelebration from "../components/UnlockCelebration";
 import XpProgressBar from "../components/XpProgressBar";
 import { useAppMode } from "../components/AppModeContext";
@@ -345,6 +346,8 @@ export default function SkillTreePage() {
           </div>
 
           <div className="min-w-0 space-y-4">
+            <UiThemeToggle variant="hero" />
+
             <label className="block space-y-2">
               <span className="text-sm font-medium text-slate-700">当前练习档案</span>
               <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
