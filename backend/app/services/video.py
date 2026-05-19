@@ -33,6 +33,10 @@ FRAME_FULL_SIZE = os.getenv("FRAME_FULL_SIZE", "854x480")
 ACTION_CLIP_SIZE = os.getenv("ACTION_CLIP_SIZE", "854x480")
 ACTION_CLIP_MAX_SECONDS = float(os.getenv("ACTION_CLIP_MAX_SECONDS", "10"))
 ACTION_CLIP_MAX_MB = int(os.getenv("ACTION_CLIP_MAX_MB", "100"))
+ACTION_AI_CLIP_SIZE = os.getenv("ACTION_AI_CLIP_SIZE", "640x360")
+ACTION_AI_CLIP_FPS = float(os.getenv("ACTION_AI_CLIP_FPS", "15"))
+ACTION_AI_CLIP_CRF = int(os.getenv("ACTION_AI_CLIP_CRF", "30"))
+ACTION_AI_CLIP_MAX_MB = int(os.getenv("ACTION_AI_CLIP_MAX_MB", "40"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
@@ -59,10 +63,10 @@ DEFAULT_PROFILE_WINDOW_SIZES: dict[str, float | None] = {
     "spiral": 6.0,
 }
 DEFAULT_PROFILE_FRAME_RATES: dict[str, int] = {
-    "jump": 10,
-    "spin": 8,
-    "spiral": 6,
-    "step": 5,
+    "jump": 16,
+    "spin": 10,
+    "spiral": 8,
+    "step": 6,
 }
 DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
     "jump": 32,
@@ -456,6 +460,26 @@ def detect_video_fps(video_path: Path) -> float:
     return 30.0
 
 
+def detect_video_duration(video_path: Path) -> float | None:
+    try:
+        metadata = _probe_video(video_path)
+        streams = metadata.get("streams") if isinstance(metadata, dict) else None
+        video_stream = next(
+            (stream for stream in streams or [] if isinstance(stream, dict) and stream.get("codec_type") == "video"),
+            None,
+        )
+        if isinstance(video_stream, dict):
+            value = video_stream.get("duration")
+            if value is not None:
+                return max(0.0, float(value))
+        format_payload = metadata.get("format") if isinstance(metadata, dict) else None
+        if isinstance(format_payload, dict) and format_payload.get("duration") is not None:
+            return max(0.0, float(format_payload.get("duration")))
+    except Exception:  # noqa: BLE001
+        logger.warning("Unable to detect duration for %s", video_path, exc_info=True)
+    return None
+
+
 def _fallback_action_window(action_type: str) -> tuple[float, float]:
     window_size = ACTION_WINDOW_SIZES.get(action_type)
     if window_size is None:
@@ -709,6 +733,68 @@ async def cut_action_window_clip(
     return out_path
 
 
+async def cut_action_window_ai_clip(
+    video_path: Path,
+    window_start_sec: float,
+    window_end_sec: float,
+    out_path: Path,
+) -> Path:
+    """
+    Create the compact action-window clip used only for AI video inputs.
+
+    The source upload remains untouched; timestamps emitted by models for this
+    clip are expected to be shifted back to the source-video timeline by callers.
+    """
+    start = max(0.0, float(window_start_sec))
+    end = max(start + 0.5, float(window_end_sec))
+    if end - start > ACTION_CLIP_MAX_SECONDS:
+        end = start + ACTION_CLIP_MAX_SECONDS
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+
+    width, height = _size_tuple(ACTION_AI_CLIP_SIZE)
+    fps = max(1.0, min(float(ACTION_AI_CLIP_FPS), 30.0))
+    crf = max(18, min(int(ACTION_AI_CLIP_CRF), 40))
+    scale_filter = (
+        f"fps={fps:.3f},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-to",
+            f"{end:.3f}",
+            "-i",
+            str(video_path),
+            "-vf",
+            scale_filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(out_path),
+        ]
+    )
+
+    max_bytes = ACTION_AI_CLIP_MAX_MB * 1024 * 1024
+    if not out_path.exists() or out_path.stat().st_size <= 0:
+        raise RuntimeError("AI action-window clip was not created.")
+    if out_path.stat().st_size > max_bytes:
+        raise RuntimeError(f"AI action-window clip exceeds {ACTION_AI_CLIP_MAX_MB}MB.")
+    return out_path
+
+
 async def _extract_thumbnails(video_path: Path, thumbs_dir: Path, frame_rate: int = FRAME_RATE) -> list[Path]:
     width, height = _size_tuple(FRAME_THUMB_SIZE)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
@@ -778,6 +864,24 @@ def _motion_scores_from_thumbs(thumbs: Sequence[Path]) -> list[float]:
     return scores
 
 
+def _smooth_motion_scores(scores: Sequence[float], window: int = 3) -> list[float]:
+    """Apply a small moving-average to motion scores to suppress noise spikes.
+
+    Why: 单帧抖动/噪声会让 peak 选错；3 帧均值能稳定起跳/落冰瞬间的位置，
+    使切帧密度更贴合真实动作节奏。
+    """
+    if window <= 1 or not scores:
+        return [float(value) for value in scores]
+    half = window // 2
+    out: list[float] = []
+    for index in range(len(scores)):
+        left = max(0, index - half)
+        right = min(len(scores), index + half + 1)
+        window_slice = scores[left:right]
+        out.append(sum(float(value) for value in window_slice) / max(len(window_slice), 1))
+    return out
+
+
 def _top_local_peak_indices(scores: Sequence[float], limit: int = 2) -> list[int]:
     """
     Return the strongest local motion peaks.
@@ -818,8 +922,10 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
     if total_frames <= sample_count:
         return list(range(total_frames))
 
-    # 设计说明: top-2 局部运动峰值通常覆盖起跳/落冰瞬间；先锁定 ±1 帧，剩余配额再按运动密度分配。
-    selected: set[int] = _peak_neighborhood_indices(scores, radius=1, limit=2)
+    smoothed = _smooth_motion_scores(scores, window=3)
+    # 设计说明: top-3 局部运动峰值通常覆盖准备/起跳/落冰瞬间；
+    # 先锁定 ±2 帧的邻域保护区，剩余配额再按运动密度分配。
+    selected: set[int] = _peak_neighborhood_indices(smoothed, radius=2, limit=3)
     if len(selected) >= sample_count:
         return sorted(selected)[:sample_count]
 
@@ -837,7 +943,7 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
         if end <= start:
             end = min(start + 1, total_frames)
         segment_ranges.append((start, end))
-        segment_weights.append(sum(scores[start:end]) + 0.001)
+        segment_weights.append(sum(smoothed[start:end]) + 0.001)
 
     total_weight = sum(segment_weights)
     extra = [0 for _ in range(segment_count)]
@@ -854,7 +960,7 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
         if quota == 0:
             continue
         segment_indices = list(range(start, end))
-        segment_indices.sort(key=lambda index: scores[index], reverse=True)
+        segment_indices.sort(key=lambda index: smoothed[index], reverse=True)
         for index in segment_indices:
             if len([item for item in selected if start <= item < end]) >= quota:
                 break
@@ -869,10 +975,10 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
 
     if len(selected) > sample_count:
         selected_list = sorted(selected)
-        protected = _peak_neighborhood_indices(scores, radius=1, limit=2)
+        protected = _peak_neighborhood_indices(smoothed, radius=2, limit=3)
         overflow = len(selected_list) - sample_count
         removable = [index for index in selected_list if index not in protected]
-        for index in sorted(removable, key=lambda item: scores[item])[:overflow]:
+        for index in sorted(removable, key=lambda item: smoothed[item])[:overflow]:
             selected.remove(index)
 
     return sorted(selected)[:sample_count]
@@ -897,6 +1003,305 @@ async def _extract_full_frame_at(video_path: Path, timestamp: float, target_path
             str(target_path),
         ]
     )
+
+
+async def _extract_precise_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
+    width, height = _frame_dimensions()
+    scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{timestamp:.3f}",
+            "-frames:v",
+            "1",
+            "-vf",
+            scale_filter,
+            "-pix_fmt",
+            "yuvj420p",
+            str(target_path),
+        ]
+    )
+
+
+async def _extract_local_motion_thumbnails(
+    video_path: Path,
+    thumbs_dir: Path,
+    start_sec: float,
+    end_sec: float,
+    frame_rate: float,
+) -> list[Path]:
+    width, height = _size_tuple(FRAME_THUMB_SIZE)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    output_pattern = str(thumbs_dir / "refine_%05d.jpg")
+    scale_filter = (
+        f"fps={frame_rate:.3f},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{max(0.0, start_sec):.3f}",
+            "-t",
+            f"{max(end_sec - start_sec, 0.001):.3f}",
+            "-vf",
+            scale_filter,
+            "-pix_fmt",
+            "yuvj420p",
+            output_pattern,
+        ]
+    )
+    return sorted(thumbs_dir.glob("refine_*.jpg"))
+
+
+def _semantic_key_moment(record: dict[str, object]) -> str | None:
+    key_moment = str(record.get("key_moment") or "")
+    if key_moment.startswith("T_"):
+        return "T"
+    if key_moment.startswith("A_"):
+        return "A"
+    if key_moment.startswith("L_"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "")
+    if phase_code == "takeoff":
+        return "T"
+    if phase_code == "air":
+        return "A"
+    if phase_code == "landing":
+        return "L"
+    return None
+
+
+def _refinement_fps(source_fps: float | None) -> float:
+    if source_fps is None or source_fps <= 0:
+        return 60.0
+    return max(1.0, min(float(source_fps), 60.0))
+
+
+def _semantic_record_timestamp(record: dict[str, object]) -> float | None:
+    try:
+        return float(record.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _semantic_order_anchors(records: Sequence[dict[str, object]]) -> dict[str, float]:
+    anchors: dict[str, float] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = _semantic_key_moment(record)
+        timestamp = _semantic_record_timestamp(record)
+        if key in {"T", "A", "L"} and timestamp is not None:
+            anchors[key] = timestamp
+    return anchors
+
+
+def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.02) -> bool:
+    if key == "T":
+        apex = anchors.get("A")
+        landing = anchors.get("L")
+        return (apex is not None and timestamp >= apex - min_gap_sec) or (landing is not None and timestamp >= landing - min_gap_sec)
+    if key == "A":
+        takeoff = anchors.get("T")
+        landing = anchors.get("L")
+        return (takeoff is not None and timestamp <= takeoff + min_gap_sec) or (landing is not None and timestamp >= landing - min_gap_sec)
+    if key == "L":
+        takeoff = anchors.get("T")
+        apex = anchors.get("A")
+        return (takeoff is not None and timestamp <= takeoff + min_gap_sec) or (apex is not None and timestamp <= apex + min_gap_sec)
+    return False
+
+
+async def _refine_motion_peak_timestamp(
+    video_path: Path,
+    work_dir: Path,
+    timestamp: float,
+    *,
+    source_fps: float | None,
+    video_duration_sec: float | None,
+    window_seconds: float,
+) -> tuple[float, float, float]:
+    fps = _refinement_fps(source_fps)
+    duration = video_duration_sec if video_duration_sec is not None and video_duration_sec > 0 else None
+    start = max(0.0, timestamp - window_seconds)
+    end = timestamp + window_seconds
+    if duration is not None:
+        end = min(duration, end)
+    if end <= start:
+        return round(timestamp, 3), fps, 0.0
+
+    thumbs_dir = work_dir / f"refine_{int(timestamp * 1000):08d}"
+    if thumbs_dir.exists():
+        shutil.rmtree(thumbs_dir, ignore_errors=True)
+    try:
+        thumbs = await _extract_local_motion_thumbnails(video_path, thumbs_dir, start, end, fps)
+        scores = _motion_scores_from_thumbs(thumbs)
+    finally:
+        shutil.rmtree(thumbs_dir, ignore_errors=True)
+
+    if not scores:
+        return round(timestamp, 3), fps, 0.0
+
+    best_index = max(range(len(scores)), key=lambda index: (scores[index], -abs((start + index / fps) - timestamp)))
+    refined = start + (best_index / fps)
+    if duration is not None:
+        refined = min(duration, refined)
+    return round(max(0.0, refined), 3), fps, round(float(scores[best_index]), 4)
+
+
+async def refine_semantic_keyframe_timestamps(
+    video_path: Path,
+    work_dir: Path,
+    selected_records: Sequence[dict[str, object]],
+    *,
+    source_fps: float | None = None,
+    video_duration_sec: float | None = None,
+    window_seconds: float = 0.18,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """
+    Refine semantic T/L timestamps with a short high-fps local motion scan.
+
+    Apex frames are intentionally preserved because the highest COM point does
+    not usually coincide with the strongest motion impulse.
+    """
+    refined_records: list[dict[str, object]] = []
+    quality_flags: list[str] = []
+    order_anchors = _semantic_order_anchors(selected_records)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    for record in selected_records:
+        if not isinstance(record, dict):
+            continue
+        output: dict[str, object] = dict(record)
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            output["refinement_method"] = "invalid_timestamp_preserved"
+            quality_flags.append("semantic_keyframe_refinement_invalid_timestamp")
+            refined_records.append(output)
+            continue
+
+        key = _semantic_key_moment(record)
+        output["pre_refine_timestamp"] = round(timestamp, 3)
+        if key == "A":
+            output["refinement_method"] = "apex_preserved"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            refined_records.append(output)
+            continue
+        if key not in {"T", "L"}:
+            output["refinement_method"] = "not_applicable"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            refined_records.append(output)
+            continue
+
+        try:
+            refined_ts, fps, motion_score = await _refine_motion_peak_timestamp(
+                video_path,
+                work_dir,
+                timestamp,
+                source_fps=source_fps,
+                video_duration_sec=video_duration_sec,
+                window_seconds=window_seconds,
+            )
+            if _violates_semantic_order(key, refined_ts, order_anchors):
+                output["timestamp"] = round(timestamp, 3)
+                output["refinement_method"] = "local_motion_peak_order_rejected"
+                output["refinement_delta_sec"] = 0.0
+                output["refinement_fps"] = round(fps, 3)
+                output["refinement_motion_score"] = motion_score
+                quality_flags.append("semantic_keyframe_refinement_order_rejected")
+                refined_records.append(output)
+                continue
+            output["timestamp"] = refined_ts
+            output["refinement_method"] = "local_motion_peak"
+            output["refinement_delta_sec"] = round(refined_ts - timestamp, 3)
+            output["refinement_fps"] = round(fps, 3)
+            output["refinement_motion_score"] = motion_score
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Semantic keyframe local refinement failed at %.3fs: %s", timestamp, exc)
+            output["timestamp"] = round(timestamp, 3)
+            output["refinement_method"] = "refinement_failed_preserved"
+            output["refinement_delta_sec"] = 0.0
+            output["refinement_fps"] = _refinement_fps(source_fps)
+            output["refinement_motion_score"] = None
+            quality_flags.append("semantic_keyframe_refinement_failed")
+        refined_records.append(output)
+
+    return refined_records, sorted(set(quality_flags))
+
+
+async def extract_precise_frames_at_timestamps(
+    video_path: Path,
+    frames_dir: Path,
+    selected_records: Sequence[dict[str, object]],
+    prefix: str = "semantic",
+) -> tuple[list[Path], list[dict[str, object]]]:
+    """
+    Extract semantic keyframes at resolved timestamps with accurate FFmpeg seek.
+
+    Uses output-side -ss after -i to avoid depending only on fast GOP seek. The
+    returned records are compatible with build_timestamp_map({"selected": ...}).
+    """
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    if not video_path.exists():
+        raise AnalysisPipelineError(AnalysisErrorCode.FRAME_EXTRACT_FAILED, f"Video not found: {video_path}")
+
+    valid_records: list[dict[str, object]] = []
+    for record in selected_records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < 0:
+            continue
+        valid_records.append({**record, "timestamp": round(timestamp, 3)})
+
+    if not valid_records:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.FRAME_EXTRACT_FAILED,
+            "No valid semantic timestamps were provided for precise extraction.",
+        )
+
+    for existing_frame in frames_dir.glob(f"{prefix}_*.jpg"):
+        existing_frame.unlink(missing_ok=True)
+
+    output_paths: list[Path] = []
+    output_records: list[dict[str, object]] = []
+    try:
+        for output_index, record in enumerate(valid_records, start=1):
+            timestamp = float(record["timestamp"])
+            frame_id = f"{prefix}_{output_index:04d}"
+            target_path = frames_dir / f"{frame_id}.jpg"
+            await _extract_precise_full_frame_at(video_path, timestamp, target_path)
+            if not target_path.exists() or target_path.stat().st_size <= 0:
+                raise RuntimeError(f"Semantic frame was not created: {target_path}")
+            output_paths.append(target_path)
+            output_record = {**record, "frame_id": frame_id, "timestamp": round(timestamp, 3)}
+            output_records.append(output_record)
+    except Exception as exc:  # noqa: BLE001
+        for path in output_paths:
+            path.unlink(missing_ok=True)
+        if isinstance(exc, AnalysisPipelineError):
+            raise
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.FRAME_EXTRACT_FAILED,
+            f"Precise semantic frame extraction failed: {exc}",
+        ) from exc
+
+    return output_paths, output_records
 
 
 async def restore_sampled_frames(

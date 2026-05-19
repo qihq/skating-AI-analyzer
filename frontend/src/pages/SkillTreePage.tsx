@@ -413,6 +413,23 @@ export default function SkillTreePage() {
         </div>
       </section>
 
+      {isParentMode ? (
+        <section className="app-card p-5 tablet:p-6">
+          <div className="flex flex-col gap-4 tablet:flex-row tablet:items-center tablet:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Analysis Quality</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-900">自动评测与模型表现</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-7 text-slate-500">
+                查看 provider JSON 合法率、冲突率、失败率和最近自动评测快照，用于回放评测和手动调权。
+              </p>
+            </div>
+            <Link to="/debug" className="app-pill min-h-[46px] shrink-0 px-5 text-sm font-semibold">
+              查看质量监控
+            </Link>
+          </div>
+        </section>
+      ) : null}
+
       <div className="flex flex-wrap gap-3">
         <button
           type="button"

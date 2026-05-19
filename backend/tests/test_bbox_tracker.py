@@ -54,6 +54,32 @@ class BBoxTrackerTests(unittest.TestCase):
             self.assertEqual(flags, [])
             self.assertGreater(_bbox_iou(tracked[-1], expected[-1]), 0.7)
 
+    def test_tracks_from_manual_preview_frame_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths: list[Path] = []
+            expected: list[dict[str, float]] = []
+            for index in range(8):
+                image = np.zeros((120, 160, 3), dtype=np.uint8)
+                x = 20 + index * 5
+                y = 40
+                cv2.rectangle(image, (x, y), (x + 30, y + 30), (0, 0, 255), -1)
+                frame_path = root / f"frame_{index:04d}.jpg"
+                self.assertTrue(cv2.imwrite(str(frame_path), image))
+                frame_paths.append(frame_path)
+                expected.append({"x": x / 160, "y": y / 120, "width": 30 / 160, "height": 30 / 120})
+
+            try:
+                tracked, flags = track_bbox(frame_paths, expected[4], initial_frame_index=4)
+            except RuntimeError as exc:
+                self.skipTest(str(exc))
+
+            self.assertEqual(len(tracked), len(frame_paths))
+            self.assertIn("bbox_tracker_anchor_not_first_frame", flags)
+            self.assertGreater(_bbox_iou(tracked[4], expected[4]), 0.8)
+            self.assertGreater(_bbox_iou(tracked[0], expected[0]), 0.45)
+            self.assertGreater(_bbox_iou(tracked[-1], expected[-1]), 0.45)
+
 
 if __name__ == "__main__":
     unittest.main()

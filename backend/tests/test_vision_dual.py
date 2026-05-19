@@ -10,10 +10,12 @@ from unittest.mock import AsyncMock, patch
 
 import cv2
 import numpy as np
+import base64
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+from app.services.llm_context import AnalysisPromptContext
 from app.services.video import FramePayload
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 
@@ -188,6 +190,47 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["jump_metrics_text"], "")
         self.assertEqual(result.used_key_frames, set())
 
+    async def test_path_a_receives_bio_data_and_motion_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            bio_data = {
+                "key_frame_candidates": {
+                    "T": {"frame_id": "frame_0001", "confidence": 0.7},
+                    "A": {"frame_id": "frame_0001", "confidence": 0.8},
+                    "L": {"frame_id": "frame_0001", "confidence": 0.6},
+                }
+            }
+            frame_motion_scores = {
+                "sample_count": 3,
+                "scores": [0.1, 0.8, 0.3],
+                "selected": [{"frame_id": "frame_0001", "motion_score": 0.8}],
+            }
+            mock_a = AsyncMock(return_value=_path_a_result())
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=mock_a),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(1))),
+            ):
+                await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(1),
+                    None,
+                    bio_data,
+                    provider,
+                    provider,
+                    frame_motion_scores=frame_motion_scores,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        kwargs = mock_a.await_args.kwargs
+        self.assertEqual(kwargs["bio_data"], bio_data)
+        self.assertEqual(kwargs["motion_features"]["sample_count"], 3)
+        self.assertEqual(kwargs["motion_features"]["score_summary"]["max"], 0.8)
+        self.assertEqual(kwargs["motion_features"]["selected"], frame_motion_scores["selected"])
+
     async def test_timestamps_are_passed_to_annotated_encode_frames(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
@@ -212,6 +255,166 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(mock_encode.await_args.kwargs["timestamps"], timestamps)
+
+    async def test_path_b_timeout_preserves_annotated_frame_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 2)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+
+            async def slow_b(*args: object, **kwargs: object) -> dict:
+                await asyncio.sleep(0.05)
+                return _path_b_result()
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())) as mock_a,
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(side_effect=slow_b)),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(2))),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(2),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                    path_b_timeout=0.001,
+                )
+
+        self.assertEqual(result.path_b["error"], "path_b_timeout")
+        self.assertEqual(result.path_b["n_frames"], 2)
+        self.assertEqual(result.path_b["annotated_frame_count"], 2)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 2)
+        self.assertEqual(mock_a.await_count, 1)
+
+    async def test_sampled_fallback_limits_path_b_payload_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 32)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 10})
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(32))),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(32),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        self.assertEqual(len(mock_b.await_args.kwargs["annotated_frame_payloads"]), 10)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 10)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count_raw"], 32)
+
+    async def test_path_b_payloads_are_compressed_without_changing_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths = []
+            for index in range(6):
+                path = root / "frames" / f"semantic_{index + 1:04d}.jpg"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                image = np.full((720, 1280, 3), 255 - index, dtype=np.uint8)
+                self.assertTrue(cv2.imwrite(str(path), image, [int(cv2.IMWRITE_JPEG_QUALITY), 95]))
+                frame_paths.append(path)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            selected = [
+                {"frame_id": "semantic_0001", "timestamp": 1.0, "phase_code": "takeoff", "confidence": 0.8},
+                {"frame_id": "semantic_0002", "timestamp": 1.2, "phase_code": "air", "confidence": 0.8},
+                {"frame_id": "semantic_0003", "timestamp": 1.4, "phase_code": "landing", "confidence": 0.8},
+            ]
+            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 6})
+            encoded_payloads = [
+                FramePayload(
+                    frame_id=f"semantic_{index + 1:04d}",
+                    data_url="data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii"),
+                    timestamp_sec=float(index),
+                )
+                for index, path in enumerate(frame_paths)
+            ]
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual._semantic_pose_for_annotation", return_value={"frames": [], "connections": []}),
+                patch("app.services.vision_dual.annotate_frames_batch", return_value=frame_paths),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=encoded_payloads)),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(6),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=root / "annotated",
+                    resolved_keyframes={"source": "video_ai_refined", "selected": selected},
+                )
+
+        payloads = mock_b.await_args.kwargs["annotated_frame_payloads"]
+        self.assertEqual(len(payloads), 6)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 6)
+        raw = base64.b64decode(payloads[0].data_url.split(",", maxsplit=1)[1])
+        decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertLessEqual(decoded.shape[1], 640)
+
+    async def test_prompt_context_is_passed_to_both_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            mock_a = AsyncMock(return_value=_path_a_result())
+            mock_b = AsyncMock(return_value=_path_b_result())
+            context = AnalysisPromptContext(
+                action_type="跳跃",
+                action_subtype="Axel",
+                skill_category="前进燕式",
+                analysis_profile="jump",
+                profile_evidence={"source": "test"},
+                motion_features={"sample_count": 32},
+                bio_data={"quality_flags": []},
+                user_note="今天起跳有点犹豫",
+                memory_context="长期训练目标：稳定落冰。",
+            )
+
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=mock_a),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+                patch("app.services.vision_dual.encode_frames", new=AsyncMock(return_value=_payloads(1))),
+            ):
+                await analyze_frames_dual(
+                    "跳跃",
+                    frame_paths,
+                    _payloads(1),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    skill_category="前进燕式",
+                    prompt_context=context,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        context_text_a = mock_a.await_args.kwargs["memory_context"]
+        context_text_b = mock_b.await_args.kwargs["memory_context"]
+        self.assertIn("action_type: 跳跃", context_text_a)
+        self.assertIn("action_subtype: Axel", context_text_a)
+        self.assertIn("skill_category: 前进燕式", context_text_a)
+        self.assertIn("上传备注/额外 comments: 今天起跳有点犹豫", context_text_a)
+        self.assertIn("长期训练目标：稳定落冰", context_text_a)
+        self.assertEqual(context_text_a, context_text_b)
+        self.assertEqual(mock_b.await_args.kwargs["skill_category"], "前进燕式")
 
 
 if __name__ == "__main__":

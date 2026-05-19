@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.services.target_lock import MANUAL_BBOX_MIN_SIDE
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +19,16 @@ def _normalize_bbox(bbox: dict[str, Any]) -> dict[str, float]:
     height = float(bbox.get("height", bbox.get("h", 0.0)))
     x = _clamp(float(bbox.get("x", 0.0)), 0.0, 1.0)
     y = _clamp(float(bbox.get("y", 0.0)), 0.0, 1.0)
-    width = _clamp(width, 0.05, 1.0 - x)
-    height = _clamp(height, 0.05, 1.0 - y)
+    width = _clamp(width, MANUAL_BBOX_MIN_SIDE, 1.0 - x)
+    height = _clamp(height, MANUAL_BBOX_MIN_SIDE, 1.0 - y)
     return {"x": round(x, 4), "y": round(y, 4), "width": round(width, 4), "height": round(height, 4)}
 
 
 def _to_pixel_bbox(bbox: dict[str, float], image_width: int, image_height: int) -> tuple[int, int, int, int]:
     x = int(_clamp(bbox["x"], 0.0, 1.0) * image_width)
     y = int(_clamp(bbox["y"], 0.0, 1.0) * image_height)
-    width = int(_clamp(bbox["width"], 0.05, 1.0) * image_width)
-    height = int(_clamp(bbox["height"], 0.05, 1.0) * image_height)
+    width = int(_clamp(bbox["width"], MANUAL_BBOX_MIN_SIDE, 1.0) * image_width)
+    height = int(_clamp(bbox["height"], MANUAL_BBOX_MIN_SIDE, 1.0) * image_height)
     return x, y, max(width, 1), max(height, 1)
 
 
@@ -53,19 +55,7 @@ def _create_tracker() -> Any:
     raise RuntimeError("OpenCV CSRT tracker is not available.")
 
 
-def track_bbox(frame_paths: list[Path], initial_bbox: dict[str, Any]) -> tuple[list[dict[str, float]], list[str]]:
-    """使用 OpenCV CSRT 在抽样帧序列中跟踪主目标 bbox。
-
-    Args:
-        frame_paths: 按时间排序的抽样帧路径。
-        initial_bbox: 第一帧上的归一化 bbox。
-
-    Returns:
-        每帧 bbox 与质量标记列表。跟踪失败时使用上一帧速度线性外推。
-
-    Raises:
-        RuntimeError: OpenCV 或首帧不可用时抛出，调用方应降级到静态 bbox。
-    """
+def _track_forward(frame_paths: list[Path], initial_bbox: dict[str, float]) -> tuple[list[dict[str, float]], list[str]]:
     if not frame_paths:
         return [], []
 
@@ -76,13 +66,12 @@ def track_bbox(frame_paths: list[Path], initial_bbox: dict[str, Any]) -> tuple[l
         raise RuntimeError(f"Could not read first frame for bbox tracking: {frame_paths[0]}")
 
     image_height, image_width = first.shape[:2]
-    normalized_initial = _normalize_bbox(initial_bbox)
     tracker = _create_tracker()
-    tracker.init(first, _to_pixel_bbox(normalized_initial, image_width, image_height))
+    tracker.init(first, _to_pixel_bbox(initial_bbox, image_width, image_height))
 
-    tracked = [normalized_initial]
+    tracked = [initial_bbox]
     quality_flags: list[str] = []
-    previous = normalized_initial
+    previous = initial_bbox
     velocity = (0.0, 0.0)
 
     for frame_path in frame_paths[1:]:
@@ -109,4 +98,43 @@ def track_bbox(frame_paths: list[Path], initial_bbox: dict[str, Any]) -> tuple[l
         tracked.append(next_bbox)
         previous = next_bbox
 
+    return tracked, quality_flags
+
+
+def track_bbox(
+    frame_paths: list[Path],
+    initial_bbox: dict[str, Any],
+    *,
+    initial_frame_index: int = 0,
+) -> tuple[list[dict[str, float]], list[str]]:
+    """使用 OpenCV CSRT 在抽样帧序列中跟踪主目标 bbox。
+
+    Args:
+        frame_paths: 按时间排序的抽样帧路径。
+        initial_bbox: 第一帧上的归一化 bbox。
+
+    Returns:
+        每帧 bbox 与质量标记列表。跟踪失败时使用上一帧速度线性外推。
+
+    Raises:
+        RuntimeError: OpenCV 或首帧不可用时抛出，调用方应降级到静态 bbox。
+    """
+    if not frame_paths:
+        return [], []
+
+    normalized_initial = _normalize_bbox(initial_bbox)
+    start_index = max(0, min(int(initial_frame_index or 0), len(frame_paths) - 1))
+    if start_index == 0:
+        tracked, flags = _track_forward(frame_paths, normalized_initial)
+        if flags.count("bbox_tracker_extrapolated") >= max(2, len(frame_paths) // 4):
+            flags.append("target_tracking_uncertain")
+        return tracked, sorted(set(flags))
+
+    backward_paths = list(reversed(frame_paths[: start_index + 1]))
+    backward_tracked, backward_flags = _track_forward(backward_paths, normalized_initial)
+    forward_tracked, forward_flags = _track_forward(frame_paths[start_index:], normalized_initial)
+    tracked = list(reversed(backward_tracked))[0:-1] + forward_tracked
+    quality_flags = backward_flags + forward_flags + ["bbox_tracker_anchor_not_first_frame"]
+    if quality_flags.count("bbox_tracker_extrapolated") >= max(2, len(frame_paths) // 4):
+        quality_flags.append("target_tracking_uncertain")
     return tracked, sorted(set(quality_flags))

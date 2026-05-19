@@ -10,7 +10,12 @@ export default function TopNav() {
     { to: "/history", label: "历史" },
     { to: "/archive", label: "进展" },
     { to: "/progress", label: "趋势" },
-    ...(isParentMode ? [{ to: "/settings", label: "设置" }] : []),
+    ...(isParentMode
+      ? [
+          { to: "/debug", label: "调试" },
+          { to: "/settings", label: "设置" },
+        ]
+      : []),
   ];
 
   return (

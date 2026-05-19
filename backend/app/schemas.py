@@ -98,6 +98,7 @@ class AnalysisDetail(BaseModel):
     pose_data: dict[str, Any] | None = None
     bio_data: dict[str, Any] | None = None
     frame_motion_scores: dict[str, Any] | None = None
+    video_temporal_diagnostics: dict[str, Any] | None = None
     processing_timings: dict[str, float] | None = None
     processing_logs: list[AnalysisLogEntry] = Field(default_factory=list)
     target_lock: dict[str, Any] | None = None
@@ -115,6 +116,19 @@ class AnalysisDetail(BaseModel):
     note: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AnalysisAutoEvalSnapshot(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    analysis_id: str
+    created_at: datetime
+    pipeline_version: str | None = None
+    analysis_profile: str | None = None
+    action_type: str
+    auto_eval: dict[str, Any] | None = None
+    key_frame_candidates: dict[str, Any] | None = None
+    fusion_diagnostics: list[str] = Field(default_factory=list)
 
 
 class NoteUpdateRequest(BaseModel):
@@ -175,11 +189,80 @@ class CompareSummary(BaseModel):
     unchanged: list[ComparisonChange] = Field(default_factory=list)
 
 
+class CompareDelta(BaseModel):
+    key: str
+    label: str
+    before: float | int | None = None
+    after: float | int | None = None
+    delta: float | int | None = None
+    unit: str | None = None
+    trend: str = "unavailable"
+    available: bool = False
+
+
+class CompareKeyframeSide(BaseModel):
+    frame_id: str | None = None
+    frame_url: str | None = None
+    timestamp: float | None = None
+    confidence: float | None = None
+    source: str | None = None
+    phase_label: str | None = None
+    selection_reason: str | None = None
+    pre_refine_timestamp: float | None = None
+    refinement_method: str | None = None
+    refinement_delta_sec: float | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    available: bool = False
+    missing_reason: str | None = None
+
+
+class CompareKeyframePair(BaseModel):
+    key: str
+    label: str
+    before: CompareKeyframeSide
+    after: CompareKeyframeSide
+
+
+class CompareVideoSide(BaseModel):
+    analysis_id: str
+    video_url: str | None = None
+    available: bool = False
+    missing_reason: str | None = None
+    action_window_start: float | None = None
+    action_window_end: float | None = None
+    action_window_duration: float | None = None
+    sync_start: float | None = None
+    sync_duration: float | None = None
+    is_slow_motion: bool = False
+    source_fps: float | None = None
+
+
+class CompareVideoPayload(BaseModel):
+    before: CompareVideoSide
+    after: CompareVideoSide
+    sync_mode: str = "action_window_start"
+    sync_anchor_key: str | None = None
+
+
+class CompareQualityPayload(BaseModel):
+    before_data_quality: str | None = None
+    after_data_quality: str | None = None
+    before_flags: list[str] = Field(default_factory=list)
+    after_flags: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AnalysisCompareResponse(BaseModel):
     analysis_a: AnalysisDetail
     analysis_b: AnalysisDetail
     score_delta: int
     summary: CompareSummary
+    subscore_deltas: list[CompareDelta] = Field(default_factory=list)
+    metric_deltas: list[CompareDelta] = Field(default_factory=list)
+    keyframe_compare: list[CompareKeyframePair] = Field(default_factory=list)
+    video_compare: CompareVideoPayload | None = None
+    quality: CompareQualityPayload | None = None
+    ai_narrative: str | None = None
 
 
 class TrainingPlanSession(BaseModel):
@@ -327,6 +410,7 @@ class TargetPreviewResponse(BaseModel):
     lock_confidence: float
     preview_frame: str | None = None
     preview_frame_url: str | None = None
+    preview_frame_index: int | None = None
     candidates: list[TargetCandidate] = Field(default_factory=list)
     target_lock_status: str | None = None
 
@@ -383,6 +467,16 @@ class ProviderPublic(BaseModel):
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ProviderMetricPublic(BaseModel):
+    provider: str
+    sample_count: int
+    json_valid_rate: float
+    avg_effective_weight: float
+    conflict_rate: float
+    failure_rate: float
+    recommendation: str | None = None
 
 
 class ProviderTestResponse(BaseModel):

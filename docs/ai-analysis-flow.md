@@ -12,14 +12,16 @@
     ▼
 ┌─────────────────────────────────────────────────────┐
 │  Stage 1  视频上传 & 校验                             │
+│  Stage 1A 视频 AI 语义时间定位 (qwen3.6-plus，并行)    │
 │  Stage 2  动作窗口检测 (运动密度曲线)                   │
 │  Stage 3  运动加权抽帧                                │
 │  Stage 4  目标锁定 (Target Lock)                      │
 │  Stage 5  姿态提取 (MediaPipe)                        │
 │  Stage 6  动作 Profile 推断                           │
 │  Stage 7  生物力学计算                                │
-│  Stage 8  LLM 视觉帧分析 (多模态)                     │
-│  Stage 9  LLM 报告生成                                │
+│  Stage 7A 时间戳仲裁 + FFmpeg 语义关键帧抽取            │
+│  Stage 8  图片 AI 语义关键帧精析 (多模态)               │
+│  Stage 9  LLM 报告融合                                │
 │  Stage 10 评分融合 & 存储                             │
 └─────────────────────────────────────────────────────┘
     │
@@ -41,6 +43,33 @@
 - 后台启动 `process_analysis()` 异步任务
 
 **涉及文件**: `video.py::save_upload_file()`, `routers/analysis.py::upload_analysis()`
+
+---
+
+## Stage 1A: 视频 AI 语义时间定位
+
+**目标**: 用完整视频理解动作阶段区间，而不是让 MediaPipe 骨架时间戳成为唯一关键帧来源。
+
+**默认模型**: `qwen3.6-plus`。`qwen-vl-max-latest` 仅保留为历史迁移兼容输入，不再推荐作为默认视觉模型。
+
+**流程**:
+
+1. `precheck_video()` 通过后，后端异步启动 `analyze_video_temporal()`
+2. 视频 AI 输出 `video_temporal_v1`:
+   - 动作类型确认
+   - `phase_segments`，包含 `time_start` / `time_end` / `key_frame_hint`
+   - 跳跃 T/A/L 建议时间
+   - `macro_assessment` 和 `overall_impression`
+3. 视频 AI 只提供语义阶段区间和宏观评价，不作为逐帧裁判
+4. API 失败、超时、JSON 解析失败或低置信时，写入 fallback flags，主分析继续使用现有 sampled frames
+
+**成本控制**:
+
+- `QWEN_VISION_DAILY_COST_LIMIT_CNY`: 每日视觉成本上限，默认 30
+- `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY`: 单次视频语义定位估算成本
+- `VIDEO_TEMPORAL_MAX_FRAMES`: 进入图片 AI 的语义关键帧预算，默认 12，上限 12
+
+**涉及文件**: `video_temporal.py::analyze_video_temporal()`, `providers.py::request_dashscope_video_completion()`
 
 ---
 
@@ -184,17 +213,76 @@
 
 ---
 
+## Stage 7A: 时间戳仲裁与语义关键帧抽取
+
+**目标**: 把视频 AI 的语义区间转成 FFmpeg 可切的真实时间点。
+
+**仲裁规则**:
+
+| 视频 AI 置信度 | 行为 |
+|---|---|
+| `>= 0.80` | 使用视频阶段区间，但在区间内用运动峰值或骨架候选 refine |
+| `>= 0.55` | blended：视频区间作为边界，优先使用落在区间内的 T/A/L 骨架候选 |
+| `< 0.55` | 回退现有骨架/运动采样 |
+
+**关键原则**:
+
+- 不直接相信视频 AI 单点时间戳
+- 阶段 confidence `< 0.60`、越界、乱序或 fallback recommendation 非 `use_video_timestamps` 时保守回退
+- 跳跃 T/A/L 顺序异常不会直接失败，会转 blended 或 fallback
+- FFmpeg 按仲裁后的 `ResolvedKeyframePlan.selected` 精确抽取 `semantic_0001.jpg` 等语义帧
+- 语义帧抽取失败时回退 Stage 3 sampled frames
+
+**涉及文件**: `video_temporal.py::resolve_semantic_keyframes()`, `video.py::extract_precise_frames_at_timestamps()`
+
+---
+
 ## Stage 8: LLM 视觉帧分析
 
-**目标**: 用多模态大模型逐帧分析技术动作。
+**目标**: 用多模态大模型分析语义正确的关键帧。
 
 **流程**:
+
+1. 优先使用 Stage 7A 抽取的语义关键帧；不可用时回退 Stage 3 sampled frames
+2. 将图片编码为 base64 data URL
+3. 若使用语义帧，每帧 prompt 加入 `video_context`
+4. 图片 AI 不再从零猜阶段，而是验证 `phase_verification`
+5. Path B 可对语义帧运行轻量 pose/annotation；失败时使用原图 + 全局 bio context
+6. 解析 JSON 响应，归一化到标准格式
+
+**video_context 示例**:
+
+```json
+{
+  "confirmed_action": "Axel",
+  "phase_label": "腾空",
+  "timestamp_sec": 2.43,
+  "phase_time_start": 2.1,
+  "phase_time_end": 2.72,
+  "key_moment": "A_air_sec",
+  "macro_axis_overall": "整体轴心略向左偏，但滑出可控",
+  "camera_view": "diagonal_front",
+  "video_confidence": 0.78
+}
+```
+
+**新增帧级输出字段**:
+
+```json
+{
+  "phase_verification": "agree|shifted|disagree|uncertain",
+  "conflict_with_video_context": false,
+  "video_context_note": ""
+}
+```
+
+**原始流程仍保留**:
 
 1. 将抽帧图片编码为 base64 data URL
 2. 构造多模态 prompt:
    - System: 花样滑冰分析师角色 + 选手记忆上下文
    - User: 动作类型 + 子类型 + Profile 证据 + 每帧图片
-3. 调用 Vision slot 的 AI 模型（默认 Qwen 3.6 Plus）
+3. 调用 Vision slot 的 AI 模型（默认 `qwen3.6-plus`）
 4. 解析 JSON 响应，归一化到标准格式
 
 **每帧输出**:

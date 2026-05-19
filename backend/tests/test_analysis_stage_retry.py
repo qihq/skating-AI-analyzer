@@ -13,6 +13,124 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_from_report_reuses_saved_outputs_without_source_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            old_report = {
+                "summary": "旧报告",
+                "issues": [],
+                "improvements": [],
+                "training_focus": "旧重点",
+                "subscores": {
+                    "takeoff_power": 60,
+                    "rotation_axis": 60,
+                    "arm_coordination": 60,
+                    "landing_absorption": 60,
+                    "core_stability": 60,
+                },
+                "data_quality": "partial",
+            }
+            new_report = {
+                "summary": "新报告包含起跳问题",
+                "issues": [],
+                "improvements": [{"target": "起跳", "action": "练压膝"}],
+                "training_focus": "起跳节奏",
+                "subscores": {
+                    "takeoff_power": 80,
+                    "rotation_axis": 80,
+                    "arm_coordination": 80,
+                    "landing_absorption": 80,
+                    "core_stability": 80,
+                },
+                "data_quality": "partial",
+            }
+            vision_structured = {
+                "frame_analysis": [
+                    {"frame_id": "frame_0001", "phase": "起跳", "issues": ["起跳准备不足"], "positives": [], "confidence": 0.8}
+                ],
+                "action_phase_summary": {"detected_phases": ["起跳"], "weakest_phase": "起跳", "strongest_phase": "起跳"},
+                "overall_raw_text": "ok",
+            }
+            bio_data = {"bio_subscores": {}, "quality_flags": [], "key_frames": {"T": "frame_0001"}}
+
+            async with database.AsyncSessionLocal() as session:
+                analysis = models.Analysis(
+                    id=analysis_id,
+                    action_type="跳跃",
+                    action_subtype="单跳",
+                    skill_category="Axel 入门",
+                    analysis_profile="jump",
+                    retry_from_stage="report",
+                    pipeline_version=CURRENT_PIPELINE_VERSION,
+                    video_path=str(upload_dir / "source.mp4"),
+                    vision_structured=vision_structured,
+                    bio_data=bio_data,
+                    frame_motion_scores={"sample_count": 32},
+                    cross_validation={"recommended_path": "A"},
+                    report=old_report,
+                    status="completed",
+                    force_score=60,
+                    note="今天手动上传时备注：落冰有点紧张。",
+                )
+                session.add(analysis)
+                await session.commit()
+
+            with (
+                patch("app.routers.analysis.extract_pose", side_effect=AssertionError("pose should not rerun")),
+                patch("app.routers.analysis.analyze_frames_dual", side_effect=AssertionError("vision should not rerun")),
+                patch("app.routers.analysis.generate_report", AsyncMock(return_value=new_report)) as report_mock,
+                patch(
+                    "app.routers.analysis.build_analysis_prompt_context",
+                    AsyncMock(return_value=SimpleNamespace(marker="prompt-context")),
+                ) as context_mock,
+                patch("app.routers.analysis.calculate_force_score", return_value=80),
+                patch("app.routers.analysis.auto_update_skill_progress", AsyncMock(return_value=None)),
+                patch("app.routers.analysis.sync_skater_progress", AsyncMock(return_value=None)),
+                patch("app.routers.analysis.suggest_memory_updates", AsyncMock(return_value=None)),
+            ):
+                await analysis_router.process_analysis(analysis_id, retry_from="report")
+
+            report_mock.assert_awaited_once()
+            context_mock.assert_awaited_once()
+            self.assertEqual(context_mock.await_args.kwargs["action_type"], "跳跃")
+            self.assertEqual(context_mock.await_args.kwargs["action_subtype"], "单跳")
+            self.assertEqual(context_mock.await_args.kwargs["skill_category"], "Axel 入门")
+            self.assertEqual(context_mock.await_args.kwargs["analysis_profile"], "jump")
+            self.assertEqual(context_mock.await_args.kwargs["motion_features"], {"sample_count": 32})
+            self.assertEqual(context_mock.await_args.kwargs["user_note"], "今天手动上传时备注：落冰有点紧张。")
+            self.assertEqual(report_mock.await_args.kwargs["prompt_context"].marker, "prompt-context")
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                self.assertEqual(saved.status, "completed")
+                self.assertEqual(saved.retry_from_stage, None)
+                self.assertEqual(saved.report["summary"], "新报告包含起跳问题")
+                self.assertEqual(saved.force_score, 80)
+                self.assertEqual(saved.vision_structured, vision_structured)
+                self.assertEqual(saved.bio_data, bio_data)
+
     async def test_retry_from_vision_reuses_pose_and_biomechanics_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir
@@ -132,7 +250,9 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(saved.vision_structured, dict)
                 self.assertEqual(saved.vision_path_a, vision_structured)
                 self.assertEqual(saved.vision_path_b, {"path": "B", "error": "mocked"})
-                self.assertEqual(saved.cross_validation, {"recommended_path": "A", "path_b_failed": True})
+                self.assertEqual(saved.cross_validation["recommended_path"], "A")
+                self.assertTrue(saved.cross_validation["path_b_failed"])
+                self.assertIn("auto_eval", saved.cross_validation)
                 self.assertIsInstance(saved.report, dict)
 
 

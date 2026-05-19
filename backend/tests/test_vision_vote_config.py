@@ -8,10 +8,21 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.providers import get_vision_providers
+from app.services.providers import _active_provider_config_from_model, get_vision_providers
 
 
 class VisionVoteConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qwen_dual_path_slots_keep_their_configured_model_ids(self) -> None:
+        path_a = _provider("path-a", "qwen", "encrypted-a", slot="vision_path_a", model_id="qwen3-omni-flash")
+        path_b = _provider("path-b", "qwen", "encrypted-b", slot="vision_path_b", model_id="qwen3.6-plus")
+
+        with patch.dict("os.environ", {"QWEN_VISION_MODEL": "qwen-vl-max-latest"}):
+            result_a = _active_provider_config_from_model(path_a, "key-a")
+            result_b = _active_provider_config_from_model(path_b, "key-b")
+
+        self.assertEqual(result_a.model_id, "qwen3-omni-flash")
+        self.assertEqual(result_b.model_id, "qwen3.6-plus")
+
     async def test_get_vision_providers_uses_ui_selected_primary_and_secondary(self) -> None:
         providers = [
             _provider("primary", "qwen", "encrypted-primary"),
@@ -50,14 +61,21 @@ class VisionVoteConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([provider.id for provider in result], ["primary", "primary"])
 
 
-def _provider(provider_id: str, provider_name: str, api_key: str) -> SimpleNamespace:
+def _provider(
+    provider_id: str,
+    provider_name: str,
+    api_key: str,
+    *,
+    slot: str = "vision",
+    model_id: str = "model",
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=provider_id,
-        slot="vision",
+        slot=slot,
         name=provider_name,
         provider=provider_name,
         base_url="https://example.com/v1",
-        model_id="model",
+        model_id=model_id,
         vision_model=None,
         api_key=api_key,
         notes=None,

@@ -37,6 +37,31 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["fallback_to_all_frames"])
         self.assertIn("仅供参考", summary["reliability_note"])
 
+    def test_summarize_vision_for_report_does_not_warn_for_mixed_partial_quality(self) -> None:
+        vision_structured = {
+            "data_quality_hint": "partial",
+            "camera_view": "side",
+            "frame_analysis": [
+                {
+                    "frame_id": f"frame_{index:04d}",
+                    "phase": "起跳" if index < 4 else "落冰",
+                    "observations": {"knee_bend": "不足"},
+                    "issues": ["起跳膝关节准备不足"],
+                    "positives": [],
+                    "confidence": confidence,
+                }
+                for index, confidence in enumerate([0.82, 0.76, 0.68, 0.42, 0.37], start=1)
+            ],
+            "overall_raw_text": "可见起跳和落冰阶段。",
+        }
+
+        summary = summarize_vision_for_report(vision_structured)
+
+        self.assertEqual(len(summary["reliable_frames"]), 3)
+        self.assertEqual(summary["low_confidence_frame_count"], 2)
+        self.assertFalse(summary["apply_low_confidence_notice"])
+        self.assertNotIn("仅供参考", summary["reliability_note"])
+
     async def test_invalid_vision_json_falls_back_and_marks_report_poor(self) -> None:
         frame_payloads = [
             FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA"),
@@ -194,9 +219,9 @@ class VisionFallbackTests(unittest.IsolatedAsyncioTestCase):
         create_kwargs = request_mock.await_args.kwargs
         self.assertEqual(create_kwargs["max_tokens"], 5400)
         prompt_text = create_kwargs["messages"][1]["content"][0]["text"]
-        self.assertIn("JUMP_SUBTYPE_EVIDENCE", prompt_text)
-        self.assertIn("每帧的 issues 和 positives 各不超过 2 条，每条不超过 30 字。", prompt_text)
-        self.assertIn("必须只输出 JSON，禁止任何解释文字。", prompt_text)
+        self.assertIn("candidate_key_frames", prompt_text)
+        self.assertIn("Free Skate 1", prompt_text)
+        self.assertIn("JSON schema:", prompt_text)
         self.assertEqual(len(vision_structured["frame_analysis"]), 20)
         self.assertEqual(vision_structured["frame_analysis"][-1]["frame_id"], "frame_0020")
         self.assertEqual(vision_structured["frame_analysis"][-1]["issues"], ["issue-19-1", "issue-19-2"])

@@ -21,6 +21,20 @@ class TargetLockTests(unittest.TestCase):
         self.assertEqual(payload["lock_confidence"], 1.0)
         self.assertEqual(payload["selected_bbox"], {"x": 0.2, "y": 0.1, "width": 0.3, "height": 0.5})
         self.assertEqual(payload["candidates"], preview.candidates)
+        self.assertEqual(payload["preview_frame_index"], 0)
+
+    def test_build_target_lock_payload_preserves_existing_preview_frame_index(self) -> None:
+        preview = build_target_preview(
+            "analysis-1",
+            ["frame_0001.jpg", "frame_0002.jpg", "frame_0003.jpg"],
+            existing_target_lock={"preview_frame": "frame_0002.jpg", "status": "manual"},
+        )
+
+        payload = build_target_lock_payload(preview, manual_bbox={"x": 0.2, "y": 0.1, "w": 0.3, "h": 0.5})
+
+        self.assertEqual(preview.preview_frame, "frame_0002.jpg")
+        self.assertEqual(preview.preview_frame_index, 1)
+        self.assertEqual(payload["preview_frame_index"], 1)
 
     def test_build_target_preview_returns_no_person_without_confident_candidates(self) -> None:
         preview = build_target_preview("analysis-1", ["frame_0001.jpg"])

@@ -70,6 +70,7 @@ class VisionPathBTests(unittest.IsolatedAsyncioTestCase):
                 analysis_profile="jump",
                 profile_evidence={"input": "Axel"},
                 memory_context="长期训练目标：稳定落冰。",
+                skill_category="Axel 入门",
             )
 
         create_kwargs = request_mock.await_args.kwargs
@@ -81,6 +82,7 @@ class VisionPathBTests(unittest.IsolatedAsyncioTestCase):
 
         user_content = messages[1]["content"]
         self.assertIn("JUMP_SUBTYPE_EVIDENCE", user_content[0]["text"])
+        self.assertIn("技能分类：Axel 入门", user_content[0]["text"])
         self.assertIn("【整体生物力学摘要】", user_content[0]["text"])
         self.assertIn("AirTime=0.45s", user_content[0]["text"])
 

@@ -13,6 +13,8 @@ from typing import Any
 
 import numpy as np
 
+from app.services.keyframe_candidates import detect_key_frame_candidates
+
 
 DEFAULT_EFFECTIVE_FPS = 5.0
 MAX_AIR_TIME_SECONDS = 1.5
@@ -493,6 +495,39 @@ def sanitize_biomechanics_data(bio_data: dict[str, Any] | None) -> dict[str, Any
     sanitized["jump_metrics_status"] = "ok"
     sanitized["jump_metrics_warning"] = None
     return sanitized
+
+
+def attach_key_frame_candidates(
+    bio_data: dict[str, Any],
+    pose_data: dict[str, Any] | None,
+    motion_scores: dict[str, Any] | None,
+    analysis_profile: str,
+    effective_fps: float | None,
+) -> dict[str, Any]:
+    """Return biomechanics payload with T/A/L key-frame candidates attached.
+
+    The legacy ``key_frames`` field is left untouched. Candidate detection is
+    additive so older consumers can keep reading ``key_frames`` while newer
+    evaluation paths inspect ``key_frame_candidates``.
+    """
+    updated = dict(bio_data) if isinstance(bio_data, dict) else {}
+    try:
+        updated["key_frame_candidates"] = detect_key_frame_candidates(
+            pose_data,
+            motion_scores,
+            analysis_profile,
+            _valid_effective_fps(effective_fps),
+        )
+    except Exception as exc:  # noqa: BLE001
+        warning = "keyframe_candidates_detection_failed"
+        updated["key_frame_candidates"] = {
+            "T": {"frame_id": None, "timestamp": None, "confidence": 0.0, "evidence": {}, "warnings": [warning]},
+            "A": {"frame_id": None, "timestamp": None, "confidence": 0.0, "evidence": {}, "warnings": [warning]},
+            "L": {"frame_id": None, "timestamp": None, "confidence": 0.0, "evidence": {}, "warnings": [warning]},
+            "quality_flags": [warning],
+            "error": str(exc),
+        }
+    return updated
 
 
 def _score_from_values(values: list[float], ideal: float, tolerance: float, invert: bool = False) -> int:

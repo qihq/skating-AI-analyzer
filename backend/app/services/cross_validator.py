@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -16,6 +16,7 @@ OBJECTIVE_FIELDS = {"rotation_axis", "core_stability"}
 
 AGREE_THRESHOLD = {"objective": 6, "subjective": 10}
 MINOR_THRESHOLD = {"objective": 15, "subjective": 22}
+CONFLICT_LEVELS = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 
 @dataclass(slots=True)
@@ -37,6 +38,7 @@ class CrossValidationReport:
     conflict_fields: list[str]
     recommended_path: str
     conflict_summary: str
+    fusion_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -82,7 +84,141 @@ def _compare_subscores(a: dict, b: dict) -> list[FieldValidation]:
     return out
 
 
-def _single_path_report(which: str, reason: str) -> CrossValidationReport:
+def _normalize_conflict_level(value: Any) -> str:
+    level = str(value or "none").strip().lower()
+    return level if level in CONFLICT_LEVELS else "none"
+
+
+def _max_conflict_level(levels: list[str]) -> str:
+    if not levels:
+        return "none"
+    return max((_normalize_conflict_level(level) for level in levels), key=lambda level: CONFLICT_LEVELS[level])
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def _path_diagnostics(path_name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    available = isinstance(payload, dict) and not payload.get("error")
+    reasons: list[str] = []
+    if not available:
+        reasons.append(f"{path_name}_failed")
+    if isinstance(payload, dict):
+        if payload.get("fallback_used"):
+            reasons.append(f"{path_name}_fallback_used")
+        flags = payload.get("quality_flags")
+        if isinstance(flags, list):
+            for flag in flags:
+                text = str(flag)
+                if "fallback" in text or "low" in text or "failed" in text:
+                    reasons.append(f"{path_name}_{text}")
+    return {
+        "available": available,
+        "conflict_level": "high" if isinstance(payload, dict) and payload.get("error") else _normalize_conflict_level(payload.get("conflict_level") if isinstance(payload, dict) else None),
+        "downgraded_reasons": _dedupe(reasons),
+    }
+
+
+def _fusion_source(path_a: dict[str, Any] | None, fusion_payload: dict[str, Any] | None) -> dict[str, Any]:
+    if isinstance(fusion_payload, dict):
+        return fusion_payload
+    if isinstance(path_a, dict) and (
+        path_a.get("fusion_version") or path_a.get("fusion_decisions") or path_a.get("fusion_model_results")
+    ):
+        return path_a
+    return {}
+
+
+def _auto_eval_payloads(fusion: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    auto_eval = fusion.get("auto_eval")
+    if isinstance(auto_eval, dict):
+        payloads.append(auto_eval)
+
+    model_results = fusion.get("model_results")
+    if not isinstance(model_results, list):
+        model_results = fusion.get("fusion_model_results")
+    if isinstance(model_results, list):
+        for result in model_results:
+            if isinstance(result, dict) and isinstance(result.get("auto_eval"), dict):
+                payloads.append(result["auto_eval"])
+    return payloads
+
+
+def _fusion_downgraded_reasons(fusion: dict[str, Any]) -> tuple[list[str], bool]:
+    reasons: list[str] = []
+    key_frame_order_invalid = False
+
+    vote_metadata = fusion.get("vote_metadata") if isinstance(fusion.get("vote_metadata"), dict) else {}
+    conflict_level = _normalize_conflict_level(fusion.get("conflict_level") or vote_metadata.get("conflict_level"))
+    if conflict_level == "high":
+        reasons.append("weighted_fusion_high_conflict")
+    elif conflict_level in {"low", "medium"}:
+        reasons.append(f"weighted_fusion_{conflict_level}_conflict")
+
+    decisions = fusion.get("fusion_decisions") if isinstance(fusion.get("fusion_decisions"), list) else []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        if _normalize_conflict_level(decision.get("conflict_level")) == "high":
+            reasons.append(f"frame_{decision.get('frame_id', 'unknown')}_high_conflict")
+        candidates = decision.get("candidates") if isinstance(decision.get("candidates"), list) else []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            flags = candidate.get("rule_flags") if isinstance(candidate.get("rule_flags"), list) else []
+            reasons.extend(str(flag) for flag in flags if flag)
+
+    for auto_eval in _auto_eval_payloads(fusion):
+        if auto_eval.get("key_frame_order_valid") is False:
+            key_frame_order_invalid = True
+            reasons.append("key_frame_order_invalid")
+        if auto_eval.get("phase_sequence_valid") is False:
+            reasons.append("phase_sequence_invalid")
+        if auto_eval.get("high_confidence_conflicts"):
+            reasons.append("high_confidence_key_frame_conflict")
+
+    return _dedupe(reasons), key_frame_order_invalid
+
+
+def build_fusion_diagnostics(
+    path_a: dict[str, Any] | None,
+    path_b: dict[str, Any] | None,
+    fusion_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fusion = _fusion_source(path_a, fusion_payload)
+    path_a_diag = _path_diagnostics("path_a", path_a)
+    path_b_diag = _path_diagnostics("path_b", path_b)
+    fusion_reasons, key_frame_order_invalid = _fusion_downgraded_reasons(fusion)
+    vote_metadata = fusion.get("vote_metadata") if isinstance(fusion.get("vote_metadata"), dict) else {}
+    fusion_level = _normalize_conflict_level(fusion.get("conflict_level") or vote_metadata.get("conflict_level"))
+    conflict_level = _max_conflict_level([path_a_diag["conflict_level"], path_b_diag["conflict_level"], fusion_level])
+    downgraded_reasons = _dedupe(path_a_diag["downgraded_reasons"] + path_b_diag["downgraded_reasons"] + fusion_reasons)
+
+    return {
+        "path_a": path_a_diag,
+        "path_b": path_b_diag,
+        "weighted_fusion": {
+            "available": bool(fusion),
+            "fusion_version": fusion.get("fusion_version"),
+            "conflict_level": fusion_level,
+            "downgraded_reasons": fusion_reasons,
+        },
+        "conflict_level": conflict_level,
+        "downgraded_reasons": downgraded_reasons,
+        "key_frame_order_invalid": key_frame_order_invalid,
+        "needs_human_review": conflict_level == "high" or key_frame_order_invalid,
+    }
+
+
+def _single_path_report(which: str, reason: str, diagnostics: dict[str, Any] | None = None) -> CrossValidationReport:
+    if diagnostics is None:
+        failed_path = "path_a" if which == "B" else "path_b"
+        diagnostics = build_fusion_diagnostics(
+            {"error": "single_path"} if failed_path == "path_a" else {},
+            {"error": "single_path"} if failed_path == "path_b" else {},
+        )
     return CrossValidationReport(
         overall_agreement_rate=0.5,
         skeleton_reliability_signal="unknown",
@@ -91,22 +227,73 @@ def _single_path_report(which: str, reason: str) -> CrossValidationReport:
         conflict_fields=[],
         recommended_path=which,
         conflict_summary=reason,
+        fusion_diagnostics=diagnostics or {},
     )
+
+
+def _path_a_quality_score(path_a: dict[str, Any] | None) -> float:
+    """Score Path A analysis quality from 0.0 to 1.0.
+
+    Checks:
+    - Whether frame_analysis exists and has entries
+    - Whether frames have meaningful (non-default) phases
+    - Whether frames have diverse phases (not all the same)
+    - Whether issues/positives are varied (not all identical)
+    - Falls back to checking subscores if no frame_analysis
+    """
+    if not isinstance(path_a, dict):
+        return 0.0
+
+    frames = path_a.get("frame_analysis")
+
+    # If no frame_analysis, check if subscores exist (valid legacy case)
+    if not isinstance(frames, list) or not frames:
+        subscores = path_a.get("pure_vision_subscores") or path_a.get("subscores")
+        if isinstance(subscores, dict) and subscores:
+            return 0.5  # Has subscores but no frame detail
+        return 0.0
+
+    n = len(frames)
+    phases = [str(f.get("phase", "")) for f in frames if isinstance(f, dict)]
+    non_default = sum(1 for p in phases if p and p != "不可分析")
+    unique_phases = len(set(p for p in phases if p and p != "不可分析"))
+
+    # Collect unique issues/positives text
+    all_issues: set[str] = set()
+    all_positives: set[str] = set()
+    for f in frames:
+        if not isinstance(f, dict):
+            continue
+        for issue in f.get("issues", []):
+            if isinstance(issue, str) and issue.strip():
+                all_issues.add(issue.strip()[:50])
+        for pos in f.get("positives", []):
+            if isinstance(pos, str) and pos.strip():
+                all_positives.add(pos.strip()[:50])
+
+    # Score components
+    phase_ratio = non_default / n if n > 0 else 0.0
+    diversity = min(unique_phases / 3, 1.0) if unique_phases > 0 else 0.0
+    detail = min((len(all_issues) + len(all_positives)) / 4, 1.0)
+
+    return round(0.4 * phase_ratio + 0.3 * diversity + 0.3 * detail, 3)
 
 
 def cross_validate(
     path_a: dict[str, Any] | None,
     path_b: dict[str, Any] | None,
+    fusion_payload: dict[str, Any] | None = None,
 ) -> CrossValidationReport:
+    diagnostics = build_fusion_diagnostics(path_a, path_b, fusion_payload)
     a_ok = bool(path_a and not path_a.get("error"))
     b_ok = bool(path_b and not path_b.get("error"))
 
     if not a_ok and not b_ok:
-        return CrossValidationReport(0.0, "unknown", [], [], [], "neither", "两路分析均失败。")
+        return CrossValidationReport(0.0, "unknown", [], [], [], "neither", "两路分析均失败。", diagnostics)
     if not a_ok:
-        return _single_path_report("B", "Path A 失败，仅使用 Path B。")
+        return _single_path_report("B", "Path A 失败，仅使用 Path B。", diagnostics)
     if not b_ok:
-        return _single_path_report("A", "Path B 失败，仅使用 Path A。")
+        return _single_path_report("A", "Path B 失败，仅使用 Path A。", diagnostics)
 
     validations: list[FieldValidation] = [
         _compare_phases(
@@ -138,10 +325,13 @@ def cross_validate(
     else:
         skeleton = "uncertain"
 
+    a_quality = _path_a_quality_score(path_a)
+
     if overall >= 0.75:
         recommended = "blend"
     elif skeleton == "likely_wrong":
-        recommended = "A"
+        # Only recommend A if it has meaningful analysis; otherwise blend
+        recommended = "A" if a_quality >= 0.4 else "blend"
     elif skeleton == "reliable":
         recommended = "blend"
     else:
@@ -155,8 +345,11 @@ def cross_validate(
         "uncertain": f"骨架追踪存疑（{total_majors} 项严重分歧）。",
         "likely_wrong": f"客观维度严重分歧（{objective_majors} 项），建议重选 target_lock。",
     }[skeleton]
+    quality_note = ""
+    if skeleton == "likely_wrong" and a_quality < 0.4:
+        quality_note = f" Path A 分析质量偏低（{a_quality:.0%}），采用融合结果。"
     summary = (
-        f"两路一致率 {overall:.0%}。{signal_text}"
+        f"两路一致率 {overall:.0%}。{signal_text}{quality_note}"
         + (f" 分歧维度：{', '.join(conflict_fields)}。" if conflict_fields else " 无明显分歧。")
     )
 
@@ -168,6 +361,7 @@ def cross_validate(
         conflict_fields=conflict_fields,
         recommended_path=recommended,
         conflict_summary=summary,
+        fusion_diagnostics=diagnostics,
     )
 
 
@@ -186,6 +380,10 @@ def compute_blend_weights(v: CrossValidationReport) -> tuple[float, float]:
         "likely_wrong": (0.75, 0.25),
         "unknown": (0.50, 0.50),
     }[v.skeleton_reliability_signal]
+    diagnostics = v.fusion_diagnostics if isinstance(v.fusion_diagnostics, dict) else {}
+    reasons = diagnostics.get("downgraded_reasons") if isinstance(diagnostics.get("downgraded_reasons"), list) else []
+    if any("target_tracking_uncertain" in str(reason) for reason in reasons):
+        base = (max(base[0], 0.65), min(base[1], 0.35))
     a, b = base
     bonus = (v.overall_agreement_rate - 0.5) * 0.2
     b = round(min(0.75, max(0.25, b + bonus)), 3)

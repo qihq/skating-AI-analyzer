@@ -10,6 +10,8 @@ from app.services.providers import ActiveProviderConfig, request_dashscope_video
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
 from app.services.vision import normalize_vision_payload
+from app.services.vision_prompt_templates import build_specialized_vision_prompt
+from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
 
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,52 @@ def _build_video_user_prompt(
     )
 
 
+def _candidate_key_frames_from_bio(bio_data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(bio_data, dict):
+        return {}
+    candidates = bio_data.get("key_frame_candidates")
+    if isinstance(candidates, dict):
+        return candidates
+    key_frames = bio_data.get("key_frames")
+    if isinstance(key_frames, dict):
+        return key_frames
+    return {}
+
+
+def _build_specialized_prompts(
+    action_type: str,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    profile_evidence: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+    motion_features: dict[str, Any] | list[Any] | None,
+    skill_category: str | None = None,
+) -> tuple[str, str]:
+    return build_specialized_vision_prompt(
+        action_type=action_type,
+        action_subtype=action_subtype,
+        analysis_profile=analysis_profile,
+        candidate_key_frames=_candidate_key_frames_from_bio(bio_data),
+        motion_features=motion_features,
+        biomechanics=bio_data,
+        profile_evidence=profile_evidence,
+        skill_category=skill_category,
+    )
+
+
+def _build_specialized_video_user_prompt(user_prompt: str) -> str:
+    return (
+        user_prompt
+        + "\n\n视频模式要求：按视频片段内秒数定位关键事件，优先返回 phase_segments，而不是逐帧 frame_id。"
+        + "JSON schema: "
+        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
+        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
+        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
+        + '"pure_vision_subscores":{"takeoff_power":0,"rotation_axis":0,"arm_coordination":0,'
+        + '"landing_absorption":0,"core_stability":0},"overall_raw_text":"2-3句总结"}'
+    )
+
+
 def _normalize_path_a_payload(
     parsed: dict[str, Any],
     frame_payloads: list[FramePayload],
@@ -110,10 +158,14 @@ async def analyze_path_a(
     action_subtype: str | None = None,
     analysis_profile: str | None = None,
     profile_evidence: dict[str, Any] | None = None,
+    bio_data: dict[str, Any] | None = None,
+    motion_features: dict[str, Any] | list[Any] | None = None,
     memory_context: str = "",
     mode: Literal["frames", "video"] = "video",
     clip_path: Path | None = None,
     window_start_sec: float = 0.0,
+    skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Path A: pure vision analysis, called opt-in by the host.
@@ -130,14 +182,20 @@ async def analyze_path_a(
         PATH_A_MAX_TOKENS_BASE + n_frames * PATH_A_MAX_TOKENS_FRAME,
     )
 
-    system_prompt = PATH_A_SYSTEM if not memory_context else f"{PATH_A_SYSTEM}\n\n{memory_context}"
-    user_text = _build_user_prompt(
+    system_prompt, user_text = _build_specialized_prompts(
         action_type,
         action_subtype,
         analysis_profile,
         profile_evidence,
-        n_frames,
+        bio_data,
+        motion_features,
+        skill_category=skill_category,
     )
+    context_block = format_video_context_prompt_block(video_context_by_frame)
+    if context_block:
+        user_text = f"{user_text}{context_block}"
+    if memory_context:
+        system_prompt = f"{system_prompt}\n\n{memory_context}"
 
     if mode == "video" and clip_path is not None:
         try:
@@ -145,13 +203,7 @@ async def analyze_path_a(
                 provider,
                 video_path=clip_path,
                 system_prompt=system_prompt,
-                user_prompt=_build_video_user_prompt(
-                    action_type,
-                    action_subtype,
-                    analysis_profile,
-                    profile_evidence,
-                    n_frames,
-                ),
+                user_prompt=_build_specialized_video_user_prompt(user_text),
                 temperature=0.0,
                 max_tokens=max_tokens,
                 timeout=180.0,
@@ -170,6 +222,9 @@ async def analyze_path_a(
     content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
     for frame in frame_payloads:
         content.append({"type": "text", "text": f"帧编号：{frame.frame_id} | 时间：{frame.timestamp_sec:.2f}s"})
+        context_label = video_context_label(frame.frame_id, video_context_by_frame)
+        if context_label:
+            content.append({"type": "text", "text": context_label})
         content.append({"type": "image_url", "image_url": {"url": frame.data_url}})
 
     raw = await request_text_completion(

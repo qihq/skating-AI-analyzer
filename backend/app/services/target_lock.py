@@ -9,12 +9,14 @@ from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineErro
 
 TARGET_LOCK_AUTO_THRESHOLD = 0.72
 TARGET_PERSON_MIN_CONFIDENCE = 0.15
+MANUAL_BBOX_MIN_SIDE = 0.02
 
 
 @dataclass(slots=True)
 class TargetPreview:
     preview_frame: str | None
     preview_frame_url: str | None
+    preview_frame_index: int | None
     auto_candidate_id: str | None
     lock_confidence: float
     candidates: list[dict[str, Any]]
@@ -29,8 +31,8 @@ def _normalized_bbox(x: float, y: float, width: float, height: float) -> dict[st
     return {
         "x": round(_clamp(x, 0.0, 1.0), 4),
         "y": round(_clamp(y, 0.0, 1.0), 4),
-        "width": round(_clamp(width, 0.05, 1.0), 4),
-        "height": round(_clamp(height, 0.05, 1.0), 4),
+        "width": round(_clamp(width, MANUAL_BBOX_MIN_SIDE, 1.0), 4),
+        "height": round(_clamp(height, MANUAL_BBOX_MIN_SIDE, 1.0), 4),
     }
 
 
@@ -59,8 +61,11 @@ def validate_manual_bbox(bbox: dict[str, Any] | None) -> dict[str, float]:
 
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 <= width <= 1.0 and 0.0 <= height <= 1.0):
         raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox values must be normalized to 0-1.")
-    if width < 0.05 or height < 0.05:
-        raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox width and height must be at least 0.05.")
+    if width < MANUAL_BBOX_MIN_SIDE or height < MANUAL_BBOX_MIN_SIDE:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.TARGET_BBOX_INVALID,
+            f"manual_bbox width and height must be at least {MANUAL_BBOX_MIN_SIDE}.",
+        )
     if x + width > 1.0 or y + height > 1.0:
         raise AnalysisPipelineError(AnalysisErrorCode.TARGET_BBOX_INVALID, "manual_bbox must stay inside the frame.")
 
@@ -82,7 +87,14 @@ def build_target_preview(
     *,
     existing_target_lock: dict[str, Any] | None = None,
 ) -> TargetPreview:
-    preview_frame = frame_names[0] if frame_names else None
+    frame_list = list(frame_names)
+    existing_preview_frame = (
+        str(existing_target_lock.get("preview_frame"))
+        if isinstance(existing_target_lock, dict) and existing_target_lock.get("preview_frame")
+        else None
+    )
+    preview_frame = existing_preview_frame if existing_preview_frame in frame_list else (frame_list[0] if frame_list else None)
+    preview_frame_index = frame_list.index(preview_frame) if preview_frame in frame_list else None
     candidates = _fallback_candidates(frame_names)
 
     if isinstance(existing_target_lock, dict) and existing_target_lock.get("candidates"):
@@ -110,6 +122,7 @@ def build_target_preview(
     return TargetPreview(
         preview_frame=preview_frame,
         preview_frame_url=f"/api/frames/{analysis_id}/{preview_frame}" if preview_frame else None,
+        preview_frame_index=preview_frame_index,
         auto_candidate_id=auto_candidate_id or None,
         lock_confidence=round(lock_confidence, 4),
         candidates=candidates,
@@ -155,6 +168,7 @@ def build_target_lock_payload(
         selected_bbox = validate_manual_bbox(manual_bbox)
         return {
             "preview_frame": preview.preview_frame,
+            "preview_frame_index": preview.preview_frame_index,
             "candidates": preview.candidates,
             "selected_candidate_id": None,
             "selected_bbox": selected_bbox,
@@ -170,6 +184,7 @@ def build_target_lock_payload(
 
     return {
         "preview_frame": preview.preview_frame,
+        "preview_frame_index": preview.preview_frame_index,
         "candidates": preview.candidates,
         "selected_candidate_id": chosen.get("id") if isinstance(chosen, dict) else preview.auto_candidate_id,
         "selected_bbox": chosen.get("bbox") if isinstance(chosen, dict) else None,

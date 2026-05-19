@@ -9,6 +9,7 @@ from app.schemas import Severity
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
+from app.services.llm_context import AnalysisPromptContext, render_prompt_context
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ SUBSCORE_WEIGHTS = {
 }
 
 HIGH_CONF_THRESHOLD = 0.5
+LOW_CONFIDENCE_NOTICE_THRESHOLD = 0.75
 LOW_CONFIDENCE_NOTICE = "低置信度帧较多，结果仅供参考。"
 REPORT_REQUEST_TIMEOUT_SECONDS = 120.0
 REPORT_JSON_MAX_ATTEMPTS = 3
@@ -114,6 +116,32 @@ def calculate_force_score(report: dict[str, Any]) -> int:
     return max(score, 0)
 
 
+def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: dict[str, Any] | None = None) -> int:
+    data_quality = str(report.get("data_quality", "partial") or "partial").strip().lower()
+    skeleton_signal = str((dual_path_meta or {}).get("skeleton_reliability_signal", "") or "").strip().lower()
+    if data_quality == "poor" or skeleton_signal == "likely_wrong":
+        return score
+
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    has_high_or_safety_risk = False
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        severity = str(issue.get("severity", "")).strip().lower()
+        text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
+        if severity == Severity.high.value or "安全" in text or "摔" in text or "risk" in text or "danger" in text:
+            has_high_or_safety_risk = True
+            break
+    if has_high_or_safety_risk:
+        return score
+
+    if data_quality == "good":
+        return max(score, 70)
+    if data_quality == "partial":
+        return max(score, 65)
+    return score
+
+
 def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = None) -> dict[str, Any]:
     normalized_issues: list[dict[str, object]] = []
     for issue in payload.get("issues", []):
@@ -164,7 +192,11 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
     }
 
 
-def _resolve_report_data_quality(payload: dict[str, Any], vision_structured: dict[str, Any]) -> str:
+def _resolve_report_data_quality(
+    payload: dict[str, Any],
+    vision_structured: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None = None,
+) -> str:
     report_quality = str(payload.get("data_quality", "partial")).strip().lower() or "partial"
     if report_quality not in {"good", "partial", "poor"}:
         report_quality = "partial"
@@ -173,6 +205,11 @@ def _resolve_report_data_quality(payload: dict[str, Any], vision_structured: dic
     if vision_quality == "poor":
         return "poor"
     if vision_quality == "partial" and report_quality == "good":
+        return "partial"
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    conflict_level = str(meta.get("conflict_level", "")).strip().lower()
+    needs_human_review = bool(meta.get("needs_human_review"))
+    if (needs_human_review or conflict_level in {"high", "severe"}) and report_quality == "good":
         return "partial"
     return report_quality
 
@@ -210,41 +247,197 @@ def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> st
     )
 
 
+def _compact_video_temporal_payload(video_temporal: dict[str, Any]) -> dict[str, Any]:
+    action_confirmation = video_temporal.get("action_confirmation")
+    macro_assessment = video_temporal.get("macro_assessment")
+    return {
+        "schema_version": video_temporal.get("schema_version"),
+        "provider": video_temporal.get("provider"),
+        "model": video_temporal.get("model"),
+        "confidence": video_temporal.get("confidence"),
+        "fallback_recommendation": video_temporal.get("fallback_recommendation"),
+        "quality_flags": video_temporal.get("quality_flags") if isinstance(video_temporal.get("quality_flags"), list) else [],
+        "camera_view": video_temporal.get("camera_view"),
+        "data_quality_hint": video_temporal.get("data_quality_hint"),
+        "action_confirmation": action_confirmation if isinstance(action_confirmation, dict) else {},
+        "key_moments": video_temporal.get("key_moments") if isinstance(video_temporal.get("key_moments"), dict) else {},
+        "phase_segments": [
+            {
+                "phase_code": segment.get("phase_code"),
+                "phase_label": segment.get("phase_label"),
+                "time_start": segment.get("time_start"),
+                "time_end": segment.get("time_end"),
+                "key_frame_hint": segment.get("key_frame_hint"),
+                "confidence": segment.get("confidence"),
+            }
+            for segment in (video_temporal.get("phase_segments") or [])
+            if isinstance(segment, dict)
+        ][:8],
+        "macro_assessment": macro_assessment if isinstance(macro_assessment, dict) else {},
+        "overall_impression": video_temporal.get("overall_impression", ""),
+    }
+
+
+def _compact_resolved_keyframes_payload(resolved_keyframes: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": resolved_keyframes.get("source"),
+        "confidence": resolved_keyframes.get("confidence"),
+        "quality_flags": resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else [],
+        "selected": [
+            {
+                "frame_id": item.get("frame_id"),
+                "timestamp": item.get("timestamp"),
+                "phase_code": item.get("phase_code"),
+                "phase_label": item.get("phase_label"),
+                "key_moment": item.get("key_moment"),
+                "selection_reason": item.get("selection_reason"),
+            }
+            for item in (resolved_keyframes.get("selected") or [])
+            if isinstance(item, dict)
+        ][:12],
+    }
+
+
+def _collect_video_context_conflicts(vision_structured: dict[str, Any]) -> list[dict[str, Any]]:
+    frames = vision_structured.get("frame_analysis") if isinstance(vision_structured, dict) else None
+    if not isinstance(frames, list):
+        return []
+    conflicts: list[dict[str, Any]] = []
+    for frame in frames:
+        if not isinstance(frame, dict) or not bool(frame.get("conflict_with_video_context")):
+            continue
+        conflicts.append(
+            {
+                "frame_id": frame.get("frame_id"),
+                "phase": frame.get("phase"),
+                "conflict_with_video_context": True,
+                "phase_verification": frame.get("phase_verification", "uncertain"),
+                "video_context_note": frame.get("video_context_note", ""),
+                "issues": frame.get("issues") if isinstance(frame.get("issues"), list) else [],
+            }
+        )
+    return conflicts[:8]
+
+
+def _build_video_temporal_report_context(
+    vision_structured: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None,
+) -> str:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    video_temporal = meta.get("video_temporal")
+    resolved_keyframes = meta.get("resolved_keyframes")
+    conflicts = _collect_video_context_conflicts(vision_structured)
+
+    if not isinstance(video_temporal, dict) and not isinstance(resolved_keyframes, dict) and not conflicts:
+        return ""
+
+    payload: dict[str, Any] = {
+        "video_temporal": _compact_video_temporal_payload(video_temporal) if isinstance(video_temporal, dict) else {},
+        "resolved_keyframes": (
+            _compact_resolved_keyframes_payload(resolved_keyframes) if isinstance(resolved_keyframes, dict) else {}
+        ),
+        "image_video_context_conflicts": conflicts,
+    }
+    return (
+        "\n\n=== 视频语义时序融合参考 ===\n"
+        f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+        "三层证据使用规则：\n"
+        "1. 视频路 video_temporal.macro_assessment 和 overall_impression 只负责动作时序、节奏、速度流动、整体轴心与出入动作质量。\n"
+        "2. 图片路 frame_analysis 负责语义关键帧上的姿态、刃面、轴心、膝踝缓冲、手臂协调等帧级微观结论。\n"
+        "3. MediaPipe/bio_data 负责角度、重心、旋转、稳定性等数值证据；不要把视频 AI 当作逐帧裁判。\n"
+        "冲突处理：若 conflict_with_video_context 为 true 或 phase_verification 为 shifted/disagree，"
+        "图片路优先但保留差异，报告中说明视频路宏观判断与图片帧级观察的不同。\n"
+        "若冲突严重、resolved_keyframes.source 为 skeleton_fallback 或数据质量标记较多，"
+        "请将 data_quality 降为 partial 或 poor，避免输出过度确定结论。\n"
+    )
+
+
+def _frame_confidence(frame: dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(float(frame.get("confidence", 0.0) or 0.0), 1.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_analyzable_frame(frame: dict[str, Any]) -> bool:
+    phase = str(frame.get("phase", "")).strip()
+    if phase and phase != "不可分析":
+        return True
+    for key in ("issues", "positives"):
+        if isinstance(frame.get(key), list) and frame.get(key):
+            return True
+    observations = frame.get("observations")
+    if not isinstance(observations, dict):
+        return False
+    uncertain_values = {"", "不可判断", "不适用", "unknown", "unavailable", "none", "n/a"}
+    return any(str(value).strip().lower() not in uncertain_values for value in observations.values())
+
+
+def _should_apply_low_confidence_notice(
+    *,
+    normalized_frames: list[dict[str, Any]],
+    low_conf_count: int,
+    all_low_confidence: bool,
+    fallback_used: bool,
+) -> bool:
+    if fallback_used or all_low_confidence:
+        return True
+    if not normalized_frames:
+        return False
+    low_conf_ratio = low_conf_count / len(normalized_frames)
+    return low_conf_ratio >= LOW_CONFIDENCE_NOTICE_THRESHOLD
+
+
 def summarize_vision_for_report(vision_structured: dict[str, Any]) -> dict[str, Any]:
     frames = vision_structured.get("frame_analysis", []) if isinstance(vision_structured, dict) else []
     normalized_frames = [frame for frame in frames if isinstance(frame, dict)]
-    high_conf_frames = [
-        frame for frame in normalized_frames if float(frame.get("confidence", 0.0) or 0.0) >= HIGH_CONF_THRESHOLD
-    ]
+    high_conf_frames = [frame for frame in normalized_frames if _frame_confidence(frame) >= HIGH_CONF_THRESHOLD]
     low_conf_count = len(normalized_frames) - len(high_conf_frames)
     fallback_to_all_frames = False
 
     if len(high_conf_frames) < 3:
         high_conf_frames = normalized_frames
-        low_conf_count = 0
         fallback_to_all_frames = True
 
     all_low_confidence = bool(normalized_frames) and all(
-        float(frame.get("confidence", 0.0) or 0.0) < HIGH_CONF_THRESHOLD for frame in normalized_frames
+        _frame_confidence(frame) < HIGH_CONF_THRESHOLD for frame in normalized_frames
+    )
+    analyzable_count = sum(1 for frame in normalized_frames if _is_analyzable_frame(frame))
+    fallback_used = bool(vision_structured.get("fallback_used")) if isinstance(vision_structured, dict) else False
+    apply_low_confidence_notice = _should_apply_low_confidence_notice(
+        normalized_frames=normalized_frames,
+        low_conf_count=low_conf_count,
+        all_low_confidence=all_low_confidence,
+        fallback_used=fallback_used,
     )
 
     summary: dict[str, Any] = {
         "reliable_frames": high_conf_frames,
         "low_confidence_frame_count": low_conf_count,
+        "low_confidence_frame_ratio": round(low_conf_count / len(normalized_frames), 3) if normalized_frames else 0.0,
         "overall_raw_text": vision_structured.get("overall_raw_text", "") if isinstance(vision_structured, dict) else "",
         "total_frame_count": len(normalized_frames),
+        "analyzable_frame_count": analyzable_count,
         "high_confidence_threshold": HIGH_CONF_THRESHOLD,
         "fallback_to_all_frames": fallback_to_all_frames,
         "all_low_confidence": all_low_confidence,
+        "apply_low_confidence_notice": apply_low_confidence_notice,
     }
     if isinstance(vision_structured, dict):
         summary["action_phase_summary"] = vision_structured.get("action_phase_summary", {})
         if vision_structured.get("data_quality_hint") is not None:
             summary["data_quality_hint"] = vision_structured.get("data_quality_hint")
+        if vision_structured.get("camera_view") is not None:
+            summary["camera_view"] = vision_structured.get("camera_view")
+        if vision_structured.get("conservative_policy") is not None:
+            summary["conservative_policy"] = vision_structured.get("conservative_policy")
         if vision_structured.get("fallback_reason") is not None:
             summary["fallback_reason"] = vision_structured.get("fallback_reason")
+        pure_vision_subscores = vision_structured.get("pure_vision_subscores")
+        if isinstance(pure_vision_subscores, dict) and pure_vision_subscores:
+            summary["pure_vision_subscores"] = pure_vision_subscores
 
-    if low_conf_count > 0 or all_low_confidence:
+    if apply_low_confidence_notice:
         summary["reliability_note"] = LOW_CONFIDENCE_NOTICE
     elif fallback_to_all_frames:
         summary["reliability_note"] = "高置信度帧不足 3 帧，已退回使用全部帧。"
@@ -260,7 +453,8 @@ def _apply_low_confidence_notice(report: dict[str, Any], vision_summary: dict[st
 
     summary = str(report.get("summary", "")).strip()
     if reliability_note not in summary:
-        report["summary"] = f"{summary} {reliability_note}".strip()
+        summary = f"{summary} {reliability_note}".strip()
+    report["summary"] = summary
 
     if report.get("data_quality") == "good":
         report["data_quality"] = "partial"
@@ -391,6 +585,7 @@ async def generate_report(
     skater_id: str | None = None,
     *,
     dual_path_meta: dict[str, Any] | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
 ) -> dict[str, Any]:
     """
     Generate a structured training report.
@@ -410,15 +605,21 @@ async def generate_report(
     """
     try:
         provider = await get_active_provider("report")
-        memory_context = await build_memory_context(skater_id)
+        memory_context = "" if prompt_context is not None else await build_memory_context(skater_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
         failure = classify_ai_failure(exc)
         return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
 
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
+    context_block = (
+        "\n\n=== 统一分析上下文 ===\n" + render_prompt_context(prompt_context, include_bio=False)
+        if prompt_context is not None
+        else ""
+    )
     vision_summary = summarize_vision_for_report(vision_structured)
     dual_block = _build_dual_path_report_context(dual_path_meta)
+    video_temporal_block = _build_video_temporal_report_context(vision_structured, dual_path_meta)
 
     user_prompt = (
         f"请根据花样滑冰【{action_type}】结构化帧分析和骨骼几何指标，生成结构化训练报告。\n\n"
@@ -432,12 +633,28 @@ async def generate_report(
         '  "data_quality": "good|partial|poor"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
-        "视觉置信规则：优先使用 reliable_frames 中的高置信帧观察。"
-        "如果 low_confidence_frame_count 大于 0，请在 summary 中明确提醒“低置信度帧较多，结果仅供参考”，"
-        "并避免过度肯定的结论。如果 fallback_to_all_frames 为 true，请指出高置信帧不足。\n\n"
+        "视觉评分参考：视觉摘要中的 pure_vision_subscores（0-1 小数）是纯视觉分析的评分，"
+        "请将其乘以 100 作为重要参考，与骨骼几何指标综合判断。"
+        "当骨骼数据缺失时，以视觉评分为主要依据。\n"
+        "当 jump_metrics 中某项指标为 null 时，说明该指标无法从视频中测量，不代表技术差——"
+        "请根据可见的动作阶段和姿态给分，不要因为数据缺失而扣分。"
+        "例如 rotation_axis 指标缺失时，应根据空中姿态判断，给 50-60 分作为中性基线。\n"
+        "评分对象说明：本系统主要服务青少年/儿童学员。若画面中可见学员体型明显偏小或处于学习阶段，"
+        "请以该学员当前水平的合理基准给分，而不是以成年高水平选手为参照——"
+        "完成 70-80 分表示该技术动作对其年龄段而言达成度尚可；"
+        "只有出现明显技术错误或安全风险才扣到 60 分以下。同时仍按 ISU 体系指出真实存在的技术问题。\n"
+        "视觉置信规则：优先使用 reliable_frames 中的高置信帧观察；"
+        "当 fallback_to_all_frames 为 true 但 reliable_frames 仍包含可分析动作、问题或优点时，必须继续给出可执行的技术结论。\n"
+        "质量表达要求：不要让 summary 只剩画质、视角或骨架不确定性。"
+        "summary 必须先说明可确认的动作阶段、主要技术问题和训练方向；"
+        "质量限制只作为补充说明。只有 apply_low_confidence_notice 为 true 时，才在 summary 末尾加入“低置信度帧较多，结果仅供参考”。\n"
+        "当 data_quality_hint 为 partial/poor 或 camera_view 受限时，请区分“可确认的动作问题”和“不可确认的细节”；"
+        "不可确认的刃型、周数或完成质量可以写入 issues，但不能替代训练建议。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
+        + context_block
         + dual_block
+        + video_temporal_block
     )
     user_prompt += (
         "\n\nOutput constraints: return exactly one valid JSON object. "
@@ -477,7 +694,7 @@ async def generate_report(
             )
             continue
 
-        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured)
+        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
 
         report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
         if report["summary"] and report["training_focus"]:

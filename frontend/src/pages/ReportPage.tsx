@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
   AnalysisDetail,
-  AnalysisLogEntry,
   createPlan,
   deleteAnalysis,
   dismissMemorySuggestion,
@@ -22,6 +21,8 @@ import {
   SkillNode,
 } from "../api/client";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
+import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
+import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
@@ -220,73 +221,6 @@ function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
         </div>
       ) : null}
     </section>
-  );
-}
-
-function AnalysisDebugLogPanel({
-  logs,
-  timings,
-  pipelineVersion,
-}: {
-  logs: AnalysisLogEntry[];
-  timings: Record<string, number> | null | undefined;
-  pipelineVersion: string | null | undefined;
-}) {
-  const timingEntries = Object.entries(timings ?? {});
-
-  return (
-    <ReportCard title="分析日志" eyebrow="Debug Log">
-      <div className="space-y-4">
-        <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-          <p>Pipeline Version: {pipelineVersion ?? "v1.0.0"}</p>
-          {timingEntries.length ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {timingEntries.map(([key, value]) => (
-                <span key={key} className="rounded-full bg-white px-3 py-1 text-xs text-slate-600">
-                  {key}: {formatDuration(value)}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-2 text-xs text-slate-500">当前还没有阶段耗时数据。</p>
-          )}
-        </div>
-
-        <div className="max-h-[26rem] space-y-3 overflow-y-auto pr-1">
-          {logs.length ? (
-            logs
-              .slice()
-              .reverse()
-              .map((entry, index) => (
-                <article key={`${entry.timestamp}-${index}`} className="rounded-[22px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-                        {entry.stage}
-                      </span>
-                      <span className="text-xs text-slate-400">{entry.level}</span>
-                    </div>
-                    <span className="text-xs text-slate-400">{formatLogTimestamp(entry.timestamp)}</span>
-                  </div>
-                  <p className="mt-2 leading-7 text-slate-700">{entry.message}</p>
-                  {entry.elapsed_s != null ? <p className="mt-2 text-xs text-slate-500">耗时：{formatDuration(entry.elapsed_s)}</p> : null}
-                  {entry.error_code ? <p className="mt-2 text-xs text-rose-500">错误码：{entry.error_code}</p> : null}
-                  {entry.detail ? (
-                    <details className="mt-2 text-xs text-slate-500">
-                      <summary className="cursor-pointer">展开详情</summary>
-                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words leading-6">{entry.detail}</pre>
-                    </details>
-                  ) : null}
-                </article>
-              ))
-          ) : (
-            <div className="rounded-[22px] border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-              当前还没有可显示的分析日志。
-            </div>
-          )}
-        </div>
-      </div>
-    </ReportCard>
   );
 }
 
@@ -533,6 +467,7 @@ export default function ReportPage() {
   const [hideRetryAfterMissingVideo, setHideRetryAfterMissingVideo] = useState(false);
   const [isRetryConfirmOpen, setIsRetryConfirmOpen] = useState(false);
   const [isRetryPinOpen, setIsRetryPinOpen] = useState(false);
+  const [retryMode, setRetryMode] = useState<"analysis" | "report">("analysis");
   const [isSharing, setIsSharing] = useState(false);
   const canUseNativeShare =
     typeof window !== "undefined" &&
@@ -856,10 +791,11 @@ export default function ReportPage() {
     if (!id) {
       return;
     }
+    const isReportOnlyRetry = retryMode === "report";
     setIsRetryingAnalysis(true);
     setError(null);
     try {
-      await retryAnalysis(id);
+      await retryAnalysis(id, isReportOnlyRetry ? { retryFrom: "report" } : undefined);
       setPose(null);
       setPlanId(null);
       startTransition(() => {
@@ -878,7 +814,7 @@ export default function ReportPage() {
         );
       });
       setHideRetryAfterMissingVideo(false);
-      showNotice("已重新提交，请稍候");
+      showNotice(isReportOnlyRetry ? "已提交报告重生成，请稍候" : "已重新提交，请稍候");
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
         if (requestError.response?.status === 404) {
@@ -937,11 +873,12 @@ export default function ReportPage() {
     }
   };
 
-  const requestRetryAnalysis = () => {
+  const requestRetryAnalysis = (mode: "analysis" | "report" = "analysis") => {
     if (!deferredAnalysis || isAnalysisInProgress(deferredAnalysis.status) || isRetryingAnalysis) {
       return;
     }
 
+    setRetryMode(mode);
     if (isParentMode) {
       setIsRetryConfirmOpen(true);
       return;
@@ -1001,11 +938,19 @@ export default function ReportPage() {
               </Link>
               <button
                 type="button"
-                onClick={requestRetryAnalysis}
+                onClick={() => requestRetryAnalysis("report")}
                 disabled={isRetryingAnalysis}
                 className="min-h-[44px] rounded-full border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-600 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isRetryingAnalysis ? "提交中..." : "🔄 再次分析"}
+                {isRetryingAnalysis ? "提交中..." : "🔄 重新生成报告"}
+              </button>
+              <button
+                type="button"
+                onClick={() => requestRetryAnalysis("analysis")}
+                disabled={isRetryingAnalysis}
+                className="min-h-[44px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                完整重新分析
               </button>
             </>
           ) : null}
@@ -1038,7 +983,7 @@ export default function ReportPage() {
             isParentMode={isParentMode}
             isRetrying={isRetryingAnalysis}
             hideRetry={hideRetryAfterMissingVideo}
-            onRetry={requestRetryAnalysis}
+            onRetry={() => requestRetryAnalysis("analysis")}
             onReupload={() =>
               navigate("/review", {
                 state: deferredAnalysis.skater_id ? { skaterId: deferredAnalysis.skater_id } : undefined,
@@ -1049,6 +994,8 @@ export default function ReportPage() {
             logs={deferredAnalysis.processing_logs ?? []}
             timings={deferredAnalysis.processing_timings}
             pipelineVersion={deferredAnalysis.pipeline_version}
+            videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
+            analysisId={deferredAnalysis.id}
           />
         </>
       ) : deferredAnalysis.status !== "completed" ? (
@@ -1059,6 +1006,8 @@ export default function ReportPage() {
             logs={deferredAnalysis.processing_logs ?? []}
             timings={deferredAnalysis.processing_timings}
             pipelineVersion={deferredAnalysis.pipeline_version}
+            videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
+            analysisId={deferredAnalysis.id}
           />
         </>
       ) : (
@@ -1116,6 +1065,8 @@ export default function ReportPage() {
               <ReportCard title="总体评价" eyebrow="Summary">
                 <p className="max-w-3xl text-base leading-8 text-slate-600">{deferredAnalysis.report?.summary ?? "暂无总体评价。"}</p>
               </ReportCard>
+
+              {isParentMode ? <AnalysisQualityPanel analysis={deferredAnalysis} /> : null}
 
               {subscores || reportDataQuality !== "good" ? (
                 <ReportCard title="分项评分" eyebrow="Subscores">
@@ -1177,6 +1128,8 @@ export default function ReportPage() {
                 logs={deferredAnalysis.processing_logs ?? []}
                 timings={deferredAnalysis.processing_timings}
                 pipelineVersion={deferredAnalysis.pipeline_version}
+                videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
+                analysisId={deferredAnalysis.id}
               />
             </div>
 
@@ -1333,7 +1286,8 @@ export default function ReportPage() {
       {isRetryConfirmOpen ? (
         <RetryAnalysisConfirmSheet
           isSubmitting={isRetryingAnalysis}
-          retryFromStage={deferredAnalysis?.retry_from_stage}
+          retryFromStage={retryMode === "report" ? "report" : deferredAnalysis?.retry_from_stage}
+          mode={retryMode}
           onClose={() => {
             if (!isRetryingAnalysis) {
               setIsRetryConfirmOpen(false);

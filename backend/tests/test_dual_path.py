@@ -272,8 +272,8 @@ def test_dual_path_summary_serializable(tmp_path: Path) -> None:
     json.dumps(dual_path_summary(result), ensure_ascii=False)
 
 
-def test_total_timeout_does_not_lose_path_a(tmp_path: Path) -> None:
-    """Total timeout marks Path B total_timeout, then retries Path A alone."""
+def test_path_b_timeout_does_not_lose_path_a_or_frame_counts(tmp_path: Path) -> None:
+    """Path B timeout is isolated and keeps annotated frame counts."""
     frame_paths = _write_frames(tmp_path)
     mock_a = AsyncMock(return_value=_path_a())
 
@@ -295,11 +295,14 @@ def test_total_timeout_does_not_lose_path_a(tmp_path: Path) -> None:
                 _provider(),
                 _provider(),
                 annotated_dir=tmp_path / "annotated",
-                total_timeout=0.001,
+                path_b_timeout=0.001,
             )
         )
 
     assert result.path_a["frame_analysis"]
-    assert result.path_b["error"] == "total_timeout"
+    assert result.path_b["error"] == "path_b_timeout"
+    assert result.path_b["n_frames"] == 1
+    assert result.path_b["annotated_frame_count"] == 1
+    assert result.dual_path_meta["annotated_frame_count"] == 1
     assert result.validation.recommended_path == "A"
-    assert mock_a.await_count == 2
+    assert mock_a.await_count == 1

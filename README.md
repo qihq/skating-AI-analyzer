@@ -12,6 +12,9 @@ Skating Analyzer helps skaters and coaches upload training videos, extract motio
 
 The latest update expands the video analysis pipeline and deployment configuration:
 
+- Video AI semantic temporal localization with Qwen 3.6 Plus (`qwen3.6-plus`)
+- Timestamp arbitration before FFmpeg frame extraction: video phase interval + motion density + skeleton candidates
+- Semantic keyframe image analysis with per-frame `video_context`
 - Dual-path vision analysis with frame-based and video-aware provider flows
 - Target lock and bounding-box tracking for more stable skater selection
 - Pose smoothing, phase voting, and cross-validation between pose signals and AI vision results
@@ -108,9 +111,10 @@ Example:
 
 ```bash
 QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-QWEN_VISION_MODEL=qwen-vl-max-latest
+QWEN_VISION_MODEL=qwen3.6-plus
 QWEN_VISION_DAILY_COST_LIMIT_CNY=30
 QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
+# VIDEO_TEMPORAL_MAX_FRAMES=12
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
 
@@ -123,6 +127,8 @@ Notes:
 
 - `.env` is not tracked by Git.
 - `.env.example` keeps placeholders only.
+- The default vision model is `qwen3.6-plus`. `qwen-vl-max-latest` is kept only as a legacy migration input and is no longer recommended as a default.
+- `QWEN_VISION_DAILY_COST_LIMIT_CNY` caps daily vision spend, `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` estimates one video-temporal call, and `VIDEO_TEMPORAL_MAX_FRAMES` caps semantic frames sent to image AI.
 - Runtime databases, uploaded videos, backups, Docker tar archives, and local model files are not committed.
 
 ## Phase-2 Pose Model
