@@ -32,6 +32,7 @@ class StructuredReport(BaseModel):
     improvements: list[ReportImprovement] = Field(default_factory=list)
     training_focus: str
     subscores: dict[str, int] = Field(default_factory=dict)
+    score_breakdown: dict[str, Any] | None = None
     data_quality: str = "partial"
 
 

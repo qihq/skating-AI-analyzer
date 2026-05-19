@@ -71,7 +71,7 @@ from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.llm_context import build_analysis_prompt_context
-from app.services.report import apply_child_score_floor, calculate_force_score, generate_report
+from app.services.report import apply_child_score_floor, attach_score_breakdown, calculate_force_score, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
@@ -700,6 +700,7 @@ async def _regenerate_report_from_saved_analysis(
             ),
         )
         force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
+        report = attach_score_breakdown(report, training_score=force_score)
         timings["report_s"] = _elapsed_seconds(report_start)
         timings["total_s"] = _elapsed_seconds(total_start)
 
@@ -1598,6 +1599,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 ),
             )
             force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
+            report = attach_score_breakdown(report, training_score=force_score)
             timings['report_s'] = _elapsed_seconds(report_start)
             timings['total_s'] = _elapsed_seconds(total_start)
         except Exception as exc:  # noqa: BLE001

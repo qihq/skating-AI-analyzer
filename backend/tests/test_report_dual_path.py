@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.llm_context import AnalysisPromptContext
-from app.services.report import apply_child_score_floor, generate_report, normalize_report
+from app.services.report import apply_child_score_floor, attach_score_breakdown, generate_report, normalize_report
 
 
 def _provider() -> SimpleNamespace:
@@ -291,6 +291,44 @@ class ReportNormalizeTests(unittest.TestCase):
         )
 
         self.assertEqual(report["subscores"]["takeoff_power"], 80)
+
+    def test_normalize_report_adds_technical_score_breakdown(self) -> None:
+        report = normalize_report(
+            {
+                "summary": "ok",
+                "issues": [],
+                "improvements": [],
+                "training_focus": "focus",
+                "subscores": {
+                    "takeoff_power": 60,
+                    "rotation_axis": 50,
+                    "arm_coordination": 40,
+                    "landing_absorption": 70,
+                    "core_stability": 80,
+                },
+            },
+            bio_data=None,
+        )
+
+        self.assertEqual(report["score_breakdown"]["technical_score"], 59)
+        self.assertEqual(report["score_breakdown"]["score_version"], "dual_score_v1")
+
+    def test_attach_score_breakdown_preserves_training_score(self) -> None:
+        report = attach_score_breakdown(
+            {
+                "subscores": {
+                    "takeoff_power": 60,
+                    "rotation_axis": 50,
+                    "arm_coordination": 40,
+                    "landing_absorption": 70,
+                    "core_stability": 80,
+                }
+            },
+            training_score=72,
+        )
+
+        self.assertEqual(report["score_breakdown"]["technical_score"], 59)
+        self.assertEqual(report["score_breakdown"]["training_score"], 72)
 
     def test_child_score_floor_lifts_completed_good_quality_report(self) -> None:
         report = {

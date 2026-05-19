@@ -1,5 +1,5 @@
 import axios from "axios";
-import { ChangeEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, RefObject, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -53,6 +53,8 @@ type SessionFormState = {
 };
 
 type UploadStage = "idle" | "uploading" | "processing";
+type AnalysisStepState = "active" | "done" | "idle";
+type AnalysisStep = (typeof PROCESS_STEPS)[number] & { state: AnalysisStepState };
 
 const PROCESS_STEPS = [
   { key: "uploaded", label: "视频上传" },
@@ -131,6 +133,528 @@ function sessionLabel(session: TrainingSessionRecord) {
     parts.push(`${session.duration_minutes} 分钟`);
   }
   return parts.join(" · ");
+}
+
+type UploadWorkspaceHeaderProps = {
+  selectedSkater: Skater | null;
+  skaters: Skater[];
+  selectedSkaterId: string;
+  isParentMode: boolean;
+  onSkaterChange: (nextSkaterId: string) => void;
+};
+
+function UploadWorkspaceHeader({
+  selectedSkater,
+  skaters,
+  selectedSkaterId,
+  isParentMode,
+  onSkaterChange,
+}: UploadWorkspaceHeaderProps) {
+  return (
+    <section className="app-card overflow-hidden p-5 phone:p-6 tablet:p-8">
+      <div className="flex flex-col gap-5 tablet:flex-row tablet:items-end tablet:justify-between">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-500">Review Workspace</p>
+          <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">视频复盘工作台</h1>
+          <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
+            先上传训练视频，再补充动作范围和最想看的问题。冰宝（IceBuddy）会自动抽取关键帧并生成诊断报告。
+          </p>
+        </div>
+
+        <div className="min-w-0 rounded-[24px] border border-slate-200 bg-white px-4 py-4 tablet:min-w-[280px]">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+            {isParentMode ? "分析对象" : "当前练习档案"}
+          </p>
+          <label className="mt-3 block space-y-2">
+            <span className="sr-only">选择练习档案</span>
+            <select value={selectedSkaterId} onChange={(event) => onSkaterChange(event.target.value)} className="app-select">
+              {skaters.map((skater) => (
+                <option key={skater.id} value={skater.id}>
+                  {skater.display_name || skater.name}
+                  {skater.level ? ` · ${skater.level}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedSkater ? (
+            <div className="mt-3 flex items-center gap-3 text-sm text-slate-500">
+              <ZodiacAvatar avatarType={selectedSkater.avatar_type} avatarEmoji={selectedSkater.avatar_emoji} size="sm" />
+              <span className="min-w-0 truncate">
+                XP {selectedSkater.total_xp} · {selectedSkater.level ?? selectedSkater.current_level}
+              </span>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-slate-500">正在加载练习档案...</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type UploadCardProps = {
+  inputRef: RefObject<HTMLInputElement>;
+  selectedFile: File | null;
+  onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+};
+
+function UploadCard({ inputRef, selectedFile, onFileChange }: UploadCardProps) {
+  return (
+    <section className="app-card overflow-hidden p-5 phone:p-6 tablet:p-7">
+      <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-blue-500">1 · 上传视频</p>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-900">选择本次训练片段</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">
+            支持 mp4 / mov / avi。建议上传单个动作或一段清晰的训练片段，后续会自动抽帧分析。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          className="min-h-[52px] shrink-0 whitespace-nowrap rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
+        >
+          选择训练视频
+        </button>
+      </div>
+
+      <input ref={inputRef} type="file" accept={ACCEPTED_TYPES} className="hidden" onChange={onFileChange} />
+
+      <div
+        className={`mt-6 rounded-[26px] border px-5 py-5 ${
+          selectedFile ? "border-blue-200 bg-blue-50/70" : "border-dashed border-slate-300 bg-slate-50"
+        }`}
+      >
+        <div className="flex flex-col gap-2 tablet:flex-row tablet:items-center tablet:justify-between">
+          <div className="min-w-0">
+            <p className="break-words text-base font-semibold text-slate-900">{selectedFile ? selectedFile.name : "尚未选择视频"}</p>
+            <p className="mt-1 text-sm text-slate-500">
+              {selectedFile ? formatFileSize(selectedFile.size) : "点击按钮选择视频后，再填写下方复盘上下文。"}
+            </p>
+          </div>
+          <span className="w-fit rounded-full bg-white px-3 py-1 text-sm font-medium text-slate-500">
+            {selectedFile ? "已就绪" : "等待上传"}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type SessionPanelProps = {
+  sessions: TrainingSessionRecord[];
+  selectedSessionId: string;
+  isSessionFormOpen: boolean;
+  sessionForm: SessionFormState;
+  isCreatingSession: boolean;
+  onSessionChange: (sessionId: string) => void;
+  onToggleForm: () => void;
+  onSessionFormChange: (nextForm: SessionFormState) => void;
+  onCreateSession: () => void;
+  onCancelSessionForm: () => void;
+};
+
+function SessionPanel({
+  sessions,
+  selectedSessionId,
+  isSessionFormOpen,
+  sessionForm,
+  isCreatingSession,
+  onSessionChange,
+  onToggleForm,
+  onSessionFormChange,
+  onCreateSession,
+  onCancelSessionForm,
+}: SessionPanelProps) {
+  return (
+    <div className="rounded-[26px] border border-slate-200 bg-slate-50/70 p-4 tablet:p-5">
+      <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">关联课次（可选）</p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">用于把本次复盘归档到训练时间轴；不关联也可以提交分析。</p>
+        </div>
+        <button type="button" onClick={onToggleForm} className="app-pill min-h-[44px] px-4 text-sm font-semibold text-blue-600">
+          {isSessionFormOpen ? "收起新课次" : "新建课次"}
+        </button>
+      </div>
+
+      <label className="mt-4 block space-y-2">
+        <span className="text-sm font-medium text-slate-700">选择已有课次</span>
+        <select value={selectedSessionId} onChange={(event) => onSessionChange(event.target.value)} className="app-select">
+          <option value="">不关联课次</option>
+          {sessions.map((session) => (
+            <option key={session.id} value={session.id}>
+              {sessionLabel(session)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {isSessionFormOpen ? (
+        <div className="mt-4 grid gap-4 rounded-[22px] border border-white bg-white p-4">
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-700">训练日期</span>
+            <input
+              type="date"
+              value={sessionForm.session_date}
+              onChange={(event) => onSessionFormChange({ ...sessionForm, session_date: event.target.value })}
+              className="app-select"
+            />
+          </label>
+
+          <div className="grid gap-4 tablet:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">地点</span>
+              <select
+                value={sessionForm.location}
+                onChange={(event) => onSessionFormChange({ ...sessionForm, location: event.target.value })}
+                className="app-select"
+              >
+                {LOCATION_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-slate-700">类型</span>
+              <select
+                value={sessionForm.session_type}
+                onChange={(event) => onSessionFormChange({ ...sessionForm, session_type: event.target.value })}
+                className="app-select"
+              >
+                {SESSION_TYPE_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-700">时长（分钟）</span>
+            <input
+              type="number"
+              min={0}
+              value={sessionForm.duration_minutes}
+              onChange={(event) => onSessionFormChange({ ...sessionForm, duration_minutes: event.target.value })}
+              className="app-select"
+              placeholder="例如 60"
+            />
+          </label>
+
+          <label className="flex min-h-[52px] items-center justify-between rounded-[18px] border border-slate-200 bg-white px-4 py-3">
+            <span className="text-sm font-medium text-slate-700">有教练陪同</span>
+            <input
+              type="checkbox"
+              checked={sessionForm.coach_present}
+              onChange={(event) => onSessionFormChange({ ...sessionForm, coach_present: event.target.checked })}
+              className="h-5 w-5 accent-blue-500"
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-700">备注</span>
+            <textarea
+              rows={3}
+              value={sessionForm.note}
+              onChange={(event) => onSessionFormChange({ ...sessionForm, note: event.target.value })}
+              className="app-textarea min-h-[96px] resize-y"
+              placeholder="可记录今天的主题、目标或状态。"
+            />
+          </label>
+
+          <div className="flex flex-col gap-3 tablet:flex-row">
+            <button
+              type="button"
+              onClick={onCreateSession}
+              disabled={isCreatingSession}
+              className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isCreatingSession ? "创建中..." : "保存并关联"}
+            </button>
+            <button type="button" onClick={onCancelSessionForm} className="app-pill min-h-[48px] px-5 text-sm font-semibold">
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type ContextCardProps = {
+  selectedActionType: ActionType;
+  selectedActionSubtype: string;
+  selectedSkill: SkillNode | undefined;
+  groupedSkills: Array<[string, SkillNode[]]>;
+  note: string;
+  sessions: TrainingSessionRecord[];
+  selectedSessionId: string;
+  isSessionFormOpen: boolean;
+  sessionForm: SessionFormState;
+  isCreatingSession: boolean;
+  onActionTypeChange: (nextType: ActionType) => void;
+  onActionSubtypeChange: (nextSubtype: string) => void;
+  onSkillChange: (nextSkillId: string) => void;
+  onNoteChange: (nextNote: string) => void;
+  onSessionChange: (sessionId: string) => void;
+  onToggleSessionForm: () => void;
+  onSessionFormChange: (nextForm: SessionFormState) => void;
+  onCreateSession: () => void;
+  onCancelSessionForm: () => void;
+};
+
+function ContextCard({
+  selectedActionType,
+  selectedActionSubtype,
+  selectedSkill,
+  groupedSkills,
+  note,
+  sessions,
+  selectedSessionId,
+  isSessionFormOpen,
+  sessionForm,
+  isCreatingSession,
+  onActionTypeChange,
+  onActionSubtypeChange,
+  onSkillChange,
+  onNoteChange,
+  onSessionChange,
+  onToggleSessionForm,
+  onSessionFormChange,
+  onCreateSession,
+  onCancelSessionForm,
+}: ContextCardProps) {
+  return (
+    <section className="app-card p-5 phone:p-6 tablet:p-7">
+      <div>
+        <p className="text-sm font-semibold text-blue-500">2 · 复盘上下文</p>
+        <h2 className="mt-2 text-2xl font-semibold text-slate-900">告诉冰宝你在看什么</h2>
+        <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">
+          动作信息会直接进入分析链路。备注只写你最关心的问题，报告会围绕这些重点展开。
+        </p>
+      </div>
+
+      <div className="mt-6 grid gap-4">
+        <div className="grid gap-4 tablet:grid-cols-2">
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-700">动作大类</span>
+            <select value={selectedActionType} onChange={(event) => onActionTypeChange(event.target.value as ActionType)} className="app-select">
+              {ACTION_TYPE_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-700">动作子类</span>
+            <select value={selectedActionSubtype} onChange={(event) => onActionSubtypeChange(event.target.value)} className="app-select">
+              {ACTION_SUBTYPE_OPTIONS[selectedActionType].map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <label className="space-y-2">
+          <span className="text-sm font-medium text-slate-700">技能分类</span>
+          <select value={selectedSkill?.id ?? ""} onChange={(event) => onSkillChange(event.target.value)} className="app-select">
+            {groupedSkills.length ? (
+              groupedSkills.map(([groupLabel, items]) => (
+                <optgroup key={groupLabel} label={groupLabel}>
+                  {items.map((skill) => (
+                    <option key={skill.id} value={skill.id}>
+                      {skill.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))
+            ) : (
+              <option value="">当前大类下暂无技能节点</option>
+            )}
+          </select>
+        </label>
+
+        <label className="space-y-2">
+          <span className="text-sm font-medium text-slate-700">最想看的问题（可选）</span>
+          <textarea
+            value={note}
+            onChange={(event) => onNoteChange(event.target.value)}
+            rows={5}
+            placeholder="比如：我最想知道为什么落冰总是飘，或者今天重点想看华尔兹跳。"
+            className="app-textarea min-h-[140px] resize-y"
+          />
+        </label>
+
+        <SessionPanel
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
+          isSessionFormOpen={isSessionFormOpen}
+          sessionForm={sessionForm}
+          isCreatingSession={isCreatingSession}
+          onSessionChange={onSessionChange}
+          onToggleForm={onToggleSessionForm}
+          onSessionFormChange={onSessionFormChange}
+          onCreateSession={onCreateSession}
+          onCancelSessionForm={onCancelSessionForm}
+        />
+      </div>
+    </section>
+  );
+}
+
+type ProcessingProgressProps = {
+  uploadStage: UploadStage;
+  uploadProgress: { loaded: number; total: number; percent: number };
+  selectedFile: File | null;
+  analysisSteps: AnalysisStep[];
+};
+
+function ProcessingProgress({ uploadStage, uploadProgress, selectedFile, analysisSteps }: ProcessingProgressProps) {
+  if (uploadStage === "idle") {
+    return null;
+  }
+
+  return (
+    <div className="rounded-[24px] border border-blue-100 bg-blue-50/70 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{uploadStage === "uploading" ? "正在上传视频" : "正在生成分析结果"}</p>
+        <span className="text-sm font-semibold text-blue-600">{uploadStage === "uploading" ? `${uploadProgress.percent}%` : "100%"}</span>
+      </div>
+
+      <div className="mt-3 h-3 overflow-hidden rounded-full bg-white">
+        <div
+          className="h-full rounded-full bg-blue-500 transition-[width] duration-300"
+          style={{ width: `${uploadStage === "uploading" ? uploadProgress.percent : 100}%` }}
+        />
+      </div>
+
+      <p className="mt-3 text-sm text-slate-500">
+        {formatFileSize(uploadProgress.loaded)} / {formatFileSize(uploadProgress.total || selectedFile?.size || 0)}
+      </p>
+
+      <div className="mt-4 grid gap-2">
+        {analysisSteps.map((step) => {
+          const icon = step.state === "done" ? "✓" : step.state === "active" ? "…" : "○";
+          const tone =
+            step.state === "done"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : step.state === "active"
+                ? "border-amber-200 bg-amber-50 text-amber-700"
+                : "border-slate-200 bg-white text-slate-400";
+          return (
+            <div key={step.key} className={`flex min-h-[42px] items-center gap-3 rounded-2xl border px-3 py-2 text-sm ${tone}`}>
+              <span className="w-5 text-center text-base leading-none">{icon}</span>
+              <span className="font-medium">{step.label}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+type ReviewSummaryProps = {
+  selectedSkater: Skater | null;
+  selectedActionType: ActionType;
+  selectedActionSubtype: string;
+  selectedSkill: SkillNode | undefined;
+  selectedSession: TrainingSessionRecord | null;
+  selectedFile: File | null;
+  note: string;
+  error: string | null;
+  saveMessage: string | null;
+  uploadStage: UploadStage;
+  uploadProgress: { loaded: number; total: number; percent: number };
+  analysisSteps: AnalysisStep[];
+  isSubmitting: boolean;
+  onSubmit: () => void;
+  onSaveDraft: () => void;
+};
+
+function ReviewSummary({
+  selectedSkater,
+  selectedActionType,
+  selectedActionSubtype,
+  selectedSkill,
+  selectedSession,
+  selectedFile,
+  note,
+  error,
+  saveMessage,
+  uploadStage,
+  uploadProgress,
+  analysisSteps,
+  isSubmitting,
+  onSubmit,
+  onSaveDraft,
+}: ReviewSummaryProps) {
+  const summaryItems = [
+    { label: "练习档案", value: selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..." },
+    { label: "动作范围", value: `${selectedActionType} · ${selectedActionSubtype}` },
+    { label: "技能分类", value: selectedSkill?.name ?? "尚未选择" },
+    { label: "关联课次", value: selectedSession ? sessionLabel(selectedSession) : "不关联" },
+    { label: "视频文件", value: selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传" },
+  ];
+
+  return (
+    <aside className="app-card p-5 phone:p-6 tablet:p-7 web:sticky web:top-[112px]">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">确认提交</p>
+        <h2 className="mt-2 text-2xl font-semibold text-slate-900">本次复盘摘要</h2>
+        <p className="mt-2 text-sm leading-7 text-slate-500">提交前确认对象、动作和视频。分析完成后会自动进入报告与时间轴。</p>
+      </div>
+
+      <div className="mt-5 grid gap-3">
+        {summaryItems.map((item) => (
+          <div key={item.label} className="rounded-[20px] border border-slate-200 bg-white px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">{item.label}</p>
+            <p className="mt-1 break-words text-sm font-medium leading-6 text-slate-700">{item.value}</p>
+          </div>
+        ))}
+        {note.trim() ? (
+          <div className="rounded-[20px] border border-blue-100 bg-blue-50/70 px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-blue-500">关注点</p>
+            <p className="mt-1 text-sm leading-6 text-slate-700">{note.trim()}</p>
+          </div>
+        ) : null}
+      </div>
+
+      {error ? <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-500">{error}</p> : null}
+      {saveMessage ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm leading-6 text-emerald-600">{saveMessage}</p> : null}
+
+      <div className="mt-5 space-y-3">
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={!selectedFile || isSubmitting}
+          className="min-h-[56px] w-full rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          {isSubmitting ? "开始诊断中..." : "开始冰宝诊断"}
+        </button>
+        <button type="button" onClick={onSaveDraft} className="app-pill min-h-[52px] w-full px-5 text-sm font-semibold">
+          保存本条复盘
+        </button>
+      </div>
+
+      <div className="mt-5">
+        <ProcessingProgress
+          uploadStage={uploadStage}
+          uploadProgress={uploadProgress}
+          selectedFile={selectedFile}
+          analysisSteps={analysisSteps}
+        />
+      </div>
+    </aside>
+  );
 }
 
 export default function ReviewPage() {
@@ -345,18 +869,7 @@ export default function ReviewPage() {
   const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0];
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const processingStage = getAnalysisProcessingStage(processingStatus);
-  const previewItems = useMemo(
-    () => [
-      { label: "练习档案", value: selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..." },
-      { label: "动作大类", value: selectedActionType },
-      { label: "动作子类", value: selectedActionSubtype },
-      { label: "技能分类", value: selectedSkill?.name ?? "尚未选择" },
-      { label: "关联课次", value: selectedSession ? sessionLabel(selectedSession) : "不关联" },
-      { label: "视频文件", value: selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传" },
-    ],
-    [selectedActionSubtype, selectedActionType, selectedFile, selectedSession, selectedSkill?.name, selectedSkater],
-  );
-  const analysisSteps = useMemo(
+  const analysisSteps = useMemo<AnalysisStep[]>(
     () => [
       { ...PROCESS_STEPS[0], state: uploadStage === "uploading" ? "active" : uploadStage === "processing" ? "done" : "idle" },
       {
@@ -536,380 +1049,62 @@ export default function ReviewPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <section className="app-card overflow-hidden p-6 tablet:p-8">
-        <div className="grid gap-6 web:grid-cols-[1.1fr_0.9fr] web:items-start">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Review Flow</p>
-            <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">视频复盘</h1>
-            <p className="mt-4 max-w-2xl text-base leading-8 text-slate-500">
-              上传视频后，冰宝（IceBuddy）会抽取关键帧做诊断。你不再需要手填四段自评，只需补充你最在意的问题。
-            </p>
-          </div>
+    <div className="min-w-0 space-y-6 overflow-x-hidden">
+      <UploadWorkspaceHeader
+        selectedSkater={selectedSkater}
+        skaters={skaters}
+        selectedSkaterId={selectedSkaterId}
+        isParentMode={isParentMode}
+        onSkaterChange={handleSkaterChange}
+      />
 
-          <div className="app-card-muted overflow-hidden rounded-[2rem] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(244,247,252,0.96)_100%)] p-0 shadow-[0_18px_40px_rgba(15,23,42,0.08)]">
-            <div className="border-b border-slate-200/80 px-5 py-5 tablet:px-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Preview</p>
-              <h2 className="mt-2 text-xl font-semibold text-slate-900">本次复盘预览</h2>
-              <p className="mt-2 text-sm leading-7 text-slate-500">上传前先确认对象、动作范围和视频文件，避免把节目录像挂到错误的技能节点上。</p>
-            </div>
+      <div className="grid min-w-0 gap-6 web:grid-cols-[minmax(0,1fr)_390px] web:items-start">
+        <main className="min-w-0 space-y-6">
+          <UploadCard inputRef={inputRef} selectedFile={selectedFile} onFileChange={handleFileChange} />
 
-            <div className="px-5 py-5 tablet:px-6">
-              <div className="grid gap-3 sm:grid-cols-2">
-                {previewItems.map((item) => (
-                  <div key={item.label} className="rounded-[1.35rem] border border-slate-200 bg-white/88 px-4 py-4">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{item.label}</p>
-                    <p className="mt-2 text-sm font-medium leading-7 text-slate-700">{item.value}</p>
-                  </div>
-                ))}
-              </div>
+          <ContextCard
+            selectedActionType={selectedActionType}
+            selectedActionSubtype={selectedActionSubtype}
+            selectedSkill={selectedSkill}
+            groupedSkills={groupedSkills}
+            note={note}
+            sessions={sessions}
+            selectedSessionId={selectedSessionId}
+            isSessionFormOpen={isSessionFormOpen}
+            sessionForm={sessionForm}
+            isCreatingSession={isCreatingSession}
+            onActionTypeChange={handleActionTypeChange}
+            onActionSubtypeChange={setSelectedActionSubtype}
+            onSkillChange={setSelectedSkillId}
+            onNoteChange={setNote}
+            onSessionChange={setSelectedSessionId}
+            onToggleSessionForm={() => setIsSessionFormOpen((current) => !current)}
+            onSessionFormChange={setSessionForm}
+            onCreateSession={() => void handleCreateSession()}
+            onCancelSessionForm={() => {
+              setIsSessionFormOpen(false);
+              setSessionForm(createDefaultSessionForm());
+            }}
+          />
+        </main>
 
-              <div className="mt-4 rounded-[1.4rem] border border-blue-100 bg-[linear-gradient(135deg,rgba(239,246,255,0.95)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4">
-                <p className="text-sm font-semibold text-slate-900">复盘后续动作</p>
-                <p className="mt-2 text-sm leading-7 text-slate-600">
-                  分析完成后，结果会自动进入练习档案时间轴，并可以在报告页继续查看双路视觉、生物力学和训练计划。
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid gap-6 web:grid-cols-[1.1fr_0.9fr]">
-        <div className="space-y-6">
-          <section className="app-card p-6 tablet:p-7">
-            <p className="text-sm font-semibold text-blue-500">Step 1</p>
-            <div className="mt-2 flex flex-col gap-4 tablet:flex-row tablet:items-center tablet:justify-between">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-900">选择训练视频</h2>
-                <p className="mt-2 text-sm text-slate-500">支持 mp4 / mov / avi，视频会被自动抽帧分析。</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="app-pill min-h-[56px] px-5 font-semibold text-blue-600"
-              >
-                选择训练视频
-              </button>
-            </div>
-
-            <input ref={inputRef} type="file" accept={ACCEPTED_TYPES} className="hidden" onChange={handleFileChange} />
-
-            <div className="mt-5 rounded-[28px] border border-dashed border-blue-100 bg-blue-50/70 p-5">
-              <p className="text-sm font-medium text-slate-700">{selectedFile ? selectedFile.name : "尚未选择视频"}</p>
-              <p className="mt-2 text-sm text-slate-500">
-                {selectedFile ? formatFileSize(selectedFile.size) : "点击上方按钮选择本次训练视频。"}
-              </p>
-            </div>
-
-            <div className="mt-5 rounded-[28px] border border-slate-200 bg-white p-5">
-              <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">关联到课次（可选）</p>
-                  <p className="mt-1 text-sm text-slate-500">可以挂到今天的新课次，或者选择已有课次。</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsSessionFormOpen((current) => !current)}
-                  className="app-pill min-h-[48px] px-4 font-semibold text-blue-600"
-                >
-                  + 今天新建课次
-                </button>
-              </div>
-
-              <label className="mt-4 space-y-2">
-                <span className="text-sm font-medium text-slate-700">选择已有课次</span>
-                <select value={selectedSessionId} onChange={(event) => setSelectedSessionId(event.target.value)} className="app-select">
-                  <option value="">不关联课次</option>
-                  {sessions.map((session) => (
-                    <option key={session.id} value={session.id}>
-                      {sessionLabel(session)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {isSessionFormOpen ? (
-                <div className="mt-4 grid gap-4 rounded-[24px] bg-slate-50 p-4">
-                  <label className="space-y-2">
-                    <span className="text-sm font-medium text-slate-700">训练日期</span>
-                    <input
-                      type="date"
-                      value={sessionForm.session_date}
-                      onChange={(event) => setSessionForm((current) => ({ ...current, session_date: event.target.value }))}
-                      className="app-select"
-                    />
-                  </label>
-
-                  <div className="grid gap-4 tablet:grid-cols-2">
-                    <label className="space-y-2">
-                      <span className="text-sm font-medium text-slate-700">地点</span>
-                      <select
-                        value={sessionForm.location}
-                        onChange={(event) => setSessionForm((current) => ({ ...current, location: event.target.value }))}
-                        className="app-select"
-                      >
-                        {LOCATION_OPTIONS.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="space-y-2">
-                      <span className="text-sm font-medium text-slate-700">类型</span>
-                      <select
-                        value={sessionForm.session_type}
-                        onChange={(event) => setSessionForm((current) => ({ ...current, session_type: event.target.value }))}
-                        className="app-select"
-                      >
-                        {SESSION_TYPE_OPTIONS.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-
-                  <label className="space-y-2">
-                    <span className="text-sm font-medium text-slate-700">时长（分钟）</span>
-                    <input
-                      type="number"
-                      min={0}
-                      value={sessionForm.duration_minutes}
-                      onChange={(event) => setSessionForm((current) => ({ ...current, duration_minutes: event.target.value }))}
-                      className="app-select"
-                      placeholder="例如 60"
-                    />
-                  </label>
-
-                  <label className="flex items-center justify-between rounded-[18px] border border-slate-200 bg-white px-4 py-3">
-                    <span className="text-sm font-medium text-slate-700">有教练陪同</span>
-                    <input
-                      type="checkbox"
-                      checked={sessionForm.coach_present}
-                      onChange={(event) => setSessionForm((current) => ({ ...current, coach_present: event.target.checked }))}
-                      className="h-5 w-5 accent-blue-500"
-                    />
-                  </label>
-
-                  <label className="space-y-2">
-                    <span className="text-sm font-medium text-slate-700">备注</span>
-                    <textarea
-                      rows={3}
-                      value={sessionForm.note}
-                      onChange={(event) => setSessionForm((current) => ({ ...current, note: event.target.value }))}
-                      className="app-textarea min-h-[96px] resize-y"
-                      placeholder="可记录今天的主题、目标或状态。"
-                    />
-                  </label>
-
-                  <div className="flex flex-col gap-3 tablet:flex-row">
-                    <button
-                      type="button"
-                      onClick={() => void handleCreateSession()}
-                      disabled={isCreatingSession}
-                      className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {isCreatingSession ? "创建中..." : "保存并关联本次复盘"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsSessionFormOpen(false);
-                        setSessionForm(createDefaultSessionForm());
-                      }}
-                      className="app-pill min-h-[48px] px-5 font-semibold"
-                    >
-                      收起表单
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="app-card p-6 tablet:p-7">
-            <p className="text-sm font-semibold text-blue-500">Step 2</p>
-            <h2 className="mt-2 text-xl font-semibold text-slate-900">告诉冰宝（IceBuddy）你在看什么</h2>
-
-            <div className="mt-5 grid gap-4">
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-slate-700">练习档案</span>
-                <select value={selectedSkaterId} onChange={(event) => handleSkaterChange(event.target.value)} className="app-select">
-                  {skaters.map((skater) => (
-                    <option key={skater.id} value={skater.id}>
-                      {skater.display_name || skater.name}
-                      {skater.level ? ` · ${skater.level}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="grid gap-4 tablet:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="text-sm font-medium text-slate-700">动作大类</span>
-                  <select
-                    value={selectedActionType}
-                    onChange={(event) => handleActionTypeChange(event.target.value as ActionType)}
-                    className="app-select"
-                  >
-                    {ACTION_TYPE_OPTIONS.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-sm font-medium text-slate-700">动作子类</span>
-                  <select
-                    value={selectedActionSubtype}
-                    onChange={(event) => setSelectedActionSubtype(event.target.value)}
-                    className="app-select"
-                  >
-                    {ACTION_SUBTYPE_OPTIONS[selectedActionType].map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-slate-700">技能分类</span>
-                <select value={selectedSkill?.id ?? ""} onChange={(event) => setSelectedSkillId(event.target.value)} className="app-select">
-                  {groupedSkills.length ? (
-                    groupedSkills.map(([groupLabel, items]) => (
-                      <optgroup key={groupLabel} label={groupLabel}>
-                        {items.map((skill) => (
-                          <option key={skill.id} value={skill.id}>
-                            {skill.name}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))
-                  ) : (
-                    <option value="">当前大类下暂无技能节点</option>
-                  )}
-                </select>
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-slate-700">补充说明（可选）</span>
-                <textarea
-                  value={note}
-                  onChange={(event) => setNote(event.target.value)}
-                  rows={5}
-                  placeholder="比如：我最想知道为什么落冰总是飘，或者今天重点想看华尔兹跳。"
-                  className="app-textarea min-h-[140px] resize-y"
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="app-card p-6 tablet:p-7">
-            <p className="text-sm font-semibold text-blue-500">Step 3</p>
-            <h2 className="mt-2 text-xl font-semibold text-slate-900">开始冰宝（IceBuddy）视频诊断</h2>
-            <p className="mt-3 text-sm leading-7 text-slate-500">
-              开始诊断后会上传视频并跳转到诊断报告页。分析结果完成后会自动进入练习档案时间轴。
-            </p>
-
-            {error ? <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-500">{error}</p> : null}
-            {saveMessage ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-600">{saveMessage}</p> : null}
-
-            {uploadStage !== "idle" ? (
-              <div className="mt-5 rounded-[28px] border border-blue-100 bg-blue-50/70 p-5">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-slate-900">
-                    {uploadStage === "uploading" ? "正在上传视频" : "正在生成分析结果"}
-                  </p>
-                  <span className="text-sm font-semibold text-blue-600">
-                    {uploadStage === "uploading" ? `${uploadProgress.percent}%` : "100%"}
-                  </span>
-                </div>
-
-                <div className="mt-3 h-3 overflow-hidden rounded-full bg-white">
-                  <div
-                    className="h-full rounded-full bg-blue-500 transition-[width] duration-300"
-                    style={{ width: `${uploadStage === "uploading" ? uploadProgress.percent : 100}%` }}
-                  />
-                </div>
-
-                <p className="mt-3 text-sm text-slate-500">
-                  {formatFileSize(uploadProgress.loaded)} / {formatFileSize(uploadProgress.total || selectedFile?.size || 0)}
-                </p>
-
-                <div className="mt-5 grid gap-3">
-                  {analysisSteps.map((step) => {
-                    const icon = step.state === "done" ? "✓" : step.state === "active" ? "⏳" : "○";
-                    const tone =
-                      step.state === "done"
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                        : step.state === "active"
-                          ? "border-amber-200 bg-amber-50 text-amber-700"
-                          : "border-slate-200 bg-white text-slate-400";
-                    return (
-                      <div key={step.key} className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${tone}`}>
-                        <span className="text-base leading-none">{icon}</span>
-                        <span className="font-medium">{step.label}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-
-            <div className="mt-5 flex flex-col gap-3 tablet:flex-row">
-              <button
-                type="button"
-                onClick={() => void handleSubmit()}
-                disabled={!selectedFile || isSubmitting}
-                className="min-h-[56px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                {isSubmitting ? "开始诊断中..." : "开始冰宝（IceBuddy）诊断"}
-              </button>
-              <button type="button" onClick={handleSaveDraft} className="app-pill min-h-[56px] px-5 font-semibold">
-                保存本条复盘
-              </button>
-            </div>
-          </section>
-        </div>
-
-        <div className="space-y-6">
-          <section className="app-card p-6 tablet:p-7">
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">复盘说明</p>
-            <div className="mt-4 space-y-4 text-sm leading-7 text-slate-500">
-              <p>1. 选择视频后，系统会自动上传原片并抽取动作关键帧。</p>
-              <p>2. 动作大类和子类会一起送入分析链路，帮助冰宝更稳定地区分跳跃、旋转、步法和节目片段。</p>
-              <p>3. 你补充的备注会和报告一起进入练习档案，课次信息也会同步进入时间轴。</p>
-            </div>
-          </section>
-
-          <section className="app-card p-6 tablet:p-7">
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前对象</p>
-            {selectedSkater ? (
-              <div className="mt-4 rounded-[28px] bg-slate-50 p-5">
-                <ZodiacAvatar
-                  avatarType={selectedSkater.avatar_type}
-                  avatarEmoji={selectedSkater.avatar_emoji}
-                  size="md"
-                  animate
-                  className="mx-auto tablet:mx-0"
-                />
-                <h2 className="mt-3 text-xl font-semibold text-slate-900">{selectedSkater.display_name || selectedSkater.name}</h2>
-                <p className="mt-2 text-sm text-slate-500">{selectedSkater.level ?? selectedSkater.current_level}</p>
-                <p className="mt-4 text-sm text-slate-500">当前 XP：{selectedSkater.total_xp}</p>
-              </div>
-            ) : (
-              <p className="mt-4 text-sm text-slate-500">正在加载练习档案...</p>
-            )}
-          </section>
-        </div>
+        <ReviewSummary
+          selectedSkater={selectedSkater}
+          selectedActionType={selectedActionType}
+          selectedActionSubtype={selectedActionSubtype}
+          selectedSkill={selectedSkill}
+          selectedSession={selectedSession}
+          selectedFile={selectedFile}
+          note={note}
+          error={error}
+          saveMessage={saveMessage}
+          uploadStage={uploadStage}
+          uploadProgress={uploadProgress}
+          analysisSteps={analysisSteps}
+          isSubmitting={isSubmitting}
+          onSubmit={() => void handleSubmit()}
+          onSaveDraft={handleSaveDraft}
+        />
       </div>
     </div>
   );

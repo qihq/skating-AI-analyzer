@@ -423,7 +423,7 @@ function ForceScoreCard({ score, isParentMode }: { score: number; isParentMode: 
 
   return (
     <div className="w-full max-w-[280px] rounded-[30px] border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-blue-50 p-5 shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
-      <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Force Score</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">训练完成度</p>
       <div className="mt-4 flex flex-col items-center gap-4 tablet:items-start">
         <ForceScoreStars score={normalized} />
         <div className="flex w-full items-center gap-4 rounded-[24px] border border-white/80 bg-white/90 px-4 py-3">
@@ -476,6 +476,10 @@ export default function ReportPage() {
     window.matchMedia("(pointer: coarse)").matches;
   const deferredAnalysis = useDeferredValue(analysis);
   const subscores = deferredAnalysis?.report?.subscores ?? deferredAnalysis?.bio_data?.bio_subscores ?? null;
+  const technicalScore =
+    typeof deferredAnalysis?.report?.score_breakdown?.technical_score === "number"
+      ? Math.max(0, Math.min(Math.round(deferredAnalysis.report.score_breakdown.technical_score), 100))
+      : null;
   const reportDataQuality = deferredAnalysis?.report?.data_quality ?? "partial";
   const hasReliableSubscores = reportDataQuality === "good" && Boolean(subscores);
   const reportSkater = skaters.find((item) => item.id === deferredAnalysis?.skater_id) ?? null;
@@ -1063,6 +1067,17 @@ export default function ReportPage() {
           <div className="grid gap-6 web:grid-cols-[1.08fr_0.92fr]">
             <div className="space-y-6">
               <ReportCard title="总体评价" eyebrow="Summary">
+                {isParentMode && technicalScore !== null ? (
+                  <div className="mb-4 rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-900">技术质量：{technicalScore} 分</span>
+                      <span className="text-xs text-slate-400">Technical quality</span>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      反映轴心、落冰、手臂、核心等技术细节；训练完成度仍以顶部主分为准。
+                    </p>
+                  </div>
+                ) : null}
                 <p className="max-w-3xl text-base leading-8 text-slate-600">{deferredAnalysis.report?.summary ?? "暂无总体评价。"}</p>
               </ReportCard>
 

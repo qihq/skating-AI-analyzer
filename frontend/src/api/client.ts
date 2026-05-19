@@ -43,6 +43,13 @@ export interface StructuredReport {
   improvements: ReportImprovement[];
   training_focus: string;
   subscores?: Record<string, number>;
+  score_breakdown?: {
+    training_score?: number | null;
+    technical_score?: number | null;
+    raw_technical_score?: number | null;
+    score_version?: string | null;
+    calibration_reason?: string | null;
+  } | null;
   data_quality?: "good" | "partial" | "poor" | string;
 }
 

@@ -116,6 +116,28 @@ def calculate_force_score(report: dict[str, Any]) -> int:
     return max(score, 0)
 
 
+def technical_score_from_subscores(subscores: dict[str, Any] | None) -> int | None:
+    if not isinstance(subscores, dict) or not subscores:
+        return None
+    return round(sum(_clamp_score(subscores.get(key), 0) * weight for key, weight in SUBSCORE_WEIGHTS.items()))
+
+
+def attach_score_breakdown(report: dict[str, Any], *, training_score: int | None = None) -> dict[str, Any]:
+    out = dict(report)
+    technical_score = technical_score_from_subscores(out.get("subscores") if isinstance(out.get("subscores"), dict) else None)
+    if technical_score is None:
+        return out
+    existing = out.get("score_breakdown") if isinstance(out.get("score_breakdown"), dict) else {}
+    out["score_breakdown"] = {
+        **existing,
+        "technical_score": technical_score,
+        "raw_technical_score": technical_score,
+        "training_score": int(training_score) if training_score is not None else existing.get("training_score"),
+        "score_version": existing.get("score_version") or "dual_score_v1",
+    }
+    return out
+
+
 def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: dict[str, Any] | None = None) -> int:
     data_quality = str(report.get("data_quality", "partial") or "partial").strip().lower()
     skeleton_signal = str((dual_path_meta or {}).get("skeleton_reliability_signal", "") or "").strip().lower()
@@ -178,7 +200,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data.get("bio_subscores"), dict) else None
         quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
 
-    return {
+    normalized = {
         "summary": str(payload.get("summary", "")).strip(),
         "issues": normalized_issues,
         "improvements": normalized_improvements,
@@ -190,6 +212,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         ),
         "data_quality": str(payload.get("data_quality", "partial")).strip() or "partial",
     }
+    return attach_score_breakdown(normalized)
 
 
 def _resolve_report_data_quality(
