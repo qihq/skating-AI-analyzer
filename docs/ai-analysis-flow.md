@@ -1,272 +1,363 @@
 # 花样滑冰 AI 视觉分析流程
 
-本文档描述 Skating Analyzer 系统从视频输入到最终报告输出的完整 AI 分析流水线。
+本文档描述 Skating Analyzer 当前（`CURRENT_PIPELINE_VERSION = v5.0.0`）从视频上传到训练报告输出的完整 AI 分析流水线。系统的核心原则是：视频 AI 负责语义时序，MediaPipe/运动密度负责可验证的几何与时间证据，图片/视频多模态模型负责技术观察，报告阶段只做融合与保守表达。
 
 ---
 
 ## 总览
 
-```
+```text
 用户上传视频
-    │
-    ▼
-┌─────────────────────────────────────────────────────┐
-│  Stage 1  视频上传 & 校验                             │
-│  Stage 1A 视频 AI 语义时间定位 (qwen3.6-plus，并行)    │
-│  Stage 2  动作窗口检测 (运动密度曲线)                   │
-│  Stage 3  运动加权抽帧                                │
-│  Stage 4  目标锁定 (Target Lock)                      │
-│  Stage 5  姿态提取 (MediaPipe)                        │
-│  Stage 6  动作 Profile 推断                           │
-│  Stage 7  生物力学计算                                │
-│  Stage 7A 时间戳仲裁 + FFmpeg 语义关键帧抽取            │
-│  Stage 8  图片 AI 语义关键帧精析 (多模态)               │
-│  Stage 9  LLM 报告融合                                │
-│  Stage 10 评分融合 & 存储                             │
-└─────────────────────────────────────────────────────┘
-    │
-    ▼
-结构化报告 + 综合评分
+  |
+  v
+Stage 1   上传、格式校验、视频预检查
+Stage 2   动作窗口检测与 profile 化运动抽帧
+Stage 1A  视频 AI 语义时间定位（基于动作窗口 clip，并行启动）
+Stage 3   Target Lock：自动或手动锁定目标学员
+Stage 4   MediaPipe 姿态提取、平滑、目标跟踪
+Stage 5   动作 Profile 推断与跳跃子类型几何证据
+Stage 6   生物力学指标与关键帧候选
+Stage 7   视频语义时间戳仲裁与 semantic keyframe 精确抽取
+Stage 8   Dual-path 视觉分析与交叉验证
+Stage 9   LLM 训练报告生成
+Stage 10  分数融合、auto-eval、存储与调试信息输出
+  |
+  v
+结构化帧观察 + 生物力学指标 + 训练报告 + Force Score
 ```
+
+实际代码中的可重试阶段为：
+
+```text
+extract_frames -> pose -> biomechanics -> vision -> report
+```
+
+文档中的 Stage 1A/7 属于这些阶段内部的并行或子流程，不是单独的重试入口。
 
 ---
 
-## Stage 1: 视频上传与校验
+## Stage 1: 上传与视频预检查
 
-**入口**: `POST /api/analysis/upload`
+**入口**：`POST /api/analysis/upload`
 
-- 接受 `.mp4` / `.mov` / `.avi` 格式
-- 文件大小限制: 默认 500MB（`MAX_UPLOAD_SIZE_MB`）
-- 视频时长限制: 最长 60 秒（`MAX_SECONDS`）
-- 保存到 `uploads/{analysis_id}/source.{ext}`
-- 创建 `Analysis` 记录，状态设为 `pending`
-- 后台启动 `process_analysis()` 异步任务
+上传阶段完成：
 
-**涉及文件**: `video.py::save_upload_file()`, `routers/analysis.py::upload_analysis()`
+- 接受 `.mp4` / `.mov` / `.avi`。
+- 默认上传大小上限为 `MAX_UPLOAD_SIZE_MB=500`。
+- 使用 magic bytes、`ffprobe`、视频流元数据和抽样帧方差做预检查。
+- 最小可分析视频要求：时长大于 0.5 秒，分辨率不低于 320x180。
+- 分析主流程最长读取前 `MAX_SECONDS=60` 秒。
+- 保存源文件到 `uploads/{analysis_id}/source.{ext}`。
+- 创建 `Analysis` 记录，写入 `pipeline_version`、`status=pending`、`retry_from_stage=None`。
+- 后台启动 `process_analysis()`。
+
+**涉及文件**：
+
+- `backend/app/services/video.py::save_upload_file()`
+- `backend/app/services/video.py::precheck_video()`
+- `backend/app/routers/analysis.py::upload_analysis()`
+
+---
+
+## Stage 2: 动作窗口检测与运动抽帧
+
+**目标**：从整段视频中定位最值得分析的动作窗口，再按动作 profile 抽取有限数量的高价值帧。
+
+动作窗口检测：
+
+- 以 `ACTION_WINDOW_DETECTION_FPS=2` 抽取 160x90 缩略图。
+- 计算相邻帧差异，形成 `motion_scores`。
+- 按 profile 选择窗口：
+
+| Profile | 默认窗口 | 抽帧 FPS | 最大帧数 |
+|---|---:|---:|---:|
+| `jump` | 3.5s | 16 | 32 |
+| `spin` | 6.0s | 10 | 28 |
+| `step` | 8.0s | 6 | 24 |
+| `spiral` | 6.0s | 8 | 20 |
+
+窗口选择规则：
+
+- `jump`/默认：选择运动量最大的窗口。
+- `spin`：运动量最大，同时奖励首尾连续性。
+- `spiral`：选择更稳定、低波动的窗口。
+- `自由滑`：保留前 60 秒作为窗口。
+
+抽帧策略：
+
+- 在动作窗口内生成缩略图并计算运动密度。
+- `_select_motion_weighted_indices()` 保护 top-3 局部运动峰值及邻域。
+- 剩余名额按 10 个时间段的运动权重分配。
+- 抽取全分辨率帧，默认 `FRAME_FULL_SIZE=854x480`。
+- 源视频 FPS >= 60 时按 `source_fps / 30` 折算慢动作时间轴。
+
+输出写入 `frame_motion_scores`，包括窗口、FPS、慢动作倍率、采样帧时间戳、运动分数和 profile hint。
+
+**涉及文件**：
+
+- `backend/app/services/video.py::detect_action_window()`
+- `backend/app/services/video.py::extract_motion_sampled_frames()`
+- `backend/app/configs/action_profiles.json`
 
 ---
 
 ## Stage 1A: 视频 AI 语义时间定位
 
-**目标**: 用完整视频理解动作阶段区间，而不是让 MediaPipe 骨架时间戳成为唯一关键帧来源。
+**目标**：让视频多模态模型理解动作的阶段区间，而不是让骨架候选或单张图片独自决定 T/A/L。
 
-**默认模型**: `qwen3.6-plus`。`qwen-vl-max-latest` 仅保留为历史迁移兼容输入，不再推荐作为默认视觉模型。
+当前实现不是直接把完整源视频送入模型，而是在 Stage 2 得到动作窗口后切出轻量 clip：
 
-**流程**:
+- `ACTION_AI_CLIP_SIZE=640x360`
+- `ACTION_AI_CLIP_FPS=15`
+- `ACTION_AI_CLIP_CRF=30`
+- `ACTION_AI_CLIP_MAX_MB=40`
 
-1. `precheck_video()` 通过后，后端异步启动 `analyze_video_temporal()`
-2. 视频 AI 输出 `video_temporal_v1`:
-   - 动作类型确认
-   - `phase_segments`，包含 `time_start` / `time_end` / `key_frame_hint`
-   - 跳跃 T/A/L 建议时间
-   - `macro_assessment` 和 `overall_impression`
-3. 视频 AI 只提供语义阶段区间和宏观评价，不作为逐帧裁判
-4. API 失败、超时、JSON 解析失败或低置信时，写入 fallback flags，主分析继续使用现有 sampled frames
+默认模型为 `qwen3.6-plus`。`qwen-vl-max-latest` 仅作为历史迁移兼容输入，不再推荐作为默认视觉模型。
 
-**成本控制**:
-
-- `QWEN_VISION_DAILY_COST_LIMIT_CNY`: 每日视觉成本上限，默认 30
-- `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY`: 单次视频语义定位估算成本
-- `VIDEO_TEMPORAL_MAX_FRAMES`: 进入图片 AI 的语义关键帧预算，默认 12，上限 12
-
-**涉及文件**: `video_temporal.py::analyze_video_temporal()`, `providers.py::request_dashscope_video_completion()`
-
----
-
-## Stage 2: 动作窗口检测
-
-**目标**: 从整段视频中定位动作最密集的时间窗口，避免分析无关片段。
-
-**流程**:
-
-1. 以 2fps 速率提取缩略图（160x90）
-2. 计算相邻帧差异 → 运动密度曲线（`motion_scores`）
-3. 根据动作类型选择窗口大小：
-   - 跳跃: 3 秒
-   - 旋转: 5 秒
-   - 步法: 8 秒
-   - 自由滑: 全段
-4. 滑动窗口找峰值区间（不同 profile 有不同策略）:
-   - **jump/spin**: 选运动量最大的窗口
-   - **spiral**: 选运动最平稳的窗口（低方差）
-   - **spin**: 附加连续性奖励
-
-**输出**: `(start_sec, end_sec)` 时间窗口
-
-**涉及文件**: `video.py::detect_action_window()`, `_pick_window_by_profile()`
-
----
-
-## Stage 3: 运动加权抽帧
-
-**目标**: 从动作窗口内智能采样 ~20 帧，运动越剧烈的区域帧越密集。
-
-**流程**:
-
-1. 在动作窗口内以 5fps 提取缩略图
-2. 计算运动密度分数
-3. 分 10 个段，按运动量分配配额
-4. 每段内按运动分数降序选取
-5. 对选中帧提取全分辨率帧（854x480）
-
-**输出**: `frame_0001.jpg` ~ `frame_0020.jpg` + 运动元数据
-
-**涉及文件**: `video.py::extract_motion_sampled_frames()`, `_select_motion_weighted_indices()`
-
----
-
-## Stage 4: 目标锁定 (Target Lock)
-
-**目标**: 当视频中有多人时，确定分析对象。
-
-**流程**:
-
-1. 基于运动检测生成候选区域（bbox）
-2. 计算锁定置信度
-3. 若置信度 >= 0.72 → 自动锁定，进入下一阶段
-4. 若置信度 < 0.72 → 暂停分析，前端展示预览帧让用户手动选择
-5. 用户确认后恢复分析
-
-**涉及文件**: `target_lock.py::build_target_preview()`, `build_target_lock_payload()`
-
----
-
-## Stage 5: 姿态提取 (MediaPipe)
-
-**目标**: 从每帧中提取 33 个关键点的 3D 坐标。
-
-**两种模式**:
-
-| 模式 | 条件 | 行为 |
-|------|------|------|
-| `multi_pose` | `MEDIAPIPE_POSE_TASK_PATH` 配置了模型文件 | 检测多人，通过评分函数选最佳目标 |
-| `fallback_single_pose` | 未配置或模型缺失 | 基于 bbox 裁剪后单人检测 |
-
-**候选评分函数** (加权):
-- IoU 连续性: 34%
-- 中心距离连续性: 22%
-- 运动区域重叠: 16%
-- 尺度一致性: 14%
-- 关键点可见性: 14%
-
-**输出**: 每帧 33 个 `{x, y, z, visibility, name}` 关键点 + 追踪状态
-
-**关键点索引** (MediaPipe 标准):
-- 11/12: 左/右肩
-- 23/24: 左/右髋
-- 25/26: 左/右膝
-- 27/28: 左/右踝
-
-**涉及文件**: `pose.py::extract_pose()`
-
----
-
-## Stage 6: 动作 Profile 推断
-
-**目标**: 判断动作的实际类型（jump/spin/step/spiral），而非仅依赖用户选择。
-
-**推理依据**:
-
-| 指标 | 来源 | 用途 |
-|------|------|------|
-| `com_vertical_range` | 质心轨迹垂直跨度 | 判断是否有跳跃腾空 |
-| `max_motion_score` | 运动密度最大值 | 判断动作幅度 |
-| `avg_motion_score` | 运动密度均值 | 判断螺旋线稳定性 |
-| `action_subtype` | 用户选择 | 初始倾向 |
-
-**决策规则**:
-- 螺旋线门控: `vertical_range <= 0.06 && avg_motion <= 0.09` 且子类型匹配
-- 跳跃门控: `vertical_range >= 0.08 && max_motion >= 0.08` 且子类型匹配
-- 未通过门控的跳跃降级为 step
-
-**涉及文件**: `action_profiles.py::infer_analysis_profile()`
-
----
-
-## Stage 7: 生物力学计算
-
-**目标**: 基于骨骼关键点计算运动学指标，不依赖 AI。
-
-**计算指标**:
-
-| 指标 | 计算方式 |
-|------|---------|
-| 膝关节角度 | 髋-膝-踝三点夹角（左右分别计算） |
-| 躯干倾斜 | 肩中点-髋中点连线与垂直轴夹角 |
-| 手臂对称性 | 左右手腕到各自肩的距离差 |
-| 质心轨迹 | 肩髋中点的 Y 坐标序列 |
-| 跳跃高度 | `h = 0.5 * g * (t/2)^2`（基于滞空时间） |
-| 起跳速度 | `v = sqrt(2gh)` |
-| 旋转速度 | 肩连线角度变化率 / 时间 |
-
-**子评分** (各 0-100):
-
-| 子项 | 含义 | 理想值 |
-|------|------|--------|
-| `takeoff_power` | 起跳发力 | 膝角 ~145° |
-| `rotation_axis` | 旋转轴心 | 躯干倾斜 ~8° |
-| `arm_coordination` | 手臂配合 | 对称性 ~1.0 |
-| `landing_absorption` | 落冰缓冲 | 落冰膝角 ~135° |
-| `core_stability` | 核心稳定 | 倾斜方差小 |
-
-**涉及文件**: `biomechanics.py::analyze_biomechanics()`
-
----
-
-## Stage 7A: 时间戳仲裁与语义关键帧抽取
-
-**目标**: 把视频 AI 的语义区间转成 FFmpeg 可切的真实时间点。
-
-**仲裁规则**:
-
-| 视频 AI 置信度 | 行为 |
-|---|---|
-| `>= 0.80` | 使用视频阶段区间，但在区间内用运动峰值或骨架候选 refine |
-| `>= 0.55` | blended：视频区间作为边界，优先使用落在区间内的 T/A/L 骨架候选 |
-| `< 0.55` | 回退现有骨架/运动采样 |
-
-**关键原则**:
-
-- 不直接相信视频 AI 单点时间戳
-- 阶段 confidence `< 0.60`、越界、乱序或 fallback recommendation 非 `use_video_timestamps` 时保守回退
-- 跳跃 T/A/L 顺序异常不会直接失败，会转 blended 或 fallback
-- FFmpeg 按仲裁后的 `ResolvedKeyframePlan.selected` 精确抽取 `semantic_0001.jpg` 等语义帧
-- 语义帧抽取失败时回退 Stage 3 sampled frames
-
-**涉及文件**: `video_temporal.py::resolve_semantic_keyframes()`, `video.py::extract_precise_frames_at_timestamps()`
-
----
-
-## Stage 8: LLM 视觉帧分析
-
-**目标**: 用多模态大模型分析语义正确的关键帧。
-
-**流程**:
-
-1. 优先使用 Stage 7A 抽取的语义关键帧；不可用时回退 Stage 3 sampled frames
-2. 将图片编码为 base64 data URL
-3. 若使用语义帧，每帧 prompt 加入 `video_context`
-4. 图片 AI 不再从零猜阶段，而是验证 `phase_verification`
-5. Path B 可对语义帧运行轻量 pose/annotation；失败时使用原图 + 全局 bio context
-6. 解析 JSON 响应，归一化到标准格式
-
-**video_context 示例**:
+视频 AI 输出 `video_temporal_v1`：
 
 ```json
 {
-  "confirmed_action": "Axel",
-  "phase_label": "腾空",
-  "timestamp_sec": 2.43,
-  "phase_time_start": 2.1,
-  "phase_time_end": 2.72,
-  "key_moment": "A_air_sec",
-  "macro_axis_overall": "整体轴心略向左偏，但滑出可控",
+  "schema_version": "video_temporal_v1",
+  "action_confirmation": {
+    "action_family": "jump|spin|step|spiral|unknown",
+    "confirmed_action": "Axel|Lutz|Flip|Loop|Salchow|Toe Loop|spin|step_sequence|spiral|不可分析",
+    "confidence": 0.0
+  },
+  "phase_segments": [
+    {
+      "phase_code": "takeoff",
+      "phase_label": "起跳",
+      "time_start": 1.23,
+      "time_end": 1.46,
+      "key_frame_hint": 1.35,
+      "confidence": 0.82
+    }
+  ],
+  "key_moments": {
+    "T_takeoff_sec": 1.34,
+    "A_air_sec": 1.55,
+    "L_landing_sec": 1.76
+  },
+  "macro_assessment": {},
+  "overall_impression": "",
   "camera_view": "diagonal_front",
-  "video_confidence": 0.78
+  "data_quality_hint": "good|partial|poor",
+  "confidence": 0.0,
+  "fallback_recommendation": "use_video_timestamps|use_sampled_frames|manual_review",
+  "quality_flags": []
 }
 ```
 
-**新增帧级输出字段**:
+关键约束：
+
+- 视频 AI 是语义层，不是逐帧裁判。
+- 时间戳会被验证、仲裁、refine；不会被无条件信任。
+- 失败、超时、JSON 解析失败、低置信或主动 fallback recommendation 都会写入 flags，主流程继续使用 sampled frames 或 skeleton fallback。
+- 视频 AI 等待上限为 `VIDEO_TEMPORAL_WAIT_TIMEOUT_SECONDS=210`。
+
+成本控制：
+
+- `QWEN_VISION_DAILY_COST_LIMIT_CNY`：视觉每日成本上限，默认 30。
+- `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY`：单次视频语义定位估算成本。
+- `VIDEO_TEMPORAL_MAX_FRAMES`：进入语义关键帧抽取的预算，上限 12。
+
+**涉及文件**：
+
+- `backend/app/services/video.py::cut_action_window_ai_clip()`
+- `backend/app/services/video_temporal.py::analyze_video_temporal()`
+- `backend/app/services/providers.py::request_dashscope_video_completion()`
+
+---
+
+## Stage 3: Target Lock
+
+**目标**：多人物或复杂背景下确定被分析的学员。
+
+流程：
+
+1. 基于运动区域生成候选 bbox。
+2. 计算候选连续性和置信度。
+3. 置信度 `>= TARGET_LOCK_AUTO_THRESHOLD`（当前 0.72）时自动锁定。
+4. 置信度不足时状态进入 `awaiting_target_selection`，前端显示预览帧和候选框。
+5. 用户确认候选或手动画框后，分析从后续阶段恢复。
+
+候选评分主要考虑：
+
+- IoU 连续性
+- 中心距离连续性
+- 运动区域重叠
+- 尺度一致性
+- 关键点可见性
+
+**涉及文件**：
+
+- `backend/app/services/target_lock.py`
+- `backend/app/services/bbox_tracker.py`
+- `frontend/src/pages/TargetSelectionPage.tsx`
+
+---
+
+## Stage 4: 姿态提取、平滑与目标跟踪
+
+**目标**：从抽帧序列中提取 33 点 MediaPipe 姿态，并尽量保持跨帧目标一致。
+
+模式：
+
+| 模式 | 条件 | 行为 |
+|---|---|---|
+| `multi_pose` | 配置 `MEDIAPIPE_POSE_TASK_PATH` | 多人检测，按目标锁定和连续性选最佳候选 |
+| `fallback_single_pose` | 未配置或模型加载失败 | 基于 bbox 裁剪后做单人检测 |
+
+姿态处理：
+
+- MediaPipe 标准 33 个关键点。
+- 支持 One-Euro 风格平滑和短时低可见性插值。
+- `track_bbox()` 用于跨帧目标框跟踪。
+- 姿态结果会影响生物力学、Path B 骨架叠加、cross-validation 和 report data_quality。
+
+关键点索引：
+
+- 11/12：左/右肩
+- 23/24：左/右髋
+- 25/26：左/右膝
+- 27/28：左/右踝
+
+**涉及文件**：
+
+- `backend/app/services/pose.py::extract_pose()`
+- `backend/app/services/smoothing.py`
+- `backend/app/services/bbox_tracker.py`
+
+---
+
+## Stage 5: 动作 Profile 与跳跃子类型证据
+
+**目标**：用规则证据校正用户输入，避免把所有动作都按同一套抽帧、提示词和评分逻辑处理。
+
+Profile 支持：
+
+- `jump`
+- `spin`
+- `step`
+- `spiral`
+
+推断依据：
+
+| 指标 | 来源 | 用途 |
+|---|---|---|
+| `com_vertical_range` | 姿态质心轨迹 | 判断是否存在明显腾空 |
+| `max_motion_score` | 运动密度峰值 | 判断动作爆发性 |
+| `avg_motion_score` | 运动密度均值 | 判断滑行动作稳定性 |
+| `action_subtype` / `skill_category` | 用户输入 | 初始倾向和 prompt 约束 |
+
+跳跃子类型证据会提取 Lutz/Flip/Loop/Salchow/Axel 的几何线索，例如起跳前刃倾向、预备姿态和运动方向，用于提示词 grounding，但不会作为唯一判决。
+
+**涉及文件**：
+
+- `backend/app/services/action_profiles.py`
+- `backend/app/services/jump_features.py`
+- `backend/app/services/vision_prompt_templates.py`
+
+---
+
+## Stage 6: 生物力学计算与关键帧候选
+
+**目标**：基于骨架序列生成可解释的几何指标，提供独立于 LLM 的客观证据。
+
+主要指标：
+
+| 指标 | 计算方式 / 含义 |
+|---|---|
+| 膝关节角度 | 髋-膝-踝三点夹角，左右分别计算 |
+| 躯干倾斜 | 肩中点-髋中点连线相对垂直轴角度 |
+| 手臂对称性 | 左右手臂位置差异 |
+| 质心轨迹 | 肩髋中点的时序轨迹 |
+| 跳跃滞空 / 高度 | 基于 T/A/L 与 FPS 修正估算 |
+| 起跳速度 | 由估算高度推导 |
+| 旋转速度 / 周数 | 肩线角度 unwrap 后估算 |
+
+子评分：
+
+- `takeoff_power`
+- `rotation_axis`
+- `arm_coordination`
+- `landing_absorption`
+- `core_stability`
+
+生物力学还会生成 `key_frame_candidates`，为语义时间戳仲裁提供 skeleton T/A/L 候选。
+
+**涉及文件**：
+
+- `backend/app/services/biomechanics.py`
+- `backend/app/services/keyframe_candidates.py`
+- `backend/app/services/phase_smoother.py`
+
+---
+
+## Stage 7: 时间戳仲裁与语义关键帧抽取
+
+**目标**：把视频 AI 的阶段区间、骨架候选、运动峰值合并为 FFmpeg 可精确抽取的真实时间点。
+
+仲裁规则：
+
+| 视频 AI 置信度 | 行为 |
+|---:|---|
+| `>= 0.80` | `video_ai_refined`：使用视频阶段区间，并用骨架候选或局部运动峰值 refine |
+| `>= 0.55` | `blended`：视频区间作为边界，优先使用落在区间内的骨架 T/A/L |
+| `< 0.55` | `skeleton_fallback`：回退到骨架候选与 sampled frames |
+
+可靠性门控：
+
+- 阶段 confidence `< 0.60` 不进入语义帧选择。
+- T/A/L 必须满足顺序：`T < A < L`。
+- `fallback_recommendation != use_video_timestamps` 时保守降级。
+- 语义帧最多 12 张。
+- T/L 会在 `±0.18s` 局部窗口内用高 FPS 运动峰值 refine。
+- Apex（A）保留语义/骨架时间点，不强行贴到运动峰值。
+- 语义帧抽取失败或 refinement 后不可靠时，视觉分析改用 Stage 2 sampled frames。
+
+输出：
+
+- `uploads/{analysis_id}/semantic_frames/semantic_0001.jpg`
+- `frame_motion_scores.resolved_keyframes`
+- `frame_motion_scores.video_temporal`
+
+**涉及文件**：
+
+- `backend/app/services/video_temporal.py::resolve_semantic_keyframes()`
+- `backend/app/services/video_temporal.py::semantic_keyframes_are_reliable()`
+- `backend/app/services/video.py::refine_semantic_keyframe_timestamps()`
+- `backend/app/services/video.py::extract_precise_frames_at_timestamps()`
+
+---
+
+## Stage 8: Dual-Path 视觉分析
+
+**目标**：让“纯视觉观察”和“骨架/数值 grounding”互相校验，降低单一路径误判。
+
+Path A：纯视觉路径
+
+- 使用原始 sampled frames 或 semantic frames。
+- 如果没有可靠 semantic frames，会优先尝试动作窗口视频模式，失败后回退图片帧模式。
+- 不直接引用骨架测量值，主要输出逐帧观察、阶段、问题、优点和 `pure_vision_subscores`。
+- 当使用 semantic frames 时，每帧附带 `video_context`，模型需要做 phase verification。
+
+Path B：骨架/数值 grounding 路径
+
+- 对帧图像叠加 MediaPipe 骨架和角度标注。
+- 输入每帧生物力学上下文、关键帧集合和 jump metrics 摘要。
+- 常规 sampled frames 下最多取 10 张带上下文帧；semantic frames 下保留全部语义帧。
+- Path B 是软失败：失败时返回 `error`，主流程继续依赖 Path A。
+
+交叉验证：
+
+- 比较两路 `detected_phases`、五项子评分和客观维度分歧。
+- 生成 `skeleton_reliability_signal`：`reliable` / `uncertain` / `likely_wrong`。
+- 根据一致率和可靠性给出 `recommended_path` 与 blend weights。
+- 高冲突或关键帧顺序异常会标记 `needs_human_review`。
+
+帧级视频上下文字段：
 
 ```json
 {
@@ -276,135 +367,199 @@
 }
 ```
 
-**原始流程仍保留**:
+**涉及文件**：
 
-1. 将抽帧图片编码为 base64 data URL
-2. 构造多模态 prompt:
-   - System: 花样滑冰分析师角色 + 选手记忆上下文
-   - User: 动作类型 + 子类型 + Profile 证据 + 每帧图片
-3. 调用 Vision slot 的 AI 模型（默认 `qwen3.6-plus`）
-4. 解析 JSON 响应，归一化到标准格式
-
-**每帧输出**:
-
-```json
-{
-  "frame_id": "frame_0001",
-  "phase": "准备|起跳|腾空|落冰|滑出|旋转入|旋转中|旋转出|步法|不可分析",
-  "observations": {
-    "knee_bend": "充分|不足|过度|不适用",
-    "arm_position": "正确|偏高|偏低|不对称|不适用",
-    "axis_alignment": "垂直|前倾|后仰|侧倾|不适用",
-    "blade_edge": "外刃|内刃|平刃|不适用",
-    "core_stability": "稳定|轻微晃动|明显晃动|不适用",
-    "landing_absorption": "良好|不足|过度|不适用"
-  },
-  "issues": ["问题描述"],
-  "positives": ["优点描述"],
-  "confidence": 0.85
-}
-```
-
-**涉及文件**: `vision.py::analyze_frames()`
+- `backend/app/services/vision_dual.py`
+- `backend/app/services/vision_path_a.py`
+- `backend/app/services/vision_path_b.py`
+- `backend/app/services/vision_video_context.py`
+- `backend/app/services/cross_validator.py`
 
 ---
 
 ## Stage 9: LLM 报告生成
 
-**目标**: 综合视觉分析和生物力学指标，生成结构化训练报告。
+**目标**：把视觉观察、生物力学、视频时序和学员记忆融合为结构化训练报告。
 
-**输入**:
-- 结构化帧分析（Stage 8 输出）
-- 生物力学指标（Stage 7 输出）
-- 选手记忆上下文（长期训练背景）
+输入：
 
-**调用**: Report slot 的 AI 模型（默认 DeepSeek V3）
+- Path A 标准化帧分析。
+- Path B 子评分与量化观察。
+- 生物力学指标。
+- `cross_validation` 与 `auto_eval`。
+- `video_temporal` 与 `resolved_keyframes` 摘要。
+- 学员记忆、技能分类、用户备注等统一上下文。
 
-**输出**:
+输出：
 
 ```json
 {
   "summary": "总体评价 2-3 句",
-  "issues": [{"category": "落冰阶段", "description": "...", "severity": "high", "phase": "落冰", "frames": ["frame_0012"]}],
-  "improvements": [{"target": "落冰缓冲", "action": "练习轻落地..."}],
+  "issues": [
+    {
+      "category": "落冰阶段",
+      "description": "...",
+      "severity": "high|medium|low",
+      "phase": "落冰",
+      "frames": ["semantic_0003"]
+    }
+  ],
+  "improvements": [
+    {"target": "落冰缓冲", "action": "..."}
+  ],
   "training_focus": "本阶段训练重点",
-  "subscores": {"takeoff_power": 80, "rotation_axis": 72, ...},
+  "subscores": {
+    "takeoff_power": 80,
+    "rotation_axis": 72,
+    "arm_coordination": 76,
+    "landing_absorption": 70,
+    "core_stability": 74
+  },
   "data_quality": "good|partial|poor"
 }
 ```
 
-**涉及文件**: `report.py::generate_report()`
+报告策略：
+
+- 报告模型失败时降级为基于生物力学的 fallback report。
+- JSON 解析最多重试 3 次。
+- `data_quality` 会结合视觉质量、双路径冲突和是否需要人工复核下调。
+- 针对儿童/初学者启用保守评分校准，避免把可训练动作按成人高水平竞技标准过度扣分。
+
+**涉及文件**：
+
+- `backend/app/services/report.py::generate_report()`
 
 ---
 
-## Stage 10: 评分融合与存储
+## Stage 10: 分数融合、auto-eval 与存储
 
-**目标**: 将 AI 评分和生物力学评分融合为最终 Force Score。
+子评分融合：
 
-**融合公式**:
+```text
+bio_weight = max(0.20, 0.60 - warning_count * 0.08)
+ai_weight = 1.0 - bio_weight
+fused[key] = round(ai_score * ai_weight + bio_score * bio_weight)
 ```
-final_score[key] = round(ai_score * 0.4 + bio_score * 0.6)
-```
 
-**Force Score 加权**:
+当生物力学质量 flags 较多时，系统会降低 bio 权重；没有 bio 子评分时直接使用 AI 子评分。
+
+Force Score 权重：
 
 | 子项 | 权重 |
-|------|------|
+|---|---:|
 | `takeoff_power` | 25% |
 | `rotation_axis` | 25% |
 | `landing_absorption` | 25% |
 | `arm_coordination` | 15% |
 | `core_stability` | 10% |
 
-**最终存储**:
-- `analysis.vision_structured` — 帧分析结构化数据
-- `analysis.report` — 训练报告
-- `analysis.pose_data` — 骨骼关键点
-- `analysis.bio_data` — 生物力学指标
-- `analysis.force_score` — 综合评分
-- `analysis.status` → `"completed"`
+儿童评分下限：
 
-**涉及文件**: `report.py::fuse_subscores()`, `calculate_force_score()`, `routers/analysis.py::process_analysis()`
+- `data_quality=good` 且没有高危问题时，Force Score 最低 70。
+- `data_quality=partial` 且没有高危问题时，Force Score 最低 65。
+- `data_quality=poor`、骨架 `likely_wrong`、高严重度/安全风险问题时不应用下限。
+
+auto-eval：
+
+- 校验关键帧顺序。
+- 校验阶段序列。
+- 收集高置信冲突。
+- 输出 data quality flags 和 key-frame signature。
+
+最终存储字段：
+
+- `analysis.vision_structured`
+- `analysis.vision_path_a`
+- `analysis.vision_path_b`
+- `analysis.cross_validation`
+- `analysis.report`
+- `analysis.pose_data`
+- `analysis.bio_data`
+- `analysis.frame_motion_scores`
+- `analysis.force_score`
+- `analysis.processing_logs`
+- `analysis.processing_timings`
+- `analysis.pipeline_version`
+- `analysis.status = completed`
+
+**涉及文件**：
+
+- `backend/app/services/report.py::fuse_subscores()`
+- `backend/app/services/report.py::calculate_force_score()`
+- `backend/app/services/report.py::apply_child_score_floor()`
+- `backend/app/services/auto_eval.py`
+- `backend/app/routers/analysis.py::process_analysis()`
 
 ---
 
 ## AI 供应商架构
 
-系统使用**双 slot** 架构，视觉分析和报告生成可以使用不同的 AI 模型:
+系统采用多 slot 供应商配置，API 使用 OpenAI SDK 兼容接口或 DashScope 视频接口。
 
-| Slot | 用途 | 推荐模型 | 备选 |
-|------|------|---------|------|
-| `vision` | 多模态帧分析 | Qwen 3.6 Plus | Kimi K2.5, GLM-4.5V, Doubao Seed 2.0 |
-| `report` | 文本报告生成 | DeepSeek V3 | Doubao Seed 2.0, MiniMax M2.7, GLM-5, Qwen-Max |
+| Slot | 用途 |
+|---|---|
+| `vision` | 兼容旧视觉入口或 fallback |
+| `vision_path_a` | Path A 纯视觉/视频模式 |
+| `vision_path_b` | Path B 骨架图 + 量化 grounding |
+| `report` | 文本报告生成 |
 
-供应商配置存储在 `ai_providers` 表中，API Key 使用 AES-GCM 加密。
+若 `vision_path_a` 或 `vision_path_b` 未配置，后端会回退到 `vision` slot，并在日志中记录 fallback。
+
+推荐默认：
+
+- 视觉：`qwen3.6-plus`
+- 报告：DeepSeek 系列文本模型
+
+供应商配置存储在数据库 `ai_providers` 表中，API Key 使用 AES-GCM 加密。
+
+---
+
+## 状态流转与重试
+
+状态流转：
+
+```text
+pending -> processing/extracting_frames -> awaiting_target_selection -> analyzing -> generating_report -> completed
+                                                                                                  -> failed
+```
+
+重试入口：
+
+| retry_from | 前置缓存要求 |
+|---|---|
+| `extract_frames` | 源视频存在 |
+| `pose` | 已有 `frame_motion_scores` |
+| `biomechanics` | 已有 `pose_data` |
+| `vision` | 已有 `pose_data` + `bio_data` |
+| `report` | 已有 `vision_structured` + `bio_data` |
+
+系统会记录：
+
+- `processing_logs`：阶段日志、耗时、provider 细节和 fallback 原因。
+- `processing_timings`：每个阶段耗时。
+- `retry_from_stage`：失败后建议从哪个阶段恢复。
+- stale task 恢复：长时间卡住的任务会被标记为 failed，并保留可重试阶段。
 
 ---
 
 ## 错误处理
 
-| 错误码 | 含义 | 触发场景 |
-|--------|------|---------|
-| `VIDEO_DECODE_FAILED` | 视频格式无法识别 | FFmpeg 无法解码 |
-| `FRAME_EXTRACT_FAILED` | 帧提取失败 | FFmpeg 输出为空 |
-| `AI_API_TIMEOUT` | AI 分析超时 | 模型响应超 90s |
-| `AI_API_AUTH_ERROR` | API Key 无效 | Key 过期或错误 |
-| `AI_API_QUOTA_EXCEEDED` | API 额度不足 | 429 限流 |
-| `AI_API_CONTENT_FILTER` | 内容安全过滤 | 模型拒绝分析 |
-| `AI_RESPONSE_PARSE_FAIL` | AI 返回格式异常 | JSON 解析失败 |
-| `REPORT_SAVE_FAILED` | 报告保存失败 | 数据库写入异常 |
-| `UNKNOWN_ERROR` | 未知错误 | 兜底 |
+常见错误码：
 
-每种错误都会映射为用户友好的中文提示。
+| 错误码 | 含义 |
+|---|---|
+| `VIDEO_FORMAT_INVALID` | 容器或 magic bytes 不合法 |
+| `VIDEO_NO_VIDEO_STREAM` | 无视频流、时长/分辨率不满足要求 |
+| `VIDEO_BLANK_FRAMES` | 抽样帧为空白或近似黑屏 |
+| `VIDEO_DECODE_FAILED` | FFmpeg 解码失败 |
+| `FRAME_EXTRACT_FAILED` | 抽帧失败或语义帧抽取失败 |
+| `AI_API_TIMEOUT` | AI 请求超时 |
+| `AI_API_AUTH_ERROR` | API Key 无效 |
+| `AI_API_QUOTA_EXCEEDED` | API 额度或限流问题 |
+| `AI_API_CONTENT_FILTER` | 模型拒绝内容 |
+| `AI_RESPONSE_PARSE_FAIL` | AI 返回 JSON 不合法 |
+| `REPORT_SAVE_FAILED` | 数据库存储失败 |
+| `UNKNOWN_ERROR` | 未知兜底错误 |
 
----
-
-## 状态流转
-
-```
-pending → extracting_frames → [awaiting_target_selection] → analyzing → generating_report → completed
-                                                                                          → failed
-```
-
-- `awaiting_target_selection`: 仅在自动锁定置信度不足时出现，等待用户手动选择目标
-- 任何阶段失败 → `failed` + 错误码 + 错误详情
+错误会映射为用户可读提示；可降级的 AI 错误尽量转为 fallback report 或 sampled-frame fallback，而不是直接中断整条流水线。

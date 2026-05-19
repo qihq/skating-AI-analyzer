@@ -202,7 +202,7 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(temporal_kwargs["analyzed_video_kind"], "action_window_ai")
             self.assertEqual(refine_mock.await_args.args[2][0]["timestamp"], 1.2)
             self.assertEqual(dual_mock.await_args.kwargs["frame_paths"], semantic_paths)
-            self.assertIsNone(dual_mock.await_args.kwargs["clip_path"])
+            self.assertEqual(dual_mock.await_args.kwargs["clip_path"].name, "action_window_ai.mp4")
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)
                 self.assertIsNotNone(saved)

@@ -1,437 +1,362 @@
-# 花样滑冰 AI 视频分析模块 — 深度复盘与迭代规划
+# 花样滑冰 AI 视频分析模块：深度复盘与迭代规划
 
-> 本文档从计算机视觉与视频理解专家视角，对当前 Skating Analyzer 的 AI 视频分析模块进行全面复盘，分析现有实现的设计思想、数据流、技术选型、根本问题，并给出可落地的优化方案。
+本文档从计算机视觉、视频理解和训练产品工程视角复盘 Skating Analyzer 当前视频分析模块。它不是接口说明书；当前流水线细节见 [ai-analysis-flow.md](./ai-analysis-flow.md)。本文重点回答三个问题：
 
----
-
-## 第一部分：现有实现详细阐述
-
-### 1. 整体流水线架构
-
-系统采用 **10 阶段串并行混合流水线**，核心设计思想是"多信号源仲裁 + 双路径验证"：
-
-```
-视频输入
-  │
-  ├─ Stage 1: 上传校验（magic bytes + ffprobe + 空帧检测）
-  ├─ Stage 1A: 视频 AI 语义时间定位（qwen3.6-plus，并行）
-  ├─ Stage 2: 运动密度曲线 → 动作窗口检测
-  ├─ Stage 3: 运动加权抽帧（~20帧，运动密集区更密）
-  ├─ Stage 4: 目标锁定（多人场景选运动员）
-  ├─ Stage 5: MediaPipe 33点姿态提取
-  ├─ Stage 6: 动作 Profile 推断（jump/spin/step/spiral）
-  ├─ Stage 7: 生物力学计算（关节角度、跳跃高度、旋转速度）
-  ├─ Stage 7A: 时间戳仲裁 + FFmpeg 语义关键帧抽取
-  ├─ Stage 8: 双路径 LLM 视觉分析（Path A 帧分析 + Path B 视频分析）
-  ├─ Stage 9: LLM 报告融合
-  └─ Stage 10: 评分融合 & 存储
-```
-
-**模块划分与数据流**：
-
-| 模块 | 输入 | 输出 | 核心文件 |
-|------|------|------|---------|
-| video | 原始视频文件 | 抽帧图片、运动元数据、动作窗口时间戳 | `video.py` |
-| video_temporal | 视频文件 + 动作类型 | 语义阶段区间、T/A/L 时间戳、宏观评估 | `video_temporal.py` |
-| pose | 帧图片目录 | 33关键点3D坐标 + 追踪状态 | `pose.py` |
-| biomechanics | 姿态序列 | 关节角度、跳跃高度、旋转速度、子评分 | `biomechanics.py` |
-| vision_dual | 帧图片 + 视频上下文 | 双路径结构化帧分析 | `vision_dual.py` |
-| vision_path_a | 语义关键帧 + video_context | 逐帧验证式分析 | `vision_path_a.py` |
-| vision_path_b | 动作窗口视频clip | 视频级结构化分析 | `vision_path_b.py` |
-| vision_fusion | Path A + Path B 结果 | 融合后的帧分析 | `vision_fusion.py` |
-| report | 帧分析 + 生物力学 + 选手记忆 | 结构化训练报告 | `report.py` |
-
-**设计哲学**：
-- **不信任单一信号源**：视频 AI、运动密度、骨架候选三路仲裁，任何一路异常都有 fallback
-- **视频 AI 是语义层而非裁判层**：只提供阶段区间和宏观评价，不做逐帧判定，避免幻觉
-- **双路径交叉验证**：Path A（帧级多模态）和 Path B（视频级原生理解）互相校验
+- 当前实现真正依赖哪些信号，哪些信号只是辅助。
+- v5.0.0 已经解决了哪些历史问题。
+- 后续迭代应该优先补哪些能力，避免继续堆 prompt 和阈值。
 
 ---
 
-### 2. 视频预处理
+## 1. 当前实现概况
 
-#### 2.1 抽帧策略
+当前系统是一个 **规则 + 姿态估计 + 视频多模态 AI + 图片多模态 AI + 报告 LLM** 的混合流水线。它没有本地端到端训练模型，也没有 ISU 官方评分引擎；现阶段定位是儿童/青少年训练复盘工具，而不是比赛打分器。
 
-系统采用 **两级抽帧** 架构：
+核心架构：
 
-**第一级：运动密度检测用缩略图**
-- 帧率：2fps（`ACTION_WINDOW_DETECTION_FPS`）
-- 分辨率：160×90
-- 用途：计算帧间差异 → 运动密度曲线
-
-**第二级：分析用全分辨率帧**
-- 帧率：按 Profile 动态配置
-  - 跳跃 (jump): 16fps — 快速动作需要高时间分辨率
-  - 旋转 (spin): 10fps — 中等速度
-  - 螺旋线 (spiral): 8fps — 慢速持续动作
-  - 步法 (step): 6fps — 连续但不需要逐帧
-- 分辨率：854×480（`FRAME_FULL_SIZE`）
-- 最大帧数：按 Profile 配置（jump=32, spin=24, spiral=16, step=20）
-
-**慢动作处理**：源视频 ≥60fps 时，自动折算回真实时间轴。例如 240fps 慢动作视频，3秒动作窗口在源视频中对应 12 秒。
-
-#### 2.2 运动密度曲线与动作窗口检测
-
-```
-帧差异 → absdiff → mean/64 → 归一化到 [0,1] → 3帧滑动均值平滑
+```text
+视频预检查
+  -> profile 化动作窗口检测
+  -> 运动加权抽帧
+  -> 目标学员锁定
+  -> MediaPipe 姿态与生物力学
+  -> Qwen 3.6 Plus 视频语义时序
+  -> 视频/骨架/运动峰值三方仲裁
+  -> semantic keyframes 或 sampled frames
+  -> Path A 纯视觉分析
+  -> Path B 骨架叠加 + 量化 grounding
+  -> cross-validation + auto-eval
+  -> 报告融合 + Force Score
 ```
 
-**窗口选择策略**（按 Profile 不同）：
-- **jump/spin**：选运动量最大的窗口（`sum(scores)`）
-- **spiral**：选运动最平稳的窗口（`stability_bonus - avg_motion`，低方差优先）
-- **spin**：附加连续性奖励（`-abs(window[0] - window[-1])`，减少切变）
+设计哲学：
 
-#### 2.3 运动加权抽帧
-
-核心算法 `_select_motion_weighted_indices()`：
-
-1. **峰值保护区**：识别 top-3 局部运动峰值，保护其 ±2 帧邻域（确保起跳/落冰瞬间不被采样掉）
-2. **分段配额**：将动作窗口分为 10 段，按运动密度权重分配剩余配额
-3. **段内降序选取**：每段内按运动分数降序选取
-4. **溢出裁剪**：超出配额时，优先移除非保护区中运动分数最低的帧
-
-#### 2.4 人体检测与跟踪
-
-**目标锁定 (Target Lock)**：
-- 基于运动检测生成候选 bbox
-- 连续性评分函数（加权）：
-  - IoU 连续性: 34%
-  - 中心距离连续性: 22%
-  - 运动区域重叠: 16%
-  - 尺度一致性: 14%
-  - 关键点可见性: 14%
-- 置信度 ≥0.72 自动锁定，<0.72 暂停等待用户手动选择
-
-**ROI 提取**：锁定后基于 bbox 裁剪，传入 MediaPipe 做单人姿态估计。
+- **不信任单一信号源**：视频 AI、图片 AI、骨架、运动密度互相校验。
+- **视频 AI 只做语义层**：它输出阶段区间、动作确认、宏观评价，不直接作为逐帧裁判。
+- **语义关键帧必须过门控**：T/A/L 顺序、阶段置信度、fallback recommendation、局部 refinement 都会影响是否采用 semantic frames。
+- **Path A 与 Path B 分工明确**：Path A 看画面，Path B 看骨架标注和数值；冲突时降低确定性。
+- **产品侧保守表达**：儿童训练场景下，报告要给可执行建议，不输出过度竞技化惩罚。
 
 ---
 
-### 3. 姿态估计与特征工程
+## 2. 当前数据流与模块职责
 
-#### 3.1 关键点检测
-
-**模型**：MediaPipe Pose（两种模式）
-
-| 模式 | 条件 | 行为 |
-|------|------|------|
-| `multi_pose` | 配置了 `.task` 模型文件 | 检测多人，评分函数选最佳目标 |
-| `fallback_single_pose` | 未配置 | 基于 bbox 裁剪后单人检测 |
-
-**骨骼定义**：MediaPipe 标准 33 点，关键索引：
-- 11/12: 左/右肩
-- 23/24: 左/右髋
-- 25/26: 左/右膝
-- 27/28: 左/右踝
-
-#### 3.2 运动学特征提取
-
-| 特征 | 计算方式 | 用途 |
-|------|---------|------|
-| 膝关节角度 | 髋-膝-踝三点夹角（左右分别） | 起跳发力/落冰缓冲评估 |
-| 躯干倾斜 | 肩中点-髋中点连线与垂直轴夹角 | 旋转轴心评估 |
-| 手臂对称性 | 左右手腕到各自肩的距离差 | 手臂配合评估 |
-| 质心轨迹 | 肩髋中点的 Y 坐标序列 | 跳跃腾空检测 |
-| 跳跃高度 | `h = 0.5 * g * (t/2)²`（基于滞空时间） | 跳跃质量 |
-| 起跳速度 | `v = sqrt(2gh)` | 起跳发力 |
-| 旋转速度 | 肩连线角度变化率 / 时间 | 旋转质量 |
-
-#### 3.3 归一化与滤波
-
-- **FPS 感知**：所有时间相关计算都考虑源视频 FPS，慢动作自动折算
-- **旋转展开**：旋转角度使用 unwrap 处理，避免 360° 跳变
-- **相位投票**：多帧姿态序列投票确定动作阶段边界
-- **Cross-validation**：骨架信号与 AI 视觉结果交叉验证
+| 模块 | 输入 | 输出 | 主要职责 |
+|---|---|---|---|
+| `video.py` | 源视频 | 动作窗口、sampled frames、semantic frames、motion metadata | FFmpeg/OpenCV 预处理、慢动作折算、抽帧、局部运动 refinement |
+| `video_temporal.py` | 动作窗口 AI clip | `video_temporal_v1`、`resolved_keyframes` | 视频语义定位、payload 校验、时间戳仲裁 |
+| `target_lock.py` / `bbox_tracker.py` | sampled frames | target lock payload、跨帧 bbox | 多人场景目标选择与跟踪 |
+| `pose.py` / `smoothing.py` | frames + target lock | 33 点姿态序列 | MediaPipe 姿态、多人/单人 fallback、平滑 |
+| `biomechanics.py` | 姿态序列 | 几何指标、bio_subscores、keyframe candidates | 膝角、躯干、质心、跳跃和旋转估算 |
+| `action_profiles.py` | 用户输入 + 运动/姿态证据 | `jump/spin/step/spiral` | profile 推断和 sampling/prompt 路由 |
+| `vision_path_a.py` | 原始帧或 clip | 纯视觉帧分析、pure_vision_subscores | 从画面判断姿态、阶段、刃面和技术问题 |
+| `vision_path_b.py` | 骨架叠加帧 + bio context | 量化 grounding 分析、subscores | 骨架/角度辅助的稳定性判断 |
+| `cross_validator.py` | Path A + Path B | 一致率、推荐路径、冲突等级 | 发现骨架追踪或视觉判断分歧 |
+| `auto_eval.py` | bio + vision + motion | 关键帧顺序和阶段质量 flags | 自动回归评估与质量诊断 |
+| `report.py` | vision + bio + context | 结构化训练报告、Force Score | 报告融合、分数融合、儿童评分校准 |
 
 ---
 
-### 4. 动作识别与分割
+## 3. v5.0.0 已解决的关键问题
 
-#### 4.1 时序模型
+### 3.1 关键帧不再只依赖运动抽帧
 
-**当前实现不使用传统时序模型**（无 3D CNN / Transformer / LSTM / GCN）。采用的是 **规则 + LLM 混合架构**：
+旧问题：动作速度快时，运动加权 sampled frames 可能错过最后离冰、最高点或首次落冰的瞬间。即便抽到运动峰值，也未必语义正确。
 
-1. **规则层**：运动密度曲线 + 质心轨迹 → 动作窗口检测 + Profile 推断
-2. **LLM 层**：多模态大模型分析关键帧 → 动作分类 + 质量评估
+当前解法：
 
-**Profile 推断规则**：
-```
-螺旋线门控: vertical_range ≤ 0.06 && avg_motion ≤ 0.09 且子类型匹配
-跳跃门控: vertical_range ≥ 0.08 && max_motion ≥ 0.08 且子类型匹配
-未通过门控的跳跃降级为 step
-```
+- Qwen 3.6 Plus 对动作窗口 clip 输出阶段区间和 T/A/L hint。
+- `resolve_semantic_keyframes()` 用视频区间、骨架候选和运动峰值仲裁。
+- T/L 使用 `±0.18s` 局部高 FPS 运动扫描 refine。
+- 语义帧不可靠时回退 sampled frames。
 
-#### 4.2 动作边界检测
+剩余风险：
 
-**视频 AI 语义定位**（`video_temporal.py`）：
-- 模型：`qwen3.6-plus`（Qwen 系列多模态视频理解模型）
-- 输入：动作窗口视频 clip（640×360, 15fps, CRF30）
-- 输出：`phase_segments` 包含每个阶段的 `time_start` / `time_end` / `phase_code` / `key_frame_hint`
+- 视频模型对高速动作的绝对时间戳仍可能偏移。
+- 单机位、遮挡和低清晰度下，Apex 与落冰的可见性不稳定。
+- 语义帧可靠性目前是规则门控，不是学习得到的置信校准。
 
-**阶段代码体系**：
+### 3.2 抽帧策略从固定 20 帧升级为 profile 化
 
-| 动作类型 | 阶段代码 |
-|---------|---------|
-| 跳跃 | approach → preparation → takeoff → air → landing → glide_out |
-| 旋转 | spin_entry → spin_main → spin_exit |
-| 步法 | step_sequence |
-| 螺旋线 | spiral_entry → spiral_hold → spiral_exit |
+旧问题：跳跃、旋转、螺旋线、步法的时长和信息密度不同，固定 5fps/20 帧会让跳跃时间分辨率不足，也会浪费慢动作帧预算。
 
-#### 4.3 动作分类类别体系
+当前解法：
 
-基于 ISU 规则的动作分类：
-- **跳跃**：Axel, Salchow, Toe Loop, Loop, Flip, Lutz（及各自周数）
-- **旋转**：Upright Spin, Sit Spin, Camel Spin, Combination Spin, Change Foot Spin
-- **步法**：Step Sequence, Choreographic Sequence
-- **螺旋线**：Charlotte, Ina Bauer, Arabesque, Spread Eagle
+- `backend/app/configs/action_profiles.json` 配置每类 profile 的窗口、FPS、最大帧数。
+- jump 当前默认 3.5s / 16fps / 32 帧。
+- spin 当前默认 6s / 10fps / 28 帧。
+- step 当前默认 8s / 6fps / 24 帧。
+- spiral 当前默认 6s / 8fps / 20 帧。
+- 源视频 >=60fps 时按 30fps 正常速度折算时间轴。
 
----
+剩余风险：
 
-### 5. 质量评估与规则检查
+- profile 推断错误会影响后续抽帧密度和 prompt。
+- 对连续组合动作或长节目片段，单窗口策略仍偏窄。
 
-#### 5.1 跳跃评估
+### 3.3 双路径分析降低了单一路径误判
 
-**周数判定**：
-- 基于滞空时间估算：`rotations ≈ air_time × rotation_speed`
-- 旋转速度从肩连线角度变化率计算
-- **当前局限**：无精确旋转角度累积（依赖 MediaPipe 2D 关键点，3D 旋转估计不精确）
+旧问题：只看原图时，模型容易被视角、服装和动作模糊影响；只看骨架时，MediaPipe 追踪错误会产生错误数值。
 
-**存周 (Under-rotation) 检测**：
-- 落冰瞬间躯干倾斜角度 > 阈值 → 标记为存周
-- **当前局限**：无冰刀刃面检测，无法精确判断落冰角度
+当前解法：
 
-**用刃错误**：
-- 要求 AI 视觉模型从帧图片判断内外刃
-- **当前局限**：帧图片分辨率和视角限制，AI 难以可靠判断刃面
+- Path A：纯视觉，不直接依赖骨架测量。
+- Path B：骨架叠加帧 + 每帧 bio context + jump metrics。
+- `cross_validate()` 比较阶段和五项评分，输出 `reliable/uncertain/likely_wrong`。
+- 当 Path B 失败，主流程仍可用 Path A 生成报告。
 
-#### 5.2 旋转定级
+剩余风险：
 
-- 基于旋转速度、轴心稳定性、持续时间
-- AI 视觉模型评估旋转姿态质量
-- **当前局限**：无 ISU Grade of Execution (GOE) 精确对标
+- Path A 和 Path B 的融合目前主要用于诊断和报告上下文，最终 `vision_structured` 仍以 Path A 为主。
+- Path B 的骨架叠加质量受 MediaPipe 检测影响较大。
+- 两路都使用通用多模态模型，仍缺乏专项学习能力。
 
-#### 5.3 步法复杂度
+### 3.4 报告生成加入质量降级和儿童评分校准
 
-- 基于运动密度和动作幅度
-- AI 视觉模型识别步法类型和连接
-- **当前局限**：无步法序列的逐元素分析
+旧问题：模型容易在低质量视频中输出过度确定的技术结论，或按成人竞技标准给儿童动作过低评分。
 
-#### 5.4 评分体系
+当前解法：
 
-**Force Score 融合公式**：
-```
-final_score[key] = round(ai_score × 0.4 + bio_score × 0.6)
-```
+- `data_quality` 会根据视觉质量、双路径冲突、human review 需求下调。
+- 低置信帧比例高时，报告会提示“结果仅供参考”。
+- 报告模型失败时转为 biomechanics fallback。
+- Force Score 使用 `apply_child_score_floor()`，在无高危问题且数据质量不差时给儿童训练场景合理下限。
 
-**加权**：
-| 子项 | 权重 |
-|------|------|
-| takeoff_power | 25% |
-| rotation_axis | 25% |
-| landing_absorption | 25% |
-| arm_coordination | 15% |
-| core_stability | 10% |
+剩余风险：
 
-**与 ISU 规则的匹配程度**：
-- 当前评分是**训练导向的启发式评分**，不是 ISU 官方 TES/PCS
-- 跳跃：关注起跳/腾空/落冰的生物力学质量，非精确 GOE
-- 旋转：关注轴心和速度，非 Level 4 定级要素
-- 步法：关注整体运动质量，非逐元素定级
+- 儿童评分下限是产品策略，不是客观技术水平校准。
+- 对“安全风险”与“严重技术错误”的文本识别依赖 issue 描述，仍有漏判可能。
 
 ---
 
-### 6. 训练数据与标注
+## 4. 当前根本限制
 
-#### 6.1 数据来源
+### 限制 1：没有花滑专项训练数据闭环
 
-**当前系统不使用本地训练数据集**。所有 AI 分析依赖预训练的云端大模型：
-- 视觉分析：`qwen3.6-plus`（阿里通义千问系列）
-- 报告生成：`DeepSeek V3` 等文本模型
+系统目前没有可持续积累和标注的专项数据集。AI 能力主要来自通用云端多模态模型，规则阈值来自工程经验和少量回归测试。
 
-这意味着系统的"训练数据"实际上是这些大模型的预训练数据，我们无法控制其分布。
+影响：
 
-#### 6.2 标注规范
+- Flip/Lutz、Loop/Salchow 等相似跳跃区分不稳定。
+- 动作边界置信无法用真实标签校准。
+- 提升主要依赖 prompt、规则和人工测试，难以量化泛化能力。
 
-- 无专门的花样滑冰标注数据集
-- 依赖大模型的 zero-shot / few-shot 能力
-- Prompt 中注入领域知识（ISU 规则、动作术语、评分标准）
+### 限制 2：姿态估计不是运动专项模型
 
-#### 6.3 数据增强
+MediaPipe 适合通用人体姿态，但花滑存在高速旋转、冰面反光、长距离拍摄、服装遮挡、多人背景等困难场景。
 
-- **帧级**：模糊过滤（Laplacian 方差 < 80.0 丢弃）
-- **视频级**：慢动作自动折算、运动加权采样
-- **无传统数据增强**（旋转/翻转/颜色抖动等），因为依赖云端 API
+影响：
 
-#### 6.4 样本不均衡
+- 旋转周数估算偏差大。
+- 膝角和躯干角在低分辨率/遮挡下不稳定。
+- 目标跟踪错误会污染 Path B 和生物力学。
 
-**严重不均衡**：
-- 跳跃视频远多于旋转/步法/螺旋线
-- 业余训练视频多于比赛视频
-- 正面/侧面视角多于斜后方
-- 单人场景多于多人场景
+### 限制 3：动作边界仍是规则仲裁
 
----
+v5.0.0 引入视频语义定位后，边界质量明显改善，但最终仍由规则把视频 AI、骨架候选和运动峰值合并。
 
-### 7. 推理优化与工程部署
+影响：
 
-#### 7.1 模型格式
+- 对连续步法、组合旋转、跳接跳等复杂片段支持有限。
+- 单一动作窗口假设限制了长视频里的多元素分析。
+- 规则门控难以表达模型置信度的真实分布。
 
-- **无本地模型推理**：所有 AI 分析通过云端 API 调用
-- MediaPipe 使用 TensorFlow Lite 格式（`.task` 文件）
-- 无 ONNX/TensorRT 转换
+### 限制 4：ISU 规则还未结构化落地
 
-#### 7.2 推理加速策略
+当前 Force Score 是训练导向评分，不是 TES/PCS 或 GOE/Level。
 
-- **并行 Stage 1A**：视频 AI 语义定位与主流程并行
-- **双路径并行**：Path A 和 Path B 在超时内并行执行
-- **帧预算控制**：`VIDEO_TEMPORAL_MAX_FRAMES=12` 限制语义帧数量
-- **模糊预过滤**：减少送入 LLM 的无效帧
-- **缓存复用**：Stage 重试时复用已抽取的帧
+影响：
 
-#### 7.3 部署方式
+- 无法给出官方语义的 GOE、Level、q、<、e、! 等标记。
+- 报告可解释，但不能作为比赛复盘的严格判分。
+- 不同动作类别之间的分数不可直接等价比较。
 
-- **Docker All-in-One**：nginx + FastAPI + SQLite 单容器
-- **云端 API 调用**：OpenAI SDK 兼容接口，支持多供应商切换
-- **供应商双 Slot**：vision slot（多模态）+ report slot（文本），可独立配置
+### 限制 5：前端人工复核能力不足
+
+系统已有 target lock 和 debug 面板，但缺少面向教练/开发者的标注与复核闭环。
+
+影响：
+
+- 错误案例难以沉淀为训练数据。
+- 无法快速修正 T/A/L、phase、动作类别和评分标签。
+- auto-eval 目前主要服务自动诊断，还没有形成数据集管理工作流。
 
 ---
 
-## 第二部分：根本问题分析
+## 5. 下一阶段迭代路线
 
-### 问题 1：过度依赖云端 LLM，缺乏领域特化模型
+### P0：建立错误案例与标注闭环
 
-**表现**：动作分类准确率不稳定，尤其是相似动作（Flip vs Lutz、Loop vs Salchow）。
+目标：把每次失败都变成可复用样本，而不是只修单个 bug。
 
-**根因**：
-- 通用多模态大模型的花样滑冰专业知识有限
-- Prompt 工程无法弥补模型对冰刀刃面、助滑弧线、身体轴心等细节的理解不足
-- 不同视角、不同画质下，模型表现差异大
+建议实现：
 
-### 问题 2：姿态估计精度不足
+- 在报告页或 Debug 页增加“标记为错误案例”入口。
+- 保存源视频、动作窗口、sampled frames、semantic frames、pose、bio、Path A/B、cross-validation、auto-eval。
+- 支持人工修正：
+  - 动作类别 / 子类型
+  - T/A/L 时间戳
+  - phase sequence
+  - target lock 是否正确
+  - Path A/B 哪一路更可信
+- 导出 JSONL 作为后续评估集。
 
-**表现**：旋转周数估计偏差大，跳跃高度计算不稳定。
+预期收益：
 
-**根因**：
-- MediaPipe 是通用姿态估计模型，非运动专用
-- 2D 关键点无法精确估计 3D 旋转
-- 冰面反光、运动模糊、服装遮挡影响关键点检测
-- 无时序姿态平滑（仅做简单相位投票）
+- 建立稳定回归集。
+- 为后续专项模型或规则校准提供数据。
+- 快速定位“模型错、骨架错、抽帧错、报告错”的责任边界。
 
-### 问题 3：动作边界检测依赖规则而非学习
+### P0：加强目标跟踪和姿态质量门控
 
-**表现**：动作起止时间戳不精确，尤其是连续步法中的单个动作分割。
+目标：减少错误骨架污染 Path B 和生物力学。
 
-**根因**：
-- 运动密度曲线是低级视觉特征，无法区分动作语义
-- 视频 AI 的时间戳精度受 clip 分辨率和帧率限制
-- 无专门的时序动作检测模型（如 ActionFormer, TemporalMaxer）
+建议实现：
 
-### 问题 4：缺乏 ISU 规则引擎
+- 为每帧姿态增加质量评分：可见关键点比例、bbox 连续性、人体尺度跳变、左右关键点异常交换。
+- 将 `skeleton_reliability_signal` 前移到 biomechanics 阶段，提前决定是否弱化 bio 权重。
+- 对 `likely_wrong` 场景主动提示用户重选目标，而不是只在报告里提示。
+- 对 semantic frames 的轻量 pose 单独记录质量，不与主 sampled pose 混淆。
 
-**表现**：评分与 ISU 官方 TES/PCS 差距大。
+预期收益：
 
-**根因**：
-- 无 ISU 规则的结构化编码（GOE ±5 标准、Level 4 要素清单）
-- 评分是启发式的，非规则驱动的
-- 缺少与 ISU 数据的对标验证
+- 降低错误骨架导致的错误报告。
+- Path B 的信任边界更清楚。
+- target lock 手动复核触发更准确。
 
-### 问题 5：无端到端可训练组件
+### P1：多动作窗口与长视频元素切分
 
-**表现**：系统改进只能靠调 Prompt 和规则阈值，无法通过数据驱动优化。
+目标：支持一个视频中出现多个动作元素，而不是只分析单个窗口。
 
-**根因**：
-- 整个流水线是模块拼接，非端到端训练
-- 各模块独立优化，梯度无法回传
-- 无标注数据集，无法训练专用模型
+建议实现：
 
----
+- 将运动密度曲线切成多个候选片段。
+- 每个片段独立 profile 推断、视频 AI 语义定位和抽帧。
+- 前端允许用户选择要分析的动作片段。
+- 数据结构从单 `Analysis` 单元素，逐步扩展到 `analysis.elements[]`。
 
-## 第三部分：优化方案
+预期收益：
 
-### 方案 1：构建花样滑冰专用动作识别模型（中期）
+- 更适合训练课视频。
+- 步法、组合旋转、跳跃串联分析更自然。
 
-**目标**：替代通用 LLM 的动作分类能力，提高相似动作区分度。
+### P1：结构化 ISU 规则引擎雏形
 
-**路径**：
-1. 收集 500-1000 段花样滑冰视频，标注动作类型和边界
-2. 使用 VideoMAE v2 或 TimeSformer 作为 backbone
-3. 在骨架序列（MediaPipe 输出）上训练 GCN 分类器
-4. 部署为 ONNX 模型，本地推理
+目标：让报告能清晰区分训练评分与规则判定。
 
-**预期收益**：动作分类准确率从 ~70% 提升到 ~90%+
+建议实现：
 
-### 方案 2：引入运动专用姿态估计（短期）
+- 先覆盖跳跃常见规则标签：
+  - 起跳刃：`!` / `e` 仅输出置信等级，不做绝对判定。
+  - 周数：`q` / `<` / `<<` 基于旋转估算 + 视觉观察给低/中/高置信。
+  - 落冰质量：step out、two-foot、fall、hand down 等训练标签。
+- 单独输出 `rule_findings`，不要直接混入 Force Score。
+- 报告中明确：“训练建议”与“规则风险”分栏。
 
-**目标**：提高关键点精度，尤其是快速旋转和跳跃场景。
+预期收益：
 
-**路径**：
-1. 替换 MediaPipe 为 ViTPose-H（大分辨率、高精度）
-2. 或使用 MotionBERT（3D 姿态提升）
-3. 增加时序姿态平滑（OneEuro Filter 或学习型平滑）
+- 更接近教练复盘语言。
+- 避免用户误以为 Force Score 等同官方分数。
 
-**预期收益**：关节角度误差降低 30-50%
+### P2：专项动作识别模型或轻量分类器
 
-### 方案 3：构建 ISU 规则引擎（中期）
+目标：减少通用 LLM 对动作类别的猜测。
 
-**目标**：评分与 ISU 规则对齐。
+短期可选：
 
-**路径**：
-1. 编码 ISU 跳跃 GOE ±5 标准（用刃、存周、进入/滑出质量等）
-2. 编码旋转 Level 1-4 要素（中心旋转、加速、姿态变化等）
-3. 构建规则检查器：输入视觉特征 → 输出 GOE 和 Level
-4. 与历史 ISU 比赛数据对标验证
+- 用现有错误案例训练轻量 tabular/sequence classifier：
+  - 输入 motion features、bio features、phase features、Path A/B 输出摘要。
+  - 输出 profile / jump subtype / confidence。
 
-**预期收益**：评分与 ISU 官方偏差从 ±2 分缩小到 ±0.5 分
+中期可选：
 
-### 方案 4：时序动作检测模型（长期）
+- 训练骨架序列分类器，例如 ST-GCN / Temporal Conv。
+- 使用 VideoMAE/TimeSformer 特征做动作分类，但需足够数据。
 
-**目标**：精确动作边界分割，替代运动密度曲线。
+预期收益：
 
-**路径**：
-1. 使用 ActionFormer 或 TemporalMaxer
-2. 输入：视频 clip 特征（VideoMAE 提取）
-3. 输出：动作实例的起止时间和类别
-4. 训练数据：标注了动作边界的花样滑冰视频数据集
+- 相似动作分类更稳定。
+- prompt 中的 `profile_evidence` 更可靠。
 
-**预期收益**：动作边界 IoU 从 ~0.5 提升到 ~0.8+
+### P2：语义时间戳置信校准
 
-### 方案 5：构建标注数据集与主动学习（持续）
+目标：把当前规则门控升级为可量化的可信度模型。
 
-**目标**：为所有模型优化提供数据基础。
+建议实现：
 
-**路径**：
-1. 设计标注工具：视频播放器 + 动作标注界面
-2. 标注规范：动作类型、边界时间戳、ISU 评分、刃面信息
-3. 主动学习：模型不确定的样本优先送人工标注
-4. 目标规模：1000+ 视频，10000+ 动作实例
+- 收集 video AI timestamp、skeleton candidate、motion peak 与人工标签的偏差。
+- 训练或拟合一个轻量校准器，输出 T/A/L 每个候选的 expected error。
+- 用校准结果替代固定的 0.55/0.80、0.60 阈值，或作为阈值补充。
 
----
+预期收益：
 
-## 第四部分：优先级排序
-
-| 优先级 | 方案 | 工期 | 预期收益 | 依赖 |
-|--------|------|------|---------|------|
-| P0 | 方案 2: 运动专用姿态估计 | 2-3 周 | 关节精度 +30-50% | 无 |
-| P0 | 方案 3: ISU 规则引擎 | 3-4 周 | 评分对齐 ISU | 领域专家 |
-| P1 | 方案 1: 专用动作识别模型 | 6-8 周 | 分类准确率 +20% | 标注数据 |
-| P2 | 方案 4: 时序动作检测 | 8-12 周 | 边界 IoU +30% | 标注数据 |
-| 持续 | 方案 5: 标注数据集 | 持续 | 所有模型的基础 | 人力 |
+- semantic frames 采用率更可控。
+- 降低“看似高置信但时间错位”的风险。
 
 ---
 
-## 附录：关键代码文件索引
+## 6. 建议的近期工程任务清单
+
+| 优先级 | 任务 | 影响面 | 验收标准 |
+|---|---|---|---|
+| P0 | 错误案例导出与人工标签 JSONL | 后端 + 前端 Debug | 可从任意 completed/failed 分析导出完整诊断包 |
+| P0 | 姿态质量评分与 target lock 复核触发 | pose / biomechanics / report | 骨架异常时 `data_quality` 下调，并提示重选目标 |
+| P0 | auto-eval 面板化 | 前端 Report/Debug | 关键帧顺序、阶段序列、冲突字段可视化 |
+| P1 | `rule_findings` 结构字段 | report / schemas / UI | 报告能单独展示规则风险，不混入训练评分 |
+| P1 | 多窗口候选预览 | video / UI | 长视频能显示多个候选动作片段供选择 |
+| P2 | 动作分类轻量评估集 | scripts / tests | 至少 100 条标注样本，可跑离线准确率 |
+
+---
+
+## 7. 当前测试覆盖与应补测试
+
+已有测试覆盖较完整，重点包括：
+
+- 视频预检查、模糊过滤、精确抽帧。
+- profile 抽帧、动作窗口、慢动作 FPS 修正。
+- target lock、bbox tracking、pose smoothing。
+- biomechanics、rotation unwrap、jump feature。
+- video temporal prompt/resolver/provider。
+- semantic keyframes、dual-path、cross-validation、report。
+- provider retry、metrics、stage retry、pipeline version。
+- auto-eval 和 replay export script。
+
+建议补充：
+
+- 真实错误案例 fixture：target 错、T/A/L 乱序、低清晰度、多人背景。
+- Path A 视频模式失败后 frame fallback 的端到端断言。
+- semantic frames refinement 后不可靠时回退 sampled frames 的报告质量断言。
+- `apply_child_score_floor()` 对安全风险文本的边界测试。
+- 多 slot provider fallback 的日志和 UI 展示测试。
+
+---
+
+## 8. 关键代码索引
 
 | 文件 | 职责 |
-|------|------|
-| `backend/app/services/video.py` | 视频预处理、抽帧、运动密度、动作窗口 |
-| `backend/app/services/video_temporal.py` | 视频 AI 语义时间定位、时间戳仲裁 |
+|---|---|
+| `backend/app/routers/analysis.py` | 主分析编排、阶段重试、状态流转、日志与存储 |
+| `backend/app/services/video.py` | 视频预处理、动作窗口、抽帧、慢动作折算、语义帧精确抽取 |
+| `backend/app/services/video_temporal.py` | 视频 AI 语义定位、payload 校验、时间戳仲裁 |
 | `backend/app/services/pose.py` | MediaPipe 姿态提取 |
-| `backend/app/services/biomechanics.py` | 生物力学计算 |
-| `backend/app/services/vision_dual.py` | 双路径视觉分析协调 |
-| `backend/app/services/vision_path_a.py` | Path A 帧级多模态分析 |
-| `backend/app/services/vision_path_b.py` | Path B 视频级分析 |
-| `backend/app/services/vision_fusion.py` | 双路径结果融合 |
-| `backend/app/services/vision_video_context.py` | 视频上下文构建 |
-| `backend/app/services/cross_validator.py` | 骨架与视觉交叉验证 |
-| `backend/app/services/report.py` | 报告生成与评分融合 |
-| `backend/app/services/target_lock.py` | 运动员目标锁定 |
-| `backend/app/services/bbox_tracker.py` | 边界框追踪 |
+| `backend/app/services/smoothing.py` | 姿态平滑与短缺口插值 |
+| `backend/app/services/target_lock.py` | 目标学员候选、自动锁定、手动选择 |
+| `backend/app/services/bbox_tracker.py` | bbox 跨帧跟踪 |
+| `backend/app/services/action_profiles.py` | 动作 profile 推断 |
+| `backend/app/services/jump_features.py` | 跳跃子类型几何证据 |
+| `backend/app/services/biomechanics.py` | 生物力学计算与 bio_subscores |
+| `backend/app/services/keyframe_candidates.py` | T/A/L 等关键帧候选 |
+| `backend/app/services/vision_path_a.py` | 纯视觉路径 |
+| `backend/app/services/vision_path_b.py` | 骨架/数值 grounding 路径 |
+| `backend/app/services/vision_dual.py` | 双路径协调、骨架标注、并行执行 |
+| `backend/app/services/cross_validator.py` | 双路径一致性与冲突诊断 |
+| `backend/app/services/auto_eval.py` | 自动质量评估 |
+| `backend/app/services/report.py` | 报告生成、评分融合、儿童评分校准 |
+| `frontend/src/pages/ReportPage.tsx` | 报告、调试信息、重试入口 |
+| `frontend/src/components/AnalysisDebugLogPanel.tsx` | 分析阶段日志展示 |
+
+---
+
+## 9. 结论
+
+v5.0.0 已经把系统从“抽几张图给 LLM 看”推进到“视频语义时序 + 骨架几何 + 双路径交叉验证”的工程化流水线。当前最有价值的下一步不是继续增加 prompt 复杂度，而是建立错误案例闭环、姿态质量门控和结构化规则输出。只有先把可验证数据沉淀下来，后续专项模型、时间戳校准和 ISU 规则引擎才有稳定基础。
