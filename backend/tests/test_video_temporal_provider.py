@@ -104,6 +104,31 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         provider_mock.assert_awaited_once()
         request_mock.assert_awaited_once()
 
+    async def test_analyze_video_temporal_offsets_action_window_clip_timestamps(self) -> None:
+        request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
+
+        with patch("app.services.video_temporal.request_dashscope_video_completion", request_mock):
+            result = await analyze_video_temporal(
+                Path("action_window_ai.mp4"),
+                action_type="jump",
+                action_subtype="Axel",
+                video_duration_sec=3.0,
+                source_video_duration_sec=10.0,
+                source_fps=15.0,
+                timestamp_offset_sec=2.0,
+                analyzed_video_kind="action_window_ai",
+                provider=_qwen_provider("qwen3.6-plus"),
+            )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["analyzed_video_kind"], "action_window_ai")
+        self.assertEqual(result["timestamp_offset_sec"], 2.0)
+        self.assertEqual(result["phase_segments"][0]["time_start"], 3.0)
+        self.assertEqual(result["phase_segments"][0]["key_frame_hint"], 3.16)
+        self.assertEqual(result["key_moments"]["T_takeoff_sec"], 3.16)
+        self.assertEqual(result["key_moments"]["A_air_sec"], 3.45)
+        self.assertEqual(result["key_moments"]["L_landing_sec"], 3.75)
+
     async def test_timeout_returns_fallback_diagnostic(self) -> None:
         request_mock = AsyncMock(
             side_effect=AnalysisPipelineError(AnalysisErrorCode.AI_API_TIMEOUT, "video request timeout")

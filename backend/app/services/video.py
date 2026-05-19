@@ -33,6 +33,10 @@ FRAME_FULL_SIZE = os.getenv("FRAME_FULL_SIZE", "854x480")
 ACTION_CLIP_SIZE = os.getenv("ACTION_CLIP_SIZE", "854x480")
 ACTION_CLIP_MAX_SECONDS = float(os.getenv("ACTION_CLIP_MAX_SECONDS", "10"))
 ACTION_CLIP_MAX_MB = int(os.getenv("ACTION_CLIP_MAX_MB", "100"))
+ACTION_AI_CLIP_SIZE = os.getenv("ACTION_AI_CLIP_SIZE", "640x360")
+ACTION_AI_CLIP_FPS = float(os.getenv("ACTION_AI_CLIP_FPS", "15"))
+ACTION_AI_CLIP_CRF = int(os.getenv("ACTION_AI_CLIP_CRF", "30"))
+ACTION_AI_CLIP_MAX_MB = int(os.getenv("ACTION_AI_CLIP_MAX_MB", "40"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
@@ -726,6 +730,68 @@ async def cut_action_window_clip(
         raise RuntimeError("Action-window clip was not created.")
     if out_path.stat().st_size > max_bytes:
         raise RuntimeError(f"Action-window clip exceeds {ACTION_CLIP_MAX_MB}MB.")
+    return out_path
+
+
+async def cut_action_window_ai_clip(
+    video_path: Path,
+    window_start_sec: float,
+    window_end_sec: float,
+    out_path: Path,
+) -> Path:
+    """
+    Create the compact action-window clip used only for AI video inputs.
+
+    The source upload remains untouched; timestamps emitted by models for this
+    clip are expected to be shifted back to the source-video timeline by callers.
+    """
+    start = max(0.0, float(window_start_sec))
+    end = max(start + 0.5, float(window_end_sec))
+    if end - start > ACTION_CLIP_MAX_SECONDS:
+        end = start + ACTION_CLIP_MAX_SECONDS
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+
+    width, height = _size_tuple(ACTION_AI_CLIP_SIZE)
+    fps = max(1.0, min(float(ACTION_AI_CLIP_FPS), 30.0))
+    crf = max(18, min(int(ACTION_AI_CLIP_CRF), 40))
+    scale_filter = (
+        f"fps={fps:.3f},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+    await _run_ffmpeg(
+        [
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-to",
+            f"{end:.3f}",
+            "-i",
+            str(video_path),
+            "-vf",
+            scale_filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(out_path),
+        ]
+    )
+
+    max_bytes = ACTION_AI_CLIP_MAX_MB * 1024 * 1024
+    if not out_path.exists() or out_path.stat().st_size <= 0:
+        raise RuntimeError("AI action-window clip was not created.")
+    if out_path.stat().st_size > max_bytes:
+        raise RuntimeError(f"AI action-window clip exceeds {ACTION_AI_CLIP_MAX_MB}MB.")
     return out_path
 
 

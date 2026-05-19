@@ -638,13 +638,46 @@ def _qwen_temporal_provider(provider: ActiveProviderConfig) -> ActiveProviderCon
     )
 
 
+def _shift_video_temporal_timestamps(payload: dict[str, Any], offset_sec: float) -> dict[str, Any]:
+    offset = _to_float(offset_sec)
+    if offset is None or abs(offset) < 1e-6:
+        return payload
+
+    shifted = dict(payload)
+    shifted["timestamp_offset_sec"] = round(offset, 3)
+
+    segments: list[dict[str, Any]] = []
+    for segment in payload.get("phase_segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        item = dict(segment)
+        for key in ("time_start", "time_end", "key_frame_hint"):
+            value = _to_float(item.get(key))
+            if value is not None:
+                item[key] = round(value + offset, 3)
+        segments.append(item)
+    shifted["phase_segments"] = segments
+
+    key_moments = payload.get("key_moments")
+    if isinstance(key_moments, dict):
+        shifted_moments: dict[str, Any] = {}
+        for key, value in key_moments.items():
+            timestamp = _to_float(value)
+            shifted_moments[key] = round(timestamp + offset, 3) if timestamp is not None else None
+        shifted["key_moments"] = shifted_moments
+    return shifted
+
+
 async def analyze_video_temporal(
     video_path: Path,
     *,
     action_type: str,
     action_subtype: str | None = None,
     video_duration_sec: float | None = None,
+    source_video_duration_sec: float | None = None,
     source_fps: float | None = None,
+    timestamp_offset_sec: float = 0.0,
+    analyzed_video_kind: str = "source",
     session: AsyncSession | None = None,
     provider: ActiveProviderConfig | None = None,
     timeout: float = VIDEO_TEMPORAL_TIMEOUT_SECONDS,
@@ -721,9 +754,18 @@ async def analyze_video_temporal(
         }
         return normalized
 
-    if video_duration_sec is not None:
-        return validate_video_temporal_payload(normalized, duration_sec=video_duration_sec)
-    return normalized
+    normalized["analyzed_video_kind"] = _string(analyzed_video_kind, "source")
+    normalized["analyzed_video_path"] = str(video_path)
+    normalized["timestamp_offset_sec"] = round(float(timestamp_offset_sec or 0.0), 3)
+    shifted = _shift_video_temporal_timestamps(normalized, float(timestamp_offset_sec or 0.0))
+
+    validation_duration = source_video_duration_sec
+    if validation_duration is None and video_duration_sec is not None:
+        validation_duration = float(video_duration_sec) + max(0.0, float(timestamp_offset_sec or 0.0))
+
+    if validation_duration is not None:
+        return validate_video_temporal_payload(shifted, duration_sec=validation_duration)
+    return shifted
 
 
 def _candidate_timestamp(candidate: Any) -> float | None:

@@ -147,7 +147,7 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch("app.routers.analysis.analyze_biomechanics", return_value={"quality_flags": []}))
                 stack.enter_context(patch("app.routers.analysis.attach_key_frame_candidates", return_value=bio_data))
                 stack.enter_context(patch("app.routers.analysis.infer_jump_subtype_evidence", return_value={}))
-                stack.enter_context(patch("app.routers.analysis.analyze_video_temporal", AsyncMock(return_value=video_temporal)))
+                temporal_mock = stack.enter_context(patch("app.routers.analysis.analyze_video_temporal", AsyncMock(return_value=video_temporal)))
                 stack.enter_context(patch("app.routers.analysis.resolve_semantic_keyframes", return_value=resolved))
                 refine_mock = stack.enter_context(
                     patch(
@@ -177,7 +177,9 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                         AsyncMock(return_value=[SimpleNamespace(frame_id="semantic_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=1.2)]),
                     )
                 )
-                stack.enter_context(patch("app.routers.analysis.cut_action_window_clip", AsyncMock(return_value=processing_dir / "action_window.mp4")))
+                ai_clip_mock = stack.enter_context(patch("app.routers.analysis.cut_action_window_ai_clip", AsyncMock(return_value=processing_dir / "action_window_ai.mp4")))
+                stack.enter_context(patch("app.routers.analysis.detect_video_duration", side_effect=[6.0, 2.0]))
+                stack.enter_context(patch("app.routers.analysis.detect_video_fps", return_value=15.0))
                 stack.enter_context(patch("app.routers.analysis._provider_for_slot", AsyncMock(return_value=SimpleNamespace())))
                 stack.enter_context(patch("app.routers.analysis.build_analysis_prompt_context", AsyncMock(return_value=None)))
                 dual_mock = stack.enter_context(patch("app.routers.analysis.analyze_frames_dual", AsyncMock(return_value=_dual(vision_structured))))
@@ -190,6 +192,14 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                 await analysis_router.process_analysis(analysis_id)
 
             self.assertEqual(encode_mock.await_args.args[0], semantic_paths)
+            ai_clip_mock.assert_awaited_once()
+            self.assertEqual(ai_clip_mock.await_args.args[3].name, "action_window_ai.mp4")
+            temporal_kwargs = temporal_mock.await_args.kwargs
+            self.assertEqual(temporal_mock.await_args.args[0].name, "action_window_ai.mp4")
+            self.assertEqual(temporal_kwargs["video_duration_sec"], 2.0)
+            self.assertEqual(temporal_kwargs["source_video_duration_sec"], 6.0)
+            self.assertEqual(temporal_kwargs["timestamp_offset_sec"], 0.0)
+            self.assertEqual(temporal_kwargs["analyzed_video_kind"], "action_window_ai")
             self.assertEqual(refine_mock.await_args.args[2][0]["timestamp"], 1.2)
             self.assertEqual(dual_mock.await_args.kwargs["frame_paths"], semantic_paths)
             self.assertIsNone(dual_mock.await_args.kwargs["clip_path"])
@@ -271,7 +281,9 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                         AsyncMock(return_value=[SimpleNamespace(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=0.5)]),
                     )
                 )
-                stack.enter_context(patch("app.routers.analysis.cut_action_window_clip", AsyncMock(return_value=None)))
+                ai_clip_mock = stack.enter_context(patch("app.routers.analysis.cut_action_window_ai_clip", AsyncMock(return_value=Path(tmpdir) / "action_window_ai.mp4")))
+                stack.enter_context(patch("app.routers.analysis.detect_video_duration", side_effect=[4.0, 1.0]))
+                stack.enter_context(patch("app.routers.analysis.detect_video_fps", return_value=15.0))
                 stack.enter_context(patch("app.routers.analysis._provider_for_slot", AsyncMock(return_value=SimpleNamespace())))
                 stack.enter_context(patch("app.routers.analysis.build_analysis_prompt_context", AsyncMock(return_value=None)))
                 stack.enter_context(patch("app.routers.analysis.analyze_frames_dual", AsyncMock(return_value=_dual(vision_structured))))
@@ -284,6 +296,7 @@ class AnalysisVideoTemporalPipelineTests(unittest.IsolatedAsyncioTestCase):
                 await analysis_router.process_analysis(analysis_id)
 
             self.assertEqual(encode_mock.await_args.args[0], sampled)
+            self.assertEqual(ai_clip_mock.await_args_list[-1].args[3].name, "action_window_ai.mp4")
             precise_mock.assert_not_awaited()
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)

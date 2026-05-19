@@ -82,11 +82,12 @@ from app.services.target_lock import (
     resolve_manual_candidate,
 )
 from app.services.video import (
+    VideoSamplingMetadata,
     build_timestamp_map,
     build_processing_frames_dir,
     build_upload_paths,
     cleanup_processing_dir,
-    cut_action_window_clip,
+    cut_action_window_ai_clip,
     detect_video_duration,
     detect_video_fps,
     encode_frames,
@@ -579,6 +580,7 @@ async def _append_analysis_log(
     detail: str | None = None,
     status_value: str | None = None,
     timings: dict[str, float] | None = None,
+    **extra: Any,
 ) -> None:
     entry: dict[str, Any] = {
         "timestamp": _utc_now_iso(),
@@ -594,6 +596,9 @@ async def _append_analysis_log(
         entry["error_code"] = error_code
     if detail:
         entry["detail"] = detail
+    for key, value in extra.items():
+        if value is not None:
+            entry[key] = value
 
     log_method = getattr(logger, level.lower(), logger.info)
     log_method("Analysis %s [%s] %s", analysis_id, stage, message)
@@ -767,6 +772,8 @@ async def _start_video_temporal_task_if_missing(
     *,
     analysis_id: str,
     video_path: Path,
+    processing_frames_dir: Path,
+    sampling_metadata: VideoSamplingMetadata,
     action_type: str,
     action_subtype: str | None,
     motion_scores: dict[str, object],
@@ -775,15 +782,25 @@ async def _start_video_temporal_task_if_missing(
     if current_task is not None or isinstance(motion_scores.get("video_temporal"), dict):
         return current_task, None
     await precheck_video(video_path)
-    duration_sec = detect_video_duration(video_path)
-    source_fps = detect_video_fps(video_path)
+    source_duration_sec = detect_video_duration(video_path)
+    ai_clip_path = await cut_action_window_ai_clip(
+        video_path,
+        sampling_metadata.action_window_start,
+        sampling_metadata.action_window_end,
+        processing_frames_dir.parent / "action_window_ai.mp4",
+    )
+    clip_duration_sec = detect_video_duration(ai_clip_path)
+    clip_fps = detect_video_fps(ai_clip_path)
     task = asyncio.create_task(
         analyze_video_temporal(
-            video_path,
+            ai_clip_path,
             action_type=action_type,
             action_subtype=action_subtype,
-            video_duration_sec=duration_sec,
-            source_fps=source_fps,
+            video_duration_sec=clip_duration_sec,
+            source_video_duration_sec=source_duration_sec,
+            source_fps=clip_fps,
+            timestamp_offset_sec=sampling_metadata.action_window_start,
+            analyzed_video_kind="action_window_ai",
         )
     )
     await _append_analysis_log(
@@ -792,8 +809,11 @@ async def _start_video_temporal_task_if_missing(
         level='info',
         message='已启动视频 AI 语义时间定位。',
         detail='video_temporal_task_started',
+        analyzed_video_path=str(ai_clip_path),
+        timestamp_offset_sec=sampling_metadata.action_window_start,
+        clip_duration_sec=clip_duration_sec,
     )
-    return task, duration_sec
+    return task, source_duration_sec
 
 
 async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
@@ -901,6 +921,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
                         analysis_id=analysis_id,
                         video_path=video_path,
+                        processing_frames_dir=processing_frames_dir,
+                        sampling_metadata=sampling_metadata,
                         action_type=action_type,
                         action_subtype=action_subtype,
                         motion_scores=motion_scores,
@@ -934,23 +956,24 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 try:
                     logger.info('Analysis %s extracting frames with profile=%s', analysis_id, analysis_profile_hint)
                     await precheck_video(video_path)
-                    video_temporal_duration_sec = detect_video_duration(video_path)
-                    video_temporal_fps = detect_video_fps(video_path)
-                    video_temporal_task = asyncio.create_task(
-                        analyze_video_temporal(
-                            video_path,
-                            action_type=action_type,
-                            action_subtype=action_subtype,
-                            video_duration_sec=video_temporal_duration_sec,
-                            source_fps=video_temporal_fps,
-                        )
-                    )
                     sampled_frames, motion_scores, sampling_metadata = await extract_motion_sampled_frames(
                         video_path,
                         processing_frames_dir,
                         action_type,
                         analysis_profile_hint,
                     )
+                    video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
+                        analysis_id=analysis_id,
+                        video_path=video_path,
+                        processing_frames_dir=processing_frames_dir,
+                        sampling_metadata=sampling_metadata,
+                        action_type=action_type,
+                        action_subtype=action_subtype,
+                        motion_scores=motion_scores,
+                        current_task=video_temporal_task,
+                    )
+                    if started_duration is not None:
+                        video_temporal_duration_sec = started_duration
                 except Exception as exc:  # noqa: BLE001
                     failure = classify_video_failure(exc)
                     timings['total_s'] = _elapsed_seconds(total_start)
@@ -1020,6 +1043,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
                     analysis_id=analysis_id,
                     video_path=video_path,
+                    processing_frames_dir=processing_frames_dir,
+                    sampling_metadata=sampling_metadata,
                     action_type=action_type,
                     action_subtype=action_subtype,
                     motion_scores=motion_scores,
@@ -1388,14 +1413,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 provider_path_b = await _provider_for_slot("vision_path_b")
                 if not use_semantic_frames:
                     try:
-                        path_a_clip_path = await cut_action_window_clip(
+                        path_a_clip_path = await cut_action_window_ai_clip(
                             video_path,
                             sampling_metadata.action_window_start,
                             sampling_metadata.action_window_end,
-                            processing_frames_dir.parent / 'action_window.mp4',
+                            processing_frames_dir.parent / 'action_window_ai.mp4',
                         )
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning('Analysis %s action-window clip failed; Path A will use frames: %s', analysis_id, exc)
+                        logger.warning('Analysis %s AI action-window clip failed; Path A will use frames: %s', analysis_id, exc)
                 prompt_context = await build_analysis_prompt_context(
                     action_type=action_type,
                     action_subtype=action_subtype,
