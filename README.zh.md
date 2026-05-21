@@ -29,6 +29,7 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 - AI 训练诊断报告
 - 阶段感知重试流程，支持缓存帧复用
 - 处理日志、管线计时、报告页调试信息
+- YOLO + ByteTrack 目标追踪，支持挂载 `yolov8n.pt` 并在设置页查看运行时状态
 - 自动检测过期任务并恢复失败状态
 - 模糊过滤与动作感知帧采样，提升视觉输入质量
 - 独立 `skating_vision` Python 包，可脱离主应用复用
@@ -103,6 +104,9 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 # 可选：启用二期多姿态跟踪
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
 # POSE_NUM_POSES=4
+
+# 可选：使用挂载的 YOLO 人体检测权重，避免运行时下载
+# YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt
 ```
 
 说明：
@@ -115,12 +119,14 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 ## 二期姿态模型启用
 
-二期多姿态跟踪通过宿主机挂载 MediaPipe `.task` 模型文件启用。
+二期多姿态和目标追踪通过宿主机挂载模型文件启用。
 
 - 将模型文件放到 `./models`，例如 `./models/pose_landmarker_heavy.task`
 - 在 `.env` 中设置 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
 - 可选设置 `POSE_NUM_POSES=4`
-- `.task` 模型文件不提交到当前仓库
+- 如需 YOLO 目标追踪，将 `yolov8n.pt` 放到 `./models`，并可选设置 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。如果未设置该变量，后端会先检查 `/models/yolov8n.pt`，再允许 Ultralytics 自动下载 `yolov8n.pt`
+- 设置页会同时显示姿态运行时和 YOLO 运行时状态，方便确认挂载权重是否已生效再开始分析
+- 模型文件不提交到当前仓库
 - 如果模型缺失或加载失败，后端会自动降级回一期单人 pose 流程
 
 ## 分析管线更新
@@ -250,7 +256,7 @@ docker run -d \
 
 说明：
 
-- 如果使用 `.env` 文件方式运行 allinone，请确保其中包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
+- 如果使用 `.env` 文件方式运行 allinone，请确保其中包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`；使用挂载 YOLO 权重时，也加入 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`
 - 如果在 NAS / Container Manager 中直接手动配置环境变量，可以不挂载 `.env`，但仍需额外设置同名环境变量，并挂载 `models` 目录
 - 旧的分析记录如果保存的是 Windows 本地绝对路径，allinone 会自动回退到 `/data/uploads/<analysis_id>/source.*` 查找原始视频
 
@@ -268,7 +274,8 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - `/archive`：历史档案 / 训练进展
 - `/plan/:plan_id`：训练计划
 - `/snowball`：冰宝陪练与记忆建议
-- `/settings`：系统设置、PIN、备份、供应商管理
+- `/settings`：系统设置、PIN、备份、供应商管理、姿态/YOLO 运行时状态
+- `/debug`：分析调试日志，支持自动刷新最新分析状态
 
 ## 数据与隐私
 

@@ -65,6 +65,12 @@ from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.auto_eval import AUTO_EVAL_VERSION, build_auto_eval_payload
 from app.services.biomechanics import analyze_biomechanics, attach_key_frame_candidates, sanitize_biomechanics_data
 from app.services.bbox_tracker import track_bbox
+from app.services.person_tracker import (
+    PERSON_TRACKER_FAILED_FLAG,
+    PERSON_TRACKER_UNAVAILABLE_FLAG,
+    PersonTrackerUnavailable,
+    track_person_bbox,
+)
 from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
@@ -1088,7 +1094,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     message='开始提取姿态关键点。',
                 )
                 pose_start = time.monotonic()
-                bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock)
+                bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock, sampling_metadata.effective_fps)
                 pose_data = await asyncio.to_thread(
                     extract_pose,
                     str(processing_frames_dir),
@@ -2041,7 +2047,11 @@ def _append_target_lock_flags(target_lock: dict[str, Any], flags: list[str]) -> 
     return target_lock
 
 
-def _build_bbox_per_frame(sampled_frames: list[Path], target_lock: dict[str, Any]) -> list[dict[str, float]] | None:
+def _build_bbox_per_frame(
+    sampled_frames: list[Path],
+    target_lock: dict[str, Any],
+    effective_fps: float | None = None,
+) -> list[dict[str, float]] | None:
     selected_bbox = target_lock.get("selected_bbox")
     if not isinstance(selected_bbox, dict):
         return None
@@ -2050,6 +2060,23 @@ def _build_bbox_per_frame(sampled_frames: list[Path], target_lock: dict[str, Any
         anchor_index = int(preview_frame_index) if preview_frame_index is not None else 0
     except (TypeError, ValueError):
         anchor_index = 0
+    try:
+        bbox_per_frame, flags = track_person_bbox(
+            sampled_frames,
+            selected_bbox,
+            initial_frame_index=anchor_index,
+            effective_fps=effective_fps,
+        )
+        _append_target_lock_flags(target_lock, flags)
+        target_lock["bbox_per_frame"] = bbox_per_frame
+        return bbox_per_frame
+    except PersonTrackerUnavailable:
+        logger.info("person tracker unavailable; falling back to CSRT bbox tracker", exc_info=True)
+        _append_target_lock_flags(target_lock, [PERSON_TRACKER_UNAVAILABLE_FLAG])
+    except Exception:  # noqa: BLE001
+        logger.warning("person tracker failed; falling back to CSRT bbox tracker", exc_info=True)
+        _append_target_lock_flags(target_lock, [PERSON_TRACKER_FAILED_FLAG])
+
     try:
         bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox, initial_frame_index=anchor_index)
         _append_target_lock_flags(target_lock, flags)

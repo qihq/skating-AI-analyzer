@@ -8,10 +8,12 @@ import {
   changePin,
   createBackup,
   fetchBackups,
+  fetchPersonTrackerRuntimeStatus,
   fetchPoseRuntimeStatus,
   fetchSkaters,
   fetchStorageStats,
   fetchSystemInfo,
+  PersonTrackerRuntimeStatus,
   PoseRuntimeStatus,
   restoreBackup,
   Skater,
@@ -57,6 +59,7 @@ export default function SettingsPage() {
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
   const [backups, setBackups] = useState<BackupFile[]>([]);
   const [poseRuntime, setPoseRuntime] = useState<PoseRuntimeStatus | null>(null);
+  const [personTrackerRuntime, setPersonTrackerRuntime] = useState<PersonTrackerRuntimeStatus | null>(null);
   const [isPoseRuntimeLoading, setIsPoseRuntimeLoading] = useState(false);
   const [poseRuntimeCheckedAt, setPoseRuntimeCheckedAt] = useState<string | null>(null);
   const [poseRuntimeError, setPoseRuntimeError] = useState<string | null>(null);
@@ -101,11 +104,24 @@ export default function SettingsPage() {
     setIsPoseRuntimeLoading(true);
     setPoseRuntimeError(null);
     try {
-      const poseRuntimeData = await fetchPoseRuntimeStatus();
+      const [poseRuntimeResult, personTrackerRuntimeResult] = await Promise.allSettled([
+        fetchPoseRuntimeStatus(),
+        fetchPersonTrackerRuntimeStatus(),
+      ]);
       if (isCancelled?.()) {
         return;
       }
-      setPoseRuntime(poseRuntimeData);
+      if (poseRuntimeResult.status === "fulfilled") {
+        setPoseRuntime(poseRuntimeResult.value);
+      } else {
+        setPoseRuntime(null);
+        setPoseRuntimeError("暂时无法读取姿态运行时状态，可以稍后重试。");
+      }
+      if (personTrackerRuntimeResult.status === "fulfilled") {
+        setPersonTrackerRuntime(personTrackerRuntimeResult.value);
+      } else {
+        setPersonTrackerRuntime(null);
+      }
       setPoseRuntimeCheckedAt(new Date().toISOString());
     } catch {
       if (isCancelled?.()) {
@@ -348,6 +364,32 @@ export default function SettingsPage() {
         : poseRuntime
           ? "fallback_single_pose"
           : "--";
+  const trackerModeLabel =
+    !personTrackerRuntime && isPoseRuntimeLoading
+      ? "正在检查 YOLO 状态"
+      : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
+        ? "YOLO 权重已就绪"
+        : personTrackerRuntime
+          ? "将尝试自动下载 YOLO"
+          : "YOLO 状态暂不可用";
+  const trackerBadgeClass =
+    !personTrackerRuntime && isPoseRuntimeLoading
+      ? "border-blue-200 bg-blue-50 text-blue-700"
+      : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : "border-amber-200 bg-amber-50 text-amber-700";
+  const trackerPathText =
+    !personTrackerRuntime && isPoseRuntimeLoading ? "检查中..." : personTrackerRuntime?.model_path ?? "/models/yolov8n.pt";
+  const trackerReasonText =
+    !personTrackerRuntime && isPoseRuntimeLoading
+      ? "正在读取 YOLO 目标追踪配置。"
+      : personTrackerRuntime?.reason === "configured"
+        ? "已通过环境变量指定 YOLO 权重路径。"
+        : personTrackerRuntime?.reason === "mounted_default"
+          ? "已在默认挂载路径找到 yolov8n.pt。"
+          : personTrackerRuntime?.reason === "missing_model_file"
+            ? "已设置 YOLO 权重路径，但该文件当前不可读。"
+            : "未找到挂载权重；首次分析时 Ultralytics 会尝试联网下载 yolov8n.pt。";
 
   if (!isParentMode) {
     return (
@@ -457,6 +499,38 @@ export default function SettingsPage() {
               <p className="text-sm font-semibold text-blue-700">启用说明</p>
               <p className="mt-2 text-sm leading-7 text-blue-700">{poseNextStepText}</p>
               <p className="mt-2 text-xs leading-6 text-blue-600">这里只是在读取配置和文件可用性，不会像正式分析那样触发模型推理。</p>
+            </div>
+
+            <div className="mt-4 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+              <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-slate-800">YOLO 目标追踪权重</p>
+                  <p className="mt-2 text-sm leading-7 text-slate-500">
+                    ByteTrack 不需要模型；YOLO 使用 `yolov8n.pt` 检测人物，建议像 MediaPipe 一样挂载到 models 目录。
+                  </p>
+                </div>
+                <span className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${trackerBadgeClass}`}>
+                  {trackerModeLabel}
+                </span>
+              </div>
+              <p className="mt-4 break-all rounded-[18px] bg-white px-4 py-3 font-mono text-xs leading-6 text-slate-600">
+                {trackerPathText}
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-[18px] bg-white px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">默认挂载路径</p>
+                  <p className="mt-2 break-all font-mono text-xs text-slate-600">
+                    {personTrackerRuntime?.mounted_default_path ?? "/models/yolov8n.pt"}
+                  </p>
+                </div>
+                <div className="rounded-[18px] bg-white px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">环境变量</p>
+                  <p className="mt-2 font-mono text-xs text-slate-600">
+                    {personTrackerRuntime?.env_var ?? "YOLO_PERSON_MODEL_PATH"}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-4 text-sm leading-7 text-slate-600">{trackerReasonText}</p>
             </div>
 
             <div className="mt-5 flex flex-wrap gap-3">

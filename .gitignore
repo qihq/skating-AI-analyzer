@@ -3,6 +3,7 @@ data/
 .env
 backups/*.db
 models/*.task
+models/*.pt
 
 # Image exports and archives
 *.tar

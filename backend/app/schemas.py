@@ -506,6 +506,18 @@ class PoseRuntimeStatusResponse(BaseModel):
     reason: str
 
 
+class PersonTrackerRuntimeStatusResponse(BaseModel):
+    mode: str
+    configured: bool
+    model_path: str
+    model_exists: bool
+    mounted_default_path: str
+    mounted_default_exists: bool
+    env_var: str
+    source: str
+    reason: str
+
+
 class BackupFilePublic(BaseModel):
     filename: str
     size_bytes: int

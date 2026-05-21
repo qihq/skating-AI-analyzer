@@ -676,6 +676,18 @@ export interface PoseRuntimeStatus {
   reason: string;
 }
 
+export interface PersonTrackerRuntimeStatus {
+  mode: string;
+  configured: boolean;
+  model_path: string;
+  model_exists: boolean;
+  mounted_default_path: string;
+  mounted_default_exists: boolean;
+  env_var: string;
+  source: string;
+  reason: string;
+}
+
 export const apiClient = axios.create({
   baseURL: "/api",
   timeout: 600000,
@@ -1075,6 +1087,11 @@ export async function testActiveApiConnection() {
 
 export async function fetchPoseRuntimeStatus() {
   const response = await apiClient.get<PoseRuntimeStatus>("/settings/pose-runtime");
+  return response.data;
+}
+
+export async function fetchPersonTrackerRuntimeStatus() {
+  const response = await apiClient.get<PersonTrackerRuntimeStatus>("/settings/person-tracker-runtime");
   return response.data;
 }
 

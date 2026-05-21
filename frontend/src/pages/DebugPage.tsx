@@ -120,6 +120,43 @@ export default function DebugPage() {
     };
   }, [isParentMode, selectedId]);
 
+  useEffect(() => {
+    if (!isParentMode) {
+      return;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const data = await fetchAnalyses();
+        if (cancelled) {
+          return;
+        }
+        setAnalyses(data);
+        setSelectedId((current) => current ?? data[0]?.id ?? null);
+
+        const detailId = selectedId ?? data[0]?.id;
+        if (detailId) {
+          const detail = await fetchAnalysis(detailId, { isParentRequest: true });
+          if (!cancelled) {
+            setSelectedDetail(detail);
+            setDetailState("ready");
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setError("调试日志刷新失败，请稍后再试。");
+        }
+      }
+    };
+
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isParentMode, selectedId]);
+
   const selectedItem = useMemo(
     () => analyses.find((item) => item.id === selectedId) ?? null,
     [analyses, selectedId],
