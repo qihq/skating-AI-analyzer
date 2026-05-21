@@ -1,9 +1,10 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
-export type UiTheme = "classic" | "ice-glass";
+export type UiTheme = "classic" | "modern";
 
 type AppearanceContextValue = {
   theme: UiTheme;
+  isModern: boolean;
   isIceGlass: boolean;
   setTheme: (nextTheme: UiTheme) => void;
   toggleTheme: () => void;
@@ -13,7 +14,8 @@ const THEME_STORAGE_KEY = "icebuddy.ui-theme";
 const AppearanceContext = createContext<AppearanceContextValue | null>(null);
 
 function readInitialTheme(): UiTheme {
-  return window.localStorage.getItem(THEME_STORAGE_KEY) === "ice-glass" ? "ice-glass" : "classic";
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return stored === "modern" || stored === "ice-glass" ? "modern" : "classic";
 }
 
 export function useAppearance() {
@@ -35,9 +37,10 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppearanceContextValue>(
     () => ({
       theme,
-      isIceGlass: theme === "ice-glass",
+      isModern: theme === "modern",
+      isIceGlass: theme === "modern",
       setTheme,
-      toggleTheme: () => setTheme(theme === "ice-glass" ? "classic" : "ice-glass"),
+      toggleTheme: () => setTheme(theme === "modern" ? "classic" : "modern"),
     }),
     [theme],
   );

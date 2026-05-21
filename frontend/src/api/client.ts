@@ -134,6 +134,8 @@ export interface PoseResponse {
   connections: number[][];
   frames: PoseFrame[];
   frame_urls: Record<string, string>;
+  frame_timestamps?: Record<string, number>;
+  effective_fps?: number | null;
 }
 
 export interface AnalysisListItem {

@@ -6,6 +6,10 @@ import { childViewAvatarType, childViewLabel, childViewModeLabel } from "../util
 import { useAppMode } from "./AppModeContext";
 import ZodiacAvatar from "./ZodiacAvatar";
 
+type ModeToggleProps = {
+  variant?: "default" | "modern";
+};
+
 function ParentModeAvatar() {
   return (
     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-900 text-[15px] text-white shadow-sm" aria-hidden="true">
@@ -14,7 +18,7 @@ function ParentModeAvatar() {
   );
 }
 
-export default function ModeToggle() {
+export default function ModeToggle({ variant = "default" }: ModeToggleProps) {
   const location = useLocation();
   const { isParentMode, childView, enterParentMode, switchToChildMode, switchToChildView } = useAppMode();
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -200,12 +204,22 @@ export default function ModeToggle() {
 
   return (
     <>
-      <div className="hidden items-center gap-1 rounded-full bg-slate-100 p-1 shadow-sm tablet:flex">
+      <div
+        className={`hidden items-center gap-1 rounded-full p-1 tablet:flex ${
+          variant === "modern" ? "border border-cyan-400/20 bg-white/7 shadow-sm" : "bg-slate-100 shadow-sm"
+        }`}
+      >
         <button
           type="button"
           onClick={switchToChildMode}
           className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
-            !isParentMode ? "bg-kid-primary text-white shadow-sm" : "text-slate-500"
+            !isParentMode
+              ? variant === "modern"
+                ? "bg-cyan-400/18 text-cyan-50 shadow-sm ring-1 ring-cyan-300/20"
+                : "bg-blue-600 text-white shadow-sm"
+              : variant === "modern"
+                ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                : "text-slate-500"
           }`}
         >
           {childViewModeLabel(childView)}
@@ -218,7 +232,13 @@ export default function ModeToggle() {
             }
           }}
           className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
-            isParentMode ? "bg-blue-500 text-white shadow-sm" : "text-slate-500"
+            isParentMode
+              ? variant === "modern"
+                ? "bg-cyan-400/18 text-cyan-50 shadow-sm ring-1 ring-cyan-300/20"
+                : "bg-blue-600 text-white shadow-sm"
+              : variant === "modern"
+                ? "text-slate-300 hover:bg-white/10 hover:text-white"
+                : "text-slate-500"
           }`}
         >
           家长模式

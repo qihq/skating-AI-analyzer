@@ -2001,17 +2001,30 @@ def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSna
     )
 
 
-def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
+def _build_pose_response(
+    analysis_id: str,
+    pose_data: dict[str, object] | None,
+    frame_motion_scores: dict[str, object] | None = None,
+) -> PoseResponse:
     safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
     frame_urls = {
         frame.get("frame", ""): f"/api/frames/{analysis_id}/{frame.get('frame', '')}"
         for frame in safe_pose_data.get("frames", [])
         if isinstance(frame, dict) and frame.get("frame")
     }
+    timestamp_by_stem = build_timestamp_map(frame_motion_scores)
+    frame_timestamps = {
+        frame_name: timestamp
+        for frame_name in frame_urls
+        if (timestamp := timestamp_by_stem.get(str(frame_name).replace(".jpg", ""))) is not None
+    }
+    effective_fps = frame_motion_scores.get("effective_fps") if isinstance(frame_motion_scores, dict) else None
     return PoseResponse(
         connections=safe_pose_data.get("connections", []),
         frames=safe_pose_data.get("frames", []),
         frame_urls=frame_urls,
+        frame_timestamps=frame_timestamps,
+        effective_fps=float(effective_fps) if isinstance(effective_fps, (int, float)) else None,
     )
 
 
@@ -3217,7 +3230,11 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
-    return _build_pose_response(analysis_id, analysis.pose_data)
+    return _build_pose_response(
+        analysis_id,
+        analysis.pose_data,
+        analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+    )
 
 
 @router.get("/{analysis_id}/video")

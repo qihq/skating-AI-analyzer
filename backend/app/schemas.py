@@ -427,6 +427,8 @@ class PoseResponse(BaseModel):
     connections: list[list[int]]
     frames: list[PoseFrame]
     frame_urls: dict[str, str]
+    frame_timestamps: dict[str, float] = Field(default_factory=dict)
+    effective_fps: float | None = None
 
 
 class ProviderBase(BaseModel):

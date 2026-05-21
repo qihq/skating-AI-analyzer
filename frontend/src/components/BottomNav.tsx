@@ -27,7 +27,7 @@ const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon
 
 export default function BottomNav({ activeTab }: BottomNavProps) {
   const { isParentMode } = useAppMode();
-  const { isIceGlass } = useAppearance();
+  const { isIceGlass, isModern } = useAppearance();
   const mobileNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
   const desktopNavItems = isParentMode ? PARENT_NAV_ITEMS : PRIMARY_NAV_ITEMS;
 
@@ -60,6 +60,9 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
 
       <aside
         className={`fixed inset-y-0 left-0 z-20 hidden w-[240px] px-5 py-8 backdrop-blur web:flex web:flex-col ${
+          isModern
+            ? "web:hidden"
+            : 
           isIceGlass
             ? "border-r border-white/10 bg-slate-950/48 shadow-[22px_0_70px_rgba(2,6,23,0.3)]"
             : "border-r border-[#E5E7EB] bg-white/92"

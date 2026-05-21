@@ -26,11 +26,13 @@ import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
+import ModernAnalysisWorkspace from "../components/ModernAnalysisWorkspace";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import PoseViewer from "../components/PoseViewer";
 import ReportCard from "../components/ReportCard";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import UnlockCelebration from "../components/UnlockCelebration";
+import { useAppearance } from "../components/AppearanceContext";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, getAnalysisStageDescription, getAnalysisStatusLabel, isAnalysisInProgress } from "../constants/analysisStatus";
 import ZodiacAvatar from "../components/ZodiacAvatar";
@@ -78,6 +80,19 @@ const PROGRESS_STAGE_META = [
   { key: "report", label: "报告生成" },
   { key: "completed", label: "完成" },
 ] as const;
+
+const reportToolbarButton =
+  "inline-flex min-h-[40px] items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50";
+const reportToolbarSecondary = `${reportToolbarButton} border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700`;
+const reportToolbarPrimary = `${reportToolbarButton} border-blue-600 bg-blue-600 text-white shadow-sm hover:bg-blue-700`;
+const reportToolbarWarning = `${reportToolbarButton} border-amber-200 bg-white text-amber-700 hover:bg-amber-50`;
+const reportToolbarDanger = `${reportToolbarButton} border-rose-200 bg-white text-rose-600 hover:bg-rose-50`;
+const modernToolbarButton =
+  "inline-flex min-h-[38px] items-center justify-center rounded-md border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-45";
+const modernToolbarSecondary = `${modernToolbarButton} border-white/10 bg-white/6 text-slate-200 hover:bg-white/10`;
+const modernToolbarPrimary = `${modernToolbarButton} border-cyan-400/25 bg-cyan-400/16 text-cyan-50 hover:bg-cyan-400/22`;
+const modernToolbarWarning = `${modernToolbarButton} border-amber-300/24 bg-amber-400/10 text-amber-100 hover:bg-amber-400/16`;
+const modernToolbarDanger = `${modernToolbarButton} border-rose-300/20 bg-rose-400/10 text-rose-100 hover:bg-rose-400/16`;
 
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -444,6 +459,7 @@ export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { isParentMode, enterParentMode, pinLength } = useAppMode();
+  const { isModern } = useAppearance();
   const [analysis, setAnalysis] = useState<AnalysisDetail | null>(null);
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [skills, setSkills] = useState<SkillNode[]>([]);
@@ -901,81 +917,73 @@ export default function ReportPage() {
         : "删除这条分析记录";
 
   return (
-    <div className="space-y-6">
-      {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link to="/review" className="app-pill">
-          ← 返回复盘
-        </Link>
-        <div className="flex flex-wrap gap-3">
-          {isParentMode && deferredAnalysis?.status === "completed" ? (
-            <button
-              type="button"
-              onClick={() => void handleShareReport()}
-              disabled={isSharing}
-              className="min-h-[44px] rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isSharing ? (canUseNativeShare ? "分享中..." : "复制中...") : canUseNativeShare ? "📤 分享" : "📋 复制"}
-            </button>
-          ) : null}
-          {isParentMode ? (
-            <button
-              type="button"
-              onClick={openDeleteModal}
-              disabled={deleteDisabled}
-              title={deleteTitle}
-              className="min-h-[44px] rounded-full border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              🗑️ 删除
-            </button>
-          ) : null}
-          <Link to="/archive" className="app-pill">
-            查看练习档案
+    <div className={isModern ? "space-y-5 text-slate-100" : "space-y-6"}>
+      {notice ? (
+        <div
+          className={
+            isModern
+              ? "rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-5 py-4 text-sm text-cyan-100"
+              : "rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700"
+          }
+        >
+          {notice}
+        </div>
+      ) : null}
+      <div className={isModern ? "rounded-lg border border-white/10 bg-white/[0.045] p-3 shadow-[0_18px_54px_rgba(2,6,23,0.22)]" : "rounded-2xl border border-slate-200 bg-white/88 p-3 shadow-sm"}>
+        <div className="flex flex-col gap-3 wide:flex-row wide:items-center wide:justify-between">
+          <Link to="/review" className={`${isModern ? modernToolbarSecondary : reportToolbarSecondary} w-fit`}>
+            返回复盘
           </Link>
-          {deferredAnalysis?.status === "completed" ? (
-            <>
-              <Link
-                to={`/report/${deferredAnalysis.id}`}
-                className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600"
-              >
-                📄 查看报告
-              </Link>
-              <button
-                type="button"
-                onClick={() => requestRetryAnalysis("report")}
-                disabled={isRetryingAnalysis}
-                className="min-h-[44px] rounded-full border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-600 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isRetryingAnalysis ? "提交中..." : "🔄 重新生成报告"}
+          <div className="flex flex-wrap gap-2">
+            {isParentMode && deferredAnalysis?.status === "completed" ? (
+              <button type="button" onClick={() => void handleShareReport()} disabled={isSharing} className={isModern ? modernToolbarSecondary : reportToolbarSecondary}>
+                {isSharing ? (canUseNativeShare ? "分享中..." : "复制中...") : canUseNativeShare ? "分享" : "复制"}
               </button>
-              <button
-                type="button"
-                onClick={() => requestRetryAnalysis("analysis")}
-                disabled={isRetryingAnalysis}
-                className="min-h-[44px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                完整重新分析
+            ) : null}
+            {isParentMode ? (
+              <button type="button" onClick={openDeleteModal} disabled={deleteDisabled} title={deleteTitle} className={isModern ? modernToolbarDanger : reportToolbarDanger}>
+                删除
               </button>
-            </>
-          ) : null}
-          {planId ? (
-            <Link to={`/plan/${planId}`} className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600">
-              查看 7 天训练计划
+            ) : null}
+            <Link to="/archive" className={isModern ? modernToolbarSecondary : reportToolbarSecondary}>
+              练习档案
             </Link>
-          ) : (
-            <button
-              type="button"
-              onClick={handleCreatePlan}
-              disabled={!deferredAnalysis || deferredAnalysis.status !== "completed" || isCreatingPlan}
-              className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isCreatingPlan ? "正在生成训练计划..." : "生成 7 天训练计划"}
-            </button>
-          )}
+            {deferredAnalysis?.status === "completed" ? (
+              <>
+                <Link to={`/report/${deferredAnalysis.id}`} className={isModern ? modernToolbarPrimary : reportToolbarPrimary}>
+                  查看报告
+                </Link>
+                <button type="button" onClick={() => requestRetryAnalysis("report")} disabled={isRetryingAnalysis} className={isModern ? modernToolbarWarning : reportToolbarWarning}>
+                  {isRetryingAnalysis ? "提交中..." : "重新生成报告"}
+                </button>
+                <button type="button" onClick={() => requestRetryAnalysis("analysis")} disabled={isRetryingAnalysis} className={isModern ? modernToolbarSecondary : reportToolbarSecondary}>
+                  完整重新分析
+                </button>
+              </>
+            ) : null}
+            {planId ? (
+              <Link to={`/plan/${planId}`} className={isModern ? modernToolbarPrimary : reportToolbarPrimary}>
+                查看 7 天训练计划
+              </Link>
+            ) : (
+              <button
+                type="button"
+                onClick={handleCreatePlan}
+                disabled={!deferredAnalysis || deferredAnalysis.status !== "completed" || isCreatingPlan}
+                className={isModern ? modernToolbarPrimary : reportToolbarPrimary}
+              >
+                {isCreatingPlan ? "正在生成训练计划..." : "生成 7 天训练计划"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
-      {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
+      {error ? (
+        <div className={isModern ? "rounded-lg border border-rose-300/20 bg-rose-400/10 px-5 py-4 text-sm text-rose-100" : "rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500"}>
+          {error}
+        </div>
+      ) : null}
 
       {!deferredAnalysis ? (
         <LoadingState status="processing" />
@@ -1022,6 +1030,141 @@ export default function ReportPage() {
             </div>
           ) : null}
 
+          {isModern ? (
+            <>
+              <ModernAnalysisWorkspace
+                analysis={deferredAnalysis}
+                pose={pose}
+                selectedFrameId={selectedPoseFrame}
+                onFrameChange={setSelectedPoseFrame}
+              />
+
+              <div className="grid gap-5 web:grid-cols-[minmax(0,1fr)_380px]">
+                <section className="min-w-0 rounded-lg border border-white/10 bg-white/[0.045] p-5 shadow-[0_18px_54px_rgba(2,6,23,0.18)] tablet:p-6">
+                  <div className="flex flex-col gap-4 tablet:flex-row tablet:items-center tablet:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">诊断报告</p>
+                      <h2 className="mt-2 text-2xl font-semibold text-white">{deferredAnalysis.action_type}</h2>
+                      <div className="mt-3 flex flex-wrap gap-3 text-sm text-slate-400">
+                        <span>{formatDate(deferredAnalysis.created_at)}</span>
+                        {deferredAnalysis.skater_name ? <span>练习档案：{deferredAnalysis.skater_name}</span> : null}
+                        {deferredAnalysis.skill_category ? <span>技能分类：{deferredAnalysis.skill_category}</span> : null}
+                      </div>
+                    </div>
+                    <div className="w-full max-w-[220px] rounded-lg border border-white/10 bg-slate-950/30 p-4 tablet:w-[220px]">
+                      <p className="text-xs text-slate-400">训练完成度</p>
+                      <p className="mt-2 text-4xl font-semibold text-white">{Math.round(deferredAnalysis.force_score ?? 0)}</p>
+                      <p className="mt-1 text-sm text-slate-400">综合表现评分</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 rounded-lg border border-white/10 bg-slate-950/24 p-4">
+                    <p className="text-sm font-semibold text-slate-200">总体评价</p>
+                    <p className="mt-3 text-sm leading-7 text-slate-300">{deferredAnalysis.report?.summary ?? "暂无总体评价。"}</p>
+                  </div>
+
+                  {isParentMode && technicalScore !== null ? (
+                    <div className="mt-4 rounded-lg border border-cyan-300/15 bg-cyan-400/8 p-4">
+                      <p className="text-sm font-semibold text-cyan-100">技术质量：{technicalScore} 分</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-400">反映轴心、落冰、手臂、核心等技术细节；训练完成度仍以顶部主分为准。</p>
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="min-w-0 rounded-lg border border-white/10 bg-white/[0.045] p-5 shadow-[0_18px_54px_rgba(2,6,23,0.18)] tablet:p-6">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">当前动作指标</p>
+                  <dl className="mt-5 space-y-3 text-sm">
+                    <div className="flex justify-between gap-4 rounded-md bg-slate-950/24 px-3 py-3">
+                      <dt className="text-slate-400">动作类型</dt>
+                      <dd className="text-right font-medium text-slate-100">{deferredAnalysis.action_type}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4 rounded-md bg-slate-950/24 px-3 py-3">
+                      <dt className="text-slate-400">数据质量</dt>
+                      <dd className="text-right font-medium text-slate-100">{DATA_QUALITY_LABELS[reportDataQuality] ?? reportDataQuality}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4 rounded-md bg-slate-950/24 px-3 py-3">
+                      <dt className="text-slate-400">源视频 FPS</dt>
+                      <dd className="text-right font-medium text-slate-100">{deferredAnalysis.source_fps ? Math.round(deferredAnalysis.source_fps) : "未知"}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4 rounded-md bg-slate-950/24 px-3 py-3">
+                      <dt className="text-slate-400">姿态帧</dt>
+                      <dd className="text-right font-medium text-slate-100">{pose?.frames?.length ? `${pose.frames.length} 帧` : "暂无数据"}</dd>
+                    </div>
+                  </dl>
+                </section>
+              </div>
+
+              <div className="grid gap-5 web:grid-cols-2">
+                <section className="rounded-lg border border-white/10 bg-white/[0.045] p-5 tablet:p-6">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">{isParentMode ? "问题列表" : "冰宝提醒"}</p>
+                  <div className="mt-5 space-y-3">
+                    {isParentMode ? (
+                      deferredAnalysis.report?.issues?.length ? (
+                        deferredAnalysis.report.issues.map((issue, index) => (
+                          <article key={`${issue.category}-${index}`} className="rounded-lg border border-white/10 bg-slate-950/24 p-4">
+                            <div className="flex items-center justify-between gap-3">
+                              <h3 className="text-sm font-semibold text-white">{issue.category}</h3>
+                              <span className="text-xs uppercase tracking-[0.18em] text-slate-400">{issue.severity}</span>
+                            </div>
+                            <p className="mt-3 text-sm leading-7 text-slate-300">{issue.description}</p>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="text-sm text-slate-400">没有识别到明显问题。</p>
+                      )
+                    ) : deferredAnalysis.report?.improvements?.length ? (
+                      deferredAnalysis.report.improvements.slice(0, 3).map((improvement, index) => (
+                        <article key={`${improvement.target}-${index}`} className="rounded-lg border border-white/10 bg-slate-950/24 p-4">
+                          <p className="text-sm font-semibold text-cyan-100">{improvement.target}</p>
+                          <p className="mt-2 text-sm leading-7 text-slate-300">{improvement.action}</p>
+                        </article>
+                      ))
+                    ) : (
+                      <p className="text-sm text-slate-400">今天表现很棒，继续保持稳定节奏。</p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-lg border border-white/10 bg-white/[0.045] p-5 tablet:p-6">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">{isParentMode ? "改进建议" : "训练重点"}</p>
+                  <div className="mt-5 space-y-3">
+                    {isParentMode ? (
+                      deferredAnalysis.report?.improvements?.length ? (
+                        deferredAnalysis.report.improvements.map((improvement, index) => (
+                          <article key={`${improvement.target}-${index}`} className="rounded-lg border border-white/10 bg-slate-950/24 p-4">
+                            <p className="text-sm font-semibold text-cyan-100">{improvement.target}</p>
+                            <p className="mt-2 text-sm leading-7 text-slate-300">{improvement.action}</p>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="text-sm text-slate-400">暂无改进建议。</p>
+                      )
+                    ) : (
+                      <p className="text-base leading-8 text-slate-200">{deferredAnalysis.report?.training_focus ?? "先把动作做稳，再慢慢加速度。"}</p>
+                    )}
+                  </div>
+                </section>
+              </div>
+
+              <div className="flex flex-col gap-4 rounded-lg border border-cyan-300/15 bg-cyan-400/8 p-5 tablet:flex-row tablet:items-center tablet:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">7 天训练计划</p>
+                  <h2 className="mt-2 text-xl font-semibold text-white">把这次诊断转成一周训练安排</h2>
+                  <p className="mt-2 text-sm leading-6 text-slate-400">系统会基于当前报告生成固定 7 天主题的个性化训练计划。</p>
+                </div>
+                {planId ? (
+                  <Link to={`/plan/${planId}`} className={modernToolbarPrimary}>
+                    查看训练计划
+                  </Link>
+                ) : (
+                  <button type="button" onClick={handleCreatePlan} disabled={isCreatingPlan} className={modernToolbarPrimary}>
+                    {isCreatingPlan ? "正在生成训练计划..." : "生成训练计划"}
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
           <section className="app-card overflow-hidden p-6 tablet:p-8">
             <div className="grid gap-6 tablet:grid-cols-[minmax(220px,240px)_1fr] tablet:items-center web:gap-8">
               <div className="flex justify-center tablet:justify-start">
@@ -1128,7 +1271,7 @@ export default function ReportPage() {
                 </ReportCard>
               ) : null}
 
-              {pose?.frames?.length ? (
+              {!isModern && pose?.frames?.length ? (
                 <ReportCard title="姿态回放与生物力学" eyebrow="Pose Replay">
                   <PoseViewer pose={pose} activeFrameId={selectedPoseFrame} onFrameChange={setSelectedPoseFrame} />
                   {deferredAnalysis.bio_data ? (
@@ -1267,6 +1410,8 @@ export default function ReportPage() {
               </div>
             </section>
           ) : null}
+            </>
+          )}
         </>
       )}
 
