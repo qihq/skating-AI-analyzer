@@ -252,7 +252,7 @@ export function TargetPoseDebugPanel({
   }
 
   return (
-    <div className="rounded-[22px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
+    <div className="min-w-0 max-w-full overflow-hidden rounded-[22px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-600">Target Tracking / Pose Debug</p>
@@ -290,7 +290,7 @@ export function TargetPoseDebugPanel({
       ) : null}
 
       {analysisId && displayFrames.length ? (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {displayFrames.map((frame, index) => {
             const frameName = frame.frame ?? `frame_${String((frame.frame_index ?? index) + 1).padStart(4, "0")}.jpg`;
             const bbox = frame.bbox;
@@ -311,9 +311,9 @@ export function TargetPoseDebugPanel({
                     />
                   ) : null}
                 </div>
-                <div className="space-y-1 px-3 py-2 text-xs text-slate-500">
+                <div className="min-w-0 space-y-1 px-3 py-2 text-xs text-slate-500">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-slate-700">{frameName}</span>
+                    <span className="min-w-0 truncate font-mono text-slate-700">{frameName}</span>
                     <span className={`rounded-full border px-2 py-0.5 ${stateClasses}`}>{frame.state ?? "unknown"}</span>
                   </div>
                   <p>
@@ -332,8 +332,8 @@ export function TargetPoseDebugPanel({
       {poseFrames.length ? (
         <details className="mt-3 text-xs text-slate-500">
           <summary className="cursor-pointer">展开 pose 逐帧摘要</summary>
-          <div className="mt-2 max-h-64 overflow-x-auto">
-            <table className="min-w-full text-left">
+          <div className="mt-2 max-w-full overflow-x-auto">
+            <table className="min-w-[640px] text-left">
               <thead className="text-slate-400">
                 <tr>
                   <th className="py-1 pr-3 font-medium">Frame</th>
@@ -394,7 +394,7 @@ export default function AnalysisDebugLogPanel({
 
   return (
     <ReportCard title="分析日志" eyebrow="Debug Log">
-      <div className="space-y-4">
+      <div className="min-w-0 space-y-4">
         <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
           <p>Pipeline Version: {pipelineVersion ?? "v5.1.0"}</p>
           <p className="mt-2 text-xs text-slate-500">
@@ -414,7 +414,7 @@ export default function AnalysisDebugLogPanel({
         </div>
 
         {videoTemporalDiagnostics ? (
-          <div className="rounded-[22px] border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-slate-700">
+          <div className="min-w-0 max-w-full overflow-hidden rounded-[22px] border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-slate-700">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-500">Video Temporal</p>
@@ -450,7 +450,7 @@ export default function AnalysisDebugLogPanel({
             ) : null}            {selectedSemanticFrames.length ? (
               <div className="mt-3 space-y-3">
                 {analysisId ? (
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     {selectedSemanticFrames.map((frame, index) => {
                       const frameId = frame.frame_id ?? null;
                       return (
@@ -462,9 +462,9 @@ export default function AnalysisDebugLogPanel({
                               <div className="flex h-full items-center justify-center px-3 text-center text-xs text-slate-400">无帧 ID</div>
                             )}
                           </div>
-                          <div className="space-y-1 px-3 py-2 text-xs text-slate-500">
+                          <div className="min-w-0 space-y-1 px-3 py-2 text-xs text-slate-500">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="font-mono text-slate-700">{frameId ?? "-"}</span>
+                              <span className="min-w-0 truncate font-mono text-slate-700">{frameId ?? "-"}</span>
                               <span>{formatDuration(frame.timestamp) ?? "-"}</span>
                             </div>
                             <p className="font-semibold text-slate-700">{frame.phase_label ?? frame.phase_code ?? "-"}</p>
@@ -479,8 +479,8 @@ export default function AnalysisDebugLogPanel({
                     })}
                   </div>
                 ) : null}
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-left text-xs">
+                <div className="max-w-full overflow-x-auto">
+                  <table className="min-w-[640px] text-left text-xs">
                     <thead className="text-slate-400">
                       <tr>
                         <th className="py-1 pr-3 font-medium">Frame</th>

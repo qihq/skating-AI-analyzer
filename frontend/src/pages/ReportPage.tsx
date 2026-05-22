@@ -1064,8 +1064,8 @@ export default function ReportPage() {
             </div>
           </section>
 
-          <div className="grid gap-6 web:grid-cols-[1.08fr_0.92fr]">
-            <div className="space-y-6">
+          <div className="grid min-w-0 max-w-full gap-6 overflow-hidden web:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
+            <div className="min-w-0 space-y-6">
               <ReportCard title="总体评价" eyebrow="Summary">
                 <p className="max-w-3xl text-base leading-8 text-slate-600">{deferredAnalysis.report?.summary ?? "暂无总体评价。"}</p>
               </ReportCard>
@@ -1075,10 +1075,10 @@ export default function ReportPage() {
               {subscores || reportDataQuality !== "good" ? (
                 <ReportCard title="分项评分" eyebrow="Subscores">
                   {hasReliableSubscores && subscores ? (
-                    <div className="grid gap-6 ipad:grid-cols-[1fr_1fr] web:grid-cols-1">
+                    <div className="grid min-w-0 gap-6 ipad:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] web:grid-cols-1">
                       <SubscoreRadarChart subscores={subscores} />
 
-                      <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                         {Object.entries(subscores).map(([key, value]) => (
                           <article key={key} className="rounded-[24px] bg-slate-50 p-4">
                             <p className="text-sm text-slate-500">{SUBSCORE_LABELS[key] ?? key}</p>
@@ -1088,7 +1088,7 @@ export default function ReportPage() {
                       </div>
                     </div>
                   ) : (
-                    <div className="grid gap-6 ipad:grid-cols-[1fr_1fr] web:grid-cols-1">
+                    <div className="grid min-w-0 gap-6 ipad:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] web:grid-cols-1">
                       <div className="relative h-64 overflow-hidden rounded-[28px] border border-slate-200 bg-slate-100">
                         <div className="absolute inset-0 opacity-60 [background-image:radial-gradient(circle_at_center,rgba(148,163,184,0.14)_0,rgba(148,163,184,0.14)_1px,transparent_1px)] [background-size:28px_28px]" />
                         <div className="absolute inset-6 rounded-full border border-dashed border-slate-300" />
@@ -1145,7 +1145,7 @@ export default function ReportPage() {
               />
             </div>
 
-            <div className="space-y-6">
+            <div className="min-w-0 space-y-6">
               {!isParentMode ? (
                 <>
                   <ReportCard title="冰宝提醒" eyebrow="Simple View">
