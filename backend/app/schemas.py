@@ -429,6 +429,7 @@ class PoseResponse(BaseModel):
     frame_urls: dict[str, str]
     frame_timestamps: dict[str, float] = Field(default_factory=dict)
     effective_fps: float | None = None
+    pose_diagnostics: dict[str, Any] | None = None
 
 
 class ProviderBase(BaseModel):
@@ -507,6 +508,21 @@ class PoseRuntimeStatusResponse(BaseModel):
     model_exists: bool
     num_poses: int
     reason: str
+
+
+class PersonTrackerRuntimeStatusResponse(BaseModel):
+    mode: str
+    configured: bool
+    model_path: str
+    model_exists: bool
+    mounted_default_path: str
+    mounted_default_exists: bool
+    env_var: str
+    source: str
+    reason: str
+    dependencies_ready: bool = False
+    dependency_status: dict[str, bool] = Field(default_factory=dict)
+    dependency_errors: dict[str, str] = Field(default_factory=dict)
 
 
 class BackupFilePublic(BaseModel):

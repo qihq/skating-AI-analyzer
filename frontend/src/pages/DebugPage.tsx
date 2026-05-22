@@ -120,6 +120,43 @@ export default function DebugPage() {
     };
   }, [isParentMode, selectedId]);
 
+  useEffect(() => {
+    if (!isParentMode) {
+      return;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const data = await fetchAnalyses();
+        if (cancelled) {
+          return;
+        }
+        setAnalyses(data);
+        setSelectedId((current) => current ?? data[0]?.id ?? null);
+
+        const detailId = selectedId ?? data[0]?.id;
+        if (detailId) {
+          const detail = await fetchAnalysis(detailId, { isParentRequest: true });
+          if (!cancelled) {
+            setSelectedDetail(detail);
+            setDetailState("ready");
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setError("调试日志刷新失败，请稍后再试。");
+        }
+      }
+    };
+
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isParentMode, selectedId]);
+
   const selectedItem = useMemo(
     () => analyses.find((item) => item.id === selectedId) ?? null,
     [analyses, selectedId],
@@ -220,7 +257,12 @@ export default function DebugPage() {
           {detailState !== "loading" && selectedDetail ? (
             <div className="space-y-4">
               <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                <p className="font-semibold text-slate-900">{selectedItem ? buildTitle(selectedItem) : selectedDetail.id}</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <p className="font-semibold text-slate-900">{selectedItem ? buildTitle(selectedItem) : selectedDetail.id}</p>
+                  <Link to={`/report/${selectedDetail.id}/pose-debug`} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-blue-600 transition hover:bg-blue-50">
+                    Pose Debug
+                  </Link>
+                </div>
                 <p className="mt-1 text-xs text-slate-500">
                   {selectedDetail.action_type}
                   {selectedDetail.action_subtype ? ` · ${selectedDetail.action_subtype}` : ""}
@@ -233,6 +275,8 @@ export default function DebugPage() {
                 pipelineVersion={selectedDetail.pipeline_version}
                 videoTemporalDiagnostics={selectedDetail.video_temporal_diagnostics}
                 analysisId={selectedDetail.id}
+                targetLock={selectedDetail.target_lock}
+                poseData={selectedDetail.pose_data}
               />
             </div>
           ) : null}

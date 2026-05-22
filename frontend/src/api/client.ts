@@ -116,6 +116,7 @@ export interface PoseKeypoint {
   y: number;
   z: number;
   visibility: number;
+  interpolated?: boolean;
 }
 
 export interface PoseFrame {
@@ -128,6 +129,8 @@ export interface PoseFrame {
     height: number;
   } | null;
   tracking_confidence?: number | null;
+  tracking_state?: string | null;
+  pose_candidates?: Record<string, unknown>[];
 }
 
 export interface PoseResponse {
@@ -136,6 +139,7 @@ export interface PoseResponse {
   frame_urls: Record<string, string>;
   frame_timestamps?: Record<string, number>;
   effective_fps?: number | null;
+  pose_diagnostics?: Record<string, unknown> | null;
 }
 
 export interface AnalysisListItem {
@@ -685,6 +689,21 @@ export interface PoseRuntimeStatus {
   reason: string;
 }
 
+export interface PersonTrackerRuntimeStatus {
+  mode: string;
+  configured: boolean;
+  model_path: string;
+  model_exists: boolean;
+  mounted_default_path: string;
+  mounted_default_exists: boolean;
+  env_var: string;
+  source: string;
+  reason: string;
+  dependencies_ready?: boolean;
+  dependency_status?: Record<string, boolean>;
+  dependency_errors?: Record<string, string>;
+}
+
 export const apiClient = axios.create({
   baseURL: "/api",
   timeout: 600000,
@@ -1084,6 +1103,11 @@ export async function testActiveApiConnection() {
 
 export async function fetchPoseRuntimeStatus() {
   const response = await apiClient.get<PoseRuntimeStatus>("/settings/pose-runtime");
+  return response.data;
+}
+
+export async function fetchPersonTrackerRuntimeStatus() {
+  const response = await apiClient.get<PersonTrackerRuntimeStatus>("/settings/person-tracker-runtime");
   return response.data;
 }
 

@@ -21,6 +21,9 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 ## 功能概览
 
 - 视频上传与异步分析
+- Pipeline v5.1.0：新增独立 Pose Debug 大屏回放页，并适配手机、iPad、网页端和 PWA 安全区
+- Pose Debug 页面集中展示骨架回放、当前帧 bbox、追踪置信度、候选数量、pose diagnostics、追踪缩略图和生物力学关键帧联动
+- 设置页已拆分姿态运行时与 YOLO 追踪运行时检查，两者拥有独立的重新检查按钮、加载状态、检查时间和错误提示
 - Qwen 3.6 Plus 视频语义时间定位，输出阶段区间和 key_frame_hint
 - 时间戳仲裁层结合视频 AI 区间、运动密度和骨架候选，再由 FFmpeg 精准抽取语义关键帧
 - 语义关键帧图片 AI 精析，prompt 中携带 `video_context`
@@ -29,6 +32,8 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 - AI 训练诊断报告
 - 阶段感知重试流程，支持缓存帧复用
 - 处理日志、管线计时、报告页调试信息
+- YOLO + ByteTrack 目标追踪，支持挂载 `yolov8n.pt` 并在设置页查看运行时状态
+- 报告页 Pose Replay 可打开 `/report/:id/pose-debug`，用于大屏查看骨架和追踪调试数据
 - 自动检测过期任务并恢复失败状态
 - 模糊过滤与动作感知帧采样，提升视觉输入质量
 - 独立 `skating_vision` Python 包，可脱离主应用复用
@@ -103,6 +108,9 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 # 可选：启用二期多姿态跟踪
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
 # POSE_NUM_POSES=4
+
+# 可选：使用挂载的 YOLO 人体检测权重，避免运行时下载
+# YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt
 ```
 
 说明：
@@ -115,12 +123,14 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 ## 二期姿态模型启用
 
-二期多姿态跟踪通过宿主机挂载 MediaPipe `.task` 模型文件启用。
+二期多姿态和目标追踪通过宿主机挂载模型文件启用。
 
 - 将模型文件放到 `./models`，例如 `./models/pose_landmarker_heavy.task`
 - 在 `.env` 中设置 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
 - 可选设置 `POSE_NUM_POSES=4`
-- `.task` 模型文件不提交到当前仓库
+- 如需 YOLO 目标追踪，将 `yolov8n.pt` 放到 `./models`，并可选设置 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。如果未设置该变量，后端会先检查 `/models/yolov8n.pt`，再允许 Ultralytics 自动下载 `yolov8n.pt`
+- 设置页会分别显示姿态运行时和 YOLO 运行时状态，并提供独立重新检查按钮，方便确认模型文件和依赖是否已生效
+- 模型文件不提交到当前仓库
 - 如果模型缺失或加载失败，后端会自动降级回一期单人 pose 流程
 
 ## 分析管线更新
@@ -250,25 +260,29 @@ docker run -d \
 
 说明：
 
-- 如果使用 `.env` 文件方式运行 allinone，请确保其中包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
+- 如果使用 `.env` 文件方式运行 allinone，请确保其中包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`；使用挂载 YOLO 权重时，也加入 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`
 - 如果在 NAS / Container Manager 中直接手动配置环境变量，可以不挂载 `.env`，但仍需额外设置同名环境变量，并挂载 `models` 目录
 - 旧的分析记录如果保存的是 Windows 本地绝对路径，allinone 会自动回退到 `/data/uploads/<analysis_id>/source.*` 查找原始视频
 
 导出：
 
-```bash
-docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:latest
+```powershell
+.\scripts\export-allinone-image.ps1
 ```
+
+导出脚本会重新构建 `skating-analyzer-allinone:latest`，并在 `./deliverables` 下生成带时间戳的 `v5.1.0` tar 文件。
 
 ## 主要页面
 
 - `/path`：技能树与学习路径
 - `/review`：上传视频并发起分析
 - `/report/:id`：分析报告
+- `/report/:id/pose-debug`：大屏姿态回放、追踪 diagnostics 与生物力学调试页
 - `/archive`：历史档案 / 训练进展
 - `/plan/:plan_id`：训练计划
 - `/snowball`：冰宝陪练与记忆建议
-- `/settings`：系统设置、PIN、备份、供应商管理
+- `/settings`：系统设置、PIN、备份、供应商管理、姿态与 YOLO 运行时状态独立检查
+- `/debug`：分析调试日志，支持自动刷新最新分析状态
 
 ## 数据与隐私
 

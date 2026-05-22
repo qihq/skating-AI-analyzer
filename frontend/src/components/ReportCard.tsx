@@ -8,7 +8,7 @@ type ReportCardProps = PropsWithChildren<{
 
 export default function ReportCard({ title, eyebrow, className = "", children }: ReportCardProps) {
   return (
-    <section className={`app-card p-6 tablet:p-7 ${className}`}>
+    <section className={`app-card min-w-0 max-w-full overflow-hidden p-5 phone:p-6 tablet:p-7 ${className}`}>
       <div className="mb-5">
         {eyebrow ? <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">{eyebrow}</p> : null}
         <h2 className="mt-2 text-xl font-semibold text-slate-900">{title}</h2>

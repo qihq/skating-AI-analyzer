@@ -9,6 +9,7 @@ import ArchivePage from "./pages/ArchivePage";
 import HistoryPage from "./pages/HistoryPage";
 import ParentSetupPage from "./pages/ParentSetupPage";
 import PlanPage from "./pages/PlanPage";
+import PoseDebugPage from "./pages/PoseDebugPage";
 import ReportPage from "./pages/ReportPage";
 import ReviewPage from "./pages/ReviewPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -126,6 +127,7 @@ export default function App() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
+          <Route path="/report/:id/pose-debug" element={<PoseDebugPage />} />
           <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />

@@ -81,11 +81,16 @@ See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full 10-stage
 
 The latest update expands the video analysis pipeline and deployment configuration:
 
+- **Pipeline v5.1.0**: dedicated Pose Debug replay page with responsive mobile, iPad, web, and PWA-safe layouts
+- Larger debug-mode skeleton replay with current-frame bbox, tracking confidence, candidate counts, pose diagnostics, tracking thumbnails, and biomechanics key-frame sync
+- Settings runtime checks are split: pose model status and YOLO tracker status now have independent refresh buttons, loading states, timestamps, and errors
 - Video AI semantic temporal localization with Qwen 3.6 Plus (`qwen3.6-plus`)
 - Timestamp arbitration before FFmpeg frame extraction: video phase interval + motion density + skeleton candidates
 - Semantic keyframe image analysis with per-frame `video_context`
 - Dual-path vision analysis with frame-based and video-aware provider flows
 - Target lock and bounding-box tracking for more stable skater selection
+- YOLO + ByteTrack person tracking with mounted `yolov8n.pt` support and settings-page runtime status
+- In-report Pose Replay can open `/report/:id/pose-debug` for expanded skeleton and tracker debugging
 - Pose smoothing, phase voting, and cross-validation between pose signals and AI vision results
 - Jump feature extraction with FPS-aware timing and rotation unwrap handling
 - Frame annotation output for clearer review and debugging
@@ -190,6 +195,9 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 # Optional: enable phase-2 multi-pose tracking
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
 # POSE_NUM_POSES=4
+
+# Optional: use a mounted YOLO person detector weight instead of runtime download
+# YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt
 ```
 
 Notes:
@@ -202,12 +210,14 @@ Notes:
 
 ## Phase-2 Pose Model
 
-Phase-2 multi-pose tracking is enabled through a host-mounted MediaPipe `.task` model file.
+Phase-2 multi-pose and person tracking use host-mounted model files.
 
 - Put the model file under `./models`, for example `./models/pose_landmarker_heavy.task`.
 - Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`.
 - Optionally set `POSE_NUM_POSES=4`.
-- The `.task` file is not committed to this repository.
+- For YOLO person tracking, put `yolov8n.pt` under `./models` and optionally set `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`. If the variable is not set, the backend checks `/models/yolov8n.pt` before allowing Ultralytics to download `yolov8n.pt`.
+- The Settings page shows pose runtime and YOLO runtime status separately, with independent recheck buttons so one check no longer blocks or reloads the other.
+- Model files are not committed to this repository.
 - If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline.
 
 ## skating_vision Package
@@ -330,25 +340,29 @@ docker run -d \
 
 Notes:
 
-- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`.
+- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` and, when using mounted YOLO weights, `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`.
 - If you configure environment variables directly in NAS or Container Manager, mounting `.env` is optional, but you still need the same environment variable and the mounted `models` directory.
 - Older analysis rows that still store Windows absolute paths automatically fall back to `/data/uploads/<analysis_id>/source.*` when the all-in-one container resolves the original video.
 
 Export:
 
-```bash
-docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:latest
+```powershell
+.\scripts\export-allinone-image.ps1
 ```
+
+The export script rebuilds `skating-analyzer-allinone:latest` and writes a timestamped `v5.1.0` tar file under `./deliverables`.
 
 ## Main Screens
 
 - `/path`: skill tree and learning path
 - `/review`: upload and analyze training videos
 - `/report/:id`: analysis report
+- `/report/:id/pose-debug`: expanded pose replay, tracking diagnostics, and biomechanics debug page
 - `/archive`: training archive and progress
 - `/plan/:plan_id`: training plan
 - `/snowball`: assistant chat and memory suggestions
-- `/settings`: settings, PIN, backups, provider management
+- `/settings`: settings, PIN, backups, provider management, separate pose and YOLO runtime status checks
+- `/debug`: analysis debug logs with auto-refresh for the latest analysis state
 
 ## Privacy
 
