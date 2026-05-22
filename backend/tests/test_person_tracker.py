@@ -31,9 +31,15 @@ from app.services.person_tracker import (
 
 
 class _FakeDetections:
-    def __init__(self, xyxy: list[tuple[float, float, float, float]], tracker_id: list[int]) -> None:
+    def __init__(
+        self,
+        xyxy: list[tuple[float, float, float, float]],
+        tracker_id: list[int],
+        confidence: list[float] | None = None,
+    ) -> None:
         self.xyxy = np.array(xyxy, dtype=np.float32)
         self.tracker_id = np.array(tracker_id, dtype=int)
+        self.confidence = np.array(confidence or [0.9 for _ in xyxy], dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self.xyxy)
@@ -118,6 +124,23 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(diagnostics[0]["state"], "continuity_rejected")
         self.assertIn("area_ratio", diagnostics[0]["rejected_reasons"])
 
+    def test_initial_small_manual_bbox_can_bootstrap_to_full_person_detection(self) -> None:
+        tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+
+        with (
+            patch.object(tracker, "_read_frame", return_value=np.zeros((240, 320, 3), dtype=np.uint8)),
+            patch.object(tracker, "_detect", return_value=[(100.0, 45.0, 124.0, 170.0, 0.9)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([(100.0, 45.0, 124.0, 170.0)], [1])),
+        ):
+            tracked, flags, diagnostics = tracker.track_sequence_detailed(
+                [Path("frame_0001.jpg")],
+                {"x": 0.31, "y": 0.29, "width": 0.055, "height": 0.21},
+            )
+
+        self.assertEqual(diagnostics[0]["state"], "tracked")
+        self.assertEqual(tracked[0], {"x": 0.3125, "y": 0.1875, "width": 0.075, "height": 0.5208})
+        self.assertNotIn(PERSON_TRACKER_CONTINUITY_REJECTED_FLAG, flags)
+
     def test_relock_requires_two_consecutive_confirmations_before_switching_id(self) -> None:
         tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
         tracker._last_known_xyxy = (20.0, 20.0, 60.0, 100.0)
@@ -157,6 +180,26 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(diagnostic["state"], "relock_rejected")
         self.assertIn(PERSON_TRACKER_RELOCK_REJECTED_FLAG, tracker.quality_flags)
         self.assertEqual(diagnostic["rejected_candidates"][0]["tracker_id"], 2)
+
+    def test_long_lost_relock_allows_stable_far_candidate_after_occlusion(self) -> None:
+        tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 60.0, 100.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        tracker._center_history[9] = [(200.0, 95.0), (202.0, 96.0)]
+
+        detections = _FakeDetections([(180.0, 50.0, 220.0, 150.0)], [9], [0.88])
+        with (
+            patch.object(tracker, "_detect", return_value=[(180.0, 50.0, 220.0, 150.0, 0.88)]),
+            patch.object(tracker, "_update_tracks", return_value=detections),
+        ):
+            first, first_diag = tracker.process_frame_detailed(np.zeros((240, 320, 3), dtype=np.uint8), tracker._last_known_xyxy)
+            second, second_diag = tracker.process_frame_detailed(np.zeros((240, 320, 3), dtype=np.uint8), tracker._last_known_xyxy)
+
+        self.assertIsNone(first)
+        self.assertEqual(first_diag["state"], "relock_pending")
+        self.assertEqual(second, (180.0, 50.0, 220.0, 150.0))
+        self.assertEqual(second_diag["state"], "relocked")
 
     def test_detector_relock_confirms_full_frame_yolo_candidate_after_two_frames(self) -> None:
         tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())

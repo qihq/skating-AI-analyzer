@@ -59,6 +59,16 @@ _DETECTOR_RELOCK_CONFIRM_DISTANCE_RATIO = 0.55
 _LOCAL_ZOOM_PADDING_RATIO = 1.50
 _LOCAL_ZOOM_SCALE = 2.0
 _LOCAL_ZOOM_MIN_CONFIDENCE = 0.35
+_INITIAL_BOOTSTRAP_MIN_SEED_COVERAGE = 0.35
+_INITIAL_BOOTSTRAP_MAX_AREA_RATIO = 7.0
+_INITIAL_BOOTSTRAP_MAX_WIDTH_RATIO = 2.25
+_INITIAL_BOOTSTRAP_MAX_HEIGHT_RATIO = 2.75
+_INITIAL_BOOTSTRAP_MAX_CENTER_DISTANCE_RATIO = 0.22
+_LONG_LOST_REACQUIRE_AFTER_FRAMES = 4
+_LONG_LOST_MIN_CONFIDENCE = 0.45
+_LONG_LOST_ASPECT_RANGE = (0.12, 0.65)
+_LONG_LOST_HEIGHT_RANGE = (0.10, 0.62)
+_LONG_LOST_AREA_RANGE = (0.002, 0.14)
 _MAX_DIAGNOSTIC_REJECTED_CANDIDATES = 4
 
 
@@ -113,6 +123,25 @@ def _iou(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+def _intersection_area(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
+    if a is None or b is None:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [float(value) for value in a]
+    bx1, by1, bx2, by2 = [float(value) for value in b]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    return (ix2 - ix1) * (iy2 - iy1)
+
+
+def _bbox_coverage(inner: Sequence[float] | None, outer: Sequence[float] | None) -> float:
+    inner_area = _xyxy_area(inner)
+    if inner_area <= 0.0:
+        return 0.0
+    return _intersection_area(inner, outer) / inner_area
 
 
 def _center(xyxy: Sequence[float]) -> tuple[float, float]:
@@ -459,7 +488,7 @@ class PersonBBoxTracker:
                     prediction_xyxy=prediction_xyxy,
                 )
 
-        continuity_reasons = self._continuity_rejection_reasons(
+        continuity_reasons = self._confirmed_track_rejection_reasons(
             target_xyxy,
             self._last_known_xyxy or seed_xyxy,
             frame_w=frame_w,
@@ -605,6 +634,7 @@ class PersonBBoxTracker:
         center_jump_ratio: float = _TRACK_CENTER_JUMP_RATIO,
         area_ratio_range: tuple[float, float] = _TRACK_AREA_RATIO_RANGE,
         aspect_ratio_range: tuple[float, float] = _TRACK_ASPECT_RATIO_RANGE,
+        allow_seed_bootstrap: bool = False,
     ) -> list[str]:
         if candidate_xyxy is None or reference_xyxy is None:
             return []
@@ -612,7 +642,20 @@ class PersonBBoxTracker:
         reasons: list[str] = []
         frame_diagonal = (frame_w**2 + frame_h**2) ** 0.5
         distance = _center_distance(candidate_xyxy, reference_xyxy)
-        if distance > frame_diagonal * center_jump_ratio:
+        reference_coverage = _bbox_coverage(reference_xyxy, candidate_xyxy)
+        reference_width = max(1.0, float(reference_xyxy[2]) - float(reference_xyxy[0]))
+        reference_height = max(1.0, float(reference_xyxy[3]) - float(reference_xyxy[1]))
+        candidate_width = max(1.0, float(candidate_xyxy[2]) - float(candidate_xyxy[0]))
+        candidate_height = max(1.0, float(candidate_xyxy[3]) - float(candidate_xyxy[1]))
+        bootstrap_allowed = (
+            allow_seed_bootstrap
+            and not self._accepted_xyxy_history
+            and reference_coverage >= _INITIAL_BOOTSTRAP_MIN_SEED_COVERAGE
+            and distance <= frame_diagonal * _INITIAL_BOOTSTRAP_MAX_CENTER_DISTANCE_RATIO
+            and candidate_width / reference_width <= _INITIAL_BOOTSTRAP_MAX_WIDTH_RATIO
+            and candidate_height / reference_height <= _INITIAL_BOOTSTRAP_MAX_HEIGHT_RATIO
+        )
+        if distance > frame_diagonal * center_jump_ratio and not bootstrap_allowed:
             reasons.append("center_jump")
 
         reference_area = _xyxy_area(reference_xyxy)
@@ -620,15 +663,33 @@ class PersonBBoxTracker:
         if reference_area > 0 and candidate_area > 0:
             area_ratio = candidate_area / reference_area
             if area_ratio < area_ratio_range[0] or area_ratio > area_ratio_range[1]:
-                reasons.append("area_ratio")
+                if not (bootstrap_allowed and area_ratio <= _INITIAL_BOOTSTRAP_MAX_AREA_RATIO):
+                    reasons.append("area_ratio")
 
         reference_aspect = _xyxy_aspect_ratio(reference_xyxy)
         candidate_aspect = _xyxy_aspect_ratio(candidate_xyxy)
         if reference_aspect > 0 and candidate_aspect > 0:
             aspect_ratio = candidate_aspect / reference_aspect
             if aspect_ratio < aspect_ratio_range[0] or aspect_ratio > aspect_ratio_range[1]:
-                reasons.append("aspect_ratio")
+                if not bootstrap_allowed:
+                    reasons.append("aspect_ratio")
         return reasons
+
+    def _confirmed_track_rejection_reasons(
+        self,
+        candidate_xyxy: Sequence[float] | None,
+        reference_xyxy: Sequence[float] | None,
+        *,
+        frame_w: int,
+        frame_h: int,
+    ) -> list[str]:
+        return self._continuity_rejection_reasons(
+            candidate_xyxy,
+            reference_xyxy,
+            frame_w=frame_w,
+            frame_h=frame_h,
+            allow_seed_bootstrap=True,
+        )
 
     def _detector_relock_rejection_reasons(
         self,
@@ -971,7 +1032,14 @@ class PersonBBoxTracker:
                 distance = _center_distance(xyxy, seed_xyxy)
                 if self._lost_frames > 0 and distance > diagonal * _MAX_RELOCK_DISTANCE_RATIO:
                     continue
-                score = _iou(xyxy, seed_xyxy) + max(0.0, 1.0 - distance / max(diagonal, 1.0)) * 0.2
+                seed_coverage = _bbox_coverage(seed_xyxy, xyxy)
+                candidate_coverage = _bbox_coverage(xyxy, seed_xyxy)
+                score = (
+                    _iou(xyxy, seed_xyxy) * 0.45
+                    + seed_coverage * 0.45
+                    + candidate_coverage * 0.05
+                    + max(0.0, 1.0 - distance / max(diagonal, 1.0)) * 0.15
+                )
             else:
                 cx, cy = _center(xyxy)
                 frame_center_distance = ((cx - frame_w / 2.0) ** 2 + (cy - frame_h / 2.0) ** 2) ** 0.5
@@ -1004,6 +1072,12 @@ class PersonBBoxTracker:
             if self._is_static_candidate(tid, frame_w):
                 reasons.append("static_candidate")
             reasons.extend(self._relock_rejection_reasons(xyxy, reference_xyxy, frame_w=frame_w, frame_h=frame_h))
+            if (
+                reasons
+                and self._lost_frames >= _LONG_LOST_REACQUIRE_AFTER_FRAMES
+                and self._long_lost_reacquire_allowed(detections, index, frame_w=frame_w, frame_h=frame_h)
+            ):
+                reasons = [reason for reason in reasons if reason not in {"center_jump", "low_iou_and_far_from_previous_bbox"}]
             if reasons:
                 rejected.append(
                     {
@@ -1020,6 +1094,33 @@ class PersonBBoxTracker:
                 best_id = tid
                 best_score = score
         return best_id, rejected
+
+    def _long_lost_reacquire_allowed(self, detections: Any, index: int, *, frame_w: int, frame_h: int) -> bool:
+        confidence = getattr(detections, "confidence", None)
+        if confidence is not None and index < len(confidence):
+            try:
+                if float(confidence[index]) < _LONG_LOST_MIN_CONFIDENCE:
+                    return False
+            except (TypeError, ValueError):
+                return False
+
+        xyxy = tuple(float(value) for value in detections.xyxy[index])
+        bbox = _xyxy_to_bbox(xyxy, frame_w, frame_h)
+        area = float(bbox["width"]) * float(bbox["height"])
+        aspect = float(bbox["width"]) / max(float(bbox["height"]), MANUAL_BBOX_MIN_SIDE)
+        height = float(bbox["height"])
+        if not (_LONG_LOST_AREA_RANGE[0] <= area <= _LONG_LOST_AREA_RANGE[1]):
+            return False
+        if not (_LONG_LOST_ASPECT_RANGE[0] <= aspect <= _LONG_LOST_ASPECT_RANGE[1]):
+            return False
+        if not (_LONG_LOST_HEIGHT_RANGE[0] <= height <= _LONG_LOST_HEIGHT_RANGE[1]):
+            return False
+
+        tracker_ids = getattr(detections, "tracker_id", None)
+        if tracker_ids is None:
+            return False
+        history = self._center_history.get(int(tracker_ids[index]), [])
+        return len(history) >= 2
 
     def _xyxy_for_tracker_id(self, detections: Any, target_tracker_id: int) -> tuple[float, float, float, float] | None:
         tracker_ids = getattr(detections, "tracker_id", None)
