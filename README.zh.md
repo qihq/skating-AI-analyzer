@@ -266,9 +266,11 @@ docker run -d \
 
 导出：
 
-```bash
-docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:latest
+```powershell
+.\scripts\export-allinone-image.ps1
 ```
+
+导出脚本会重新构建 `skating-analyzer-allinone:latest`，并在 `./deliverables` 下生成带时间戳的 `v5.1.0` tar 文件。
 
 ## 主要页面
 

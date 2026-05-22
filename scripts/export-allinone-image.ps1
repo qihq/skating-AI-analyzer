@@ -1,7 +1,8 @@
 param(
     [string]$ImageName = "skating-analyzer-allinone",
     [string]$ImageTag = "latest",
-    [string]$OutputDir = ".\\dist"
+    [string]$PipelineVersion = "v5.1.0",
+    [string]$OutputDir = ".\\deliverables"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +10,8 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $resolvedOutputDir = Join-Path $projectRoot $OutputDir
 $fullImageName = "${ImageName}:${ImageTag}"
-$tarName = "${ImageName}-${ImageTag}.tar"
+$timestamp = Get-Date -Format "yyyyMMdd-HHmm"
+$tarName = "${ImageName}-${PipelineVersion}-${timestamp}.tar"
 $tarPath = Join-Path $resolvedOutputDir $tarName
 
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null

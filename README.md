@@ -277,9 +277,11 @@ Notes:
 
 Export:
 
-```bash
-docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:latest
+```powershell
+.\scripts\export-allinone-image.ps1
 ```
+
+The export script rebuilds `skating-analyzer-allinone:latest` and writes a timestamped `v5.1.0` tar file under `./deliverables`.
 
 ## Main Screens
 
