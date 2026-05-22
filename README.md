@@ -12,12 +12,16 @@ Skating Analyzer helps skaters and coaches upload training videos, extract motio
 
 The latest update expands the video analysis pipeline and deployment configuration:
 
+- **Pipeline v5.1.0**: dedicated Pose Debug replay page with responsive mobile, iPad, web, and PWA-safe layouts
+- Larger debug-mode skeleton replay with current-frame bbox, tracking confidence, candidate counts, pose diagnostics, tracking thumbnails, and biomechanics key-frame sync
+- Settings runtime checks are split: pose model status and YOLO tracker status now have independent refresh buttons, loading states, timestamps, and errors
 - Video AI semantic temporal localization with Qwen 3.6 Plus (`qwen3.6-plus`)
 - Timestamp arbitration before FFmpeg frame extraction: video phase interval + motion density + skeleton candidates
 - Semantic keyframe image analysis with per-frame `video_context`
 - Dual-path vision analysis with frame-based and video-aware provider flows
 - Target lock and bounding-box tracking for more stable skater selection
 - YOLO + ByteTrack person tracking with mounted `yolov8n.pt` support and settings-page runtime status
+- In-report Pose Replay can open `/report/:id/pose-debug` for expanded skeleton and tracker debugging
 - Pose smoothing, phase voting, and cross-validation between pose signals and AI vision results
 - Jump feature extraction with FPS-aware timing and rotation unwrap handling
 - Frame annotation output for clearer review and debugging
@@ -143,7 +147,7 @@ Phase-2 multi-pose and person tracking use host-mounted model files.
 - Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`.
 - Optionally set `POSE_NUM_POSES=4`.
 - For YOLO person tracking, put `yolov8n.pt` under `./models` and optionally set `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`. If the variable is not set, the backend checks `/models/yolov8n.pt` before allowing Ultralytics to download `yolov8n.pt`.
-- The Settings page shows both pose runtime and YOLO runtime status, so you can confirm whether the mounted weight is active before running analysis.
+- The Settings page shows pose runtime and YOLO runtime status separately, with independent recheck buttons so one check no longer blocks or reloads the other.
 - Model files are not committed to this repository.
 - If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline.
 
@@ -282,10 +286,11 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - `/path`: skill tree and learning path
 - `/review`: upload and analyze training videos
 - `/report/:id`: analysis report
+- `/report/:id/pose-debug`: expanded pose replay, tracking diagnostics, and biomechanics debug page
 - `/archive`: training archive and progress
 - `/plan/:plan_id`: training plan
 - `/snowball`: assistant chat and memory suggestions
-- `/settings`: settings, PIN, backups, provider management, pose/YOLO runtime status
+- `/settings`: settings, PIN, backups, provider management, separate pose and YOLO runtime status checks
 - `/debug`: analysis debug logs with auto-refresh for the latest analysis state
 
 ## Privacy

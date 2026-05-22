@@ -174,7 +174,7 @@ function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
           ) : null}
         </div>
         <div className="rounded-[22px] border border-cyan-100 bg-white/80 px-4 py-3 text-sm text-slate-600">
-          <p>Pipeline: {analysis.pipeline_version ?? "v1.0.0"}</p>
+          <p>Pipeline: {analysis.pipeline_version ?? "v5.1.0"}</p>
           {typeof timings.total_s === "number" ? <p className="mt-1">累计耗时：{formatDuration(timings.total_s)}</p> : null}
         </div>
       </div>
@@ -996,6 +996,8 @@ export default function ReportPage() {
             pipelineVersion={deferredAnalysis.pipeline_version}
             videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
             analysisId={deferredAnalysis.id}
+            targetLock={deferredAnalysis.target_lock}
+            poseData={pose ?? deferredAnalysis.pose_data}
           />
         </>
       ) : deferredAnalysis.status !== "completed" ? (
@@ -1008,6 +1010,8 @@ export default function ReportPage() {
             pipelineVersion={deferredAnalysis.pipeline_version}
             videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
             analysisId={deferredAnalysis.id}
+            targetLock={deferredAnalysis.target_lock}
+            poseData={pose ?? deferredAnalysis.pose_data}
           />
         </>
       ) : (
@@ -1115,6 +1119,12 @@ export default function ReportPage() {
 
               {pose?.frames?.length ? (
                 <ReportCard title="姿态回放与生物力学" eyebrow="Pose Replay">
+                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm text-slate-500">查看骨架、bbox 与逐帧追踪数据。</p>
+                    <Link to={`/report/${deferredAnalysis.id}/pose-debug`} className="app-pill text-sm font-semibold">
+                      打开大屏调试
+                    </Link>
+                  </div>
                   <PoseViewer pose={pose} activeFrameId={selectedPoseFrame} onFrameChange={setSelectedPoseFrame} />
                   {deferredAnalysis.bio_data ? (
                     <div className="mt-5">
@@ -1130,6 +1140,8 @@ export default function ReportPage() {
                 pipelineVersion={deferredAnalysis.pipeline_version}
                 videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
                 analysisId={deferredAnalysis.id}
+                targetLock={deferredAnalysis.target_lock}
+                poseData={pose ?? deferredAnalysis.pose_data}
               />
             </div>
 

@@ -61,8 +61,11 @@ export default function SettingsPage() {
   const [poseRuntime, setPoseRuntime] = useState<PoseRuntimeStatus | null>(null);
   const [personTrackerRuntime, setPersonTrackerRuntime] = useState<PersonTrackerRuntimeStatus | null>(null);
   const [isPoseRuntimeLoading, setIsPoseRuntimeLoading] = useState(false);
+  const [isPersonTrackerRuntimeLoading, setIsPersonTrackerRuntimeLoading] = useState(false);
   const [poseRuntimeCheckedAt, setPoseRuntimeCheckedAt] = useState<string | null>(null);
+  const [personTrackerRuntimeCheckedAt, setPersonTrackerRuntimeCheckedAt] = useState<string | null>(null);
   const [poseRuntimeError, setPoseRuntimeError] = useState<string | null>(null);
+  const [personTrackerRuntimeError, setPersonTrackerRuntimeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [savingSkaterId, setSavingSkaterId] = useState<string | null>(null);
@@ -104,24 +107,11 @@ export default function SettingsPage() {
     setIsPoseRuntimeLoading(true);
     setPoseRuntimeError(null);
     try {
-      const [poseRuntimeResult, personTrackerRuntimeResult] = await Promise.allSettled([
-        fetchPoseRuntimeStatus(),
-        fetchPersonTrackerRuntimeStatus(),
-      ]);
+      const poseRuntimeResult = await fetchPoseRuntimeStatus();
       if (isCancelled?.()) {
         return;
       }
-      if (poseRuntimeResult.status === "fulfilled") {
-        setPoseRuntime(poseRuntimeResult.value);
-      } else {
-        setPoseRuntime(null);
-        setPoseRuntimeError("暂时无法读取姿态运行时状态，可以稍后重试。");
-      }
-      if (personTrackerRuntimeResult.status === "fulfilled") {
-        setPersonTrackerRuntime(personTrackerRuntimeResult.value);
-      } else {
-        setPersonTrackerRuntime(null);
-      }
+      setPoseRuntime(poseRuntimeResult);
       setPoseRuntimeCheckedAt(new Date().toISOString());
     } catch {
       if (isCancelled?.()) {
@@ -131,6 +121,29 @@ export default function SettingsPage() {
     } finally {
       if (!isCancelled?.()) {
         setIsPoseRuntimeLoading(false);
+      }
+    }
+  };
+
+  const loadPersonTrackerRuntimeData = async (isCancelled?: () => boolean) => {
+    setIsPersonTrackerRuntimeLoading(true);
+    setPersonTrackerRuntimeError(null);
+    try {
+      const result = await fetchPersonTrackerRuntimeStatus();
+      if (isCancelled?.()) {
+        return;
+      }
+      setPersonTrackerRuntime(result);
+      setPersonTrackerRuntimeCheckedAt(new Date().toISOString());
+    } catch {
+      if (isCancelled?.()) {
+        return;
+      }
+      setPersonTrackerRuntime(null);
+      setPersonTrackerRuntimeError("暂时无法读取 YOLO 目标追踪状态，可以稍后重试。");
+    } finally {
+      if (!isCancelled?.()) {
+        setIsPersonTrackerRuntimeLoading(false);
       }
     }
   };
@@ -147,7 +160,7 @@ export default function SettingsPage() {
         if (cancelled) {
           return;
         }
-        await loadPoseRuntimeData(() => cancelled);
+        await Promise.all([loadPoseRuntimeData(() => cancelled), loadPersonTrackerRuntimeData(() => cancelled)]);
       } catch {
         if (!cancelled) {
           setError("家长设置加载失败，请稍后重试。");
@@ -364,32 +377,45 @@ export default function SettingsPage() {
         : poseRuntime
           ? "fallback_single_pose"
           : "--";
+  const trackerDependenciesMissing = personTrackerRuntime?.dependencies_ready === false;
   const trackerModeLabel =
-    !personTrackerRuntime && isPoseRuntimeLoading
+    !personTrackerRuntime && isPersonTrackerRuntimeLoading
       ? "正在检查 YOLO 状态"
-      : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
+      : trackerDependenciesMissing
+        ? "YOLO dependencies missing"
+        : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
         ? "YOLO 权重已就绪"
         : personTrackerRuntime
           ? "将尝试自动下载 YOLO"
           : "YOLO 状态暂不可用";
   const trackerBadgeClass =
-    !personTrackerRuntime && isPoseRuntimeLoading
+    !personTrackerRuntime && isPersonTrackerRuntimeLoading
       ? "border-blue-200 bg-blue-50 text-blue-700"
-      : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
+      : trackerDependenciesMissing
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : personTrackerRuntime?.model_exists || personTrackerRuntime?.mounted_default_exists
         ? "border-emerald-200 bg-emerald-50 text-emerald-700"
         : "border-amber-200 bg-amber-50 text-amber-700";
   const trackerPathText =
-    !personTrackerRuntime && isPoseRuntimeLoading ? "检查中..." : personTrackerRuntime?.model_path ?? "/models/yolov8n.pt";
+    !personTrackerRuntime && isPersonTrackerRuntimeLoading ? "检查中..." : personTrackerRuntime?.model_path ?? "/models/yolov8n.pt";
   const trackerReasonText =
-    !personTrackerRuntime && isPoseRuntimeLoading
+    !personTrackerRuntime && isPersonTrackerRuntimeLoading
       ? "正在读取 YOLO 目标追踪配置。"
-      : personTrackerRuntime?.reason === "configured"
-        ? "已通过环境变量指定 YOLO 权重路径。"
-        : personTrackerRuntime?.reason === "mounted_default"
-          ? "已在默认挂载路径找到 yolov8n.pt。"
-          : personTrackerRuntime?.reason === "missing_model_file"
-            ? "已设置 YOLO 权重路径，但该文件当前不可读。"
-            : "未找到挂载权重；首次分析时 Ultralytics 会尝试联网下载 yolov8n.pt。";
+      : personTrackerRuntime?.reason === "missing_dependencies"
+        ? "YOLO 权重文件存在，但后端 Python 环境缺少 ultralytics 或 supervision，分析会回退到 CSRT。"
+        : personTrackerRuntime?.reason === "configured"
+          ? "已通过环境变量指定 YOLO 权重路径。"
+          : personTrackerRuntime?.reason === "mounted_default"
+            ? "已在默认挂载路径找到 yolov8n.pt。"
+            : personTrackerRuntime?.reason === "missing_model_file"
+              ? "已设置 YOLO 权重路径，但该文件当前不可读。"
+              : personTrackerRuntimeError ?? "未找到挂载权重；首次分析时 Ultralytics 会尝试联网下载 yolov8n.pt。";
+  const trackerRuntimeCheckedText =
+    personTrackerRuntimeCheckedAt
+      ? `上次检查：${formatDate(personTrackerRuntimeCheckedAt)}`
+      : isPersonTrackerRuntimeLoading
+        ? "正在检查 YOLO 状态..."
+        : "尚未完成 YOLO 检查";
 
   if (!isParentMode) {
     return (
@@ -509,10 +535,22 @@ export default function SettingsPage() {
                     ByteTrack 不需要模型；YOLO 使用 `yolov8n.pt` 检测人物，建议像 MediaPipe 一样挂载到 models 目录。
                   </p>
                 </div>
-                <span className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${trackerBadgeClass}`}>
-                  {trackerModeLabel}
-                </span>
+                <div className="flex flex-wrap items-start gap-3 tablet:justify-end">
+                  <span className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${trackerBadgeClass}`}>
+                    {trackerModeLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void loadPersonTrackerRuntimeData()}
+                    disabled={isPersonTrackerRuntimeLoading}
+                    className="min-h-[42px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isPersonTrackerRuntimeLoading ? "检查中..." : "重新检查"}
+                  </button>
+                </div>
               </div>
+              <p className="mt-4 text-sm text-slate-500">{trackerRuntimeCheckedText}</p>
+              {personTrackerRuntimeError ? <p className="mt-2 text-sm text-amber-600">{personTrackerRuntimeError}</p> : null}
               <p className="mt-4 break-all rounded-[18px] bg-white px-4 py-3 font-mono text-xs leading-6 text-slate-600">
                 {trackerPathText}
               </p>

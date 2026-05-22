@@ -426,6 +426,7 @@ class PoseResponse(BaseModel):
     connections: list[list[int]]
     frames: list[PoseFrame]
     frame_urls: dict[str, str]
+    pose_diagnostics: dict[str, Any] | None = None
 
 
 class ProviderBase(BaseModel):
@@ -516,6 +517,9 @@ class PersonTrackerRuntimeStatusResponse(BaseModel):
     env_var: str
     source: str
     reason: str
+    dependencies_ready: bool = False
+    dependency_status: dict[str, bool] = Field(default_factory=dict)
+    dependency_errors: dict[str, str] = Field(default_factory=dict)
 
 
 class BackupFilePublic(BaseModel):

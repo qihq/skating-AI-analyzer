@@ -109,6 +109,7 @@ export interface PoseKeypoint {
   y: number;
   z: number;
   visibility: number;
+  interpolated?: boolean;
 }
 
 export interface PoseFrame {
@@ -121,12 +122,15 @@ export interface PoseFrame {
     height: number;
   } | null;
   tracking_confidence?: number | null;
+  tracking_state?: string | null;
+  pose_candidates?: Record<string, unknown>[];
 }
 
 export interface PoseResponse {
   connections: number[][];
   frames: PoseFrame[];
   frame_urls: Record<string, string>;
+  pose_diagnostics?: Record<string, unknown> | null;
 }
 
 export interface AnalysisListItem {
@@ -686,6 +690,9 @@ export interface PersonTrackerRuntimeStatus {
   env_var: string;
   source: string;
   reason: string;
+  dependencies_ready?: boolean;
+  dependency_status?: Record<string, boolean>;
+  dependency_errors?: Record<string, string>;
 }
 
 export const apiClient = axios.create({

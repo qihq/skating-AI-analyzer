@@ -6,6 +6,7 @@ type PoseViewerProps = {
   pose: PoseResponse;
   activeFrameId?: string | null;
   onFrameChange?: (frameId: string) => void;
+  variant?: "compact" | "debug";
 };
 
 const UPPER_BODY = new Set([11, 12, 13, 14, 15, 16]);
@@ -61,9 +62,10 @@ function drawPose(
   }
 
   if (frame.target_bbox) {
-    context.strokeStyle = "rgba(56, 189, 248, 0.95)";
+    const isInterpolatedFrame = frame.tracking_state === "interpolated";
+    context.strokeStyle = isInterpolatedFrame ? "rgba(148, 163, 184, 0.75)" : "rgba(56, 189, 248, 0.95)";
     context.lineWidth = 2;
-    context.setLineDash([8, 6]);
+    context.setLineDash(isInterpolatedFrame ? [4, 8] : [8, 6]);
     context.strokeRect(
       frame.target_bbox.x * width,
       frame.target_bbox.y * height,
@@ -77,7 +79,7 @@ function drawPose(
       context.fillStyle = "#E0F2FE";
       context.font = "12px sans-serif";
       context.fillText(
-        `lock ${(frame.tracking_confidence * 100).toFixed(0)}%`,
+        `${isInterpolatedFrame ? "interp" : "lock"} ${(frame.tracking_confidence * 100).toFixed(0)}%`,
         frame.target_bbox.x * width + 8,
         Math.max(14, frame.target_bbox.y * height - 10),
       );
@@ -94,26 +96,29 @@ function drawPose(
     if (!a || !b || a.visibility < 0.5 || b.visibility < 0.5) {
       continue;
     }
-    context.strokeStyle = "rgba(226, 232, 240, 0.82)";
-    context.lineWidth = 3;
+    const interpolated = frame.tracking_state === "interpolated" || Boolean(a.interpolated) || Boolean(b.interpolated);
+    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : "rgba(226, 232, 240, 0.82)";
+    context.lineWidth = interpolated ? 2 : 3;
+    context.setLineDash(interpolated ? [6, 6] : []);
     context.beginPath();
     context.moveTo(a.x * width, a.y * height);
     context.lineTo(b.x * width, b.y * height);
     context.stroke();
   }
+  context.setLineDash([]);
 
   for (const point of frame.keypoints) {
     if (point.visibility < 0.5) {
       continue;
     }
-    context.fillStyle = keypointColor(point);
+    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated ? "rgba(148, 163, 184, 0.62)" : keypointColor(point);
     context.beginPath();
     context.arc(point.x * width, point.y * height, AXIS_POINTS.has(point.id) ? 5 : 4, 0, Math.PI * 2);
     context.fill();
   }
 }
 
-export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseViewerProps) {
+export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant = "compact" }: PoseViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -198,11 +203,20 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseV
   const jumpTo = (nextIndex: number) => {
     setFrameIndex(Math.max(0, Math.min(nextIndex, frames.length - 1)));
   };
+  const viewerFrameClass =
+    variant === "debug"
+      ? "relative overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950 shadow-[0_20px_70px_rgba(15,23,42,0.18)]"
+      : "relative overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950";
+  const aspectClass = variant === "debug" ? "aspect-video w-full min-h-[220px] tablet:min-h-[360px] web:min-h-[520px]" : "aspect-video w-full";
+  const controlsClass =
+    variant === "debug"
+      ? "flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-slate-200 bg-white p-3 shadow-sm"
+      : "flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-white/10 bg-white/5 p-3";
 
   return (
     <div className="space-y-4">
-      <div className="relative overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950">
-        <div className="aspect-video w-full">
+      <div className={viewerFrameClass}>
+        <div className={aspectClass}>
           {currentFrameUrl && !frameImageError ? (
             <img
               ref={imageRef}
@@ -228,7 +242,7 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange }: PoseV
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-[1.25rem] border border-white/10 bg-white/5 p-3">
+      <div className={controlsClass}>
         <button type="button" className="pose-control" onClick={() => jumpTo(0)}>
           ⏮
         </button>

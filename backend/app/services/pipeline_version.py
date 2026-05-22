@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.0.0"
+CURRENT_PIPELINE_VERSION = "v5.1.0"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -15,3 +15,4 @@ CURRENT_PIPELINE_VERSION = "v5.0.0"
 # v1.1.10: Add frame-mode self-consistency voting and key-frame phase overrides.
 # v1.1.11: Add multi-provider Qwen/Doubao vision voting and Doubao video slot validation.
 # v5.0.0: Add Qwen 3.6 Plus video temporal localization, semantic keyframe arbitration, semantic FFmpeg extraction, image AI video_context, and video/image/MediaPipe report fusion.
+# v5.1.0: Add Pose Debug replay page, responsive PWA-safe debug UI, and separate pose/YOLO runtime checks.

@@ -69,7 +69,7 @@ from app.services.person_tracker import (
     PERSON_TRACKER_FAILED_FLAG,
     PERSON_TRACKER_UNAVAILABLE_FLAG,
     PersonTrackerUnavailable,
-    track_person_bbox,
+    track_person_bbox_detailed,
 )
 from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
 from app.services.memory_suggest import suggest_memory_updates
@@ -1095,6 +1095,25 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 )
                 pose_start = time.monotonic()
                 bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock, sampling_metadata.effective_fps)
+                tracker_summary = _tracker_debug_summary(target_lock, len(sampled_frames))
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='pose',
+                    level='info',
+                    message=(
+                        f'目标 bbox 追踪完成：{tracker_summary.get("tracker_type")}，'
+                        f'{tracker_summary.get("frame_count", 0)} 帧，'
+                        f'lost/reused {tracker_summary.get("lost_reused", 0)}，'
+                        f'relock {tracker_summary.get("relocked", 0)}，'
+                        f'rejected {tracker_summary.get("continuity_rejected", 0) + tracker_summary.get("relock_rejected", 0)}。'
+                    ),
+                    detail=_compact_json_detail(
+                        {
+                            "summary": tracker_summary,
+                            "frames": target_lock.get("person_tracker_diagnostics", []),
+                        }
+                    ),
+                )
                 pose_data = await asyncio.to_thread(
                     extract_pose,
                     str(processing_frames_dir),
@@ -1103,6 +1122,24 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     sampling_metadata.effective_fps,
                 )
                 timings['pose_s'] = _elapsed_seconds(pose_start)
+                pose_summary = _pose_debug_summary(pose_data)
+                await _append_analysis_log(
+                    analysis_id,
+                    stage='pose',
+                    level='info',
+                    message=(
+                        f'姿态候选选择完成：tracked {pose_summary.get("tracked", 0)}/'
+                        f'{pose_summary.get("total_frames", 0)}，'
+                        f'lost {pose_summary.get("lost", 0)}，'
+                        f'low confidence {pose_summary.get("low_confidence", 0)}。'
+                    ),
+                    detail=_compact_json_detail(
+                        {
+                            "summary": pose_summary,
+                            "frames": (pose_data.get("pose_diagnostics", {}) if isinstance(pose_data, dict) else {}).get("frames", []),
+                        }
+                    ),
+                )
                 async with AsyncSessionLocal() as session:
                     analysis = await session.get(Analysis, analysis_id)
                     if analysis is None:
@@ -1118,6 +1155,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     level='info',
                     message=f'姿态提取完成，共 {len(pose_data.get("frames", [])) if isinstance(pose_data, dict) else 0} 帧。',
                     elapsed_s=timings['pose_s'],
+                    detail=_compact_json_detail(
+                        {
+                            "tracker": tracker_summary,
+                            "pose": pose_summary,
+                            "quality_flags": pose_data.get("quality_flags", []) if isinstance(pose_data, dict) else [],
+                        }
+                    ),
                     timings=timings,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -2009,6 +2053,7 @@ def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) 
         connections=safe_pose_data.get("connections", []),
         frames=safe_pose_data.get("frames", []),
         frame_urls=frame_urls,
+        pose_diagnostics=safe_pose_data.get("pose_diagnostics") if isinstance(safe_pose_data.get("pose_diagnostics"), dict) else None,
     )
 
 
@@ -2047,6 +2092,94 @@ def _append_target_lock_flags(target_lock: dict[str, Any], flags: list[str]) -> 
     return target_lock
 
 
+def _clear_person_tracker_flags(target_lock: dict[str, Any]) -> dict[str, Any]:
+    existing = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+    target_lock["quality_flags"] = [flag for flag in existing if not str(flag).startswith("person_tracker_")]
+    return target_lock
+
+
+def _count_diagnostic_states(diagnostics: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(diagnostics, list):
+        return counts
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        state = str(item.get("state") or "unknown")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _tracker_debug_summary(target_lock: dict[str, Any], frame_count: int) -> dict[str, Any]:
+    flags = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+    diagnostics = target_lock.get("person_tracker_diagnostics") if isinstance(target_lock.get("person_tracker_diagnostics"), list) else []
+    state_counts = _count_diagnostic_states(diagnostics)
+    tracker_type = target_lock.get("tracker_type") or ("yolo_bytetrack" if diagnostics else "fallback")
+    return {
+        "tracker_type": tracker_type,
+        "frame_count": frame_count,
+        "diagnostic_frames": len(diagnostics),
+        "tracked": state_counts.get("tracked", 0) + state_counts.get("relocked", 0),
+        "lost_reused": state_counts.get("lost_reused", 0),
+        "relock_pending": state_counts.get("relock_pending", 0),
+        "relocked": state_counts.get("relocked", 0),
+        "continuity_rejected": state_counts.get("continuity_rejected", 0),
+        "relock_rejected": state_counts.get("relock_rejected", 0),
+        "states": state_counts,
+        "quality_flags": flags,
+    }
+
+
+def _pose_debug_summary(pose_data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(pose_data, dict):
+        return {"total_frames": 0, "tracked": 0, "lost": 0, "low_confidence": 0}
+    diagnostics = pose_data.get("pose_diagnostics") if isinstance(pose_data.get("pose_diagnostics"), dict) else None
+    if diagnostics:
+        return {
+            "mode": diagnostics.get("mode"),
+            "total_frames": diagnostics.get("total_frames", 0),
+            "tracked": diagnostics.get("tracked_frames", 0),
+            "lost": diagnostics.get("lost_frames", 0),
+            "interpolated": diagnostics.get("interpolated_frames", 0),
+            "low_confidence": diagnostics.get("low_confidence_frames", 0),
+            "multi_pose_frames": diagnostics.get("multi_pose_frames", 0),
+            "single_pose_crop_frames": diagnostics.get("single_pose_crop_frames", 0),
+            "candidate_count_histogram": diagnostics.get("candidate_count_histogram", {}),
+        }
+
+    frames = pose_data.get("frames") if isinstance(pose_data.get("frames"), list) else []
+    tracked = 0
+    lost = 0
+    low_confidence = 0
+    candidate_counts: dict[str, int] = {}
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        state = str(frame.get("tracking_state") or "unknown")
+        if state == "tracked":
+            tracked += 1
+        else:
+            lost += 1
+        confidence = frame.get("tracking_confidence")
+        if isinstance(confidence, (int, float)) and float(confidence) < 0.2:
+            low_confidence += 1
+        candidates = frame.get("pose_candidates") if isinstance(frame.get("pose_candidates"), list) else []
+        key = str(len(candidates))
+        candidate_counts[key] = candidate_counts.get(key, 0) + 1
+    return {
+        "mode": "legacy",
+        "total_frames": len(frames),
+        "tracked": tracked,
+        "lost": lost,
+        "low_confidence": low_confidence,
+        "candidate_count_histogram": candidate_counts,
+    }
+
+
+def _compact_json_detail(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 def _build_bbox_per_frame(
     sampled_frames: list[Path],
     target_lock: dict[str, Any],
@@ -2060,8 +2193,9 @@ def _build_bbox_per_frame(
         anchor_index = int(preview_frame_index) if preview_frame_index is not None else 0
     except (TypeError, ValueError):
         anchor_index = 0
+    _clear_person_tracker_flags(target_lock)
     try:
-        bbox_per_frame, flags = track_person_bbox(
+        bbox_per_frame, flags, diagnostics = track_person_bbox_detailed(
             sampled_frames,
             selected_bbox,
             initial_frame_index=anchor_index,
@@ -2069,6 +2203,8 @@ def _build_bbox_per_frame(
         )
         _append_target_lock_flags(target_lock, flags)
         target_lock["bbox_per_frame"] = bbox_per_frame
+        target_lock["person_tracker_diagnostics"] = diagnostics
+        target_lock["tracker_type"] = "yolo_bytetrack"
         return bbox_per_frame
     except PersonTrackerUnavailable:
         logger.info("person tracker unavailable; falling back to CSRT bbox tracker", exc_info=True)
@@ -2081,12 +2217,14 @@ def _build_bbox_per_frame(
         bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox, initial_frame_index=anchor_index)
         _append_target_lock_flags(target_lock, flags)
         target_lock["bbox_per_frame"] = bbox_per_frame
+        target_lock["tracker_type"] = "csrt_fallback"
         return bbox_per_frame
     except Exception:  # noqa: BLE001
         logger.warning("bbox tracker failed; falling back to static target bbox", exc_info=True)
         _append_target_lock_flags(target_lock, ["bbox_tracker_failed_fallback"])
         bbox_per_frame = [selected_bbox for _ in sampled_frames]
         target_lock["bbox_per_frame"] = bbox_per_frame
+        target_lock["tracker_type"] = "static_fallback"
         return bbox_per_frame
 
 

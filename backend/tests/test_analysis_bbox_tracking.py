@@ -24,14 +24,17 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
             {"x": 0.12, "y": 0.2, "width": 0.3, "height": 0.4},
         ]
 
+        diagnostics = [{"frame": "frame_0001.jpg", "state": "tracked"}]
         with (
-            patch("app.routers.analysis.track_person_bbox", return_value=(person_result, ["person_flag"])) as person_mock,
+            patch("app.routers.analysis.track_person_bbox_detailed", return_value=(person_result, ["person_flag"], diagnostics)) as person_mock,
             patch("app.routers.analysis.track_bbox", side_effect=AssertionError("CSRT should not run")),
         ):
             result = _build_bbox_per_frame(frames, target_lock, effective_fps=12.0)
 
         self.assertEqual(result, person_result)
         self.assertEqual(target_lock["bbox_per_frame"], person_result)
+        self.assertEqual(target_lock["person_tracker_diagnostics"], diagnostics)
+        self.assertEqual(target_lock["tracker_type"], "yolo_bytetrack")
         self.assertIn("person_flag", target_lock["quality_flags"])
         person_mock.assert_called_once_with(
             frames,
@@ -53,12 +56,13 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
         ]
 
         with (
-            patch("app.routers.analysis.track_person_bbox", side_effect=PersonTrackerUnavailable("missing")),
+            patch("app.routers.analysis.track_person_bbox_detailed", side_effect=PersonTrackerUnavailable("missing")),
             patch("app.routers.analysis.track_bbox", return_value=(csrt_result, ["csrt_flag"])) as csrt_mock,
         ):
             result = _build_bbox_per_frame(frames, target_lock, effective_fps=8.0)
 
         self.assertEqual(result, csrt_result)
+        self.assertEqual(target_lock["tracker_type"], "csrt_fallback")
         self.assertIn(PERSON_TRACKER_UNAVAILABLE_FLAG, target_lock["quality_flags"])
         self.assertIn("csrt_flag", target_lock["quality_flags"])
         csrt_mock.assert_called_once_with(frames, target_lock["selected_bbox"], initial_frame_index=1)
@@ -69,12 +73,13 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
         target_lock = {"selected_bbox": selected_bbox, "quality_flags": []}
 
         with (
-            patch("app.routers.analysis.track_person_bbox", side_effect=RuntimeError("boom")),
+            patch("app.routers.analysis.track_person_bbox_detailed", side_effect=RuntimeError("boom")),
             patch("app.routers.analysis.track_bbox", side_effect=RuntimeError("csrt boom")),
         ):
             result = _build_bbox_per_frame(frames, target_lock)
 
         self.assertEqual(result, [selected_bbox, selected_bbox, selected_bbox])
+        self.assertEqual(target_lock["tracker_type"], "static_fallback")
         self.assertIn(PERSON_TRACKER_FAILED_FLAG, target_lock["quality_flags"])
         self.assertIn("bbox_tracker_failed_fallback", target_lock["quality_flags"])
 

@@ -257,7 +257,12 @@ export default function DebugPage() {
           {detailState !== "loading" && selectedDetail ? (
             <div className="space-y-4">
               <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                <p className="font-semibold text-slate-900">{selectedItem ? buildTitle(selectedItem) : selectedDetail.id}</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <p className="font-semibold text-slate-900">{selectedItem ? buildTitle(selectedItem) : selectedDetail.id}</p>
+                  <Link to={`/report/${selectedDetail.id}/pose-debug`} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-blue-600 transition hover:bg-blue-50">
+                    Pose Debug
+                  </Link>
+                </div>
                 <p className="mt-1 text-xs text-slate-500">
                   {selectedDetail.action_type}
                   {selectedDetail.action_subtype ? ` · ${selectedDetail.action_subtype}` : ""}
@@ -270,6 +275,8 @@ export default function DebugPage() {
                 pipelineVersion={selectedDetail.pipeline_version}
                 videoTemporalDiagnostics={selectedDetail.video_temporal_diagnostics}
                 analysisId={selectedDetail.id}
+                targetLock={selectedDetail.target_lock}
+                poseData={selectedDetail.pose_data}
               />
             </div>
           ) : null}

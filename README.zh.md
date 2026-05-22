@@ -21,6 +21,9 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 ## 功能概览
 
 - 视频上传与异步分析
+- Pipeline v5.1.0：新增独立 Pose Debug 大屏回放页，并适配手机、iPad、网页端和 PWA 安全区
+- Pose Debug 页面集中展示骨架回放、当前帧 bbox、追踪置信度、候选数量、pose diagnostics、追踪缩略图和生物力学关键帧联动
+- 设置页已拆分姿态运行时与 YOLO 追踪运行时检查，两者拥有独立的重新检查按钮、加载状态、检查时间和错误提示
 - Qwen 3.6 Plus 视频语义时间定位，输出阶段区间和 key_frame_hint
 - 时间戳仲裁层结合视频 AI 区间、运动密度和骨架候选，再由 FFmpeg 精准抽取语义关键帧
 - 语义关键帧图片 AI 精析，prompt 中携带 `video_context`
@@ -30,6 +33,7 @@ Skating Analyzer 是一个用于花样滑冰训练视频分析的全栈项目，
 - 阶段感知重试流程，支持缓存帧复用
 - 处理日志、管线计时、报告页调试信息
 - YOLO + ByteTrack 目标追踪，支持挂载 `yolov8n.pt` 并在设置页查看运行时状态
+- 报告页 Pose Replay 可打开 `/report/:id/pose-debug`，用于大屏查看骨架和追踪调试数据
 - 自动检测过期任务并恢复失败状态
 - 模糊过滤与动作感知帧采样，提升视觉输入质量
 - 独立 `skating_vision` Python 包，可脱离主应用复用
@@ -125,7 +129,7 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 - 在 `.env` 中设置 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`
 - 可选设置 `POSE_NUM_POSES=4`
 - 如需 YOLO 目标追踪，将 `yolov8n.pt` 放到 `./models`，并可选设置 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。如果未设置该变量，后端会先检查 `/models/yolov8n.pt`，再允许 Ultralytics 自动下载 `yolov8n.pt`
-- 设置页会同时显示姿态运行时和 YOLO 运行时状态，方便确认挂载权重是否已生效再开始分析
+- 设置页会分别显示姿态运行时和 YOLO 运行时状态，并提供独立重新检查按钮，方便确认模型文件和依赖是否已生效
 - 模型文件不提交到当前仓库
 - 如果模型缺失或加载失败，后端会自动降级回一期单人 pose 流程
 
@@ -271,10 +275,11 @@ docker save -o skating-analyzer-allinone-latest.tar skating-analyzer-allinone:la
 - `/path`：技能树与学习路径
 - `/review`：上传视频并发起分析
 - `/report/:id`：分析报告
+- `/report/:id/pose-debug`：大屏姿态回放、追踪 diagnostics 与生物力学调试页
 - `/archive`：历史档案 / 训练进展
 - `/plan/:plan_id`：训练计划
 - `/snowball`：冰宝陪练与记忆建议
-- `/settings`：系统设置、PIN、备份、供应商管理、姿态/YOLO 运行时状态
+- `/settings`：系统设置、PIN、备份、供应商管理、姿态与 YOLO 运行时状态独立检查
 - `/debug`：分析调试日志，支持自动刷新最新分析状态
 
 ## 数据与隐私

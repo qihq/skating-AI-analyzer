@@ -78,6 +78,17 @@ def _point(keypoints: list[dict[str, Any]], index: int) -> dict[str, float] | No
     return {"x": float(raw.get("x", 0.0)), "y": float(raw.get("y", 0.0)), "z": float(raw.get("z", 0.0))}
 
 
+def _biomechanics_frames(pose_data: dict[str, Any]) -> list[dict[str, Any]]:
+    frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
+    if not isinstance(frames, list):
+        return []
+    return [
+        frame
+        for frame in frames
+        if isinstance(frame, dict) and frame.get("tracking_state") != "interpolated"
+    ]
+
+
 def _distance(a: dict[str, float], b: dict[str, float]) -> float:
     return math.hypot(a["x"] - b["x"], a["y"] - b["y"])
 
@@ -169,7 +180,7 @@ def calc_center_of_mass_trajectory(pose_data: dict[str, Any]) -> dict[str, Any]:
     points: list[dict[str, Any]] = []
     y_values: list[float] = []
     reference_lengths: list[float] = []
-    for frame in pose_data.get("frames", []):
+    for frame in _biomechanics_frames(pose_data):
         keypoints = frame.get("keypoints", [])
         hips = [_point(keypoints, 23), _point(keypoints, 24)]
         shoulders = [_point(keypoints, 11), _point(keypoints, 12)]
@@ -291,7 +302,7 @@ def detect_key_frames(
             "L": _normalize_frame_name(points[landing_index]["frame"]),
         }
 
-    frames = pose_data.get("frames", [])
+    frames = _biomechanics_frames(pose_data)
     if analysis_profile == "spin":
         max_delta_index = _find_max_hip_x_delta(frames)
         if max_delta_index is None:
@@ -320,7 +331,7 @@ class PathLikeFrame:
 
 def calc_rotation_axis_stability(pose_data: dict[str, Any], start_frame: int, end_frame: int) -> dict[str, Any]:
     tilts: list[float] = []
-    for frame in pose_data.get("frames", []):
+    for frame in _biomechanics_frames(pose_data):
         frame_idx = _frame_number(str(frame.get("frame", "")))
         if start_frame <= frame_idx <= end_frame:
             tilt = calc_trunk_tilt(frame.get("keypoints", []), frame_idx).get("tilt_degrees")
@@ -365,7 +376,7 @@ def _build_sampling_context(
 
 def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int, effective_fps: float) -> float:
     angles: list[float] = []
-    for frame in pose_data.get("frames", []):
+    for frame in _biomechanics_frames(pose_data):
         frame_idx = _frame_number(str(frame.get("frame", "")))
         if start_frame <= frame_idx <= end_frame:
             left = _point(frame.get("keypoints", []), 11)
@@ -617,7 +628,7 @@ def analyze_biomechanics(
     normalized_effective_fps = _valid_effective_fps(effective_fps)
     sampling_context = _build_sampling_context(normalized_effective_fps, source_fps, window_seconds)
 
-    frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
+    frames = _biomechanics_frames(pose_data)
     if not frames:
         return _empty_analysis(analysis_profile=analysis_profile, sampling_context=sampling_context)
 
