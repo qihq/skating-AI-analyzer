@@ -73,7 +73,7 @@ class VisionPathATests(unittest.IsolatedAsyncioTestCase):
 
         create_kwargs = request_mock.await_args.kwargs
         self.assertEqual(create_kwargs["temperature"], 0.1)
-        self.assertEqual(create_kwargs["max_tokens"], 1360)
+        self.assertEqual(create_kwargs["max_tokens"], 2040)
         user_content = create_kwargs["messages"][1]["content"]
         self.assertIn("candidate_key_frames", user_content[0]["text"])
         self.assertIn("Free Skate 1", user_content[0]["text"])
@@ -101,6 +101,47 @@ class VisionPathATests(unittest.IsolatedAsyncioTestCase):
                 await analyze_path_a("跳跃", frame_payloads, provider)
 
         self.assertEqual(caught.exception.code, AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL)
+
+    async def test_nonstandard_json_is_recovered_without_repair_call(self) -> None:
+        frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]
+        provider = SimpleNamespace(api_key="test-key", base_url="https://example.com/v1", model_id="mimo-v2.5")
+        payload = {
+            "frame_analysis": [{"frame_id": "frame_0001", "phase": "旋转中", "issues": ["轴心前倾"], "confidence": 0.8}],
+            "action_phase_summary": {"detected_phases": ["旋转中"], "weakest_phase": "旋转中", "strongest_phase": "旋转中"},
+            "pure_vision_subscores": {"rotation_axis": 0.5},
+            "overall_raw_text": "整体能完成旋转。",
+        }
+
+        with patch("app.services.vision_path_a.request_text_completion") as request_mock:
+            request_mock.return_value = "模型结论如下：\n" + json.dumps(payload, ensure_ascii=False) + "\n谢谢"
+            result = await analyze_path_a("旋转", frame_payloads, provider, analysis_profile="spin")
+
+        self.assertEqual(request_mock.await_count, 1)
+        self.assertEqual(result["frame_analysis"][0]["phase"], "旋转中")
+        self.assertEqual(result["pure_vision_subscores"]["rotation_axis"], 0.5)
+
+    async def test_malformed_json_uses_repair_completion(self) -> None:
+        frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]
+        provider = SimpleNamespace(api_key="test-key", base_url="https://example.com/v1", model_id="mimo-v2.5")
+        repaired = {
+            "frame_analysis": [{"frame_id": "frame_0001", "phase": "步法", "issues": ["浮足膝盖弯曲"], "confidence": 0.8}],
+            "action_phase_summary": {"detected_phases": ["步法"], "weakest_phase": "燕式保持", "strongest_phase": "燕式进入"},
+            "pure_vision_subscores": {"core_stability": 0.6},
+            "overall_raw_text": "燕式保持需要更稳定。",
+        }
+
+        with patch("app.services.vision_path_a.request_text_completion") as request_mock:
+            request_mock.side_effect = [
+                '{"frame_analysis":[{"frame_id":"frame_0001","phase":"燕式保持" "issues":["浮足膝盖弯曲"]}]}',
+                json.dumps(repaired, ensure_ascii=False),
+            ]
+            result = await analyze_path_a("步法", frame_payloads, provider, analysis_profile="spiral")
+
+        self.assertEqual(request_mock.await_count, 2)
+        repair_messages = request_mock.await_args_list[1].kwargs["messages"]
+        self.assertIn("JSON 修复器", repair_messages[0]["content"])
+        self.assertEqual(result["frame_analysis"][0]["phase"], "步法")
+        self.assertEqual(result["frame_analysis"][0]["issues"], ["浮足膝盖弯曲"])
 
 
 if __name__ == "__main__":

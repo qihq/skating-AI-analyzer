@@ -8,12 +8,13 @@
 
 Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
 
-当前分析管线版本为 `v5.2.8`。
+当前分析管线版本为 `v5.2.9`。
 
 ## 最近更新
 
-最新版本重点提升远距离、小目标滑行者在跟踪、语义关键帧和调试复盘中的稳定性。
+最新版本重点提升双路径 AI 输出的韧性，并确保某一路 AI 返回非标准 JSON 时，报告仍然可执行。
 
+- `v5.2.9`：Path A 会请求更严格的 JSON、恢复非标准模型输出、追加一次 JSON-only 修复重试；报告在 Path A 不可用时会回退使用 Path B/top issues 证据和动作专项训练建议。
 - `v5.2.8`：丢失后复用的 tracker bbox 可作为带 padding 的 pose crop hint，用于远距离小目标滑行者。
 - `v5.2.7`：当 overlap-safe rejected tracker hint 成为 reference bbox 时，应用 tracker 风格的 crop padding。
 - `v5.2.6`：overlap-safe continuity-rejected tracker bbox 可作为 pose crop hint 复用，但不会接受目标身份切换。
@@ -33,8 +34,8 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 - 生物力学指标，包括阶段时序、跳跃证据、旋转估算和姿态质量。
 - Qwen 3.6 Plus 视频语义时间定位，解析起跳/腾空/落冰区间。
 - 结合视频 AI、运动密度和骨架候选的语义关键帧时间戳仲裁。
-- 双路径视觉分析，支持 video context、供应商回退、重试处理和成本限制。
-- AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式。
+- 双路径视觉分析，支持 video context、供应商回退、非标准 JSON 恢复、重试处理和成本限制。
+- AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式；报告兜底会使用 Path B 证据和动作专项训练建议。
 - Pose Debug 与 Debug 页面，用于骨架回放、tracker 缩略图、候选数量、姿态诊断、耗时和日志检查。
 - Docker Compose 与 all-in-one Docker 部署，适合 NAS 或本地单容器运行。
 
@@ -48,7 +49,7 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 6. 平滑姿态信号，计算生物力学、跳跃特征和关键帧候选。
 7. 在已配置供应商时运行视频语义 AI，解析 T/A/L 时间戳。
 8. 用 FFmpeg 抽取语义关键帧，并把 video context 注入图片 AI。
-9. 融合姿态、生物力学、视频 AI 和图片 AI，生成结构化报告。
+9. 融合姿态、生物力学、视频 AI、Path A 纯视觉和 Path B 骨架量化证据，生成结构化报告。
 10. 持久化帧、日志、耗时、调试摘要和重试检查点。
 
 ## 技术栈
@@ -127,6 +128,15 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 - `VIDEO_TEMPORAL_MAX_FRAMES` 控制进入图片 AI 的语义帧数量。
 - 运行时数据库、上传视频、抽帧、备份、Docker tar 包和本地模型文件不会提交。
 
+## 双路径报告韧性
+
+分析流程会同时保存 `vision_path_a` 和 `vision_path_b`，便于审计和调试。
+
+- Path A 是纯视觉判断。现在会要求供应商返回 JSON 对象，从带噪输出中抽取合法 JSON，并在失败时追加一次低温 JSON 修复请求，再标记 Path A 不可用。
+- Path B 使用叠加骨架的关键帧和生物力学数值。它的 `top_issues`、`top_positives`、阶段摘要和帧级问题会注入报告上下文。
+- 如果 Path A 失败，或报告模型输出过于模板化，后端会用 Path B 证据替换“数据质量有限”类占位问题，并按跳跃、旋转、燕式、步法 profile 生成更具体的训练动作。
+- 当证据不完整时，报告仍会保持 `data_quality=partial`，但问题列表和改进建议应继续绑定到可见或可量化的技术结论。
+
 ## 本地模型
 
 二期多姿态和人体跟踪通过宿主机挂载模型文件启用。
@@ -204,7 +214,7 @@ npm run dev
 - 视频预检、精准抽帧和语义时间解析。
 - bbox tracking、target lock、person tracking 和 pose smoothing。
 - 关键帧候选、T/A/L 顺序和生物力学时序。
-- 双路径视觉、供应商重试、报告融合和内容归一化。
+- 双路径视觉、Path A 非标准 JSON 恢复、供应商重试、报告融合和内容归一化。
 
 运行后端测试：
 

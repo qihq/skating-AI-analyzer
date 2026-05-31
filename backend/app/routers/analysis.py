@@ -407,6 +407,46 @@ def _merge_video_temporal_cross_validation(
     return merged
 
 
+def _compact_report_path_b_evidence(path_b: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(path_b, dict) or path_b.get("error"):
+        return None
+
+    frames: list[dict[str, Any]] = []
+    for frame in path_b.get("frame_analysis", []) if isinstance(path_b.get("frame_analysis"), list) else []:
+        if not isinstance(frame, dict):
+            continue
+        frames.append(
+            {
+                "frame_id": frame.get("frame_id"),
+                "phase": frame.get("phase"),
+                "bio_observations": frame.get("bio_observations") if isinstance(frame.get("bio_observations"), dict) else {},
+                "issues": frame.get("issues") if isinstance(frame.get("issues"), list) else [],
+                "confidence": frame.get("confidence"),
+            }
+        )
+        if len(frames) >= 8:
+            break
+
+    return {
+        "top_issues": path_b.get("top_issues") if isinstance(path_b.get("top_issues"), list) else [],
+        "top_positives": path_b.get("top_positives") if isinstance(path_b.get("top_positives"), list) else [],
+        "action_phase_summary": path_b.get("action_phase_summary") if isinstance(path_b.get("action_phase_summary"), dict) else {},
+        "frame_analysis": frames,
+    }
+
+
+def _attach_path_b_report_evidence(
+    dual_path_meta: dict[str, Any] | None,
+    path_b: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(dual_path_meta, dict):
+        return dual_path_meta
+    evidence = _compact_report_path_b_evidence(path_b)
+    if not evidence:
+        return dual_path_meta
+    return {**dual_path_meta, "path_b_evidence": evidence}
+
+
 PHASE_LABEL_TO_JUMP_PARTIAL_CODE = {
     "起跳": ("takeoff", "T_takeoff_sec"),
     "腾空": ("air", "A_air_sec"),
@@ -818,6 +858,10 @@ async def _regenerate_report_from_saved_analysis(
             dual_path_meta = _merge_video_temporal_cross_validation(
                 analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None,
                 frame_motion_scores=frame_motion_scores,
+            )
+            dual_path_meta = _attach_path_b_report_evidence(
+                dual_path_meta,
+                analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None,
             )
             user_note = analysis.note
             profile_evidence = bio_data.get("profile_evidence") if isinstance(bio_data.get("profile_evidence"), dict) else None
@@ -1619,6 +1663,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     resolved_keyframes=resolved_keyframes,
                     frame_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
                 )
+                cross_validation = _attach_path_b_report_evidence(cross_validation, vision_path_b)
                 dual_path_meta = cross_validation
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
@@ -1680,6 +1725,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     cross_validation,
                     frame_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
                 )
+                cross_validation = _attach_path_b_report_evidence(cross_validation, vision_path_b)
                 dual_path_meta = cross_validation
             await _append_analysis_log(
                 analysis_id,

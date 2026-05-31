@@ -260,6 +260,103 @@ class ReportDualPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("上传备注/额外 comments: 今天状态不错", prompt)
         self.assertIn("长期训练目标：稳定落冰", prompt)
 
+    async def test_generate_report_refines_generic_items_with_path_b_evidence(self) -> None:
+        request_mock = AsyncMock(
+            return_value="""
+            {
+              "summary": "本次步法复盘已结合结构化视觉和骨骼几何指标生成。整体动作可继续围绕轴心、发力节奏和落冰稳定性微调。",
+              "issues": [{"category":"数据质量","description":"当前视频可分析信息有限，建议结合教练观察复核。","severity":"low","phase":null,"frames":[]}],
+              "improvements": [
+                {"target":"轴心稳定","action":"用短时、低冲击的分段练习保持头肩髋对齐。"},
+                {"target":"落冰缓冲","action":"练习轻落地和软膝盖停住，优先保证安全稳定。"}
+              ],
+              "training_focus": "本阶段重点是稳定轴心和提高落冰控制。",
+              "subscores": {
+                "takeoff_power": 70,
+                "rotation_axis": 70,
+                "arm_coordination": 70,
+                "landing_absorption": 70,
+                "core_stability": 70
+              },
+              "data_quality": "partial"
+            }
+            """
+        )
+        dual_path_meta = {
+            "recommended_path": "B",
+            "path_b_evidence": {
+                "top_issues": [
+                    "燕式保持阶段浮足膝盖弯曲（左膝157.04度），建议练习将浮足向后上方完全伸直。",
+                    "燕式保持阶段滑行速度有下降趋势，建议在进入前加强蹬冰力量。",
+                ],
+                "top_positives": ["进入阶段身体轴心垂直。"],
+                "action_phase_summary": {"weakest_phase": "燕式保持"},
+                "frame_analysis": [],
+            },
+        }
+        context = AnalysisPromptContext(
+            action_type="步法",
+            action_subtype="燕式滑行",
+            skill_category="前向有力蹬冰",
+            analysis_profile="spiral",
+            profile_evidence={},
+            motion_features={},
+            bio_data={},
+            user_note="",
+            memory_context="",
+        )
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.request_text_completion", request_mock),
+        ):
+            report = await generate_report("步法", {"path": "A", "error": "path_a_parse_failed", "frame_analysis": []}, dual_path_meta=dual_path_meta, prompt_context=context)
+
+        prompt = request_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertIn("Path B 可直接用于报告的问题/优点证据", prompt)
+        self.assertIn("浮足膝盖弯曲", report["issues"][0]["description"])
+        self.assertIn("滑行速度有下降趋势", report["issues"][1]["description"])
+        self.assertIn("浮足", report["improvements"][0]["target"])
+        self.assertNotEqual(report["issues"][0]["category"], "数据质量")
+
+    async def test_report_ai_failure_uses_path_b_fallback_for_spin(self) -> None:
+        dual_path_meta = {
+            "recommended_path": "B",
+            "path_b_evidence": {
+                "top_issues": [
+                    "旋转中轴心稳定性不足，躯干前倾角度（最大31度）影响旋转效率和速度。",
+                    "旋转速度明显不足，未达到初级旋转3圈的转速要求。",
+                ],
+                "top_positives": [],
+                "action_phase_summary": {"weakest_phase": "旋转中"},
+                "frame_analysis": [],
+            },
+        }
+        context = AnalysisPromptContext(
+            action_type="旋转",
+            action_subtype="直立旋转3圈",
+            skill_category="直立旋转",
+            analysis_profile="spin",
+            profile_evidence={},
+            motion_features={},
+            bio_data={},
+            user_note="为什么不足圈",
+            memory_context="",
+        )
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.request_text_completion", AsyncMock(side_effect=TimeoutError("timeout"))),
+        ):
+            report = await generate_report("旋转", {"path": "A", "error": "path_a_parse_failed", "frame_analysis": []}, dual_path_meta=dual_path_meta, prompt_context=context)
+
+        descriptions = " ".join(issue["description"] for issue in report["issues"])
+        actions = " ".join(item["action"] for item in report["improvements"])
+        self.assertIn("旋转速度明显不足", descriptions)
+        self.assertIn("3圈", descriptions)
+        self.assertIn("收臂", actions)
+        self.assertEqual(report["fallback_reason"], "AI_API_TIMEOUT")
+
 
 class ReportNormalizeTests(unittest.TestCase):
     def test_bio_subscores_are_fused_without_key_frames(self) -> None:

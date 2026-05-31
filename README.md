@@ -8,12 +8,13 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.8`.
+The current pipeline version is `v5.2.9`.
 
 ## Recent Updates
 
-The latest release focuses on making small or distant skaters more stable through target tracking, semantic keyframe resolution, and richer debugging.
+The latest release focuses on making dual-path AI output more resilient and keeping reports actionable when one AI path returns malformed JSON.
 
+- `v5.2.9`: Path A now requests stricter JSON, recovers malformed model output, retries a JSON-only repair pass, and reports fall back to Path B/top-issue evidence with action-specific drills.
 - `v5.2.8`: reused lost tracker boxes can be used as padded pose crop hints for distant tiny skaters.
 - `v5.2.7`: tracker-style crop padding is applied to overlap-safe rejected tracker hints when they become reference boxes.
 - `v5.2.6`: overlap-safe continuity-rejected tracker boxes can be reused as pose crop hints without accepting identity switches.
@@ -33,8 +34,8 @@ The latest release focuses on making small or distant skaters more stable throug
 - Biomechanics metrics for phase timing, jump evidence, rotation estimation, and pose quality.
 - Qwen 3.6 Plus video temporal localization for semantic takeoff/apex/landing intervals.
 - Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
-- Dual-path vision analysis with video-aware context, provider fallback, retry handling, and cost limits.
-- AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode.
+- Dual-path vision analysis with video-aware context, provider fallback, malformed-JSON recovery, retry handling, and cost limits.
+- AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
 - Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, timings, and logs.
 - Docker Compose and all-in-one Docker deployment for NAS or local single-container use.
 
@@ -48,7 +49,7 @@ The latest release focuses on making small or distant skaters more stable throug
 6. Smooth pose signals and compute biomechanics, jump features, and keyframe candidates.
 7. Run video-temporal AI when configured and resolve semantic T/A/L timestamps.
 8. Extract semantic keyframes with FFmpeg and pass video context to image AI.
-9. Fuse pose, biomechanics, video AI, and image AI into structured report data.
+9. Fuse pose, biomechanics, video AI, Path A pure vision, and Path B skeleton-grounded evidence into structured report data.
 10. Persist frames, logs, timings, debug summaries, and retry checkpoints.
 
 ## Tech Stack
@@ -127,6 +128,15 @@ Notes:
 - `VIDEO_TEMPORAL_MAX_FRAMES` caps semantic frames sent to image AI.
 - Runtime databases, uploaded videos, extracted frames, backups, Docker tar archives, and local model files are not committed.
 
+## Dual-Path Report Resilience
+
+The analysis pipeline stores both `vision_path_a` and `vision_path_b` for audit and debugging.
+
+- Path A is pure visual judgment. It now asks providers for JSON-object output, extracts valid JSON from noisy responses, and performs one low-temperature JSON repair pass before marking Path A unavailable.
+- Path B uses skeleton-overlaid frames and biomechanics. Its `top_issues`, `top_positives`, phase summary, and frame-level issues are injected into the report context.
+- If Path A fails or the report model returns generic items, the backend replaces weak “data quality” placeholders with Path B-grounded issues and action-specific drills for jump, spin, spiral, and step profiles.
+- The report still keeps `data_quality=partial` when evidence is incomplete, but the issue list and improvements should remain tied to visible/quantified technical findings.
+
 ## Local Models
 
 Phase-2 multi-pose and person tracking use host-mounted model files.
@@ -204,7 +214,7 @@ Backend regression tests cover:
 - video precheck, precise extraction, and semantic temporal resolution
 - bbox tracking, target lock, person tracking, and pose smoothing
 - keyframe candidates, T/A/L ordering, and biomechanics timing
-- dual-path vision, provider retry, report fusion, and content normalization
+- dual-path vision, malformed Path A JSON recovery, provider retry, report fusion, and content normalization
 
 Run backend tests:
 
