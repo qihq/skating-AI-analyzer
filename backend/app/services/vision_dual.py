@@ -10,6 +10,7 @@ from typing import Any
 
 import cv2
 
+from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
 from app.services.bio_context import (
     build_frame_bio_context,
     extract_key_frame_stems,
@@ -37,6 +38,7 @@ DUAL_PATH_TOTAL_TIMEOUT = 150.0
 PATH_B_TIMEOUT = 120.0
 PATH_B_IMAGE_MAX_WIDTH = 640
 PATH_B_IMAGE_JPEG_QUALITY = 72
+PATH_A_ERROR_EXCERPT_CHARS = 1200
 
 
 def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> dict[str, Any]:
@@ -63,6 +65,20 @@ def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> d
 
 def _uses_semantic_keyframes(resolved_keyframes: dict[str, Any] | None) -> bool:
     return semantic_keyframes_are_reliable(resolved_keyframes)
+
+
+def _path_a_error_payload(error: str, detail: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "path": "A",
+        "error": error,
+        "frame_analysis": [],
+        "action_phase_summary": {"detected_phases": [], "weakest_phase": "", "strongest_phase": ""},
+        "pure_vision_subscores": {},
+        "quality_flags": ["path_a_unavailable_fallback"],
+    }
+    if detail:
+        payload["error_detail"] = detail[:PATH_A_ERROR_EXCERPT_CHARS]
+    return payload
 
 
 def _semantic_pose_for_annotation(
@@ -292,6 +308,11 @@ async def analyze_frames_dual(
     except asyncio.TimeoutError:
         logger.warning("Path A timeout > %.0fs; using error result", total_timeout)
         path_a_result = {"path": "A", "error": "path_a_timeout"}
+    except AnalysisPipelineError as exc:
+        if exc.code != AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL:
+            raise
+        logger.warning("Path A parse failed; continuing with Path B/fallback report: %s", exc.detail)
+        path_a_result = _path_a_error_payload("path_a_parse_failed", exc.detail)
 
     validation = cross_validate(path_a_result, path_b_result)
     weights = compute_blend_weights(validation)
@@ -306,7 +327,10 @@ async def analyze_frames_dual(
         "weight_a": weights[0],
         "weight_b": weights[1],
         "path_b_subscores": (path_b_result or {}).get("subscores"),
+        "path_a_failed": bool(path_a_result and path_a_result.get("error")),
+        "path_a_error": (path_a_result or {}).get("error") if isinstance(path_a_result, dict) else None,
         "path_b_failed": bool(path_b_result and path_b_result.get("error")),
+        "path_b_error": (path_b_result or {}).get("error") if isinstance(path_b_result, dict) else None,
         "path_b_annotation_source": annotation_source,
         "path_b_preserve_all_frames": uses_semantic_keyframes,
         "raw_frame_count": len(raw_frame_payloads),

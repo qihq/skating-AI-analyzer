@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,9 +25,10 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
         ]
 
         diagnostics = [{"frame": "frame_0001.jpg", "state": "tracked"}]
+        person_mock = Mock(return_value=(person_result, ["person_flag"], diagnostics))
         with (
-            patch("app.routers.analysis.track_person_bbox_detailed", return_value=(person_result, ["person_flag"], diagnostics)) as person_mock,
-            patch("app.routers.analysis.track_bbox", side_effect=AssertionError("CSRT should not run")),
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_person_bbox_detailed": person_mock}),
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_bbox": Mock(side_effect=AssertionError("CSRT should not run"))}),
         ):
             result = _build_bbox_per_frame(frames, target_lock, effective_fps=12.0)
 
@@ -54,10 +55,11 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
             {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
             {"x": 0.2, "y": 0.2, "width": 0.3, "height": 0.4},
         ]
+        csrt_mock = Mock(return_value=(csrt_result, ["csrt_flag"]))
 
         with (
-            patch("app.routers.analysis.track_person_bbox_detailed", side_effect=PersonTrackerUnavailable("missing")),
-            patch("app.routers.analysis.track_bbox", return_value=(csrt_result, ["csrt_flag"])) as csrt_mock,
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_person_bbox_detailed": Mock(side_effect=PersonTrackerUnavailable("missing"))}),
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_bbox": csrt_mock}),
         ):
             result = _build_bbox_per_frame(frames, target_lock, effective_fps=8.0)
 
@@ -73,8 +75,8 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
         target_lock = {"selected_bbox": selected_bbox, "quality_flags": []}
 
         with (
-            patch("app.routers.analysis.track_person_bbox_detailed", side_effect=RuntimeError("boom")),
-            patch("app.routers.analysis.track_bbox", side_effect=RuntimeError("csrt boom")),
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_person_bbox_detailed": Mock(side_effect=RuntimeError("boom"))}),
+            patch.dict(_build_bbox_per_frame.__globals__, {"track_bbox": Mock(side_effect=RuntimeError("csrt boom"))}),
         ):
             result = _build_bbox_per_frame(frames, target_lock)
 

@@ -123,22 +123,35 @@ def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: 
         return score
 
     issues = report.get("issues") if isinstance(report.get("issues"), list) else []
-    has_high_or_safety_risk = False
+    has_safety_or_incomplete_risk = False
     for issue in issues:
         if not isinstance(issue, dict):
             continue
-        severity = str(issue.get("severity", "")).strip().lower()
         text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
-        if severity == Severity.high.value or "安全" in text or "摔" in text or "risk" in text or "danger" in text:
-            has_high_or_safety_risk = True
+        if any(
+            marker in text
+            for marker in (
+                "安全",
+                "摔",
+                "跌倒",
+                "未完成",
+                "中断",
+                "risk",
+                "danger",
+                "fall",
+                "failed",
+                "incomplete",
+            )
+        ):
+            has_safety_or_incomplete_risk = True
             break
-    if has_high_or_safety_risk:
+    if has_safety_or_incomplete_risk:
         return score
 
     if data_quality == "good":
-        return max(score, 70)
+        return max(score, 80)
     if data_quality == "partial":
-        return max(score, 65)
+        return max(score, 70)
     return score
 
 
@@ -178,6 +191,10 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data.get("bio_subscores"), dict) else None
         quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
 
+    user_note = payload.get("user_note")
+    if user_note is None:
+        user_note = payload.get("note")
+
     return {
         "summary": str(payload.get("summary", "")).strip(),
         "issues": normalized_issues,
@@ -189,6 +206,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
             quality_flags=quality_flags,
         ),
         "data_quality": str(payload.get("data_quality", "partial")).strip() or "partial",
+        "user_note": str(user_note).strip() if isinstance(user_note, str) and user_note.strip() else None,
     }
 
 
@@ -695,6 +713,9 @@ async def generate_report(
             continue
 
         parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
+
+        if prompt_context is not None and prompt_context.user_note:
+            parsed["user_note"] = prompt_context.user_note
 
         report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
         if report["summary"] and report["training_focus"]:

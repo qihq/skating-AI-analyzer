@@ -305,23 +305,44 @@ class ReportNormalizeTests(unittest.TestCase):
             },
         }
 
-        self.assertEqual(apply_child_score_floor(58, report, {}), 70)
+        self.assertEqual(apply_child_score_floor(58, report, {}), 80)
 
-    def test_child_score_floor_lifts_good_report_with_medium_issues_to_70(self) -> None:
+    def test_child_score_floor_lifts_good_report_with_medium_issues_to_80(self) -> None:
         report = {
             "issues": [{"severity": "medium", "category": "起跳", "description": "压膝不足"}],
             "data_quality": "good",
         }
 
-        self.assertEqual(apply_child_score_floor(58, report, {}), 70)
+        self.assertEqual(apply_child_score_floor(58, report, {}), 80)
 
-    def test_child_score_floor_lifts_partial_report_with_medium_issues_to_65(self) -> None:
+    def test_child_score_floor_lifts_partial_report_with_medium_issues_to_70(self) -> None:
         report = {
             "issues": [{"severity": "medium", "category": "起跳", "description": "压膝不足"}],
             "data_quality": "partial",
         }
 
-        self.assertEqual(apply_child_score_floor(58, report, {}), 65)
+        self.assertEqual(apply_child_score_floor(58, report, {}), 70)
+
+    def test_child_score_floor_lifts_completed_partial_report_with_technical_high_issues(self) -> None:
+        report = {
+            "issues": [{"severity": "high", "category": "起跳力量", "description": "屈膝不足，影响起跳高度。"}],
+            "data_quality": "partial",
+        }
+
+        self.assertEqual(apply_child_score_floor(59, report, {}), 70)
+
+    def test_child_score_floor_does_not_lift_safety_or_incomplete_issue(self) -> None:
+        safety_report = {
+            "issues": [{"severity": "high", "category": "安全风险", "description": "落冰摔倒风险明显。"}],
+            "data_quality": "partial",
+        }
+        incomplete_report = {
+            "issues": [{"severity": "high", "category": "动作完成度", "description": "动作未完成，中途断开。"}],
+            "data_quality": "partial",
+        }
+
+        self.assertEqual(apply_child_score_floor(59, safety_report, {}), 59)
+        self.assertEqual(apply_child_score_floor(59, incomplete_report, {}), 59)
 
     def test_child_score_floor_does_not_lift_poor_or_likely_wrong(self) -> None:
         self.assertEqual(apply_child_score_floor(58, {"issues": [], "data_quality": "poor"}, {}), 58)

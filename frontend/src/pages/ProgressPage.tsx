@@ -12,6 +12,7 @@ import {
 
 import { fetchProgress, ProgressPoint, ProgressResponse } from "../api/client";
 import TopNav from "../components/TopNav";
+import { parseApiDate } from "../utils/datetime";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 
@@ -22,7 +23,7 @@ function formatDateShort(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
     month: "numeric",
     day: "numeric",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function formatDateLong(dateString: string) {
@@ -32,7 +33,7 @@ function formatDateLong(dateString: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 export default function ProgressPage() {

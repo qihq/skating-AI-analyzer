@@ -10,6 +10,7 @@ import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { pickSkaterIdForChildView } from "../utils/childView";
+import { localDateKey, parseApiDate } from "../utils/datetime";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 const RANGE_OPTIONS = [
@@ -41,7 +42,7 @@ function formatDate(dateString: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function formatSessionDate(dateString: string | null) {
@@ -52,7 +53,7 @@ function formatSessionDate(dateString: string | null) {
     year: "numeric",
     month: "long",
     day: "numeric",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function formatDayKey(dateString: string) {
@@ -61,7 +62,7 @@ function formatDayKey(dateString: string) {
     month: "2-digit",
     day: "2-digit",
     timeZone: "Asia/Shanghai",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function forceScoreTone(score: number | null) {
@@ -112,7 +113,7 @@ function buildTimelineGroups(timeline: ArchiveTimelineEntry[]): TimelineGroup[] 
   let current: TimelineGroup | null = null;
 
   timeline.forEach((entry) => {
-    const key = entry.session_id ?? `solo-${entry.created_at.slice(0, 10)}-${entry.id}`;
+    const key = entry.session_id ?? `solo-${formatDayKey(entry.created_at)}-${entry.id}`;
     if (!current || current.key !== key) {
       current = {
         key,
@@ -130,7 +131,7 @@ function buildTimelineGroups(timeline: ArchiveTimelineEntry[]): TimelineGroup[] 
 
 function isWithinLastDays(dateString: string, days: number) {
   const start = Date.now() - days * 24 * 60 * 60 * 1000;
-  return new Date(dateString).getTime() >= start;
+  return parseApiDate(dateString).getTime() >= start;
 }
 
 function computeCurrentStreak(timeline: ArchiveTimelineEntry[]) {
@@ -143,9 +144,9 @@ function computeCurrentStreak(timeline: ArchiveTimelineEntry[]) {
   today.setHours(0, 0, 0, 0);
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  const startDate = recordedDays.has(formatDayKey(today.toISOString()))
+  const startDate = recordedDays.has(localDateKey(today))
     ? today
-    : recordedDays.has(formatDayKey(yesterday.toISOString()))
+    : recordedDays.has(localDateKey(yesterday))
       ? yesterday
       : null;
 
@@ -155,7 +156,7 @@ function computeCurrentStreak(timeline: ArchiveTimelineEntry[]) {
 
   let streak = 0;
   const cursor = new Date(startDate);
-  while (recordedDays.has(formatDayKey(cursor.toISOString()))) {
+  while (recordedDays.has(localDateKey(cursor))) {
     streak += 1;
     cursor.setDate(cursor.getDate() - 1);
   }
@@ -168,7 +169,7 @@ function computeMonthlySessions(timeline: ArchiveTimelineEntry[]) {
   const sessionKeys = new Set<string>();
 
   timeline.forEach((entry) => {
-    if (new Date(entry.created_at).getTime() < monthStart) {
+    if (parseApiDate(entry.created_at).getTime() < monthStart) {
       return;
     }
     sessionKeys.add(entry.session_id ?? `solo-${entry.id}`);
@@ -330,7 +331,7 @@ export default function ArchivePage() {
     () =>
       skaters
         .flatMap((skater) => annotateTimeline(skater, archiveBySkaterId[skater.id]))
-        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()),
+        .sort((left, right) => parseApiDate(right.created_at).getTime() - parseApiDate(left.created_at).getTime()),
     [archiveBySkaterId, skaters],
   );
 
@@ -345,7 +346,7 @@ export default function ArchivePage() {
       return [];
     }
     return annotateTimeline(selectedSkater, archiveBySkaterId[selectedSkater.id]).sort(
-      (left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
+      (left, right) => parseApiDate(right.created_at).getTime() - parseApiDate(left.created_at).getTime(),
     );
   }, [activeScope, allTimelineEntries, archiveBySkaterId, isParentMode, selectedSkater]);
 

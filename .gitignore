@@ -12,6 +12,7 @@ models/*.pt
 *.zip
 
 # Temporary files
+tmp/
 tmp-test/
 *.tmp
 *.log

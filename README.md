@@ -1,59 +1,63 @@
 # Skating Analyzer
 
-AI-powered figure skating training analysis system built with React, FastAPI, and Docker.
+AI-powered figure skating training analysis system built with React, FastAPI, MediaPipe, YOLO/ByteTrack, and Docker.
 
 [Chinese README](./README.zh.md) | [Contributing](./CONTRIBUTING.md) | [License](./LICENSE) | [Screenshot Guide](./SCREENSHOT_GUIDE.md)
 
 ## Overview
 
-Skating Analyzer helps skaters and coaches upload training videos, extract motion frames, run pose estimation, generate biomechanics metrics, create AI-assisted reports, and track training progress through plans, archives, and skill trees.
+Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
+
+The current pipeline version is `v5.2.8`.
 
 ## Recent Updates
 
-The latest update expands the video analysis pipeline and deployment configuration:
+The latest release focuses on making small or distant skaters more stable through target tracking, semantic keyframe resolution, and richer debugging.
 
-- **Pipeline v5.1.0**: dedicated Pose Debug replay page with responsive mobile, iPad, web, and PWA-safe layouts
-- Larger debug-mode skeleton replay with current-frame bbox, tracking confidence, candidate counts, pose diagnostics, tracking thumbnails, and biomechanics key-frame sync
-- Settings runtime checks are split: pose model status and YOLO tracker status now have independent refresh buttons, loading states, timestamps, and errors
-- Video AI semantic temporal localization with Qwen 3.6 Plus (`qwen3.6-plus`)
-- Timestamp arbitration before FFmpeg frame extraction: video phase interval + motion density + skeleton candidates
-- Semantic keyframe image analysis with per-frame `video_context`
-- Dual-path vision analysis with frame-based and video-aware provider flows
-- Target lock and bounding-box tracking for more stable skater selection
-- YOLO + ByteTrack person tracking with mounted `yolov8n.pt` support and settings-page runtime status
-- In-report Pose Replay can open `/report/:id/pose-debug` for expanded skeleton and tracker debugging
-- Pose smoothing, phase voting, and cross-validation between pose signals and AI vision results
-- Jump feature extraction with FPS-aware timing and rotation unwrap handling
-- Frame annotation output for clearer review and debugging
-- Provider retry handling, vision content normalization, and cost-limit settings
-- Video precheck and nginx upload limits for larger review files
-- Expanded backend regression tests for tracking, smoothing, dual-path vision, reports, provider retry, and plan generation
+- `v5.2.8`: reused lost tracker boxes can be used as padded pose crop hints for distant tiny skaters.
+- `v5.2.7`: tracker-style crop padding is applied to overlap-safe rejected tracker hints when they become reference boxes.
+- `v5.2.6`: overlap-safe continuity-rejected tracker boxes can be reused as pose crop hints without accepting identity switches.
+- `v5.2.5`: regular pose crops are validated against their actual reference bbox when motion-predicted crops are attempted.
+- `v5.2.4`: ordered visible T/A/L candidates are kept complete while preserving low-confidence warnings.
+- `v5.2.3`: unconfirmed but gated tracker relock boxes can guide pose crops without switching the target identity.
+- `v5.2.2`: tracker-aligned crop poses are preserved during fast target motion instead of over-penalizing seed-bbox drift.
+- `v5.2.1`: jump action-window padding is tighter and target preview anchors prefer high-motion sampled frames.
+- `v5.2.0`: debug replay mirrors the formal sampling pipeline and excludes unreliable pose frames from keyframe scoring.
 
-## Features
+## Core Features
 
-- Video upload with async analysis pipeline
-- Motion frame sampling and MediaPipe pose detection
-- Optional phase-2 multi-pose tracking with MediaPipe task models
-- Biomechanics metrics, phase smoothing, and structured scoring
-- Dual-path AI vision analysis with fallback handling
-- AI-generated training reports and training plan generation
-- Stage-aware retry flow with cached frame reuse
-- Processing logs, pipeline timing, and in-report debug visibility
-- Automatic stale-task recovery and safer failure handling
-- Blur filtering and video precheck before vision encoding
-- Blur filtering and profile-aware frame sampling for more stable vision input
-- Standalone `skating_vision` package for reuse outside the main app
-- Child mode and parent mode experiences
-- Skill tree, training plan, archive, and progress tracking
-- Docker all-in-one deployment
+- Video upload with asynchronous analysis and stage-aware retry.
+- Motion sampling, video precheck, blur filtering, and larger nginx upload limits.
+- Target preview, manual target lock, YOLO + ByteTrack person tracking, and per-frame bbox diagnostics.
+- MediaPipe pose extraction with smoothing, multi-candidate handling, and crop fallback logic.
+- Biomechanics metrics for phase timing, jump evidence, rotation estimation, and pose quality.
+- Qwen 3.6 Plus video temporal localization for semantic takeoff/apex/landing intervals.
+- Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
+- Dual-path vision analysis with video-aware context, provider fallback, retry handling, and cost limits.
+- AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode.
+- Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, timings, and logs.
+- Docker Compose and all-in-one Docker deployment for NAS or local single-container use.
+
+## Analysis Pipeline
+
+1. Upload the source video and create an analysis record.
+2. Run video precheck, motion sampling, and action-window detection.
+3. Build target preview candidates and wait for manual selection when confidence is low.
+4. Track the selected skater with YOLO/ByteTrack and per-frame bbox continuity checks.
+5. Extract pose landmarks from regular, tracker-guided, and fallback crops.
+6. Smooth pose signals and compute biomechanics, jump features, and keyframe candidates.
+7. Run video-temporal AI when configured and resolve semantic T/A/L timestamps.
+8. Extract semantic keyframes with FFmpeg and pass video context to image AI.
+9. Fuse pose, biomechanics, video AI, and image AI into structured report data.
+10. Persist frames, logs, timings, debug summaries, and retry checkpoints.
 
 ## Tech Stack
 
-- Frontend: React 18, TypeScript, Vite, Tailwind CSS, React Router, Recharts
-- Backend: FastAPI, SQLAlchemy Async, SQLite
-- Vision and media: FFmpeg, OpenCV, MediaPipe
-- AI integration: OpenAI SDK-compatible providers for vision and text
-- Deployment: Docker, nginx
+- Frontend: React 18, TypeScript, Vite, Tailwind CSS, React Router, Recharts.
+- Backend: FastAPI, SQLAlchemy Async, SQLite, APScheduler.
+- Vision and media: FFmpeg, OpenCV, MediaPipe, YOLO/ByteTrack, PyTorch CPU.
+- AI integration: OpenAI SDK-compatible providers for text, image, and video-aware vision flows.
+- Deployment: Docker, nginx, Docker Compose, all-in-one container image.
 
 ## Project Structure
 
@@ -61,9 +65,9 @@ The latest update expands the video analysis pipeline and deployment configurati
 skating-analyzer/
 |-- backend/                  # FastAPI backend
 |   |-- app/
-|   |   |-- configs/          # action profile and prompt configuration
+|   |   |-- configs/          # action profiles and provider configuration
 |   |   |-- routers/          # API routes
-|   |   |-- services/         # analysis, report, provider, vision, pose services
+|   |   |-- services/         # analysis, pose, tracking, vision, report, skill services
 |   |   |-- main.py
 |   |   |-- models.py
 |   |   `-- schemas.py
@@ -73,35 +77,18 @@ skating-analyzer/
 |   |-- src/
 |   `-- public/
 |-- docker/
-|   `-- allinone/             # all-in-one image build config
-|-- ai_skating_analysis_pack/ # standalone analysis reference pack
+|   `-- allinone/             # all-in-one image Dockerfile, nginx config, start script
+|-- docs/                     # pipeline documentation
+|-- skating_vision/           # standalone vision-analysis package
+|-- ai_skating_analysis_pack/ # standalone reference pack
+|-- scripts/                  # diagnostics, batch analysis, image export
 |-- data/                     # runtime data, ignored by Git
-|-- backups/                  # backup db files, ignored by Git
-|-- models/                   # local model files, ignored by Git
+|-- backups/                  # runtime backups, ignored by Git
+|-- models/                   # local model weights, ignored by Git
+|-- deliverables/             # exported image files, ignored by Git
 |-- .env.example
 |-- docker-compose.yml
 `-- README.md
-├─ backend/                  # FastAPI backend
-│  ├─ app/
-│  │  ├─ routers/            # API routes
-│  │  ├─ services/           # analysis, report, provider, skill services
-│  │  ├─ main.py
-│  │  ├─ models.py
-│  │  └─ schemas.py
-│  └─ requirements.txt
-├─ frontend/                 # React frontend
-│  ├─ src/
-│  └─ public/
-├─ skating_vision/           # standalone vision analysis Python package
-├─ docs/
-│  └─ ai-analysis-flow.md   # full 10-stage pipeline documentation
-├─ docker/
-│  └─ allinone/              # all-in-one image build config
-├─ data/                     # runtime data (ignored)
-├─ backups/                  # backups (db files ignored)
-├─ .env.example
-├─ docker-compose.yml
-└─ README.md
 ```
 
 ## Environment Variables
@@ -134,37 +121,37 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 Notes:
 
 - `.env` is not tracked by Git.
-- `.env.example` keeps placeholders only.
-- The default vision model is `qwen3.6-plus`. `qwen-vl-max-latest` is kept only as a legacy migration input and is no longer recommended as a default.
-- `QWEN_VISION_DAILY_COST_LIMIT_CNY` caps daily vision spend, `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` estimates one video-temporal call, and `VIDEO_TEMPORAL_MAX_FRAMES` caps semantic frames sent to image AI.
-- Runtime databases, uploaded videos, backups, Docker tar archives, and local model files are not committed.
+- The default vision model is `qwen3.6-plus`; `qwen-vl-max-latest` is only kept as legacy migration input.
+- `QWEN_VISION_DAILY_COST_LIMIT_CNY` caps daily vision spend.
+- `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` estimates one video-temporal call.
+- `VIDEO_TEMPORAL_MAX_FRAMES` caps semantic frames sent to image AI.
+- Runtime databases, uploaded videos, extracted frames, backups, Docker tar archives, and local model files are not committed.
 
-## Phase-2 Pose Model
+## Local Models
 
 Phase-2 multi-pose and person tracking use host-mounted model files.
 
-- Put the model file under `./models`, for example `./models/pose_landmarker_heavy.task`.
+- Put MediaPipe task files under `./models`, for example `./models/pose_landmarker_heavy.task`.
 - Set `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` in `.env`.
 - Optionally set `POSE_NUM_POSES=4`.
-- For YOLO person tracking, put `yolov8n.pt` under `./models` and optionally set `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`. If the variable is not set, the backend checks `/models/yolov8n.pt` before allowing Ultralytics to download `yolov8n.pt`.
-- The Settings page shows pose runtime and YOLO runtime status separately, with independent recheck buttons so one check no longer blocks or reloads the other.
-- Model files are not committed to this repository.
-- If the model is missing or cannot be loaded, the backend automatically falls back to the phase-1 single-person pose pipeline.
+- Put YOLO weights under `./models`, for example `./models/yolov8n.pt`.
+- Optionally set `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`.
+- If `YOLO_PERSON_MODEL_PATH` is not set, the backend checks `/models/yolov8n.pt` before allowing Ultralytics to download `yolov8n.pt`.
+- The Settings page shows pose runtime and YOLO runtime status separately.
+- If a model is missing or cannot be loaded, the backend falls back to the safer available pipeline.
 
 ## skating_vision Package
 
-The `skating_vision` directory is a standalone Python package that extracts the core analysis modules for use outside the main FastAPI app. It provides:
+The `skating_vision` directory is a standalone Python package that extracts core analysis modules for reuse outside the FastAPI app.
 
-- **video** — frame extraction, motion sampling, action window detection, blur filtering
-- **pose** — MediaPipe pose extraction with multi-candidate fallback
-- **biomechanics** — geometric heuristic metrics, jump rotation estimation
-- **vision** — LLM-based frame-by-frame visual analysis
-- **report** — structured report generation and score fusion
-- **providers** — OpenAI SDK-compatible provider abstraction
-- **target_lock** — primary skater candidate locking
-- **action_profiles** — profile inference for jump, spin, spiral, and step sequences
-
-Install as a local package or import directly:
+- `video`: frame extraction, motion sampling, action-window detection, blur filtering.
+- `pose`: MediaPipe pose extraction with multi-candidate fallback.
+- `biomechanics`: geometric metrics and jump rotation estimation.
+- `vision`: LLM-based visual analysis.
+- `report`: structured report generation and score fusion.
+- `providers`: OpenAI SDK-compatible provider abstraction.
+- `target_lock`: primary skater candidate locking.
+- `action_profiles`: profile inference for jumps, spins, spirals, and step sequences.
 
 ```python
 from skating_vision.video import extract_motion_sampled_frames
@@ -173,11 +160,11 @@ from skating_vision.biomechanics import analyze_biomechanics
 from skating_vision.report import generate_report
 ```
 
-See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full 10-stage pipeline documentation.
+See [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md) for the full pipeline documentation.
 
 ## Local Development
 
-### Backend
+Backend:
 
 ```bash
 cd backend
@@ -193,7 +180,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --no-use-colors
 ```
 
-### Frontend
+Frontend:
 
 ```bash
 cd frontend
@@ -205,19 +192,19 @@ Default URLs:
 
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
+- Health: `http://localhost:8000/api/health`
 
 ## Testing
 
-Backend regression tests cover the newer pipeline and heuristics, including:
+Backend regression tests cover:
 
-- analysis profile inference from user input
+- profile inference from user input
 - stage retry and pipeline version behavior
-- blur filtering, video precheck, and vision fallback handling
-- bbox tracking, target lock, pose smoothing, and phase voting
-- dual-path vision and report generation
-- provider retry and vision content normalization
-- biomechanics normalization, jump timing, and rotation estimation
-- training plan generation
+- debug-run persistence and replay flows
+- video precheck, precise extraction, and semantic temporal resolution
+- bbox tracking, target lock, person tracking, and pose smoothing
+- keyframe candidates, T/A/L ordering, and biomechanics timing
+- dual-path vision, provider retry, report fusion, and content normalization
 
 Run backend tests:
 
@@ -233,22 +220,20 @@ cd frontend
 npm run build
 ```
 
-## Docker
-
-### docker-compose
+## Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-If you want to enable phase-2 multi-pose tracking, place the model file under `./models` before starting Docker Compose.
+If phase-2 pose or YOLO tracking is needed, place model files under `./models` before starting Docker Compose.
 
 Default URLs:
 
 - App: `http://localhost:8080`
-- Health: `http://localhost:8080/api/health`
+- API health: `http://localhost:8000/api/health`
 
-### All-in-one Image
+## All-in-one Image
 
 Build:
 
@@ -269,31 +254,45 @@ docker run -d \
   skating-analyzer-allinone:latest
 ```
 
-Notes:
-
-- If you run all-in-one with a mounted `.env`, make sure it contains `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` and, when using mounted YOLO weights, `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`.
-- If you configure environment variables directly in NAS or Container Manager, mounting `.env` is optional, but you still need the same environment variable and the mounted `models` directory.
-- Older analysis rows that still store Windows absolute paths automatically fall back to `/data/uploads/<analysis_id>/source.*` when the all-in-one container resolves the original video.
-
 Export:
 
 ```powershell
 .\scripts\export-allinone-image.ps1
 ```
 
-The export script rebuilds `skating-analyzer-allinone:latest` and writes a timestamped `v5.1.0` tar file under `./deliverables`.
+The export script rebuilds `skating-analyzer-allinone:latest`, reads the current pipeline version from `backend/app/services/pipeline_version.py`, and writes a timestamped tar file under `./deliverables`.
+
+All-in-one notes:
+
+- If `.env` is mounted, include `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` when using the MediaPipe task model.
+- Include `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt` when using mounted YOLO weights.
+- If environment variables are configured directly in NAS or Container Manager, mounting `.env` is optional.
+- `data`, `backups`, and `models` should remain host-mounted volumes so runtime data and model files are not baked into the image.
+- Older analysis rows that still store Windows absolute paths fall back to `/data/uploads/<analysis_id>/source.*` inside the all-in-one container.
+
+## Image Size Notes
+
+The all-in-one image is intentionally larger than the split frontend image because it includes the backend, frontend, FFmpeg, nginx, MediaPipe, OpenCV, PyTorch CPU, Ultralytics YOLO, and tracking dependencies.
+
+Recent inspection of `skating-analyzer-allinone:latest` showed:
+
+- Docker image size: about `3.72GB`.
+- Largest image layer: Python dependencies from `pip install`, about `2.25GB`.
+- System media/server layer: `ffmpeg`, `nginx`, and `curl`, about `467MB`.
+- Largest Python packages: `torch` about `724MB`, `jaxlib` about `330MB`, `scipy` about `113MB`, OpenCV packages/libs about `337MB` combined, and `mediapipe` about `66MB`.
+- `tmp/` diagnostics can make Docker build context and Git history noisy, but the all-in-one Dockerfile copies only `backend/app`, `backend/requirements.txt`, `frontend`, and `docker/allinone` files into the final image. `tmp/` is now ignored by Git and Docker build context.
 
 ## Main Screens
 
-- `/path`: skill tree and learning path
-- `/review`: upload and analyze training videos
-- `/report/:id`: analysis report
-- `/report/:id/pose-debug`: expanded pose replay, tracking diagnostics, and biomechanics debug page
-- `/archive`: training archive and progress
-- `/plan/:plan_id`: training plan
-- `/snowball`: assistant chat and memory suggestions
-- `/settings`: settings, PIN, backups, provider management, separate pose and YOLO runtime status checks
-- `/debug`: analysis debug logs with auto-refresh for the latest analysis state
+- `/path`: skill tree and learning path.
+- `/review`: upload and analyze training videos.
+- `/report/:id`: analysis report.
+- `/report/:id/pose-debug`: expanded skeleton replay and tracker diagnostics.
+- `/archive`: training archive and progress.
+- `/plan/:plan_id`: training plan.
+- `/snowball`: assistant chat and memory suggestions.
+- `/settings`: PIN, backups, providers, cost limits, pose runtime, and YOLO runtime checks.
+- `/debug`: analysis debug logs and debug-run replay.
 
 ## Privacy
 
@@ -306,13 +305,13 @@ The export script rebuilds `skating-analyzer-allinone:latest` and writes a times
 
 This repository does not include:
 
-- Real API keys
-- Local databases
-- Training videos or extracted media assets
-- Exported Docker tar archives
-- Local model weights
-- Local worktree metadata such as `.claude/`
-- Deliverable packaging artifacts
+- real API keys
+- local databases
+- training videos or extracted media assets
+- exported Docker tar archives
+- local model weights
+- local worktree metadata
+- temporary diagnostics and deliverable packaging artifacts
 
 ## Open Source Extras
 

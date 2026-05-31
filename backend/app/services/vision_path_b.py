@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.services.providers import ActiveProviderConfig, request_text_completion
@@ -146,6 +147,49 @@ def _fallback(error: str) -> dict[str, Any]:
     }
 
 
+def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
+    if not raw_text or not raw_text.strip():
+        return None
+
+    cleaned = clean_json_text(raw_text)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw_text, re.IGNORECASE)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+    for start, char in enumerate(raw_text):
+        if char != "{":
+            continue
+        depth = 0
+        for end in range(start, len(raw_text)):
+            if raw_text[end] == "{":
+                depth += 1
+            elif raw_text[end] == "}":
+                depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(raw_text[start : end + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    break
+    return None
+
+
+def _path_b_temperature(provider: ActiveProviderConfig) -> float:
+    if getattr(provider, "provider", "") == "mimo":
+        return 0.0
+    return PATH_B_TEMPERATURE
+
+
 async def analyze_path_b(
     action_type: str,
     annotated_frame_payloads: list[FramePayload],
@@ -208,22 +252,21 @@ async def analyze_path_b(
 
         raw = await request_text_completion(
             provider,
-            temperature=PATH_B_TEMPERATURE,
+            temperature=_path_b_temperature(provider),
             max_tokens=max_tokens,
             timeout=90.0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
         )
 
-        cleaned = clean_json_text(raw)
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            logger.warning("Path B JSON parse failed: %s; raw[:500]=%r", exc, cleaned[:500])
-            return _fallback(f"json_parse: {exc}")
-
+        parsed = _extract_json_object(raw)
+        if parsed is None:
+            cleaned = clean_json_text(raw)
+            logger.warning("Path B JSON parse failed; raw[:500]=%r", cleaned[:500])
+            return _fallback("json_parse: no valid JSON object found")
         if not isinstance(parsed, dict):
             return _fallback("response is not a dict")
 

@@ -7,6 +7,26 @@ type PoseViewerProps = {
   activeFrameId?: string | null;
   onFrameChange?: (frameId: string) => void;
   variant?: "compact" | "debug";
+  diagnosticsByFrame?: Record<string, PoseViewerDiagnostic>;
+};
+
+type PoseViewerBBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type PoseViewerDiagnostic = {
+  rejectedCandidates?: Array<{
+    bbox?: PoseViewerBBox | null;
+    reasons?: string[];
+    source?: string | null;
+    trackerId?: number | null;
+    confidence?: number | null;
+  }>;
+  predictionBBox?: PoseViewerBBox | null;
+  state?: string | null;
 };
 
 const UPPER_BODY = new Set([11, 12, 13, 14, 15, 16]);
@@ -35,6 +55,7 @@ function drawPose(
   frame: PoseFrame,
   connections: number[][],
   hasFrameImage: boolean,
+  diagnostic?: PoseViewerDiagnostic,
 ) {
   const context = canvas.getContext("2d");
   if (!context) {
@@ -63,9 +84,14 @@ function drawPose(
 
   if (frame.target_bbox) {
     const isInterpolatedFrame = frame.tracking_state === "interpolated";
-    context.strokeStyle = isInterpolatedFrame ? "rgba(148, 163, 184, 0.75)" : "rgba(56, 189, 248, 0.95)";
+    const isLowConfidenceFrame = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
+    context.strokeStyle = isInterpolatedFrame
+      ? "rgba(148, 163, 184, 0.75)"
+      : isLowConfidenceFrame
+        ? "rgba(245, 158, 11, 0.95)"
+        : "rgba(56, 189, 248, 0.95)";
     context.lineWidth = 2;
-    context.setLineDash(isInterpolatedFrame ? [4, 8] : [8, 6]);
+    context.setLineDash(isInterpolatedFrame || isLowConfidenceFrame ? [4, 8] : [8, 6]);
     context.strokeRect(
       frame.target_bbox.x * width,
       frame.target_bbox.y * height,
@@ -79,11 +105,46 @@ function drawPose(
       context.fillStyle = "#E0F2FE";
       context.font = "12px sans-serif";
       context.fillText(
-        `${isInterpolatedFrame ? "interp" : "lock"} ${(frame.tracking_confidence * 100).toFixed(0)}%`,
+        `${isInterpolatedFrame ? "interp" : isLowConfidenceFrame ? "low" : "lock"} ${(frame.tracking_confidence * 100).toFixed(0)}%`,
         frame.target_bbox.x * width + 8,
         Math.max(14, frame.target_bbox.y * height - 10),
       );
     }
+  }
+
+  if (diagnostic?.predictionBBox) {
+    context.strokeStyle = "rgba(168, 85, 247, 0.95)";
+    context.lineWidth = 2;
+    context.setLineDash([3, 6]);
+    context.strokeRect(
+      diagnostic.predictionBBox.x * width,
+      diagnostic.predictionBBox.y * height,
+      diagnostic.predictionBBox.width * width,
+      diagnostic.predictionBBox.height * height,
+    );
+    context.setLineDash([]);
+  }
+
+  for (const candidate of diagnostic?.rejectedCandidates ?? []) {
+    if (!candidate.bbox) {
+      continue;
+    }
+    context.strokeStyle = "rgba(244, 63, 94, 0.92)";
+    context.lineWidth = 2;
+    context.setLineDash([8, 4]);
+    context.strokeRect(
+      candidate.bbox.x * width,
+      candidate.bbox.y * height,
+      candidate.bbox.width * width,
+      candidate.bbox.height * height,
+    );
+    context.setLineDash([]);
+    const label = (candidate.reasons ?? []).slice(0, 2).join(", ") || "rejected";
+    context.fillStyle = "rgba(127, 29, 29, 0.88)";
+    context.fillRect(candidate.bbox.x * width, Math.max(0, candidate.bbox.y * height - 22), Math.min(220, Math.max(96, label.length * 7)), 18);
+    context.fillStyle = "#FFE4E6";
+    context.font = "11px sans-serif";
+    context.fillText(label, candidate.bbox.x * width + 6, Math.max(12, candidate.bbox.y * height - 9));
   }
 
   const points = new Map(frame.keypoints.map((point) => [point.id, point]));
@@ -97,7 +158,8 @@ function drawPose(
       continue;
     }
     const interpolated = frame.tracking_state === "interpolated" || Boolean(a.interpolated) || Boolean(b.interpolated);
-    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : "rgba(226, 232, 240, 0.82)";
+    const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
+    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : lowConfidence ? "rgba(245, 158, 11, 0.46)" : "rgba(226, 232, 240, 0.82)";
     context.lineWidth = interpolated ? 2 : 3;
     context.setLineDash(interpolated ? [6, 6] : []);
     context.beginPath();
@@ -111,14 +173,15 @@ function drawPose(
     if (point.visibility < 0.5) {
       continue;
     }
-    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated ? "rgba(148, 163, 184, 0.62)" : keypointColor(point);
+    const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
+    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated ? "rgba(148, 163, 184, 0.62)" : lowConfidence ? "rgba(245, 158, 11, 0.72)" : keypointColor(point);
     context.beginPath();
     context.arc(point.x * width, point.y * height, AXIS_POINTS.has(point.id) ? 5 : 4, 0, Math.PI * 2);
     context.fill();
   }
 }
 
-export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant = "compact" }: PoseViewerProps) {
+export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant = "compact", diagnosticsByFrame = {} }: PoseViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -130,6 +193,9 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
   const frames = pose.frames;
   const currentFrame = frames[frameIndex];
   const currentFrameUrl = currentFrame ? pose.frame_urls[currentFrame.frame] ?? "" : "";
+  const currentFrameId = currentFrame ? frameIdFromName(currentFrame.frame) : "";
+  const currentDiagnostic = currentFrameId ? diagnosticsByFrame[currentFrameId] : undefined;
+  const rejectedCount = currentDiagnostic?.rejectedCandidates?.length ?? 0;
 
   useEffect(() => {
     if (!activeFrameId) {
@@ -156,6 +222,7 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
           currentFrame,
           pose.connections,
           Boolean(currentFrameUrl) && !frameImageError && Boolean(imageRef.current?.complete),
+          currentDiagnostic,
         );
       }
     };
@@ -166,7 +233,7 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
     return () => {
       window.removeEventListener("resize", redraw);
     };
-  }, [currentFrame, currentFrameUrl, frameImageError, onFrameChange, pose.connections]);
+  }, [currentFrame, currentDiagnostic, currentFrameUrl, frameImageError, onFrameChange, pose.connections]);
 
   useEffect(() => {
     if (!isPlaying || frames.length <= 1) {
@@ -225,7 +292,7 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
               className="absolute inset-0 h-full w-full object-contain"
               onLoad={() => {
                 if (canvasRef.current && currentFrame) {
-                  drawPose(canvasRef.current, currentFrame, pose.connections, true);
+                  drawPose(canvasRef.current, currentFrame, pose.connections, true, currentDiagnostic);
                 }
               }}
               onError={() => {
@@ -271,6 +338,21 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
         <span className="rounded-full bg-slate-950/70 px-3 py-2 text-sm text-slate-100">
           {currentFrame ? frameIdFromName(currentFrame.frame) : "--"} · {frameIndex + 1}/{frames.length}
         </span>
+        {currentDiagnostic?.state ? (
+          <span className="rounded-full bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+            tracker {currentDiagnostic.state}
+          </span>
+        ) : null}
+        {currentFrame?.tracking_state === "low_confidence" || (typeof currentFrame?.tracking_confidence === "number" && currentFrame.tracking_confidence <= 0.2) ? (
+          <span className="rounded-full bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-800">
+            low confidence pose
+          </span>
+        ) : null}
+        {rejectedCount ? (
+          <span className="rounded-full bg-rose-100 px-3 py-2 text-sm font-semibold text-rose-800">
+            {rejectedCount} rejected bbox
+          </span>
+        ) : null}
       </div>
     </div>
   );

@@ -25,6 +25,7 @@ import {
 import { useAppMode } from "../components/AppModeContext";
 import PinInput from "../components/PinInput";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
+import { parseApiDate } from "../utils/datetime";
 
 type PinLengthOption = 4 | 5 | 6;
 
@@ -49,7 +50,7 @@ function formatDate(dateString: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 export default function SettingsPage() {

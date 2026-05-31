@@ -13,6 +13,12 @@ from app.services.pose import (
     _candidate_rejection_reasons,
     _crop_bounds,
     _empty_payload,
+    _pending_relock_bbox_from_diagnostic,
+    _reference_crop_padding_ratio,
+    _reference_crop_source,
+    _tracker_bbox_is_reliable,
+    _unreliable_tracker_bbox_for_crop,
+    _validation_bbox_for_candidate,
 )
 from app.services.smoothing import smooth_keypoint_sequence
 
@@ -175,6 +181,148 @@ class PoseSmoothingTests(unittest.TestCase):
 
         self.assertIn("keypoint_roi_coverage", reasons)
         self.assertIn("core_center_outside_roi", reasons)
+
+    def test_keypoint_gate_rejects_predicted_crop_when_core_center_drifts_from_tracker(self) -> None:
+        tracker_bbox = {"x": 0.44, "y": 0.43, "width": 0.08, "height": 0.18}
+        candidate = {
+            "bbox": {"x": 0.50, "y": 0.42, "width": 0.06, "height": 0.18},
+            "keypoints": _visible_pose_keypoints(0.535, 0.47),
+            "source": "single_pose_predicted_crop",
+        }
+
+        reasons = _candidate_rejection_reasons(
+            candidate,
+            previous_bbox=tracker_bbox,
+            tracker_bbox=tracker_bbox,
+            seed_bbox=tracker_bbox,
+        )
+
+        self.assertIn("core_center_offset_from_tracker", reasons)
+        self.assertIn("core_center_tracker_offset", candidate["candidate_validation"])
+
+    def test_tracker_aligned_crop_allows_fast_core_motion(self) -> None:
+        previous_bbox = {"x": 0.31, "y": 0.32, "width": 0.16, "height": 0.42}
+        tracker_bbox = {"x": 0.34, "y": 0.32, "width": 0.16, "height": 0.42}
+        candidate = {
+            "bbox": {"x": 0.34, "y": 0.32, "width": 0.16, "height": 0.42},
+            "keypoints": _visible_pose_keypoints(0.45, 0.47),
+            "source": "single_pose_crop",
+        }
+
+        reasons = _candidate_rejection_reasons(
+            candidate,
+            previous_bbox=previous_bbox,
+            tracker_bbox=tracker_bbox,
+            seed_bbox=previous_bbox,
+            previous_core_center={"x": 0.29, "y": 0.30},
+        )
+
+        self.assertNotIn("temporal_pose_jump", reasons)
+
+    def test_seed_bbox_no_overlap_does_not_penalize_tracker_aligned_motion(self) -> None:
+        tracker_bbox = {"x": 0.60, "y": 0.43, "width": 0.04, "height": 0.16}
+        seed_bbox = {"x": 0.30, "y": 0.43, "width": 0.04, "height": 0.16}
+        candidate = {
+            "bbox": tracker_bbox,
+            "keypoints": _visible_pose_keypoints(0.62, 0.48),
+            "source": "single_pose_crop",
+        }
+
+        reasons = _candidate_rejection_reasons(
+            candidate,
+            previous_bbox=tracker_bbox,
+            tracker_bbox=tracker_bbox,
+            seed_bbox=seed_bbox,
+        )
+
+        self.assertEqual(reasons, [])
+
+    def test_pending_relock_bbox_is_crop_hint_but_reused_tracker_bbox_is_not_reliable(self) -> None:
+        diagnostic = {
+            "state": "full_frame_yolo_relock_pending",
+            "bbox": {"x": 0.30, "y": 0.40, "width": 0.03, "height": 0.14},
+            "pending_relock_bbox": {"x": 0.50, "y": 0.42, "width": 0.04, "height": 0.18},
+        }
+
+        self.assertFalse(_tracker_bbox_is_reliable(diagnostic))
+        self.assertEqual(
+            _pending_relock_bbox_from_diagnostic(diagnostic),
+            {"x": 0.5, "y": 0.42, "width": 0.04, "height": 0.18},
+        )
+        self.assertTrue(_tracker_bbox_is_reliable({"state": "detector_relocked"}))
+
+    def test_regular_crop_validation_keeps_reference_bbox_when_prediction_is_also_available(self) -> None:
+        reference_bbox = {"x": 0.37, "y": 0.37, "width": 0.13, "height": 0.18}
+        predicted_bbox = {"x": 0.54, "y": 0.54, "width": 0.08, "height": 0.20}
+        candidate = {
+            "bbox": reference_bbox,
+            "keypoints": _visible_pose_keypoints(0.43, 0.44),
+            "source": "single_pose_crop",
+        }
+
+        validation_bbox = _validation_bbox_for_candidate(
+            candidate,
+            current_tracker_bbox=None,
+            pending_relock_bbox=None,
+            reference_bbox=reference_bbox,
+            predicted_bbox=predicted_bbox,
+        )
+        reasons = _candidate_rejection_reasons(
+            candidate,
+            previous_bbox=reference_bbox,
+            tracker_bbox=validation_bbox,
+            seed_bbox=reference_bbox,
+        )
+
+        self.assertEqual(validation_bbox, reference_bbox)
+        self.assertNotIn("tracker_center_distance", reasons)
+        self.assertNotIn("core_center_outside_roi", reasons)
+
+    def test_continuity_rejected_tracker_bbox_can_be_conservative_crop_hint(self) -> None:
+        previous_bbox = {"x": 0.37, "y": 0.37, "width": 0.13, "height": 0.18}
+        rejected_bbox = {"x": 0.35, "y": 0.32, "width": 0.17, "height": 0.23}
+        diagnostic = {"state": "continuity_rejected", "bbox": rejected_bbox}
+
+        self.assertEqual(
+            _unreliable_tracker_bbox_for_crop(diagnostic, rejected_bbox, previous_bbox),
+            rejected_bbox,
+        )
+        self.assertIsNone(
+            _unreliable_tracker_bbox_for_crop(
+                diagnostic,
+                {"x": 0.80, "y": 0.20, "width": 0.08, "height": 0.20},
+                previous_bbox,
+            )
+        )
+
+    def test_lost_reused_tracker_bbox_can_be_conservative_crop_hint(self) -> None:
+        previous_bbox = {"x": 0.5171, "y": 0.3763, "width": 0.0486, "height": 0.1189}
+        diagnostic = {"state": "lost_reused", "bbox": previous_bbox}
+
+        self.assertEqual(
+            _unreliable_tracker_bbox_for_crop(diagnostic, previous_bbox, previous_bbox),
+            previous_bbox,
+        )
+
+    def test_unreliable_tracker_crop_hint_uses_tracker_padding_even_as_reference(self) -> None:
+        rejected_bbox = {"x": 0.35, "y": 0.32, "width": 0.17, "height": 0.23}
+
+        self.assertEqual(
+            _reference_crop_source(
+                current_tracker_bbox=None,
+                pending_relock_bbox=None,
+                unreliable_tracker_crop_bbox=rejected_bbox,
+            ),
+            "single_pose_unreliable_tracker_crop",
+        )
+        self.assertGreater(
+            _reference_crop_padding_ratio(
+                current_tracker_bbox=None,
+                pending_relock_bbox=None,
+                unreliable_tracker_crop_bbox=rejected_bbox,
+            ),
+            0.0,
+        )
 
     def test_small_tracker_crop_rejects_partial_foreground_body(self) -> None:
         tracker_bbox = {"x": 0.4376, "y": 0.4391, "width": 0.0385, "height": 0.1163}

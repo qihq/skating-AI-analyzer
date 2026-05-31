@@ -13,6 +13,7 @@ from app.services.providers import (
     get_vision_providers,
     request_dashscope_video_completion,
     request_doubao_vision_completion,
+    request_mimo_video_completion,
     request_text_completion,
 )
 from app.services.report import clean_json_text
@@ -867,6 +868,16 @@ async def analyze_frames(
                 )
             elif getattr(video_provider, "provider", "") == "doubao":
                 raw_content = await request_doubao_vision_completion(
+                    video_provider,
+                    video_path=clip_path,
+                    system_prompt=system_prompt,
+                    user_prompt=video_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=180.0,
+                )
+            elif getattr(video_provider, "provider", "") == "mimo":
+                raw_content = await request_mimo_video_completion(
                     video_provider,
                     video_path=clip_path,
                     system_prompt=system_prompt,

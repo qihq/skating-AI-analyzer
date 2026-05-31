@@ -42,6 +42,13 @@ DEPRECATED_QWEN_VISION_MODELS = {"qwen-vl-max-latest"}
 DEFAULT_DOUBAO_VISION_MODEL = "doubao-1.5-vision-pro-32k"
 DOUBAO_VISION_MAX_MB = 50
 DOUBAO_VISION_MAX_SECONDS = 60.0
+DEFAULT_MIMO_VISION_MODEL = "mimo-v2.5"
+DEFAULT_MIMO_REPORT_MODEL = "mimo-v2.5-pro"
+MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MIMO_VIDEO_MAX_BASE64_MB = 50
+MIMO_VIDEO_FPS = 2
+MIMO_VIDEO_MEDIA_RESOLUTION = "default"
 QWEN_VIDEO_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 _VISION_VIDEO_COST_DAY: date | None = None
 _VISION_VIDEO_COST_CNY = 0.0
@@ -78,6 +85,30 @@ PRESET_PROVIDERS = [
         "provider": "doubao",
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "model_id": "doubao-seed-2-0-250615",
+        "is_active": False,
+    },
+    {
+        "slot": "vision",
+        "name": "MiMo V2.5",
+        "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "model_id": DEFAULT_MIMO_VISION_MODEL,
+        "is_active": False,
+    },
+    {
+        "slot": "vision_path_a",
+        "name": "MiMo V2.5 Path A",
+        "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "model_id": DEFAULT_MIMO_VISION_MODEL,
+        "is_active": False,
+    },
+    {
+        "slot": "vision_path_b",
+        "name": "MiMo V2.5 Path B",
+        "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "model_id": DEFAULT_MIMO_VISION_MODEL,
         "is_active": False,
     },
     {
@@ -122,6 +153,14 @@ PRESET_PROVIDERS = [
     },
     {
         "slot": "report",
+        "name": "MiMo V2.5 Pro",
+        "provider": "mimo",
+        "base_url": MIMO_BASE_URL,
+        "model_id": DEFAULT_MIMO_REPORT_MODEL,
+        "is_active": False,
+    },
+    {
+        "slot": "report",
         "name": "自定义 OpenAI 兼容",
         "provider": "openai_compatible",
         "base_url": "https://api.openai.com/v1",
@@ -145,6 +184,7 @@ ENV_KEYS_BY_PROVIDER = {
     "doubao": ["DOUBAO_API_KEY"],
     "minimax": ["MINIMAX_API_KEY"],
     "glm": ["GLM_API_KEY"],
+    "mimo": ["MIMO_API_KEY"],
 }
 
 TINY_PNG_DATA_URL = (
@@ -221,6 +261,10 @@ def _resolve_qwen_vision_model(provider: AIProvider) -> str:
         return provider.model_id
     if provider.provider == "qwen" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
         return DEFAULT_QWEN_VISION_MODEL
+    if provider.provider == "mimo" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
+        return DEFAULT_MIMO_VISION_MODEL
+    if provider.provider == "mimo" and provider.slot == "report":
+        return DEFAULT_MIMO_REPORT_MODEL
     return provider.model_id
 
 
@@ -236,6 +280,8 @@ def _resolve_env_vision_model(provider_name: str) -> str:
         return env_model or DEFAULT_QWEN_VISION_MODEL
     if normalized == "doubao":
         return os.getenv("DOUBAO_VISION_MODEL", "").strip() or DEFAULT_DOUBAO_VISION_MODEL
+    if normalized == "mimo":
+        return os.getenv("MIMO_VISION_MODEL", "").strip() or DEFAULT_MIMO_VISION_MODEL
     return os.getenv(f"{normalized.upper()}_VISION_MODEL", "").strip() or normalized
 
 
@@ -253,6 +299,7 @@ def _env_vision_provider_config(provider_name: str) -> ActiveProviderConfig | No
         "doubao": "https://ark.cn-beijing.volces.com/api/v3",
         "kimi": "https://api.moonshot.cn/v1",
         "glm": "https://open.bigmodel.cn/api/paas/v4",
+        "mimo": MIMO_BASE_URL,
     }
     return ActiveProviderConfig(
         id=f"env:vision:{normalized}",
@@ -423,6 +470,27 @@ def _claude_messages_url(base_url: str) -> str:
     return f"{normalized}/messages"
 
 
+def is_mimo_provider(provider_name: str) -> bool:
+    return provider_name.strip().lower() == "mimo"
+
+
+def _mimo_chat_completions_url(base_url: str) -> str:
+    normalized = (base_url or MIMO_BASE_URL).rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
+def _mimo_effective_base_url(provider: ActiveProviderConfig) -> str:
+    base_url = (provider.base_url or MIMO_BASE_URL).strip()
+    api_key = (provider.api_key or "").strip()
+    if api_key.startswith("tp-") and "api.xiaomimimo.com" in base_url:
+        return MIMO_TOKEN_PLAN_BASE_URL
+    return base_url
+
+
 def _extract_status_code(exc: Exception) -> int | None:
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
@@ -525,6 +593,48 @@ async def _request_claude_compatible_completion(
     return "\n".join(text_parts).strip()
 
 
+async def _request_mimo_completion(
+    provider: ActiveProviderConfig,
+    *,
+    messages: list[dict[str, object]],
+    temperature: float,
+    max_tokens: int,
+    extra_body: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
+    timeout: float,
+) -> str:
+    payload: dict[str, Any] = {
+        "model": provider.model_id,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if extra_body:
+        payload.update(extra_body)
+    if response_format:
+        payload["response_format"] = response_format
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            _mimo_chat_completions_url(_mimo_effective_base_url(provider)),
+            headers={
+                "api-key": provider.api_key,
+                "Authorization": f"Bearer {provider.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    return extract_message_text(content).strip()
+
+
 async def request_text_completion(
     provider: ActiveProviderConfig,
     *,
@@ -562,6 +672,16 @@ async def request_text_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        if is_mimo_provider(provider.provider):
+            return await _request_mimo_completion(
+                provider,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra_body,
+                response_format=response_format,
                 timeout=timeout,
             )
 
@@ -773,6 +893,84 @@ async def request_doubao_vision_completion(
     return await _with_completion_retry(operation)
 
 
+def _base64_encoded_size_bytes(raw_size_bytes: int) -> int:
+    return ((max(0, raw_size_bytes) + 2) // 3) * 4
+
+
+def _mimo_video_limit_bytes() -> int:
+    return MIMO_VIDEO_MAX_BASE64_MB * 1024 * 1024
+
+
+async def request_mimo_video_completion(
+    provider: ActiveProviderConfig,
+    *,
+    video_path: Path,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+    timeout: float = 180.0,
+) -> str:
+    """
+    Request MiMo video understanding through its OpenAI-compatible API.
+
+    Local action clips are sent as Base64 data URLs because this project does
+    not publish temporary video files to a public URL.
+    """
+    if not is_mimo_provider(provider.provider):
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.UNKNOWN_ERROR,
+            "MiMo video mode requires the mimo provider.",
+        )
+    if not video_path.exists():
+        raise AnalysisPipelineError(AnalysisErrorCode.FRAME_EXTRACT_FAILED, f"Video clip not found: {video_path}")
+
+    projected_encoded_size = _base64_encoded_size_bytes(video_path.stat().st_size)
+    if projected_encoded_size > _mimo_video_limit_bytes():
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"MiMo vision video base64 exceeds {MIMO_VIDEO_MAX_BASE64_MB}MB limit; skipping provider.",
+        )
+
+    with video_path.open("rb") as handle:
+        encoded_video = base64.b64encode(handle.read()).decode("ascii")
+
+    if len(encoded_video.encode("ascii")) > _mimo_video_limit_bytes():
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"MiMo vision video base64 exceeds {MIMO_VIDEO_MAX_BASE64_MB}MB limit; skipping provider.",
+        )
+
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{encoded_video}"},
+                    "fps": MIMO_VIDEO_FPS,
+                    "media_resolution": MIMO_VIDEO_MEDIA_RESOLUTION,
+                },
+                {"type": "text", "text": user_prompt},
+            ],
+        },
+    ]
+
+    async def operation() -> str:
+        return await _request_mimo_completion(
+            provider,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            timeout=timeout,
+        )
+
+    return await _with_completion_retry(operation)
+
+
 async def get_active_provider(slot: str, session: AsyncSession | None = None) -> ActiveProviderConfig:
     owns_session = session is None
     if owns_session:
@@ -968,17 +1166,27 @@ async def test_provider_connectivity(provider: AIProvider) -> tuple[bool, str]:
     )
 
     if provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
-        client = AsyncOpenAI(api_key=api_key, base_url=provider.base_url, timeout=30.0, max_retries=0)
         messages: list[dict[str, object]] = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "请回复 ok。"},
+                    {"type": "text", "text": "Reply with ok."},
                     {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URL}},
                 ],
             }
         ]
         try:
+            if is_mimo_provider(provider.provider):
+                content = await request_text_completion(
+                    active_provider,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=16,
+                    timeout=30.0,
+                )
+                return True, content or "连通性测试通过。"
+
+            client = AsyncOpenAI(api_key=api_key, base_url=provider.base_url, timeout=30.0, max_retries=0)
             response = await client.chat.completions.create(
                 model=provider.model_id,
                 messages=messages,
@@ -994,7 +1202,7 @@ async def test_provider_connectivity(provider: AIProvider) -> tuple[bool, str]:
     try:
         content = await request_text_completion(
             active_provider,
-            messages=[{"role": "user", "content": "请回复 ok。"}],
+            messages=[{"role": "user", "content": "Reply with ok."}],
             temperature=0,
             max_tokens=16,
             timeout=30.0,

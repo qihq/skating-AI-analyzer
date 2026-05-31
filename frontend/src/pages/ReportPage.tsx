@@ -33,6 +33,7 @@ import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import UnlockCelebration from "../components/UnlockCelebration";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, getAnalysisStageDescription, getAnalysisStatusLabel, isAnalysisInProgress } from "../constants/analysisStatus";
+import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 
 const STATUS_TEXT: Record<string, string> = {
@@ -80,13 +81,13 @@ const PROGRESS_STAGE_META = [
 ] as const;
 
 function formatDate(dateString: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return apiDateTimeFormatter({
     year: "numeric",
     month: "long",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function buildSubscoreRadarData(subscores: Record<string, number>) {
@@ -146,13 +147,13 @@ function formatDuration(value?: number | null) {
 }
 
 function formatLogTimestamp(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return apiDateTimeFormatter({
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(value));
+  }).format(parseApiDate(value));
 }
 
 function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
@@ -174,7 +175,7 @@ function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
           ) : null}
         </div>
         <div className="rounded-[22px] border border-cyan-100 bg-white/80 px-4 py-3 text-sm text-slate-600">
-          <p>Pipeline: {analysis.pipeline_version ?? "v5.1.0"}</p>
+          <p>Pipeline: {analysis.pipeline_version ?? "v5.2.1"}</p>
           {typeof timings.total_s === "number" ? <p className="mt-1">累计耗时：{formatDuration(timings.total_s)}</p> : null}
         </div>
       </div>

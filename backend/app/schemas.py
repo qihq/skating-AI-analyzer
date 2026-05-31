@@ -33,6 +33,7 @@ class StructuredReport(BaseModel):
     training_focus: str
     subscores: dict[str, int] = Field(default_factory=dict)
     data_quality: str = "partial"
+    user_note: str | None = None
 
 
 class AnalysisUploadResponse(BaseModel):
@@ -129,6 +130,35 @@ class AnalysisAutoEvalSnapshot(BaseModel):
     auto_eval: dict[str, Any] | None = None
     key_frame_candidates: dict[str, Any] | None = None
     fusion_diagnostics: list[str] = Field(default_factory=list)
+
+
+class DebugRunCreateResponse(BaseModel):
+    id: str
+    status: str
+
+
+class DebugRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    mode: str
+    source_type: str
+    analysis_id: str | None = None
+    action_type: str
+    action_subtype: str | None = None
+    analysis_profile: str | None = None
+    note: str | None = None
+    status: str
+    summary: dict[str, Any] | None = None
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DebugRunDetail(DebugRunSummary):
+    video_path: str | None = None
+    result_json: dict[str, Any] | None = None
+    error_detail: str | None = None
 
 
 class NoteUpdateRequest(BaseModel):

@@ -24,7 +24,9 @@ from app.services.person_tracker import (
     _YOLO_MODEL_NAME,
     _YOLO_MODEL_PATH_ENV,
     _resolve_yolo_model_path,
+    _zoomed_content_crop_bounds,
     _xyxy_to_bbox,
+    detect_person_candidates,
     track_person_bbox,
     track_person_bbox_detailed,
 )
@@ -88,6 +90,39 @@ class PersonTrackerTests(unittest.TestCase):
         ):
             mounted_path.exists.return_value = False
             self.assertEqual(_resolve_yolo_model_path(), _YOLO_MODEL_NAME)
+
+    def test_zoomed_content_crop_bounds_trim_black_side_bars(self) -> None:
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        frame[:, 50:150] = 80
+
+        self.assertEqual(_zoomed_content_crop_bounds(frame), (50, 20, 150, 85))
+
+    def test_detect_person_candidates_can_use_zoomed_content_detection(self) -> None:
+        tracker_frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        tracker_frame[:, 50:150] = 80
+        calls: list[tuple[int, int, int]] = []
+
+        def fake_detect(self: PersonBBoxTracker, frame: np.ndarray, *, conf_threshold: float = 0.4):
+            calls.append(frame.shape)
+            if len(calls) == 1:
+                return []
+            return [(30.0, 30.0, 54.0, 120.0, 0.64)]
+
+        with (
+            patch.object(PersonBBoxTracker, "_read_frame", return_value=tracker_frame),
+            patch.object(PersonBBoxTracker, "_detect", fake_detect),
+        ):
+            candidates = detect_person_candidates(
+                Path("frame_0001.jpg"),
+                min_confidence=0.25,
+                include_zoomed_small_targets=True,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1], (195, 300, 3))
+        self.assertEqual(candidates[0]["source"], "yolo_zoomed_content")
+        self.assertEqual(candidates[0]["confidence"], 0.64)
+        self.assertEqual(candidates[0]["bbox"], {"x": 0.3, "y": 0.3, "width": 0.04, "height": 0.3})
 
     def test_relock_rejects_far_passerby_after_lost_frames(self) -> None:
         tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
@@ -218,6 +253,7 @@ class PersonTrackerTests(unittest.TestCase):
 
         self.assertIsNone(first)
         self.assertEqual(first_diag["state"], "full_frame_yolo_relock_pending")
+        self.assertEqual(first_diag["pending_relock_bbox"], _xyxy_to_bbox((22.0, 20.0, 62.0, 100.0), 240, 120))
         self.assertEqual(second, (22.0, 20.0, 62.0, 100.0))
         self.assertEqual(second_diag["state"], "detector_relocked")
         self.assertEqual(second_diag["relock_source"], "full_frame_yolo_relock")
@@ -241,6 +277,28 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(diagnostic["state"], "lost_reused")
         self.assertIn("target_track_missing", diagnostic["rejected_reasons"])
         self.assertIn("far_from_reference", diagnostic["rejected_candidates"][0]["reasons"])
+
+    def test_detector_relock_allows_close_scale_jump_candidate(self) -> None:
+        tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (95.0, 95.0, 120.0, 160.0)
+        tracker._record_accepted_bbox(0, (96.0, 96.0, 121.0, 161.0))
+        tracker._record_accepted_bbox(1, tracker._last_known_xyxy)
+        tracker._target_tracker_id = 1
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        candidate = (80.0, 55.0, 160.0, 235.0)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.88)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+            patch.object(tracker, "_local_zoom_relock_boxes", return_value=([], [0, 0, 100, 100])),
+        ):
+            first, first_diag = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=2)
+            second, second_diag = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=3)
+
+        self.assertIsNone(first)
+        self.assertEqual(first_diag["state"], "full_frame_yolo_relock_pending")
+        self.assertEqual(second, candidate)
+        self.assertEqual(second_diag["state"], "detector_relocked")
 
     def test_local_zoom_relock_maps_crop_detection_back_to_full_frame(self) -> None:
         tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())

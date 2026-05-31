@@ -24,6 +24,7 @@ import {
   fetchAnalysisCompare,
 } from "../api/client";
 import ReportCard from "../components/ReportCard";
+import { parseApiDate } from "../utils/datetime";
 
 const ISSUE_STYLES: Record<string, string> = {
   high: "border-rose-400/45 bg-rose-500/10",
@@ -38,7 +39,7 @@ function formatDate(dateString: string) {
     year: "numeric",
     month: "short",
     day: "numeric",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function formatValue(value: number | null | undefined, unit?: string | null) {

@@ -121,13 +121,97 @@ class VideoTemporalPayloadTests(unittest.TestCase):
         self.assertEqual(normalized["phase_segments"][0]["key_frame_hint"], 1.2)
         self.assertEqual(normalized["key_moments"]["T_takeoff_sec"], 1.2)
 
+    def test_normalize_accepts_provider_phase_and_keyframe_aliases(self) -> None:
+        raw = {
+            "action_family": "jump",
+            "confirmed_action": "Toe Loop",
+            "phases": [
+                {"phase": "takeoff", "start": "6.85", "end": "7.15", "timestamp": "6.95", "confidence": "0.8"},
+                {"phase": "air", "start_time": "7.15", "end_time": "7.55", "keyframe_sec": "7.35", "confidence": "0.75"},
+                {"phase": "landing", "start": "7.55", "end": "7.85", "time": "7.65", "confidence": "0.85"},
+            ],
+            "keyframes": {
+                "takeoff": {"timestamp": "6.95"},
+                "apex": {"timestamp": "7.35"},
+                "landing": {"timestamp": "7.65"},
+            },
+            "confidence": 0.85,
+            "fallback_recommendation": "use_video_timestamps",
+        }
+
+        normalized = normalize_video_temporal_payload(raw, "mimo", "mimo-v2.5")
+        validated = validate_video_temporal_payload(normalized, duration_sec=9.568)
+
+        self.assertTrue(validated["valid"])
+        self.assertIn("video_temporal_phase_segments_alias_phases", validated["quality_flags"])
+        self.assertEqual(validated["phase_segments"][0]["phase_code"], "takeoff")
+        self.assertEqual(validated["phase_segments"][0]["time_start"], 6.85)
+        self.assertEqual(validated["phase_segments"][0]["key_frame_hint"], 6.95)
+        self.assertEqual(validated["key_moments"]["T_takeoff_sec"], 6.95)
+        self.assertEqual(validated["key_moments"]["A_air_sec"], 7.35)
+        self.assertEqual(validated["key_moments"]["L_landing_sec"], 7.65)
+
+    def test_normalize_corrects_spiral_family_when_provider_reports_step(self) -> None:
+        raw = {
+            "schema_version": "video_temporal_v1",
+            "action_confirmation": {
+                "action_family": "step",
+                "confirmed_action": "spiral",
+                "confidence": 0.9,
+            },
+            "phase_segments": [
+                {"phase_code": "spiral_entry", "time_start": 1.0, "time_end": 2.0, "key_frame_hint": 1.5, "confidence": 0.8},
+                {"phase_code": "spiral_hold", "time_start": 2.0, "time_end": 4.0, "key_frame_hint": 3.0, "confidence": 0.85},
+                {"phase_code": "spiral_exit", "time_start": 4.0, "time_end": 5.0, "key_frame_hint": 4.5, "confidence": 0.8},
+            ],
+            "confidence": 0.8,
+            "fallback_recommendation": "use_video_timestamps",
+        }
+
+        normalized = normalize_video_temporal_payload(raw, "mimo", "mimo-v2.5")
+        validated = validate_video_temporal_payload(normalized, duration_sec=6.0)
+
+        self.assertEqual(validated["action_confirmation"]["action_family"], "spiral")
+        self.assertTrue(validated["valid"])
+        self.assertNotIn("video_temporal_phase_0_invalid_code", validated["quality_flags"])
+
+    def test_normalize_recovers_json_from_markdown_fence(self) -> None:
+        raw = f"```json\n{json.dumps(_valid_jump_payload(), ensure_ascii=False)}\n```"
+
+        normalized = normalize_video_temporal_payload(raw, "mimo", "mimo-v2.5")
+
+        self.assertTrue(normalized["valid"])
+        self.assertEqual(normalized["provider"], "mimo")
+        self.assertEqual(normalized["action_confirmation"]["action_family"], "jump")
+
+    def test_normalize_recovers_json_with_surrounding_text(self) -> None:
+        raw = f"模型说明：下面是结果\n{json.dumps(_valid_jump_payload(), ensure_ascii=False)}\n请查收"
+
+        normalized = normalize_video_temporal_payload(raw, "qwen", "qwen3.6-plus")
+
+        self.assertTrue(normalized["valid"])
+        self.assertEqual(normalized["key_moments"]["L_landing_sec"], 2.94)
+
+    def test_normalize_accepts_nested_content_text(self) -> None:
+        raw = {"content": [{"type": "text", "text": json.dumps(_valid_jump_payload(), ensure_ascii=False)}]}
+
+        normalized = normalize_video_temporal_payload(raw, "mimo", "mimo-v2.5")
+
+        self.assertTrue(normalized["valid"])
+        self.assertEqual(normalized["model"], "mimo-v2.5")
+
     def test_invalid_json_returns_diagnostic_payload(self) -> None:
-        normalized = normalize_video_temporal_payload("{bad json", provider="qwen", model="qwen3.6-plus")
+        raw = "{bad json"
+        normalized = normalize_video_temporal_payload(raw, provider="qwen", model="qwen3.6-plus")
 
         self.assertFalse(normalized["valid"])
         self.assertEqual(normalized["phase_segments"], [])
         self.assertIn("video_temporal_invalid_json", normalized["quality_flags"])
         self.assertEqual(normalized["fallback_recommendation"], "use_sampled_frames")
+        self.assertEqual(normalized["raw_response_excerpt"], raw)
+        self.assertEqual(normalized["raw_response_length"], len(raw))
+        self.assertFalse(normalized["raw_response_truncated"])
+        self.assertIsInstance(normalized["parse_error_detail"], str)
 
     def test_missing_required_fields_is_invalid_without_exception(self) -> None:
         normalized = normalize_video_temporal_payload(
@@ -140,6 +224,31 @@ class VideoTemporalPayloadTests(unittest.TestCase):
         self.assertFalse(validated["valid"])
         self.assertIn("video_temporal_missing_phase_segments", validated["quality_flags"])
         self.assertEqual(validated["validation"]["errors"], ["video_temporal_missing_phase_segments"])
+        self.assertIn("raw_response_excerpt", validated)
+        self.assertIn("normalized payload missing phase_segments", validated["parse_error_detail"])
+
+    def test_truncated_json_salvages_top_level_phase_segments(self) -> None:
+        raw = (
+            '{\n'
+            '  "schema_version": "video_temporal_v1",\n'
+            '  "action_confirmation": {"action_family": "jump", "confirmed_action": "Axel", "confidence": 0.75},\n'
+            '  "phase_segments": [\n'
+            '    {"phase_code": "approach", "time_start": 0.0, "time_end": 1.8, "key_frame_hint": 0.9, "confidence": 0.85},\n'
+            '    {"phase_code": "takeoff", "time_start": 2.1, "time_end": 2.4, "key_frame_hint": 2.3, "confidence": 0.7},\n'
+            '    {"phase_code": "air", "time_start": 2.4, "time_end": 2.8, "key_frame_hint": 2.6, "confidence": 0.65},\n'
+            '    {"phase_code": "landing", "time_start": 2.8, "time_end": 3.1, "key_frame_hint": 2.9, "confidence": 0.7}\n'
+            '  ],\n'
+            '  "key_moments"'
+        )
+
+        normalized = normalize_video_temporal_payload(raw, "mimo", "mimo-v2.5")
+        validated = validate_video_temporal_payload(normalized, duration_sec=4.6)
+
+        self.assertGreaterEqual(len(validated["phase_segments"]), 3)
+        self.assertIn("video_temporal_partial_json_salvaged", validated["quality_flags"])
+        self.assertNotIn("video_temporal_missing_phase_segments", validated["quality_flags"])
+        self.assertEqual(validated["phase_segments"][1]["phase_code"], "takeoff")
+        self.assertIn("partial JSON salvaged", validated["parse_error_detail"])
 
     def test_time_out_of_bounds_marks_phase_invalid(self) -> None:
         payload = _valid_jump_payload()

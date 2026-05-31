@@ -85,7 +85,7 @@ def _biomechanics_frames(pose_data: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         frame
         for frame in frames
-        if isinstance(frame, dict) and frame.get("tracking_state") != "interpolated"
+        if isinstance(frame, dict) and frame.get("tracking_state") not in {"interpolated", "lost", "low_confidence"}
     ]
 
 

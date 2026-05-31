@@ -131,6 +131,52 @@ class VisionVideoModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("vision_fallback_to_frames", result["quality_flags"])
         self.assertEqual(frame_mock.await_count, 2)
 
+    async def test_video_mode_dispatches_to_mimo_video_provider(self) -> None:
+        frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=5.0)]
+        provider = SimpleNamespace(
+            id="mimo-provider",
+            slot="vision",
+            name="mimo",
+            provider="mimo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model_id="mimo-v2.5",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+        payload = {
+            "phase_segments": [{"start_sec": 0.0, "end_sec": 0.5, "phase": "èµ·è·³", "confidence": 0.9}],
+            "action_phase_summary": {
+                "detected_phases": ["èµ·è·³"],
+                "weakest_phase": "èµ·è·³",
+                "strongest_phase": "èµ·è·³",
+            },
+            "overall_raw_text": "mimo video",
+        }
+
+        with (
+            patch("app.services.vision.get_active_provider", AsyncMock(return_value=provider)),
+            patch("app.services.vision.get_vision_providers", AsyncMock(return_value=[provider])),
+            patch("app.services.vision.build_memory_context", AsyncMock(return_value="")),
+            patch(
+                "app.services.vision.request_mimo_video_completion",
+                AsyncMock(return_value=json.dumps(payload, ensure_ascii=False)),
+            ) as video_mock,
+            patch("app.services.vision.request_text_completion", AsyncMock()) as frame_mock,
+        ):
+            result = await analyze_frames(
+                "è·³è·ƒ",
+                frame_payloads,
+                mode="video",
+                clip_path=Path("clip.mp4"),
+                window_start_sec=5.0,
+            )
+
+        self.assertEqual(result["vision_mode"], "video")
+        self.assertEqual(result["provider"], "mimo")
+        video_mock.assert_awaited_once()
+        frame_mock.assert_not_awaited()
+
     async def test_path_a_video_mode_preserves_path_fields(self) -> None:
         frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=3.25)]
         provider = SimpleNamespace(
@@ -174,6 +220,49 @@ class VisionVideoModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["vision_mode"], "video")
         self.assertEqual(result["pure_vision_subscores"]["takeoff_power"], 88)
         self.assertEqual(result["frame_analysis"][0]["phase"], "起跳")
+
+    async def test_path_a_video_mode_dispatches_to_mimo(self) -> None:
+        frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=3.25)]
+        provider = SimpleNamespace(
+            id="mimo-provider",
+            slot="vision_path_a",
+            name="mimo",
+            provider="mimo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model_id="mimo-v2.5",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+        video_payload = {
+            "phase_segments": [
+                {"start_sec": 0.0, "end_sec": 0.5, "phase": "èµ·è·³", "confidence": 0.9},
+            ],
+            "pure_vision_subscores": {"takeoff_power": 88},
+            "action_phase_summary": {
+                "detected_phases": ["èµ·è·³"],
+                "weakest_phase": "è½å†°",
+                "strongest_phase": "èµ·è·³",
+            },
+            "overall_raw_text": "path a mimo video",
+        }
+
+        with patch(
+            "app.services.vision_path_a.request_mimo_video_completion",
+            AsyncMock(return_value=json.dumps(video_payload, ensure_ascii=False)),
+        ) as video_mock:
+            result = await analyze_path_a(
+                "è·³è·ƒ",
+                frame_payloads,
+                provider,
+                mode="video",
+                clip_path=Path("clip.mp4"),
+                window_start_sec=3.0,
+            )
+
+        self.assertEqual(result["path"], "A")
+        self.assertEqual(result["vision_mode"], "video")
+        video_mock.assert_awaited_once()
 
 
 if __name__ == "__main__":

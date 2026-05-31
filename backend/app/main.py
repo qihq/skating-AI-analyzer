@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -10,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import ensure_storage_dirs, init_db
+from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
 from app.routers.providers import router as providers_router
@@ -65,6 +71,7 @@ app.add_middleware(
 )
 
 app.include_router(analysis_router)
+app.include_router(debug_router)
 app.include_router(plan_router)
 app.include_router(frames_router)
 app.include_router(auth_router)

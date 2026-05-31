@@ -69,6 +69,7 @@ from app.services.person_tracker import (
     PERSON_TRACKER_FAILED_FLAG,
     PERSON_TRACKER_UNAVAILABLE_FLAG,
     PersonTrackerUnavailable,
+    detect_person_candidates,
     track_person_bbox_detailed,
 )
 from app.services.plan import PlanGenerationError, extend_training_plan, generate_training_plan
@@ -81,11 +82,12 @@ from app.services.report import apply_child_score_floor, calculate_force_score, 
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
-    TARGET_LOCK_AUTO_THRESHOLD,
     build_target_lock_payload,
     build_target_preview,
     frame_names_from_dir,
     resolve_manual_candidate,
+    select_stable_target_candidate,
+    target_preview_anchor_frame_indices,
 )
 from app.services.video import (
     VideoSamplingMetadata,
@@ -94,18 +96,22 @@ from app.services.video import (
     build_upload_paths,
     cleanup_processing_dir,
     cut_action_window_ai_clip,
-    detect_video_duration,
-    detect_video_fps,
     encode_frames,
-    extract_precise_frames_at_timestamps,
     extract_motion_sampled_frames,
+    extract_precise_frames_at_timestamps,
     precheck_video,
     persist_frames,
-    refine_semantic_keyframe_timestamps,
     restore_sampled_frames,
     save_upload_file,
 )
-from app.services.video_temporal import analyze_video_temporal, resolve_semantic_keyframes, semantic_keyframes_are_reliable
+from app.services.semantic_keyframe_pipeline import (
+    effective_timestamp_source,
+    merge_frame_motion_payload,
+    resolve_semantic_keyframe_pipeline,
+    retry_video_temporal_if_needed,
+    start_video_temporal_task,
+)
+from app.services.video_temporal import semantic_keyframes_are_reliable
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 from app.services.providers import get_active_provider, request_text_completion
 
@@ -140,7 +146,7 @@ COMPARE_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
 MAX_ANALYSIS_LOG_ENTRIES = 200
-CONFIRMED_TARGET_LOCK_STATUSES = {"locked", "manual"}
+CONFIRMED_TARGET_LOCK_STATUSES = {"auto_locked", "locked", "manual"}
 STALE_ANALYSIS_TIMEOUT_SECONDS = 600
 VIDEO_TEMPORAL_WAIT_TIMEOUT_SECONDS = 210.0
 IN_PROGRESS_ANALYSIS_STATUSES = {
@@ -374,12 +380,11 @@ def _merge_frame_motion_payload(
     video_temporal: dict[str, Any] | None = None,
     resolved_keyframes: dict[str, Any] | None = None,
 ) -> dict[str, object]:
-    merged: dict[str, object] = dict(motion_scores)
-    if isinstance(video_temporal, dict):
-        merged["video_temporal"] = video_temporal
-    if isinstance(resolved_keyframes, dict):
-        merged["resolved_keyframes"] = resolved_keyframes
-    return merged
+    return merge_frame_motion_payload(
+        motion_scores,
+        video_temporal=video_temporal,
+        resolved_keyframes=resolved_keyframes,
+    )
 
 
 def _merge_video_temporal_cross_validation(
@@ -402,6 +407,129 @@ def _merge_video_temporal_cross_validation(
     return merged
 
 
+PHASE_LABEL_TO_JUMP_PARTIAL_CODE = {
+    "起跳": ("takeoff", "T_takeoff_sec"),
+    "腾空": ("air", "A_air_sec"),
+    "空中": ("air", "A_air_sec"),
+    "落冰": ("landing", "L_landing_sec"),
+    "落地": ("landing", "L_landing_sec"),
+}
+
+
+def _motion_timestamp_by_frame_id(frame_motion_scores: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(frame_motion_scores, dict):
+        return {}
+    output: dict[str, float] = {}
+    for item in frame_motion_scores.get("selected", []) if isinstance(frame_motion_scores.get("selected"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        frame_id = str(item.get("frame_id") or "").removesuffix(".jpg")
+        try:
+            timestamp = float(item.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if frame_id:
+            output[frame_id] = timestamp
+    return output
+
+
+def _phase_anchor_records_from_vision(
+    vision_structured: dict[str, Any] | None,
+    frame_motion_scores: dict[str, Any] | None,
+    *,
+    analysis_profile: str | None,
+) -> list[dict[str, Any]]:
+    if str(analysis_profile or "").strip().lower() != "jump" or not isinstance(vision_structured, dict):
+        return []
+    frame_analysis = vision_structured.get("frame_analysis")
+    if not isinstance(frame_analysis, list):
+        return []
+    timestamp_by_frame = _motion_timestamp_by_frame_id(frame_motion_scores)
+    by_phase: dict[str, list[dict[str, Any]]] = {}
+    for frame in frame_analysis:
+        if not isinstance(frame, dict):
+            continue
+        phase = str(frame.get("phase") or "").strip()
+        mapped = next((value for label, value in PHASE_LABEL_TO_JUMP_PARTIAL_CODE.items() if label in phase), None)
+        if mapped is None:
+            continue
+        phase_code, key_moment = mapped
+        frame_id = str(frame.get("frame_id") or "").removesuffix(".jpg")
+        timestamp = timestamp_by_frame.get(frame_id)
+        if timestamp is None:
+            continue
+        try:
+            confidence = float(frame.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        by_phase.setdefault(phase_code, []).append(
+            {
+                "frame_id": frame_id,
+                "timestamp": timestamp,
+                "confidence": max(0.05, min(confidence, 0.35)),
+                "phase_code": phase_code,
+                "phase_label": phase,
+                "key_moment": key_moment,
+                "selection_reason": "post_vision_low_confidence_phase_anchor",
+                "partial_semantic_frame": True,
+                "selection_status": "partial_unreliable",
+            }
+        )
+
+    output: list[dict[str, Any]] = []
+    for phase_code in ("takeoff", "air", "landing"):
+        candidates = by_phase.get(phase_code) or []
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (item["confidence"], item["timestamp"]), reverse=True)
+        output.append(candidates[0])
+    return output
+
+
+async def _attach_post_vision_partial_semantic_frames(
+    *,
+    video_path: Path,
+    semantic_frames_dir: Path,
+    resolved_keyframes: dict[str, Any] | None,
+    vision_structured: dict[str, Any] | None,
+    frame_motion_scores: dict[str, Any] | None,
+    analysis_profile: str | None,
+) -> dict[str, Any] | None:
+    if not isinstance(resolved_keyframes, dict) or semantic_keyframes_are_reliable(resolved_keyframes):
+        return resolved_keyframes
+    existing_partial = resolved_keyframes.get("partial_selected")
+    if isinstance(existing_partial, list) and existing_partial:
+        return resolved_keyframes
+    candidates = _phase_anchor_records_from_vision(
+        vision_structured,
+        frame_motion_scores,
+        analysis_profile=analysis_profile,
+    )
+    if not candidates:
+        return resolved_keyframes
+    try:
+        _, partial_records = await extract_precise_frames_at_timestamps(
+            video_path,
+            semantic_frames_dir,
+            candidates,
+            prefix="partial_semantic",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Post-vision partial semantic frame extraction failed: %s", exc)
+        return resolved_keyframes
+    resolved = dict(resolved_keyframes)
+    resolved["partial_selected"] = partial_records
+    flags = resolved.get("quality_flags") if isinstance(resolved.get("quality_flags"), list) else []
+    for flag in (
+        "semantic_keyframes_post_vision_partial_phase_frames_available",
+        "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    ):
+        if flag not in flags:
+            flags = [*flags, flag]
+    resolved["quality_flags"] = flags
+    return resolved
+
+
 def _video_temporal_diagnostics(frame_motion_scores: dict[str, Any] | None, *, analysis_id: str | None = None) -> dict[str, Any] | None:
     if not isinstance(frame_motion_scores, dict):
         return None
@@ -411,6 +539,7 @@ def _video_temporal_diagnostics(frame_motion_scores: dict[str, Any] | None, *, a
         return None
 
     selected = resolved_keyframes.get("selected") if isinstance(resolved_keyframes, dict) else None
+    partial_selected = resolved_keyframes.get("partial_selected") if isinstance(resolved_keyframes, dict) else None
     quality_flags: list[str] = []
     for source in (video_temporal, resolved_keyframes):
         flags = source.get("quality_flags") if isinstance(source, dict) else None
@@ -421,17 +550,34 @@ def _video_temporal_diagnostics(frame_motion_scores: dict[str, Any] | None, *, a
     if isinstance(video_temporal, dict):
         fallback_reason = video_temporal.get("fallback_reason") or video_temporal.get("fallback_recommendation")
     used_semantic_frames = semantic_keyframes_are_reliable(resolved_keyframes if isinstance(resolved_keyframes, dict) else None)
+    resolver_source = resolved_keyframes.get("source") if isinstance(resolved_keyframes, dict) else None
+    timestamp_source = effective_timestamp_source(
+        resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
+        used_semantic_frames,
+    )
     return {
         "video_ai_model": video_temporal.get("model") if isinstance(video_temporal, dict) else None,
         "video_ai_provider": video_temporal.get("provider") if isinstance(video_temporal, dict) else None,
         "video_ai_confidence": video_temporal.get("confidence") if isinstance(video_temporal, dict) else None,
         "video_ai_ran": isinstance(video_temporal, dict),
         "video_ai_video_url": f"/api/analysis/{analysis_id}/video" if analysis_id else None,
-        "timestamp_source": resolved_keyframes.get("source") if isinstance(resolved_keyframes, dict) else None,
+        "raw_response_excerpt": video_temporal.get("raw_response_excerpt") if isinstance(video_temporal, dict) else None,
+        "raw_response_length": video_temporal.get("raw_response_length") if isinstance(video_temporal, dict) else None,
+        "raw_response_truncated": video_temporal.get("raw_response_truncated") if isinstance(video_temporal, dict) else None,
+        "parse_error_detail": video_temporal.get("parse_error_detail") if isinstance(video_temporal, dict) else None,
+        "timestamp_source": timestamp_source,
+        "resolver_source": resolver_source,
         "resolved_confidence": resolved_keyframes.get("confidence") if isinstance(resolved_keyframes, dict) else None,
         "selected_semantic_frames": selected if isinstance(selected, list) else [],
+        "partial_semantic_frames": partial_selected if isinstance(partial_selected, list) else [],
         "fallback_reason": fallback_reason,
         "quality_flags": list(dict.fromkeys(quality_flags)),
+        "retry_rejection_flags": (
+            resolved_keyframes.get("video_temporal_quality_retry_rejection_flags")
+            if isinstance(resolved_keyframes, dict)
+            and isinstance(resolved_keyframes.get("video_temporal_quality_retry_rejection_flags"), list)
+            else []
+        ),
         "used_semantic_frames": used_semantic_frames,
         "used_legacy_sampled_frames": not used_semantic_frames,
     }
@@ -787,27 +933,14 @@ async def _start_video_temporal_task_if_missing(
 ) -> tuple[asyncio.Task | None, float | None]:
     if current_task is not None or isinstance(motion_scores.get("video_temporal"), dict):
         return current_task, None
-    await precheck_video(video_path)
-    source_duration_sec = detect_video_duration(video_path)
-    ai_clip_path = await cut_action_window_ai_clip(
-        video_path,
-        sampling_metadata.action_window_start,
-        sampling_metadata.action_window_end,
-        processing_frames_dir.parent / "action_window_ai.mp4",
-    )
-    clip_duration_sec = detect_video_duration(ai_clip_path)
-    clip_fps = detect_video_fps(ai_clip_path)
-    task = asyncio.create_task(
-        analyze_video_temporal(
-            ai_clip_path,
-            action_type=action_type,
-            action_subtype=action_subtype,
-            video_duration_sec=clip_duration_sec,
-            source_video_duration_sec=source_duration_sec,
-            source_fps=clip_fps,
-            timestamp_offset_sec=sampling_metadata.action_window_start,
-            analyzed_video_kind="action_window_ai",
-        )
+    handle = await start_video_temporal_task(
+        video_path=video_path,
+        work_dir=processing_frames_dir.parent,
+        sampling_metadata=sampling_metadata,
+        action_type=action_type,
+        action_subtype=action_subtype,
+        analyzed_video_kind="action_window_ai",
+        precheck=False,
     )
     await _append_analysis_log(
         analysis_id,
@@ -815,11 +948,11 @@ async def _start_video_temporal_task_if_missing(
         level='info',
         message='已启动视频 AI 语义时间定位。',
         detail='video_temporal_task_started',
-        analyzed_video_path=str(ai_clip_path),
+        analyzed_video_path=str(handle.ai_clip_path),
         timestamp_offset_sec=sampling_metadata.action_window_start,
-        clip_duration_sec=clip_duration_sec,
+        clip_duration_sec=handle.clip_duration_sec,
     )
-    return task, source_duration_sec
+    return handle.task, handle.source_duration_sec
 
 
 async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
@@ -998,7 +1131,18 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             if upload_frames_dir is not None:
                 persist_frames(sampled_frames, upload_frames_dir)
 
-            preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
+            preview = build_target_preview(
+                analysis_id,
+                [frame.name for frame in sampled_frames],
+                existing_target_lock=existing_target_lock,
+                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                analysis_profile=analysis_profile_hint,
+                detected_candidates=(
+                    []
+                    if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES
+                    else _formal_target_preview_candidates(sampled_frames, motion_scores)
+                ),
+            )
             target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES else build_target_lock_payload(preview)
 
             async with AsyncSessionLocal() as session:
@@ -1016,7 +1160,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.retry_from_stage = 'pose'
                 await session.commit()
 
-            if (not existing_target_lock or str(existing_target_lock.get('status')) not in CONFIRMED_TARGET_LOCK_STATUSES) and preview.lock_confidence < TARGET_LOCK_AUTO_THRESHOLD:
+            if (not existing_target_lock or str(existing_target_lock.get('status')) not in CONFIRMED_TARGET_LOCK_STATUSES) and preview.target_lock_status != "auto_locked":
                 if video_temporal_task is not None and not video_temporal_task.done():
                     video_temporal_task.cancel()
                 if upload_frames_dir is not None:
@@ -1074,7 +1218,18 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     message='分段重试复用缓存帧时启动视频语义定位失败，将回退使用现有关键帧。',
                     detail=stringify_exception(exc),
                 )
-            preview = build_target_preview(analysis_id, [frame.name for frame in sampled_frames], existing_target_lock=existing_target_lock)
+            preview = build_target_preview(
+                analysis_id,
+                [frame.name for frame in sampled_frames],
+                existing_target_lock=existing_target_lock,
+                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                analysis_profile=analysis_profile_hint,
+                detected_candidates=(
+                    []
+                    if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES
+                    else _formal_target_preview_candidates(sampled_frames, motion_scores)
+                ),
+            )
             target_lock = existing_target_lock if existing_target_lock else build_target_lock_payload(preview)
             await _append_analysis_log(
                 analysis_id,
@@ -1301,28 +1456,32 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             elif isinstance(motion_scores, dict) and isinstance(motion_scores.get("video_temporal"), dict):
                 video_temporal_result = motion_scores.get("video_temporal")  # type: ignore[assignment]
 
-            try:
-                resolved_keyframes = resolve_semantic_keyframes(
-                    video_temporal_result,
-                    bio_data,
-                    motion_scores if isinstance(motion_scores, dict) else None,
-                    video_duration_sec=max(
-                        float(video_temporal_duration_sec or 0.0),
-                        float(sampling_metadata.action_window_end or 0.0),
-                        0.001,
-                    ),
-                    analysis_profile=analysis_profile,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Analysis %s semantic keyframe resolver failed; using sampled frames: %s", analysis_id, exc)
-                resolved_keyframes = {
-                    "source": "skeleton_fallback",
-                    "confidence": 0.0,
-                    "quality_flags": ["video_temporal_resolver_failed"],
-                    "selected": [],
-                    "video_ai": video_temporal_result or {},
-                }
-
+            semantic_pipeline = await resolve_semantic_keyframe_pipeline(
+                video_path=video_path,
+                work_dir=processing_frames_dir.parent,
+                semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+                video_temporal=video_temporal_result,
+                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                sampling_metadata=sampling_metadata,
+                analysis_profile=analysis_profile,
+                bio_data=bio_data,
+                video_duration_sec=video_temporal_duration_sec,
+            )
+            semantic_pipeline = await retry_video_temporal_if_needed(
+                result=semantic_pipeline,
+                video_path=video_path,
+                work_dir=processing_frames_dir.parent,
+                semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+                sampling_metadata=sampling_metadata,
+                action_type=action_type,
+                action_subtype=action_subtype,
+                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                analysis_profile=analysis_profile,
+                bio_data=bio_data,
+                analyzed_video_kind="action_window_ai",
+            )
+            video_temporal_result = semantic_pipeline.video_temporal
+            resolved_keyframes = semantic_pipeline.resolved_keyframes
             motion_scores = _merge_frame_motion_payload(
                 motion_scores,
                 video_temporal=video_temporal_result,
@@ -1345,31 +1504,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             await _set_analysis_status(analysis_id, 'analyzing')
             try:
                 vision_start = time.monotonic()
-                vision_frame_paths = sampled_frames
-                selected_for_vision = (
-                    resolved_keyframes.get("selected")
-                    if isinstance(resolved_keyframes, dict) and isinstance(resolved_keyframes.get("selected"), list)
-                    else []
-                )
-                has_semantic_moments = any(
-                    isinstance(item, dict)
-                    and (
-                        str(item.get("key_moment") or "").startswith(("T_", "A_", "L_"))
-                        or str(item.get("phase_code") or "") in {"takeoff", "air", "landing"}
-                    )
-                    and item.get("timestamp") is not None
-                    for item in selected_for_vision
-                )
-                use_semantic_frames = semantic_keyframes_are_reliable(resolved_keyframes if isinstance(resolved_keyframes, dict) else None)
-                if has_semantic_moments and not use_semantic_frames and isinstance(resolved_keyframes, dict):
-                    flags = resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else []
-                    if "semantic_keyframes_unreliable_fallback_to_sampled_frames" not in flags:
-                        resolved_keyframes["quality_flags"] = [*flags, "semantic_keyframes_unreliable_fallback_to_sampled_frames"]
-                        motion_scores = _merge_frame_motion_payload(
-                            motion_scores,
-                            video_temporal=video_temporal_result,
-                            resolved_keyframes=resolved_keyframes,
-                        )
+                use_semantic_frames = semantic_pipeline.used_semantic_frames
+                vision_frame_paths = semantic_pipeline.semantic_frames if use_semantic_frames else sampled_frames
+                if semantic_pipeline.has_semantic_moments and not use_semantic_frames:
                     await _append_analysis_log(
                         analysis_id,
                         stage='vision',
@@ -1377,84 +1514,14 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         message='语义关键帧未通过质量门槛，视觉分析改用常规 sampled frames。',
                         detail='semantic_keyframes_unreliable_fallback_to_sampled_frames',
                     )
-                if use_semantic_frames:
-                    try:
-                        semantic_dir = processing_frames_dir.parent / "semantic_frames"
-                        refined_records, refinement_flags = await refine_semantic_keyframe_timestamps(
-                            video_path,
-                            processing_frames_dir.parent / "semantic_refinement",
-                            selected_for_vision,
-                            source_fps=sampling_metadata.source_fps,
-                            video_duration_sec=max(
-                                float(video_temporal_duration_sec or 0.0),
-                                float(sampling_metadata.action_window_end or 0.0),
-                                0.001,
-                            ),
-                        )
-                        if refinement_flags:
-                            flags = resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else []
-                            resolved_keyframes["quality_flags"] = [*flags, *refinement_flags]
-                        selected_for_vision = refined_records
-                        if not semantic_keyframes_are_reliable(resolved_keyframes):
-                            flags = resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else []
-                            resolved_keyframes["quality_flags"] = [*flags, "semantic_keyframes_unreliable_after_refinement"]
-                            motion_scores = _merge_frame_motion_payload(
-                                motion_scores,
-                                video_temporal=video_temporal_result,
-                                resolved_keyframes=resolved_keyframes,
-                            )
-                            vision_frame_paths = sampled_frames
-                            use_semantic_frames = False
-                            await _append_analysis_log(
-                                analysis_id,
-                                stage='vision',
-                                level='warning',
-                                message='语义关键帧 refinement 后未通过质量门槛，视觉分析改用常规 sampled frames。',
-                                detail='semantic_keyframes_unreliable_after_refinement',
-                            )
-                            raise RuntimeError("semantic_keyframes_unreliable_after_refinement")
-                        semantic_frames, semantic_records = await extract_precise_frames_at_timestamps(
-                            video_path,
-                            semantic_dir,
-                            selected_for_vision,
-                            prefix="semantic",
-                        )
-                        vision_frame_paths = semantic_frames
-                        assert isinstance(resolved_keyframes, dict)
-                        resolved_keyframes["selected"] = semantic_records
-                        motion_scores = _merge_frame_motion_payload(
-                            motion_scores,
-                            video_temporal=video_temporal_result,
-                            resolved_keyframes=resolved_keyframes,
-                        )
-                        async with AsyncSessionLocal() as session:
-                            analysis = await session.get(Analysis, analysis_id)
-                            if analysis is None:
-                                return
-                            analysis.frame_motion_scores = motion_scores
-                            await session.commit()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Analysis %s semantic FFmpeg extraction failed; using sampled frames: %s", analysis_id, exc)
-                        if isinstance(resolved_keyframes, dict):
-                            flags = resolved_keyframes.get("quality_flags") if isinstance(resolved_keyframes.get("quality_flags"), list) else []
-                            extra_flag = "semantic_frame_extract_failed"
-                            if str(exc) == "semantic_keyframes_unreliable_after_refinement":
-                                extra_flag = "semantic_keyframes_unreliable_after_refinement"
-                            resolved_keyframes["quality_flags"] = [*flags, extra_flag]
-                            motion_scores = _merge_frame_motion_payload(
-                                motion_scores,
-                                video_temporal=video_temporal_result,
-                                resolved_keyframes=resolved_keyframes,
-                            )
-                            async with AsyncSessionLocal() as session:
-                                analysis = await session.get(Analysis, analysis_id)
-                                if analysis is None:
-                                    return
-                                analysis.frame_motion_scores = motion_scores
-                                await session.commit()
-                        vision_frame_paths = sampled_frames
-                        use_semantic_frames = False
-
+                if "semantic_keyframes_unreliable_after_refinement" in semantic_pipeline.quality_flags:
+                    await _append_analysis_log(
+                        analysis_id,
+                        stage='vision',
+                        level='warning',
+                        message='Semantic keyframes failed reliability gate after refinement; using sampled frames.',
+                        detail='semantic_keyframes_unreliable_after_refinement',
+                    )
                 timestamps = build_timestamp_map({"selected": resolved_keyframes.get("selected")}) if use_semantic_frames and isinstance(resolved_keyframes, dict) else build_timestamp_map(motion_scores)
                 raw_payloads = await encode_frames(vision_frame_paths, timestamps=timestamps)
                 clip_path = None
@@ -1526,6 +1593,19 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 if isinstance(frame_analysis, list):
                     vision_structured['frame_analysis'] = smooth_phases(frame_analysis, analysis_profile, bio_data=bio_data)
                     vision_path_a = vision_structured
+                resolved_keyframes = await _attach_post_vision_partial_semantic_frames(
+                    video_path=video_path,
+                    semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+                    resolved_keyframes=resolved_keyframes,
+                    vision_structured=vision_structured,
+                    frame_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                    analysis_profile=analysis_profile,
+                )
+                motion_scores = _merge_frame_motion_payload(
+                    motion_scores,
+                    video_temporal=video_temporal_result,
+                    resolved_keyframes=resolved_keyframes,
+                )
                 cross_validation = _attach_auto_eval(
                     cross_validation,
                     bio_data=bio_data,
@@ -1661,7 +1741,11 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             persist_frames(sampled_frames, upload_frames_dir)
             semantic_dir = processing_frames_dir.parent / "semantic_frames"
             if semantic_dir.exists():
-                persist_frames(sorted(semantic_dir.glob("semantic_*.jpg")), video_path.parent / "semantic_frames")
+                semantic_artifacts = [
+                    *sorted(semantic_dir.glob("semantic_*.jpg")),
+                    *sorted(semantic_dir.glob("partial_semantic_*.jpg")),
+                ]
+                persist_frames(semantic_artifacts, video_path.parent / "semantic_frames")
 
         try:
             async with AsyncSessionLocal() as session:
@@ -2003,8 +2087,8 @@ def _detail_from_analysis(
         error_detail=analysis.error_detail if include_error_detail else None,
         error_message=analysis.error_message,
         note=analysis.note,
-        created_at=analysis.created_at,
-        updated_at=analysis.updated_at,
+        created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
+        updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
     )
 
 
@@ -2032,7 +2116,7 @@ def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSna
     cross_validation = analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None
     return AnalysisAutoEvalSnapshot(
         analysis_id=analysis.id,
-        created_at=analysis.created_at,
+        created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
         pipeline_version=analysis.pipeline_version,
         analysis_profile=analysis.analysis_profile,
         action_type=analysis.action_type,
@@ -2080,6 +2164,94 @@ def _fallback_motion_payload(frames_dir: Path) -> dict[str, object]:
         "scores": [],
         "source": "legacy_frames",
     }
+
+
+def _formal_target_preview_candidates(
+    sampled_frames: list[Path],
+    motion_scores: dict[str, Any] | object,
+) -> list[dict[str, Any]]:
+    frame_names = [frame.name for frame in sampled_frames]
+    anchor_candidates: list[dict[str, Any]] = []
+    for anchor_index in target_preview_anchor_frame_indices(
+        frame_names,
+        motion_scores if isinstance(motion_scores, dict) else None,
+    ):
+        if anchor_index < 0 or anchor_index >= len(sampled_frames):
+            continue
+        frame_path = sampled_frames[anchor_index]
+        try:
+            detected = detect_person_candidates(frame_path, include_zoomed_small_targets=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Could not detect target preview candidates on %s: %s", frame_path, exc)
+            continue
+        for candidate in detected:
+            item = dict(candidate)
+            item["id"] = f"anchor_{anchor_index}_{candidate.get('id') or len(anchor_candidates) + 1}"
+            item["anchor_frame"] = frame_path.name
+            item["anchor_index"] = anchor_index
+            anchor_candidates.append(item)
+
+    selected = select_stable_target_candidate(anchor_candidates)
+    if selected is None:
+        return anchor_candidates
+
+    selected = dict(selected)
+    selected["id"] = "candidate_auto_stable"
+    selected["source"] = str(selected.get("source") or "yolo_preview_multi_anchor")
+    return [selected, *anchor_candidates]
+
+
+def _target_preview_detected_candidates_from_frames(
+    frames_dir: Path,
+    frame_names: list[str],
+    motion_scores: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    sampled_frames = [frames_dir / frame_name for frame_name in frame_names]
+    sampled_frames = [frame for frame in sampled_frames if frame.exists()]
+    if not sampled_frames:
+        return []
+    return _formal_target_preview_candidates(sampled_frames, motion_scores or {})
+
+
+async def _resume_auto_target_lock_if_available(analysis: Analysis, session: AsyncSession) -> bool:
+    if analysis.status != "awaiting_target_selection":
+        return False
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    frame_names = frame_names_from_dir(frames_dir)
+    if not frame_names:
+        return False
+
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    preview = build_target_preview(
+        analysis.id,
+        frame_names,
+        existing_target_lock=analysis.target_lock,
+        motion_scores=motion_scores,
+        analysis_profile=analysis.analysis_profile,
+        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
+    )
+    if preview.target_lock_status != "auto_locked":
+        target_lock = build_target_lock_payload(preview)
+        if isinstance(target_lock, dict):
+            analysis.target_lock = target_lock
+            analysis.target_lock_status = str(target_lock.get("status") or preview.target_lock_status)
+            await session.commit()
+            await session.refresh(analysis)
+        return False
+
+    target_lock = build_target_lock_payload(preview)
+    target_lock = _append_target_lock_flags(target_lock, ["target_lock_auto_resume_from_preview"])
+    analysis.target_lock = target_lock
+    analysis.target_lock_status = str(target_lock.get("status") or "auto_locked")
+    analysis.retry_from_stage = "pose"
+    analysis.status = "failed"
+    analysis.error_code = None
+    analysis.error_detail = None
+    analysis.error_message = None
+    await session.commit()
+    await session.refresh(analysis)
+    return True
 
 
 def _append_target_lock_flags(target_lock: dict[str, Any], flags: list[str]) -> dict[str, Any]:
@@ -2178,6 +2350,18 @@ def _pose_debug_summary(pose_data: dict[str, Any] | None) -> dict[str, Any]:
 
 def _compact_json_detail(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _sync_report_user_note(report: dict[str, Any] | None, note: str | None) -> dict[str, Any] | None:
+    if not isinstance(report, dict):
+        return report
+    updated = dict(report)
+    normalized_note = _normalize_optional_text(note)
+    if normalized_note:
+        updated["user_note"] = normalized_note
+    else:
+        updated.pop("user_note", None)
+    return updated
 
 
 def _build_bbox_per_frame(
@@ -2461,8 +2645,8 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
         status=analysis.status,
         force_score=analysis.force_score,
         note=analysis.note,
-        created_at=analysis.created_at,
-        updated_at=analysis.updated_at,
+        created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
+        updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
     )
 
 
@@ -3279,7 +3463,7 @@ async def get_progress(
     points = [
         ProgressPoint(
             id=analysis.id,
-            created_at=analysis.created_at,
+            created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
             action_type=analysis.action_type,
             force_score=analysis.force_score or 0,
             summary=_report_summary(analysis),
@@ -3452,6 +3636,9 @@ async def retry_analysis(
         await session.commit()
         await session.refresh(analysis)
 
+    if analysis.status == "awaiting_target_selection":
+        await _resume_auto_target_lock_if_available(analysis, session)
+
     if analysis.status in {"pending", "processing", "extracting_frames", "awaiting_target_selection", "analyzing", "generating_report"}:
         raise HTTPException(status_code=400, detail="????????????????")
 
@@ -3489,7 +3676,12 @@ async def retry_analysis(
     analysis.processing_timings = None
     analysis.pipeline_version = CURRENT_PIPELINE_VERSION
     analysis.retry_from_stage = retry_from_stage
-    if retry_from_stage in {None, 'extract_frames', 'pose'}:
+    target_lock_status = (
+        str(analysis.target_lock.get("status"))
+        if isinstance(analysis.target_lock, dict) and analysis.target_lock.get("status") is not None
+        else None
+    )
+    if retry_from_stage in {None, 'extract_frames', 'pose'} and target_lock_status not in CONFIRMED_TARGET_LOCK_STATUSES:
         analysis.target_lock_status = 'pending'
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
@@ -3508,7 +3700,16 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     frames_dir = _frames_dir_for_analysis(analysis)
-    preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
+    frame_names = frame_names_from_dir(frames_dir)
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    preview = build_target_preview(
+        analysis_id,
+        frame_names,
+        existing_target_lock=analysis.target_lock,
+        motion_scores=motion_scores,
+        analysis_profile=analysis.analysis_profile,
+        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
+    )
     return TargetPreviewResponse(
         analysis_id=analysis.id,
         status=analysis.status,
@@ -3518,7 +3719,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
         preview_frame_url=preview.preview_frame_url,
         preview_frame_index=preview.preview_frame_index,
         candidates=preview.candidates,
-        target_lock_status=analysis.target_lock_status,
+        target_lock_status=preview.target_lock_status,
     )
 
 
@@ -3535,7 +3736,16 @@ async def confirm_target_lock(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     frames_dir = _frames_dir_for_analysis(analysis)
-    preview = build_target_preview(analysis_id, frame_names_from_dir(frames_dir), existing_target_lock=analysis.target_lock)
+    frame_names = frame_names_from_dir(frames_dir)
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    preview = build_target_preview(
+        analysis_id,
+        frame_names,
+        existing_target_lock=analysis.target_lock,
+        motion_scores=motion_scores,
+        analysis_profile=analysis.analysis_profile,
+        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
+    )
     try:
         selected = None if payload.manual_bbox is not None else resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
         if selected is None and payload.manual_bbox is None:
@@ -3574,6 +3784,10 @@ async def update_note(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     analysis.note = _normalize_optional_text(payload.note)
+    analysis.report = _sync_report_user_note(
+        analysis.report if isinstance(analysis.report, dict) else None,
+        analysis.note,
+    )
     await session.commit()
     await session.refresh(analysis)
 
@@ -3713,7 +3927,11 @@ async def extend_plan(
 
 @frames_router.get("/{analysis_id}/{filename}")
 async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
-    if not (filename.startswith("frame_") or filename.startswith("semantic_")) or not filename.endswith(".jpg"):
+    if not (
+        filename.startswith("frame_")
+        or filename.startswith("semantic_")
+        or filename.startswith("partial_semantic_")
+    ) or not filename.endswith(".jpg"):
         raise HTTPException(status_code=400, detail="无效的帧文件名。")
 
     analysis = await session.get(Analysis, analysis_id)
@@ -3723,7 +3941,11 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
     frames_dir = restored_frames_dir.resolve() if restored_frames_dir.exists() else (UPLOADS_DIR / analysis_id / "frames").resolve()
     semantic_dir = (UPLOADS_DIR / analysis_id / "semantic_frames").resolve()
-    frames_root = semantic_dir if filename.startswith("semantic_") and semantic_dir.exists() else frames_dir
+    frames_root = (
+        semantic_dir
+        if (filename.startswith("semantic_") or filename.startswith("partial_semantic_")) and semantic_dir.exists()
+        else frames_dir
+    )
     frame_path = (frames_root / filename).resolve()
     if frames_root not in frame_path.parents or not frame_path.exists():
         raise HTTPException(status_code=404, detail="未找到该视频帧。")

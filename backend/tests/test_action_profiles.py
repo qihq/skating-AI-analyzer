@@ -41,6 +41,13 @@ def _frame(
 
 
 class ActionProfileInferenceTests(unittest.TestCase):
+    def test_english_action_type_preserves_jump_profile(self) -> None:
+        profile, evidence = infer_analysis_profile("jump", None, {"frames": []}, {"scores": []})
+
+        self.assertEqual(profile, "jump")
+        self.assertEqual(evidence["profile_hint"], "jump")
+        self.assertIn("jump_gate_not_passed", evidence["quality_flags"])
+
     def test_jump_profile_detected_for_wide_shot_using_relative_height(self) -> None:
         pose_data = {
             "frames": [

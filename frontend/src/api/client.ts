@@ -186,6 +186,8 @@ export interface SelectedSemanticFrame {
   phase_label?: string | null;
   key_moment?: string | null;
   selection_reason?: string | null;
+  selection_status?: string | null;
+  partial_semantic_frame?: boolean | null;
   pre_refine_timestamp?: number | null;
   refinement_method?: string | null;
   refinement_delta_sec?: number | null;
@@ -197,11 +199,18 @@ export interface VideoTemporalDiagnostics {
   video_ai_confidence?: number | null;
   video_ai_ran?: boolean;
   video_ai_video_url?: string | null;
+  raw_response_excerpt?: string | null;
+  raw_response_length?: number | null;
+  raw_response_truncated?: boolean | null;
+  parse_error_detail?: string | null;
   timestamp_source?: string | null;
+  resolver_source?: string | null;
   resolved_confidence?: number | null;
   selected_semantic_frames?: SelectedSemanticFrame[];
+  partial_semantic_frames?: SelectedSemanticFrame[];
   fallback_reason?: string | null;
   quality_flags?: string[];
+  retry_rejection_flags?: string[];
   used_semantic_frames?: boolean;
   used_legacy_sampled_frames?: boolean;
 }
@@ -418,6 +427,46 @@ export interface AutoEvalSnapshotSummary {
   } | null;
   key_frame_candidates: Record<string, unknown> | null;
   fusion_diagnostics: string[];
+}
+
+export type DebugRunMode = "local_pose_keyframes" | "video_ai_keyframes";
+export type DebugRunStatus = "pending" | "processing" | "awaiting_target_selection" | "completed" | "failed";
+export type DebugRunSourceType = "analysis" | "upload";
+
+export interface DebugRunSummary {
+  id: string;
+  mode: DebugRunMode | string;
+  source_type: DebugRunSourceType | string;
+  analysis_id: string | null;
+  action_type: string;
+  action_subtype: string | null;
+  analysis_profile: string | null;
+  note: string | null;
+  status: DebugRunStatus | string;
+  summary: Record<string, unknown> | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DebugRunDetail extends DebugRunSummary {
+  video_path: string | null;
+  result_json: Record<string, unknown> | null;
+  error_detail: string | null;
+}
+
+export interface DebugRunCreateResponse {
+  id: string;
+  status: DebugRunStatus | string;
+}
+
+export interface DebugRunCreatePayload {
+  analysisId?: string | null;
+  file?: File | null;
+  actionType?: string | null;
+  actionSubtype?: string | null;
+  analysisProfile?: string | null;
+  note?: string | null;
 }
 
 export interface ComparisonChange {
@@ -996,6 +1045,63 @@ export async function fetchAutoEvalSnapshots(params?: {
       action_type: params?.action_type ?? undefined,
     },
   });
+  return response.data;
+}
+
+export async function fetchDebugRuns(params?: { limit?: number }) {
+  const response = await apiClient.get<DebugRunSummary[]>("/debug/runs", {
+    params: { limit: params?.limit ?? 50 },
+  });
+  return response.data;
+}
+
+export async function fetchDebugRun(id: string) {
+  const response = await apiClient.get<DebugRunDetail>(`/debug/runs/${id}`);
+  return response.data;
+}
+
+export async function deleteDebugRun(id: string) {
+  await apiClient.delete(`/debug/runs/${id}`);
+}
+
+function buildDebugRunFormData(payload: DebugRunCreatePayload) {
+  const formData = new FormData();
+  if (payload.analysisId) {
+    formData.append("analysis_id", payload.analysisId);
+  }
+  if (payload.file) {
+    formData.append("file", payload.file);
+  }
+  if (payload.actionType) {
+    formData.append("action_type", payload.actionType);
+  }
+  if (payload.actionSubtype) {
+    formData.append("action_subtype", payload.actionSubtype);
+  }
+  if (payload.analysisProfile) {
+    formData.append("analysis_profile", payload.analysisProfile);
+  }
+  if (payload.note) {
+    formData.append("note", payload.note);
+  }
+  return formData;
+}
+
+export async function createLocalDebugRun(payload: DebugRunCreatePayload) {
+  const response = await apiClient.post<DebugRunCreateResponse>("/debug/runs/local-pose-keyframes", buildDebugRunFormData(payload));
+  return response.data;
+}
+
+export async function createVideoAiDebugRun(payload: DebugRunCreatePayload) {
+  const response = await apiClient.post<DebugRunCreateResponse>("/debug/runs/video-ai-keyframes", buildDebugRunFormData(payload));
+  return response.data;
+}
+
+export async function confirmDebugTargetLock(
+  id: string,
+  payload: { candidate_id?: string | null; x?: number; y?: number; manual_bbox?: TargetBBox | null },
+) {
+  const response = await apiClient.post<DebugRunCreateResponse>(`/debug/runs/${id}/target-lock`, payload);
   return response.data;
 }
 

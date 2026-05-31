@@ -132,7 +132,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.validation.recommended_path, "A")
         self.assertEqual(result.dual_path_meta["path_b_failed"], True)
 
-    async def test_path_a_error_is_hard(self) -> None:
+    async def test_path_a_parse_error_uses_path_b(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
             provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
@@ -144,6 +144,39 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                         side_effect=AnalysisPipelineError(
                             AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
                             "bad a",
+                        )
+                    ),
+                ),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(1),
+                    None,
+                    None,
+                    provider,
+                    provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                )
+
+        self.assertEqual(result.path_a["error"], "path_a_parse_failed")
+        self.assertEqual(result.validation.recommended_path, "B")
+        self.assertEqual(result.dual_path_meta["path_a_failed"], True)
+        self.assertIn("path_a_parse_failed", result.dual_path_meta["path_a_error"])
+
+    async def test_path_a_non_parse_error_is_hard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+
+            with (
+                patch(
+                    "app.services.vision_dual.analyze_path_a",
+                    new=AsyncMock(
+                        side_effect=AnalysisPipelineError(
+                            AnalysisErrorCode.UNKNOWN_ERROR,
+                            "provider unavailable",
                         )
                     ),
                 ),
@@ -161,7 +194,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                         annotated_dir=Path(tmp) / "annotated",
                     )
 
-        self.assertEqual(caught.exception.code, AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL)
+        self.assertEqual(caught.exception.code, AnalysisErrorCode.UNKNOWN_ERROR)
 
     async def test_bio_none_and_pose_none_degrade_without_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,8 +15,8 @@ from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
 
 class PipelineVersionPersistenceTests(unittest.IsolatedAsyncioTestCase):
-    def test_current_pipeline_version_is_v5_1_0(self) -> None:
-        self.assertEqual(CURRENT_PIPELINE_VERSION, "v5.1.0")
+    def test_current_pipeline_version_is_v5_2_8(self) -> None:
+        self.assertEqual(CURRENT_PIPELINE_VERSION, "v5.2.8")
 
     async def test_init_db_adds_pipeline_columns_and_new_analysis_uses_current_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

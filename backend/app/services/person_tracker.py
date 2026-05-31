@@ -56,9 +56,16 @@ _DETECTOR_RELOCK_MIN_IOU = 0.02
 _DETECTOR_RELOCK_REFERENCE_DIAGONAL_RATIO = 1.10
 _DETECTOR_RELOCK_CONFIRM_IOU = 0.15
 _DETECTOR_RELOCK_CONFIRM_DISTANCE_RATIO = 0.55
+_DETECTOR_RELOCK_SCALE_JUMP_MIN_CONFIDENCE = 0.70
+_DETECTOR_RELOCK_SCALE_JUMP_MAX_CENTER_RATIO = 0.18
 _LOCAL_ZOOM_PADDING_RATIO = 1.50
 _LOCAL_ZOOM_SCALE = 2.0
 _LOCAL_ZOOM_MIN_CONFIDENCE = 0.35
+_ZOOMED_CONTENT_PREVIEW_SCALE = 3.0
+_ZOOMED_CONTENT_COLUMN_BRIGHTNESS = 20.0
+_ZOOMED_CONTENT_TOP_RATIO = 0.20
+_ZOOMED_CONTENT_BOTTOM_RATIO = 0.85
+_ZOOMED_CONTENT_MIN_WIDTH_RATIO = 0.15
 _INITIAL_BOOTSTRAP_MIN_SEED_COVERAGE = 0.35
 _INITIAL_BOOTSTRAP_MAX_AREA_RATIO = 7.0
 _INITIAL_BOOTSTRAP_MAX_WIDTH_RATIO = 2.25
@@ -86,6 +93,18 @@ def _normalize_bbox(bbox: dict[str, Any]) -> dict[str, float]:
     width = _clamp(float(bbox.get("width", bbox.get("w", 0.0)) or 0.0), MANUAL_BBOX_MIN_SIDE, 1.0 - x)
     height = _clamp(float(bbox.get("height", bbox.get("h", 0.0)) or 0.0), MANUAL_BBOX_MIN_SIDE, 1.0 - y)
     return {"x": round(x, 4), "y": round(y, 4), "width": round(width, 4), "height": round(height, 4)}
+
+
+def _is_plausible_human_xyxy(candidate_xyxy: Sequence[float], *, frame_w: int, frame_h: int) -> bool:
+    bbox = _xyxy_to_bbox(candidate_xyxy, frame_w, frame_h)
+    area = float(bbox["width"]) * float(bbox["height"])
+    aspect = float(bbox["width"]) / max(float(bbox["height"]), MANUAL_BBOX_MIN_SIDE)
+    height = float(bbox["height"])
+    return (
+        _LONG_LOST_AREA_RANGE[0] <= area <= _LONG_LOST_AREA_RANGE[1]
+        and _LONG_LOST_ASPECT_RANGE[0] <= aspect <= _LONG_LOST_ASPECT_RANGE[1]
+        and _LONG_LOST_HEIGHT_RANGE[0] <= height <= _LONG_LOST_HEIGHT_RANGE[1]
+    )
 
 
 def _bbox_to_xyxy(bbox: dict[str, float], frame_width: int, frame_height: int) -> tuple[float, float, float, float]:
@@ -219,6 +238,7 @@ def _frame_diagnostic(
     rejected_reasons: Sequence[str] | None = None,
     rejected_candidates: Sequence[dict[str, Any]] | None = None,
     prediction_xyxy: Sequence[float] | None = None,
+    pending_relock_xyxy: Sequence[float] | None = None,
     relock_source: str | None = None,
     local_crop_bounds: Sequence[int] | None = None,
     candidate_confidence: float | None = None,
@@ -239,6 +259,8 @@ def _frame_diagnostic(
         diagnostic["rejected_candidates"] = list(rejected_candidates)[:_MAX_DIAGNOSTIC_REJECTED_CANDIDATES]
     if prediction_xyxy is not None:
         diagnostic["prediction_bbox"] = _xyxy_to_bbox(prediction_xyxy, frame_w, frame_h)
+    if pending_relock_xyxy is not None:
+        diagnostic["pending_relock_bbox"] = _xyxy_to_bbox(pending_relock_xyxy, frame_w, frame_h)
     if relock_source:
         diagnostic["relock_source"] = relock_source
     if local_crop_bounds is not None:
@@ -423,6 +445,7 @@ class PersonBBoxTracker:
                     frame_h=frame_h,
                 )
                 if relocked is not None:
+                    pending_relock_xyxy = self._xyxy_for_tracker_id(tracked, relocked)
                     if relocked == self._pending_relock_tracker_id:
                         self._pending_relock_count += 1
                     else:
@@ -458,6 +481,7 @@ class PersonBBoxTracker:
                         tracker_id=self._target_tracker_id,
                         candidate_tracker_id=relocked,
                         lost_frames=self._lost_frames,
+                        pending_relock_xyxy=pending_relock_xyxy,
                         rejected_candidates=relock_rejections,
                     )
                 _add_flag(self.quality_flags, PERSON_TRACKER_RELOCK_REJECTED_FLAG)
@@ -727,6 +751,35 @@ class PersonBBoxTracker:
             if prediction_iou < _DETECTOR_RELOCK_MIN_IOU and prediction_distance > prediction_diagonal * _DETECTOR_RELOCK_REFERENCE_DIAGONAL_RATIO:
                 reasons.append("far_from_prediction")
 
+        if (
+            confidence >= _DETECTOR_RELOCK_SCALE_JUMP_MIN_CONFIDENCE
+            and "aspect_ratio" not in reasons
+            and "center_jump" not in reasons
+            and "far_from_reference" not in reasons
+            and "far_from_prediction" not in reasons
+        ):
+            frame_diagonal = (frame_w**2 + frame_h**2) ** 0.5
+            distance_to_prediction = (
+                _center_distance(candidate_xyxy, prediction_xyxy)
+                if prediction_xyxy is not None
+                else float("inf")
+            )
+            distance_to_reference = (
+                _center_distance(candidate_xyxy, reference_xyxy)
+                if reference_xyxy is not None
+                else float("inf")
+            )
+            if min(distance_to_prediction, distance_to_reference) <= frame_diagonal * _DETECTOR_RELOCK_SCALE_JUMP_MAX_CENTER_RATIO:
+                reasons = [reason for reason in reasons if reason != "area_ratio"]
+
+        if self._lost_frames >= _RELOCK_AFTER_LOST_FRAMES and confidence >= _DETECTOR_RELOCK_MIN_CONFIDENCE:
+            if _is_plausible_human_xyxy(candidate_xyxy, frame_w=frame_w, frame_h=frame_h):
+                reasons = [
+                    reason
+                    for reason in reasons
+                    if reason not in {"center_jump", "area_ratio", "aspect_ratio", "far_from_reference", "far_from_prediction"}
+                ]
+
         return list(dict.fromkeys(reasons))
 
     def _select_detector_relock_candidate(
@@ -860,6 +913,7 @@ class PersonBBoxTracker:
                 lost_frames=self._lost_frames,
                 rejected_candidates=rejected_candidates,
                 prediction_xyxy=prediction_xyxy,
+                pending_relock_xyxy=candidate_xyxy,
                 relock_source=source,
                 local_crop_bounds=local_crop_bounds,
                 candidate_confidence=confidence,
@@ -1077,7 +1131,11 @@ class PersonBBoxTracker:
                 and self._lost_frames >= _LONG_LOST_REACQUIRE_AFTER_FRAMES
                 and self._long_lost_reacquire_allowed(detections, index, frame_w=frame_w, frame_h=frame_h)
             ):
-                reasons = [reason for reason in reasons if reason not in {"center_jump", "low_iou_and_far_from_previous_bbox"}]
+                reasons = [
+                    reason
+                    for reason in reasons
+                    if reason not in {"center_jump", "area_ratio", "aspect_ratio", "low_iou_and_far_from_previous_bbox"}
+                ]
             if reasons:
                 rejected.append(
                     {
@@ -1120,7 +1178,7 @@ class PersonBBoxTracker:
         if tracker_ids is None:
             return False
         history = self._center_history.get(int(tracker_ids[index]), [])
-        return len(history) >= 2
+        return len(history) >= 2 or confidence is not None
 
     def _xyxy_for_tracker_id(self, detections: Any, target_tracker_id: int) -> tuple[float, float, float, float] | None:
         tracker_ids = getattr(detections, "tracker_id", None)
@@ -1180,6 +1238,76 @@ def _resolve_yolo_model_path() -> str:
     return _YOLO_MODEL_NAME
 
 
+def _zoomed_content_crop_bounds(frame_bgr: np.ndarray) -> tuple[int, int, int, int]:
+    frame_h, frame_w = frame_bgr.shape[:2]
+    left = 0
+    right = frame_w
+    try:
+        import cv2  # type: ignore
+
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        content_columns = np.flatnonzero(gray.mean(axis=0) > _ZOOMED_CONTENT_COLUMN_BRIGHTNESS)
+        if len(content_columns) > 0:
+            candidate_left = int(content_columns[0])
+            candidate_right = int(content_columns[-1]) + 1
+            if (candidate_right - candidate_left) >= frame_w * _ZOOMED_CONTENT_MIN_WIDTH_RATIO:
+                left = candidate_left
+                right = candidate_right
+    except Exception:
+        left = 0
+        right = frame_w
+
+    top = int(frame_h * _ZOOMED_CONTENT_TOP_RATIO)
+    bottom = int(frame_h * _ZOOMED_CONTENT_BOTTOM_RATIO)
+    if bottom <= top:
+        top = 0
+        bottom = frame_h
+    return left, top, right, bottom
+
+
+def _detect_zoomed_content_person_boxes(
+    tracker: PersonBBoxTracker,
+    frame_bgr: np.ndarray,
+    *,
+    min_confidence: float,
+) -> tuple[list[tuple[float, float, float, float, float]], list[int] | None]:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return [], None
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    left, top, right, bottom = _zoomed_content_crop_bounds(frame_bgr)
+    crop = frame_bgr[top:bottom, left:right]
+    if crop.size <= 0:
+        return [], [left, top, right, bottom]
+
+    zoomed = cv2.resize(
+        crop,
+        None,
+        fx=_ZOOMED_CONTENT_PREVIEW_SCALE,
+        fy=_ZOOMED_CONTENT_PREVIEW_SCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    zoom_boxes = tracker._detect(zoomed, conf_threshold=min_confidence)
+    mapped: list[tuple[float, float, float, float, float]] = []
+    for x1, y1, x2, y2, confidence in zoom_boxes:
+        mapped.append(
+            _clamp_xyxy(
+                (
+                    left + x1 / _ZOOMED_CONTENT_PREVIEW_SCALE,
+                    top + y1 / _ZOOMED_CONTENT_PREVIEW_SCALE,
+                    left + x2 / _ZOOMED_CONTENT_PREVIEW_SCALE,
+                    top + y2 / _ZOOMED_CONTENT_PREVIEW_SCALE,
+                ),
+                frame_w,
+                frame_h,
+            )
+            + (confidence,)
+        )
+    return mapped, [left, top, right, bottom]
+
+
 def get_person_tracker_runtime_status() -> dict[str, Any]:
     dependency_status: dict[str, bool] = {"ultralytics": False, "supervision": False, "torchvision": False}
     dependency_errors: dict[str, str] = {}
@@ -1234,6 +1362,50 @@ def get_person_tracker_runtime_status() -> dict[str, Any]:
         "dependency_status": dependency_status,
         "dependency_errors": dependency_errors,
     }
+
+
+def detect_person_candidates(
+    frame_path: Path,
+    *,
+    min_confidence: float = _YOLO_CONF_THRESHOLD,
+    include_zoomed_small_targets: bool = False,
+) -> list[dict[str, Any]]:
+    """Detect person candidates in a single preview frame for target-lock bootstrap."""
+
+    tracker = PersonBBoxTracker()
+    frame = tracker._read_frame(frame_path)
+    frame_h, frame_w = frame.shape[:2]
+    raw_boxes: list[tuple[tuple[float, float, float, float, float], str, list[int] | None]] = [
+        (raw_box, "yolo_preview", None)
+        for raw_box in tracker._detect(frame, conf_threshold=min_confidence)
+    ]
+    if include_zoomed_small_targets:
+        zoom_boxes, crop_bounds = _detect_zoomed_content_person_boxes(
+            tracker,
+            frame,
+            min_confidence=min_confidence,
+        )
+        raw_boxes.extend((raw_box, "yolo_zoomed_content", crop_bounds) for raw_box in zoom_boxes)
+
+    candidates: list[dict[str, Any]] = []
+    for index, (raw_box, source, crop_bounds) in enumerate(raw_boxes, start=1):
+        x1, y1, x2, y2, confidence = raw_box
+        xyxy = _clamp_xyxy((x1, y1, x2, y2), frame_w, frame_h)
+        bbox = _xyxy_to_bbox(xyxy, frame_w, frame_h)
+        area = float(bbox.get("width", 0.0)) * float(bbox.get("height", 0.0))
+        candidate = {
+            "id": f"candidate_{index}",
+            "bbox": bbox,
+            "confidence": round(float(confidence), 4),
+            "source": source,
+            "area": round(area, 6),
+        }
+        if crop_bounds is not None:
+            candidate["zoom_crop_bounds"] = crop_bounds
+            candidate["zoom_scale"] = _ZOOMED_CONTENT_PREVIEW_SCALE
+        candidates.append(candidate)
+    candidates.sort(key=lambda item: (float(item.get("confidence", 0.0)), float(item.get("area", 0.0))), reverse=True)
+    return candidates
 
 
 def _track_forward(

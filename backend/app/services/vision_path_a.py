@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
-from app.services.providers import ActiveProviderConfig, request_dashscope_video_completion, request_text_completion
+from app.services.providers import (
+    ActiveProviderConfig,
+    request_dashscope_video_completion,
+    request_mimo_video_completion,
+    request_text_completion,
+)
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
 from app.services.vision import normalize_vision_payload
@@ -199,15 +204,33 @@ async def analyze_path_a(
 
     if mode == "video" and clip_path is not None:
         try:
-            raw = await request_dashscope_video_completion(
-                provider,
-                video_path=clip_path,
-                system_prompt=system_prompt,
-                user_prompt=_build_specialized_video_user_prompt(user_text),
-                temperature=0.0,
-                max_tokens=max_tokens,
-                timeout=180.0,
-            )
+            provider_name = getattr(provider, "provider", "")
+            video_user_prompt = _build_specialized_video_user_prompt(user_text)
+            if provider_name == "qwen":
+                raw = await request_dashscope_video_completion(
+                    provider,
+                    video_path=clip_path,
+                    system_prompt=system_prompt,
+                    user_prompt=video_user_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=180.0,
+                )
+            elif provider_name == "mimo":
+                raw = await request_mimo_video_completion(
+                    provider,
+                    video_path=clip_path,
+                    system_prompt=system_prompt,
+                    user_prompt=video_user_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=180.0,
+                )
+            else:
+                raise AnalysisPipelineError(
+                    AnalysisErrorCode.UNKNOWN_ERROR,
+                    f"Path A native video mode does not support provider={provider_name}.",
+                )
             parsed = json.loads(clean_json_text(raw))
             normalized = normalize_vision_payload(parsed, frame_payloads, window_start_sec=window_start_sec) | {
                 "pure_vision_subscores": parsed.get("pure_vision_subscores") if isinstance(parsed.get("pure_vision_subscores"), dict) else {},

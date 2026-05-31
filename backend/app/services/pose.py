@@ -72,7 +72,9 @@ POSE_CONNECTIONS = [
 
 _POSE_MODE_LOGGED = False
 _POSE_MIN_ACCEPT_SCORE = 0.15
+_POSE_LOW_CONFIDENCE_THRESHOLD = 0.2
 _POSE_CROP_PADDING_RATIO = 0.75
+_POSE_NO_PADDING_RATIO = 0.0
 _POSE_PREDICTED_CROP_PADDING_RATIO = 1.15
 _TRACKER_CANDIDATE_MIN_AREA_RATIO = 0.20
 _TRACKER_CANDIDATE_MAX_AREA_RATIO = 6.0
@@ -97,9 +99,13 @@ _KEYPOINT_STRICT_SMALL_TRACKER_HEIGHT = 0.14
 _KEYPOINT_STRICT_MIN_CORE_COVERAGE = 0.75
 _CROP_KEYPOINT_MIN_TRACKER_COVERAGE = 0.18
 _TEMPORAL_CORE_JUMP_LIMIT = 0.16
+_CORE_CENTER_TRACKER_OFFSET_LIMIT = 0.35
 _TRACKER_PREDICTION_HISTORY = 5
 _MAX_DISPLAY_INTERPOLATION_GAP = 2
 _MAX_DIAGNOSTIC_POSE_REJECTIONS = 6
+_RELIABLE_TRACKER_STATES = {"tracked", "relocked", "detector_relocked"}
+_UNRELIABLE_TRACKER_CROP_HINT_STATES = {"continuity_rejected", "lost_reused"}
+_UNRELIABLE_TRACKER_CROP_MIN_REFERENCE_COVERAGE = 0.25
 
 CORE_KEYPOINT_IDS = [11, 12, 23, 24]
 
@@ -252,6 +258,12 @@ def _bbox_center_distance(a: dict[str, float] | None, b: dict[str, float] | None
     ax, ay = _bbox_center(a)
     bx, by = _bbox_center(b)
     return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _bbox_diagonal(bbox: dict[str, float] | None) -> float:
+    if not bbox:
+        return 0.0
+    return (float(bbox.get("width", 0.0)) ** 2 + float(bbox.get("height", 0.0)) ** 2) ** 0.5
 
 
 def _bbox_intersection_area(a: dict[str, float] | None, b: dict[str, float] | None) -> float:
@@ -470,6 +482,67 @@ def _bbox_for_frame(bbox_per_frame: list[dict[str, float]] | None, frame_index: 
     return bbox if isinstance(bbox, dict) else None
 
 
+def _tracker_diagnostics_by_index(target_lock: dict[str, Any] | None) -> dict[int, dict[str, Any]]:
+    if not isinstance(target_lock, dict):
+        return {}
+    diagnostics = target_lock.get("person_tracker_diagnostics")
+    if not isinstance(diagnostics, list):
+        return {}
+    by_index: dict[int, dict[str, Any]] = {}
+    for fallback_index, item in enumerate(diagnostics):
+        if not isinstance(item, dict):
+            continue
+        try:
+            frame_index = int(item.get("frame_index", fallback_index))
+        except (TypeError, ValueError):
+            frame_index = fallback_index
+        by_index[frame_index] = item
+    return by_index
+
+
+def _tracker_bbox_is_reliable(diagnostic: dict[str, Any] | None) -> bool:
+    if not isinstance(diagnostic, dict):
+        return True
+    state = str(diagnostic.get("state") or "")
+    return state in _RELIABLE_TRACKER_STATES
+
+
+def _pending_relock_bbox_from_diagnostic(diagnostic: dict[str, Any] | None) -> dict[str, float] | None:
+    if not isinstance(diagnostic, dict):
+        return None
+    bbox = diagnostic.get("pending_relock_bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        return {
+            "x": round(_clamp(float(bbox.get("x", 0.0) or 0.0), 0.0, 1.0), 4),
+            "y": round(_clamp(float(bbox.get("y", 0.0) or 0.0), 0.0, 1.0), 4),
+            "width": round(_clamp(float(bbox.get("width", 0.0) or 0.0), MANUAL_BBOX_MIN_SIDE, 1.0), 4),
+            "height": round(_clamp(float(bbox.get("height", 0.0) or 0.0), MANUAL_BBOX_MIN_SIDE, 1.0), 4),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _unreliable_tracker_bbox_for_crop(
+    diagnostic: dict[str, Any] | None,
+    raw_tracker_bbox: dict[str, float] | None,
+    reference_bbox: dict[str, float] | None,
+) -> dict[str, float] | None:
+    if not isinstance(diagnostic, dict) or not isinstance(raw_tracker_bbox, dict) or not isinstance(reference_bbox, dict):
+        return None
+    state = str(diagnostic.get("state") or "")
+    if state not in _UNRELIABLE_TRACKER_CROP_HINT_STATES:
+        return None
+    if _bbox_area(raw_tracker_bbox) <= 0.0:
+        return None
+    if _bbox_iou(raw_tracker_bbox, reference_bbox) > 0.0:
+        return raw_tracker_bbox
+    if _bbox_coverage(reference_bbox, raw_tracker_bbox) >= _UNRELIABLE_TRACKER_CROP_MIN_REFERENCE_COVERAGE:
+        return raw_tracker_bbox
+    return None
+
+
 def _increment_histogram(histogram: dict[str, int], value: int) -> None:
     key = str(value)
     histogram[key] = histogram.get(key, 0) + 1
@@ -503,7 +576,7 @@ def _score_candidate(
         + (seed_overlap * 0.20)
     )
     # 手动锁定时，如果候选与用户框完全不重叠，强行降权——避免镜头里另一位滑行者抢走骨架。
-    if seed_bbox and seed_overlap <= 0.0:
+    if seed_bbox and seed_overlap <= 0.0 and motion_overlap <= 0.0 and iou_score <= 0.0:
         base *= 0.25
     return round(base, 4)
 
@@ -652,8 +725,24 @@ def _candidate_rejection_reasons(
     current_core_center = metrics.get("core_center")
     if previous_core_center and current_core_center:
         distance = _bbox_center_distance(_core_center_bbox(previous_core_center), _core_center_bbox(current_core_center))
-        if distance > _TEMPORAL_CORE_JUMP_LIMIT:
+        tracker_aligned_jump = (
+            tracker_bbox is not None
+            and str(candidate.get("source") or "")
+            in {"single_pose_crop", "single_pose_pending_relock_crop", "single_pose_unreliable_tracker_crop"}
+            and _bbox_iou(bbox, tracker_bbox) >= _MULTI_POSE_MIN_IOU
+            and isinstance(metrics.get("visible_core_keypoints"), int)
+            and int(metrics.get("visible_core_keypoints") or 0) >= len(CORE_KEYPOINT_IDS)
+            and isinstance(metrics.get("core_roi_coverage"), (int, float))
+            and float(metrics.get("core_roi_coverage") or 0.0) >= _KEYPOINT_MIN_CORE_ROI_COVERAGE
+        )
+        if distance > _TEMPORAL_CORE_JUMP_LIMIT and not tracker_aligned_jump:
             reasons.append("temporal_pose_jump")
+    if tracker_bbox and current_core_center and str(candidate.get("source") or "") == "single_pose_predicted_crop":
+        core_distance = _bbox_center_distance(_core_center_bbox(current_core_center), tracker_bbox)
+        tracker_diagonal = max(_bbox_diagonal(tracker_bbox), MANUAL_BBOX_MIN_SIDE)
+        if core_distance > tracker_diagonal * _CORE_CENTER_TRACKER_OFFSET_LIMIT:
+            reasons.append("core_center_offset_from_tracker")
+            candidate["candidate_validation"]["core_center_tracker_offset"] = round(core_distance / tracker_diagonal, 4)
     return list(dict.fromkeys(reasons))
 
 
@@ -677,9 +766,59 @@ def _candidate_priority(candidate: dict[str, Any]) -> int:
     source = candidate.get("source")
     if source == "single_pose_crop":
         return 0
-    if source == "single_pose_predicted_crop":
+    if source == "single_pose_unreliable_tracker_crop":
         return 1
-    return 2
+    if source == "single_pose_pending_relock_crop":
+        return 2
+    if source == "single_pose_predicted_crop":
+        return 3
+    return 4
+
+
+def _validation_bbox_for_candidate(
+    candidate: dict[str, Any],
+    *,
+    current_tracker_bbox: dict[str, float] | None,
+    pending_relock_bbox: dict[str, float] | None,
+    reference_bbox: dict[str, float] | None,
+    predicted_bbox: dict[str, float] | None,
+) -> dict[str, float] | None:
+    explicit_bbox = candidate.get("_validation_tracker_bbox")
+    if isinstance(explicit_bbox, dict):
+        return explicit_bbox
+
+    source = str(candidate.get("source") or "")
+    if source == "single_pose_predicted_crop":
+        return predicted_bbox
+    if source in {"single_pose_crop", "single_pose_pending_relock_crop", "single_pose_unreliable_tracker_crop"}:
+        return current_tracker_bbox or pending_relock_bbox or reference_bbox
+    return current_tracker_bbox or pending_relock_bbox or predicted_bbox
+
+
+def _reference_crop_padding_ratio(
+    *,
+    current_tracker_bbox: dict[str, float] | None,
+    pending_relock_bbox: dict[str, float] | None,
+    unreliable_tracker_crop_bbox: dict[str, float] | None,
+) -> float:
+    if current_tracker_bbox or pending_relock_bbox or unreliable_tracker_crop_bbox:
+        return _POSE_CROP_PADDING_RATIO
+    return _POSE_NO_PADDING_RATIO
+
+
+def _reference_crop_source(
+    *,
+    current_tracker_bbox: dict[str, float] | None,
+    pending_relock_bbox: dict[str, float] | None,
+    unreliable_tracker_crop_bbox: dict[str, float] | None,
+) -> str:
+    if pending_relock_bbox:
+        return "single_pose_pending_relock_crop"
+    if current_tracker_bbox:
+        return "single_pose_crop"
+    if unreliable_tracker_crop_bbox:
+        return "single_pose_unreliable_tracker_crop"
+    return "single_pose_crop"
 
 
 def _score_pose_candidate(
@@ -899,8 +1038,11 @@ def _resolve_tasks_landmarker() -> Any | None:
         from mediapipe.tasks import python
         from mediapipe.tasks.python import vision
 
+        base_options = python.BaseOptions(model_asset_path=str(model_path))
+        if os.name == "nt" and model_path.is_absolute():
+            base_options = python.BaseOptions(model_asset_buffer=model_path.read_bytes())
         options = vision.PoseLandmarkerOptions(
-            base_options=python.BaseOptions(model_asset_path=str(model_path)),
+            base_options=base_options,
             num_poses=num_poses,
             min_pose_detection_confidence=0.35,
             min_pose_presence_confidence=0.35,
@@ -976,6 +1118,7 @@ def extract_pose(
     previous_bbox = seed_bbox
     previous_core_center: dict[str, float] | None = None
     tracker_bbox_history: list[tuple[int, dict[str, float]]] = []
+    tracker_diagnostics_by_index = _tracker_diagnostics_by_index(target_lock)
     lost_count = 0
     tasks_landmarker = _resolve_tasks_landmarker()
     pose_mode = "multi_pose" if tasks_landmarker is not None else "single_pose_crop"
@@ -989,8 +1132,16 @@ def extract_pose(
     try:
         for frame_index, frame_path in enumerate(frame_paths):
             image = cv2.imread(str(frame_path))
-            current_tracker_bbox = _bbox_for_frame(bbox_per_frame, frame_index)
-            reference_bbox = current_tracker_bbox or previous_bbox or seed_bbox
+            tracker_diagnostic = tracker_diagnostics_by_index.get(frame_index)
+            raw_tracker_bbox = _bbox_for_frame(bbox_per_frame, frame_index)
+            current_tracker_bbox = raw_tracker_bbox if _tracker_bbox_is_reliable(tracker_diagnostic) else None
+            pending_relock_bbox = _pending_relock_bbox_from_diagnostic(tracker_diagnostic)
+            reference_bbox = pending_relock_bbox or current_tracker_bbox or previous_bbox or seed_bbox
+            unreliable_tracker_crop_bbox = _unreliable_tracker_bbox_for_crop(
+                tracker_diagnostic,
+                raw_tracker_bbox,
+                reference_bbox,
+            )
             if image is None:
                 lost_frames += 1
                 low_confidence_frames += 1
@@ -1027,7 +1178,12 @@ def extract_pose(
             rejected_candidates: list[dict[str, Any]] = []
             crop_attempts: list[dict[str, Any]] = []
             predicted_bbox: dict[str, float] | None = None
-            pose_reference_source = "tracker_bbox" if current_tracker_bbox else "previous_pose"
+            if pending_relock_bbox:
+                pose_reference_source = "pending_relock_bbox"
+            elif current_tracker_bbox:
+                pose_reference_source = "tracker_bbox"
+            else:
+                pose_reference_source = "previous_pose"
 
             if current_tracker_bbox:
                 tracker_bbox_history.append((frame_index, current_tracker_bbox))
@@ -1039,13 +1195,44 @@ def extract_pose(
                 image_height,
                 reference_bbox,
                 cv2_module=cv2,
-                padding_ratio=_POSE_CROP_PADDING_RATIO if current_tracker_bbox else 0.0,
-                source="single_pose_crop",
+                padding_ratio=_reference_crop_padding_ratio(
+                    current_tracker_bbox=current_tracker_bbox,
+                    pending_relock_bbox=pending_relock_bbox,
+                    unreliable_tracker_crop_bbox=unreliable_tracker_crop_bbox,
+                ),
+                source=_reference_crop_source(
+                    current_tracker_bbox=current_tracker_bbox,
+                    pending_relock_bbox=pending_relock_bbox,
+                    unreliable_tracker_crop_bbox=unreliable_tracker_crop_bbox,
+                ),
             )
             crop_attempts.append(crop_attempt)
             if crop_candidate is not None:
+                crop_candidate["_validation_tracker_bbox"] = pending_relock_bbox or current_tracker_bbox or reference_bbox
                 candidate_results.append(crop_candidate)
                 single_pose_crop_frames += 1
+
+            if (
+                unreliable_tracker_crop_bbox
+                and unreliable_tracker_crop_bbox != reference_bbox
+                and unreliable_tracker_crop_bbox != pending_relock_bbox
+                and unreliable_tracker_crop_bbox != current_tracker_bbox
+            ):
+                unreliable_candidate, unreliable_attempt = _run_single_pose_crop(
+                    single_pose,
+                    image,
+                    image_width,
+                    image_height,
+                    unreliable_tracker_crop_bbox,
+                    cv2_module=cv2,
+                    padding_ratio=_POSE_CROP_PADDING_RATIO,
+                    source="single_pose_unreliable_tracker_crop",
+                )
+                crop_attempts.append(unreliable_attempt)
+                if unreliable_candidate is not None:
+                    unreliable_candidate["_validation_tracker_bbox"] = unreliable_tracker_crop_bbox
+                    candidate_results.append(unreliable_candidate)
+                    single_pose_crop_frames += 1
 
             if current_tracker_bbox is None or lost_count > 0:
                 predicted_bbox = _predict_bbox_from_history(tracker_bbox_history, frame_index)
@@ -1063,6 +1250,7 @@ def extract_pose(
                     predicted_attempt["predicted_bbox"] = predicted_bbox
                     crop_attempts.append(predicted_attempt)
                     if predicted_candidate is not None:
+                        predicted_candidate["_validation_tracker_bbox"] = predicted_bbox
                         candidate_results.append(predicted_candidate)
                         pose_reference_source = "tracker_motion_predicted"
 
@@ -1097,7 +1285,13 @@ def extract_pose(
 
             filtered_candidates: list[dict[str, Any]] = []
             for candidate in candidate_results:
-                validation_tracker_bbox = current_tracker_bbox or predicted_bbox
+                validation_tracker_bbox = _validation_bbox_for_candidate(
+                    candidate,
+                    current_tracker_bbox=current_tracker_bbox,
+                    pending_relock_bbox=pending_relock_bbox,
+                    reference_bbox=reference_bbox,
+                    predicted_bbox=predicted_bbox,
+                )
                 rejection_reasons = _candidate_rejection_reasons(
                     candidate,
                     previous_bbox=previous_bbox,
@@ -1116,7 +1310,13 @@ def extract_pose(
                 _score_pose_candidate(
                     candidate,
                     reference_bbox=reference_bbox,
-                    current_tracker_bbox=current_tracker_bbox or predicted_bbox,
+                    current_tracker_bbox=_validation_bbox_for_candidate(
+                        candidate,
+                        current_tracker_bbox=current_tracker_bbox,
+                        pending_relock_bbox=pending_relock_bbox,
+                        reference_bbox=reference_bbox,
+                        predicted_bbox=predicted_bbox,
+                    ),
                     motion_bbox=motion_bbox,
                     seed_bbox=seed_bbox,
                 )
@@ -1152,7 +1352,10 @@ def extract_pose(
                     {
                         "frame": frame_path.name,
                         "frame_index": frame_index,
-                        "tracker_bbox": current_tracker_bbox,
+                        "tracker_bbox": raw_tracker_bbox,
+                        "effective_tracker_bbox": current_tracker_bbox,
+                        "pending_relock_bbox": pending_relock_bbox,
+                        "tracker_state": tracker_diagnostic.get("state") if isinstance(tracker_diagnostic, dict) else None,
                         "reference_bbox": reference_bbox,
                         "selected_bbox": previous_bbox,
                         "output_bbox": output_bbox,
@@ -1175,21 +1378,25 @@ def extract_pose(
                 )
                 continue
 
-            previous_bbox = best_candidate.get("bbox")
-            previous_core_center = (best_candidate.get("candidate_validation") or {}).get("core_center")
-            lost_count = 0
             confidence = round(float(best_candidate.get("score", 0.0)), 4)
+            is_low_confidence = confidence <= _POSE_LOW_CONFIDENCE_THRESHOLD
+            if not is_low_confidence:
+                previous_bbox = best_candidate.get("bbox")
+                previous_core_center = (best_candidate.get("candidate_validation") or {}).get("core_center")
+            lost_count = 0
             output_bbox = current_tracker_bbox or previous_bbox
-            tracked_frames += 1
-            if confidence < 0.2:
+            tracking_state = "low_confidence" if is_low_confidence else "tracked"
+            if is_low_confidence:
                 low_confidence_frames += 1
+            else:
+                tracked_frames += 1
             frames.append(
                 {
                     "frame": frame_path.name,
                     "keypoints": best_candidate.get("keypoints", []),
                     "target_bbox": output_bbox,
                     "tracking_confidence": confidence,
-                    "tracking_state": "tracked",
+                    "tracking_state": tracking_state,
                     "pose_candidates": [
                         _diagnostic_candidate_summary(candidate)
                         for candidate in scored_candidates[:num_poses]
@@ -1200,26 +1407,30 @@ def extract_pose(
                 {
                     "frame": frame_path.name,
                     "frame_index": frame_index,
-                    "tracker_bbox": current_tracker_bbox,
-                        "reference_bbox": reference_bbox,
-                        "selected_bbox": previous_bbox,
-                        "output_bbox": output_bbox,
-                        "tracking_state": "tracked",
-                        "tracking_confidence": confidence,
-                        "candidate_count": len(candidate_results),
-                        "scored_candidate_count": len(scored_candidates),
-                        "rejected_candidate_count": len(rejected_candidates) + max(0, len(candidate_results) - len(scored_candidates)),
-                        "selected_source": best_candidate.get("source"),
-                        "pose_reference_source": pose_reference_source,
-                        "crop_attempts": crop_attempts,
-                        "candidate_validation": best_candidate.get("candidate_validation"),
-                        "rejected_candidates": rejected_candidates[:_MAX_DIAGNOSTIC_POSE_REJECTIONS],
-                        "top_candidates": [
-                            _diagnostic_candidate_summary(candidate)
-                            for candidate in scored_candidates[:num_poses]
-                        ],
-                    }
-                )
+                    "tracker_bbox": raw_tracker_bbox,
+                    "effective_tracker_bbox": current_tracker_bbox,
+                    "pending_relock_bbox": pending_relock_bbox,
+                    "tracker_state": tracker_diagnostic.get("state") if isinstance(tracker_diagnostic, dict) else None,
+                    "reference_bbox": reference_bbox,
+                    "selected_bbox": best_candidate.get("bbox"),
+                    "output_bbox": output_bbox,
+                    "tracking_state": tracking_state,
+                    "tracking_confidence": confidence,
+                    "candidate_count": len(candidate_results),
+                    "scored_candidate_count": len(scored_candidates),
+                    "rejected_candidate_count": len(rejected_candidates) + max(0, len(candidate_results) - len(scored_candidates)),
+                    "selected_source": best_candidate.get("source"),
+                    "pose_reference_source": pose_reference_source,
+                    "crop_attempts": crop_attempts,
+                    "candidate_validation": best_candidate.get("candidate_validation"),
+                    "reason": "pose_low_confidence" if is_low_confidence else None,
+                    "rejected_candidates": rejected_candidates[:_MAX_DIAGNOSTIC_POSE_REJECTIONS],
+                    "top_candidates": [
+                        _diagnostic_candidate_summary(candidate)
+                        for candidate in scored_candidates[:num_poses]
+                    ],
+                }
+            )
     finally:
         single_pose.close()
         if tasks_landmarker is not None:
@@ -1247,7 +1458,11 @@ def extract_pose(
             "low_confidence_frames": sum(
                 1
                 for frame in frames
-                if isinstance(frame.get("tracking_confidence"), (int, float)) and float(frame.get("tracking_confidence", 0.0)) < 0.2
+                if frame.get("tracking_state") == "low_confidence"
+                or (
+                    isinstance(frame.get("tracking_confidence"), (int, float))
+                    and float(frame.get("tracking_confidence", 0.0)) <= _POSE_LOW_CONFIDENCE_THRESHOLD
+                )
             ),
             "multi_pose_frames": multi_pose_frames,
             "single_pose_crop_frames": single_pose_crop_frames,

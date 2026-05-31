@@ -86,6 +86,10 @@ def infer_profile_from_input(action_type: str, action_subtype: str | None) -> st
 
 
 def infer_profile_hint(action_type: str, action_subtype: str | None) -> str:
+    canonical_profile = (action_type or "").strip().lower()
+    if canonical_profile in ANALYSIS_PROFILES:
+        return canonical_profile
+
     subtype = normalize_action_subtype(action_type, action_subtype)
     if subtype in SPIRAL_SUBTYPES:
         return "spiral"

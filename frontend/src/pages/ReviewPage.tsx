@@ -19,6 +19,7 @@ import ZodiacAvatar from "../components/ZodiacAvatar";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
+import { localDateKey } from "../utils/datetime";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -111,7 +112,7 @@ function normalizeSubtype(actionType: ActionType, subtype?: string | null) {
 }
 
 function todayString() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateKey();
 }
 
 function createDefaultSessionForm(): SessionFormState {

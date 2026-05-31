@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -35,13 +36,28 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 ARCHIVE_DIR = DATA_DIR / "archive"
 BACKUPS_DIR = _resolve_runtime_path(os.getenv("BACKUPS_DIR", str(DEFAULT_BACKUPS_DIR)), DEFAULT_BACKUPS_DIR)
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{DATA_DIR / 'skating-analyzer.db'}")
+SQLITE_BUSY_TIMEOUT_SECONDS = float(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "30"))
 
 
 class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(DATABASE_URL, future=True)
+_sqlite_connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_async_engine(DATABASE_URL, future=True, connect_args=_sqlite_connect_args)
+
+
+if DATABASE_URL.startswith("sqlite"):
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"PRAGMA busy_timeout={int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cursor.close()
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
@@ -61,6 +77,7 @@ async def init_db() -> None:
 def ensure_storage_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    (UPLOADS_DIR / "_debug").mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -181,6 +198,7 @@ async def _run_migrations(conn) -> None:
     await run_migrations_patch_g(conn)
     await run_migrations_patch_h(conn)
     await run_migrations_patch_i(conn)
+    await run_migrations_debug_runs(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -416,6 +434,51 @@ async def _apply_patch_i(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_id ON analyses(skater_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_created_at ON analyses(skater_id, created_at DESC)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_status_created_at ON analyses(status, created_at DESC)"))
+
+
+async def run_migrations_debug_runs(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_debug_run_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_debug_run_tables(conn)
+
+
+async def _create_debug_run_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS debug_runs (
+                id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                analysis_id TEXT REFERENCES analyses(id),
+                video_path TEXT,
+                action_type TEXT NOT NULL,
+                action_subtype TEXT,
+                analysis_profile TEXT,
+                note TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                summary JSON,
+                result_json JSON,
+                error_code TEXT,
+                error_detail TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    columns_result = await conn.execute(text("PRAGMA table_info(debug_runs)"))
+    existing_columns = {row[1] for row in columns_result.fetchall()}
+    if "note" not in existing_columns:
+        await conn.execute(text("ALTER TABLE debug_runs ADD COLUMN note TEXT"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_created_at ON debug_runs(created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_status_created_at ON debug_runs(status, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_analysis_id ON debug_runs(analysis_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_mode ON debug_runs(mode)"))
 
 
 async def _create_phase6_tables(conn) -> None:

@@ -42,6 +42,9 @@ type SlotSection = {
   activeLabel: string;
 };
 
+const MIMO_BASE_URL = "https://api.xiaomimimo.com/v1";
+const MIMO_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
+
 const PROVIDER_OPTIONS: ProviderOption[] = [
   {
     id: "qwen",
@@ -65,6 +68,14 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
     defaultModel: "doubao-seed-2-0-250615",
     modelPlaceholder: "例如：doubao-seed-2-0-250615 或 ep-xxxxxxxx",
+    supportsVision: true,
+  },
+  {
+    id: "mimo",
+    label: "MiMo",
+    baseUrl: MIMO_BASE_URL,
+    defaultModel: "mimo-v2.5-pro",
+    modelPlaceholder: "例如：mimo-v2.5（视觉）或 mimo-v2.5-pro（文本）",
     supportsVision: true,
   },
   {
@@ -154,6 +165,33 @@ function optionsForSlot(slot: ProviderSlot) {
   return slot === "report" ? PROVIDER_OPTIONS : PROVIDER_OPTIONS.filter((item) => item.supportsVision);
 }
 
+function defaultModelForSlot(provider: string, slot: ProviderSlot) {
+  if (provider === "qwen") {
+    if (slot === "vision" || slot === "vision_path_a") {
+      return "qwen3-omni-flash";
+    }
+    if (slot === "vision_path_b") {
+      return "qwen3.6-plus";
+    }
+  }
+  if (provider === "mimo") {
+    return slot === "report" ? "mimo-v2.5-pro" : "mimo-v2.5";
+  }
+  return providerOption(provider).defaultModel;
+}
+
+function baseUrlForProviderKey(provider: string, apiKey: string, currentBaseUrl: string) {
+  const trimmedKey = apiKey.trim();
+  const trimmedBaseUrl = currentBaseUrl.trim();
+  if (provider !== "mimo" || !trimmedKey.startsWith("tp-")) {
+    return currentBaseUrl;
+  }
+  if (!trimmedBaseUrl || trimmedBaseUrl === MIMO_BASE_URL) {
+    return MIMO_TOKEN_PLAN_BASE_URL;
+  }
+  return currentBaseUrl;
+}
+
 function slotTitle(slot: ProviderSlot) {
   return SLOT_SECTIONS.find((section) => section.slot === slot)?.title ?? slot;
 }
@@ -175,16 +213,10 @@ function providerNameForSave(slot: ProviderSlot, provider: string, modelId: stri
 function defaultDraftForm(slot: ProviderSlot): ProviderFormState {
   const defaultProvider = slot === "report" ? "deepseek" : "qwen";
   const option = providerOption(defaultProvider);
-  const defaultModelBySlot: Record<ProviderSlot, string> = {
-    report: option.defaultModel,
-    vision: "qwen3-omni-flash",
-    vision_path_a: "qwen3-omni-flash",
-    vision_path_b: "qwen3.6-plus",
-  };
   return {
     provider: defaultProvider,
     api_key: "",
-    model_id: defaultModelBySlot[slot],
+    model_id: defaultModelForSlot(defaultProvider, slot),
     vision_model: "",
     base_url: option.baseUrl,
   };
@@ -318,10 +350,16 @@ export default function ApiSettingsPage() {
   const setFormField = (key: string, field: keyof ProviderFormState, value: string) => {
     setForms((current) => ({
       ...current,
-      [key]: {
-        ...(current[key] ?? defaultDraftForm("vision")),
-        [field]: value,
-      },
+      [key]: (() => {
+        const next = {
+          ...(current[key] ?? defaultDraftForm("vision")),
+          [field]: value,
+        };
+        if (field === "api_key") {
+          next.base_url = baseUrlForProviderKey(next.provider, value, next.base_url);
+        }
+        return next;
+      })(),
     }));
   };
 
@@ -333,7 +371,7 @@ export default function ApiSettingsPage() {
         ...(current[key] ?? defaultDraftForm(slot)),
         provider,
         base_url: option.baseUrl,
-        model_id: option.defaultModel,
+        model_id: defaultModelForSlot(provider, slot),
       },
     }));
   };

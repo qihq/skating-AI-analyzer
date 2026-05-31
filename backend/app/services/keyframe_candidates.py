@@ -33,6 +33,11 @@ CONFIDENCE_WEIGHTS = {
     "phase_order_score": 0.10,
 }
 MISSING_POSE_CONFIDENCE_CAP = 0.55
+EXCLUDED_TRACKING_STATES = {"lost", "interpolated", "low_confidence"}
+MOTION_FALLBACK_MIN_PEAK_SCORE = 0.04
+PARTIAL_TAL_LOW_MOTION_FALLBACK_MIN_PEAK_SCORE = 0.015
+ORDERED_TAL_CONFIDENCE_FLOOR = 0.35
+ORDERED_TAL_LOW_CONFIDENCE_MIN_RAW = 0.20
 
 
 @dataclass(frozen=True)
@@ -154,6 +159,46 @@ def _candidate(
         },
         "warnings": list(warnings or []),
     }
+
+
+def _motion_only_candidate(
+    record: tuple[int, str, float, float],
+    role: str,
+    confidence: float,
+    normalized_motion: float,
+    warnings: Iterable[str],
+) -> dict[str, Any]:
+    index, frame_id, timestamp, motion_score = record
+    signal = _FrameSignal(
+        index=index,
+        frame_id=frame_id,
+        timestamp=timestamp,
+        com_y=None,
+        hip_y=None,
+        ankle_y=None,
+        knee_angle=None,
+        motion_score=motion_score,
+        visibility_score=0.0,
+    )
+    return _candidate(
+        signal,
+        confidence,
+        {
+            "signal_index": index,
+            "motion_fallback": True,
+            "motion_fallback_role": role,
+            "motion_score": round(motion_score, 5),
+            "normalized_motion_score": round(normalized_motion, 3),
+            "score_components": {
+                "motion_peak": round(normalized_motion, 3),
+                "com_velocity": None,
+                "pose_visibility": 0.0,
+                "knee_angle_change": None,
+                "phase_order": 1.0,
+            },
+        },
+        warnings,
+    )
 
 
 def _keypoint(
@@ -291,6 +336,93 @@ def _selected_records(motion_scores: dict[str, Any] | None) -> tuple[dict[str, d
     return by_frame, selected, scores
 
 
+def _motion_records(motion_scores: dict[str, Any] | None, effective_fps: float) -> list[tuple[int, str, float, float]]:
+    if not isinstance(motion_scores, dict):
+        return []
+
+    _, selected, score_series = _selected_records(motion_scores)
+    records: list[tuple[int, str, float, float]] = []
+    if selected:
+        for index, item in enumerate(selected):
+            frame_id = _frame_stem(item.get("frame_id") or item.get("frame") or f"frame_{index + 1:04d}")
+            score = _to_float(item.get("motion_score"))
+            if score is None and index < len(score_series):
+                score = score_series[index]
+            if score is None:
+                continue
+            timestamp = _to_float(item.get("timestamp"))
+            if timestamp is None:
+                timestamp = index / effective_fps
+            records.append((index, frame_id, timestamp, score))
+        return records
+
+    return [
+        (index, f"frame_{index + 1:04d}", index / effective_fps, score)
+        for index, score in enumerate(score_series)
+    ]
+
+
+def _best_motion_record(records: list[tuple[int, str, float, float]], *, prefer_late: bool) -> tuple[int, str, float, float]:
+    if prefer_late:
+        return max(records, key=lambda item: (item[3], item[0]))
+    return max(records, key=lambda item: (item[3], -item[0]))
+
+
+def _motion_fallback_candidates(
+    motion_scores: dict[str, Any] | None,
+    effective_fps: float,
+    quality_flags: list[str],
+    *,
+    min_peak_score: float = MOTION_FALLBACK_MIN_PEAK_SCORE,
+) -> dict[str, Any] | None:
+    records = _motion_records(motion_scores, effective_fps)
+    if len(records) < 3:
+        return None
+
+    scores = [record[3] for record in records]
+    max_score = max(scores)
+    if max_score < min_peak_score:
+        return None
+
+    peak_index = max(range(len(records)), key=lambda index: records[index][3])
+    if 0 < peak_index < len(records) - 1:
+        takeoff_record = _best_motion_record(records[:peak_index], prefer_late=True)
+        apex_record = records[peak_index]
+        landing_record = _best_motion_record(records[peak_index + 1 :], prefer_late=False)
+    else:
+        first_cut = max(1, len(records) // 3)
+        second_cut = max(first_cut + 1, (len(records) * 2) // 3)
+        second_cut = min(second_cut, len(records) - 1)
+        takeoff_record = _best_motion_record(records[:first_cut], prefer_late=True)
+        apex_record = _best_motion_record(records[first_cut:second_cut], prefer_late=True)
+        landing_record = _best_motion_record(records[second_cut:], prefer_late=False)
+
+    low = min(scores)
+    span = max(max_score - low, 1e-9)
+    absolute_motion_score = _clamp(max_score / 0.12)
+
+    def confidence_for(record: tuple[int, str, float, float]) -> tuple[float, float]:
+        normalized = _clamp((record[3] - low) / span) if span > 1e-9 else _clamp(record[3] / max(max_score, 1e-9))
+        confidence = _clamp(0.36 + 0.12 * normalized + 0.08 * absolute_motion_score, high=0.54)
+        return round(confidence, 3), normalized
+
+    warning = "keyframe_candidates_motion_fallback"
+    flags = [*quality_flags, warning, "tal_candidate_motion_fallback_low_precision"]
+    if max_score < MOTION_FALLBACK_MIN_PEAK_SCORE:
+        flags.append("tal_candidate_motion_fallback_low_motion")
+    candidates: dict[str, Any] = {"quality_flags": list(dict.fromkeys(flags))}
+    for role, record in (("T", takeoff_record), ("A", apex_record), ("L", landing_record)):
+        confidence, normalized = confidence_for(record)
+        candidates[role] = _motion_only_candidate(
+            record,
+            role,
+            confidence,
+            normalized,
+            [warning, f"{role.lower()}_pose_signal_insufficient"],
+        )
+    return candidates
+
+
 def _motion_score_at(
     index: int,
     frame_id: str,
@@ -357,6 +489,9 @@ def _build_signals(
     for index, frame in enumerate(frames):
         if not isinstance(frame, dict):
             continue
+        tracking_state = str(frame.get("tracking_state") or "tracked")
+        if tracking_state in EXCLUDED_TRACKING_STATES:
+            continue
         keypoints = frame.get("keypoints", [])
         frame_id = _frame_stem(frame.get("frame") or frame.get("frame_id") or f"frame_{index + 1:04d}")
         signals.append(
@@ -373,6 +508,20 @@ def _build_signals(
             )
         )
     return signals
+
+
+def _excluded_pose_frame_counts(pose_data: dict[str, Any] | None) -> dict[str, int]:
+    frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
+    if not isinstance(frames, list):
+        return {}
+    counts: dict[str, int] = {}
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        state = str(frame.get("tracking_state") or "tracked")
+        if state in EXCLUDED_TRACKING_STATES:
+            counts[state] = counts.get(state, 0) + 1
+    return counts
 
 
 def _smooth(values: list[float | None]) -> list[float | None]:
@@ -444,6 +593,7 @@ def _detect_apex(signals: list[_FrameSignal], smoothed_com: list[float | None]) 
             "vertical_range": round(vertical_range, 5),
             "local_prominence": round(local_prominence, 5),
             "local_minimum": apex_index in local_minima,
+            "signal_index": apex_index,
             "score_components": {
                 "motion_peak": round(motion_score, 3),
                 "com_velocity": round(com_score, 3),
@@ -503,6 +653,7 @@ def _detect_takeoff(
             "knee_extension_deg": round(knee_extension, 3),
             "com_ascent_delta": round(com_ascent, 5),
             "motion_peak_score": round(motion_norm[index], 3),
+            "signal_index": index,
             "score_components": {
                 "motion_peak": round(motion_norm[index], 3),
                 "com_velocity": round(ascent_score, 3),
@@ -578,6 +729,7 @@ def _detect_landing(
             "knee_absorption_deg": round(knee_absorption, 3),
             "com_descent_delta": round(com_descent, 5),
             "motion_peak_score": round(motion_norm[index], 3),
+            "signal_index": index,
             "score_components": {
                 "motion_peak": round(motion_norm[index], 3),
                 "com_velocity": round(com_velocity_score, 3),
@@ -604,8 +756,34 @@ def _candidate_index(candidate: dict[str, Any]) -> int | None:
     evidence = candidate.get("evidence")
     if not isinstance(evidence, dict):
         return None
+    signal_value = evidence.get("signal_index")
+    if isinstance(signal_value, int):
+        return signal_value
     value = evidence.get("pose_index")
     return int(value) if isinstance(value, int) else None
+
+
+def _apply_ordered_confidence_floor(candidates: Iterable[dict[str, Any]]) -> None:
+    for candidate in candidates:
+        confidence = _to_float(candidate.get("confidence"))
+        if confidence is None or confidence >= ORDERED_TAL_CONFIDENCE_FLOOR:
+            continue
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        visibility = _to_float(evidence.get("visibility_score"))
+        has_visible_ordered_candidate = (
+            bool(candidate.get("frame_id"))
+            and confidence >= ORDERED_TAL_LOW_CONFIDENCE_MIN_RAW
+            and visibility is not None
+            and visibility >= MIN_VISIBILITY
+        )
+        if confidence < 0.30 and not has_visible_ordered_candidate:
+            continue
+        candidate["confidence"] = ORDERED_TAL_CONFIDENCE_FLOOR
+        warnings = candidate.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+            candidate["warnings"] = warnings
+        warnings.append("confidence_floor_from_ordered_tal")
 
 
 def detect_key_frame_candidates(
@@ -649,8 +827,15 @@ def detect_key_frame_candidates(
         }
 
     fps = _valid_effective_fps(effective_fps)
+    excluded_counts = _excluded_pose_frame_counts(pose_data)
+    if excluded_counts:
+        quality_flags.append("keyframe_candidates_excluded_unreliable_pose_frames")
     signals = _build_signals(pose_data, motion_scores, fps)
     if not signals:
+        fallback = _motion_fallback_candidates(motion_scores, fps, quality_flags + ["keyframe_candidates_insufficient_pose"])
+        if fallback is not None:
+            fallback["excluded_pose_frames"] = excluded_counts
+            return fallback
         warning = "keyframe_candidates_missing_pose"
         return {
             "T": _empty_candidate([warning]),
@@ -665,6 +850,11 @@ def detect_key_frame_candidates(
         quality_flags.append("keyframe_candidates_insufficient_pose")
     if low_visibility_count > len(signals) / 2:
         quality_flags.append("keyframe_candidates_low_visibility")
+    if valid_pose_count < 3:
+        fallback = _motion_fallback_candidates(motion_scores, fps, quality_flags)
+        if fallback is not None:
+            fallback["excluded_pose_frames"] = excluded_counts
+            return fallback
 
     smoothed_com = _smooth([signal.com_y for signal in signals])
     smoothed_knee = _smooth([signal.knee_angle for signal in signals])
@@ -680,6 +870,15 @@ def detect_key_frame_candidates(
     a_index = _candidate_index(apex)
     l_index = _candidate_index(landing)
     if t_index is None or a_index is None or l_index is None:
+        fallback = _motion_fallback_candidates(
+            motion_scores,
+            fps,
+            quality_flags + ["tal_candidate_incomplete", "tal_order_unresolved"],
+            min_peak_score=PARTIAL_TAL_LOW_MOTION_FALLBACK_MIN_PEAK_SCORE,
+        )
+        if fallback is not None:
+            fallback["excluded_pose_frames"] = excluded_counts
+            return fallback
         quality_flags.append("tal_candidate_incomplete")
         quality_flags.append("tal_order_unresolved")
     elif not (t_index < a_index < l_index):
@@ -688,13 +887,23 @@ def detect_key_frame_candidates(
         takeoff["warnings"].append(message)
         apex["warnings"].append(message)
         landing["warnings"].append(message)
+    else:
+        _apply_ordered_confidence_floor((takeoff, apex, landing))
 
     if any(candidate.get("confidence", 0.0) < 0.35 for candidate in (takeoff, apex, landing)):
         quality_flags.append("tal_candidate_confidence_low")
+
+    if (
+        "tal_order_invalid" in quality_flags
+        and (fallback := _motion_fallback_candidates(motion_scores, fps, quality_flags)) is not None
+    ):
+        fallback["excluded_pose_frames"] = excluded_counts
+        return fallback
 
     return {
         "T": takeoff,
         "A": apex,
         "L": landing,
+        "excluded_pose_frames": excluded_counts,
         "quality_flags": list(dict.fromkeys(quality_flags)),
     }

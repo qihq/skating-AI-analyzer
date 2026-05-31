@@ -75,6 +75,87 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(end_sec, 30.0)
         self.assertGreater(end_sec - start_sec, 20.0)
 
+    async def test_detect_action_window_uses_tight_jump_padding_to_reduce_glide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 41)]
+            motion_scores = [0.0] * 40
+            for index in range(10, 17):
+                motion_scores[index] = 1.0
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="ÃƒÂ¨Ã‚Â·Ã‚Â³ÃƒÂ¨Ã‚Â·Ã†â€™",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertEqual(start_sec, 4.65)
+        self.assertEqual(end_sec, 9.25)
+        self.assertLess(end_sec - start_sec, 5.0)
+
+    async def test_detect_action_window_jump_guard_prefers_later_sustained_motion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 61)]
+            motion_scores = [0.02] * 60
+            for index in range(1, 7):
+                motion_scores[index] = 1.0
+            for index in range(30, 36):
+                motion_scores[index] = 0.86
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="跳跃",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertGreaterEqual(start_sec, 14.0)
+        self.assertLess(end_sec - start_sec, 5.0)
+
+    async def test_detect_action_window_jump_guard_prefers_near_tie_late_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 21)]
+            motion_scores = [0.02] * 20
+            for index, value in enumerate([0.65, 0.66, 0.64, 0.63, 0.66, 0.64, 0.65], start=1):
+                motion_scores[index] = value
+            for index, value in enumerate([0.53, 0.54, 0.52, 0.53, 0.54, 0.52, 0.53], start=10):
+                motion_scores[index] = value
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="跳跃",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertEqual(start_sec, 4.65)
+        self.assertEqual(end_sec, 9.25)
+        self.assertLess(end_sec - start_sec, 5.0)
+
     async def test_jump_profile_uses_jump_frame_rate_during_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -188,6 +269,63 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(8.0 <= timestamp <= 16.0 for timestamp in extracted_timestamps))
         self.assertGreater(max(extracted_timestamps), 20.0)
         self.assertGreater(max(extracted_timestamps) - min(extracted_timestamps), 20.0)
+
+    async def test_full_video_debug_sampling_uses_video_duration_not_detected_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            thumb_paths = [root / "thumbs" / f"thumb_{index:05d}.jpg" for index in range(1, 193)]
+            extracted_timestamps: list[float] = []
+
+            async def fake_extract_thumbnails_in_window(
+                _video_path: Path,
+                _thumbs_dir: Path,
+                _start_sec: float,
+                _end_sec: float,
+                frame_rate: int = 5,
+            ) -> list[Path]:
+                self.assertEqual((_start_sec, _end_sec), (0.0, 12.0))
+                self.assertEqual(frame_rate, 16)
+                _thumbs_dir.mkdir(parents=True, exist_ok=True)
+                for thumb_path in thumb_paths:
+                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                    thumb_path.write_bytes(b"thumb")
+                return thumb_paths
+
+            async def fake_extract_full_frame_at(_video_path: Path, timestamp: float, target_path: Path) -> None:
+                extracted_timestamps.append(round(timestamp, 3))
+                target_path.write_bytes(b"frame")
+
+            scores = [0.02 for _ in thumb_paths]
+            for index in range(132, 145):
+                scores[index] = 1.0
+
+            with (
+                patch("app.services.video.detect_video_fps", return_value=30.0),
+                patch("app.services.video.detect_video_duration", return_value=12.0),
+                patch("app.services.video.detect_action_window", AsyncMock(return_value=(0.0, 5.0))) as detect_window_mock,
+                patch("app.services.video._extract_thumbnails_in_window", side_effect=fake_extract_thumbnails_in_window),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=scores),
+                patch("app.services.video._extract_full_frame_at", side_effect=fake_extract_full_frame_at),
+            ):
+                sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path=video_path,
+                    frames_dir=frames_dir,
+                    action_type="跳跃",
+                    analysis_profile="jump",
+                    dense_peak_bursts=True,
+                    full_video_window=True,
+                )
+
+        detect_window_mock.assert_not_called()
+        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(motion_payload["window_strategy"], "full_video_debug")
+        self.assertEqual(motion_payload["selection_strategy"], "dense_peak_bursts")
+        self.assertEqual(sampling_metadata.action_window_end, 12.0)
+        self.assertTrue(any(8.25 <= timestamp <= 9.1 for timestamp in extracted_timestamps))
 
 
 if __name__ == "__main__":
