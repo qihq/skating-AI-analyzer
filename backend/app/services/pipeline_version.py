@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.9"
+CURRENT_PIPELINE_VERSION = "v5.2.10"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -26,3 +26,4 @@ CURRENT_PIPELINE_VERSION = "v5.2.9"
 # v5.2.7: Apply tracker-style crop padding to overlap-safe rejected tracker hints even when they become the reference bbox.
 # v5.2.8: Treat reused lost tracker boxes as padded pose crop hints for distant tiny skaters.
 # v5.2.9: Recover malformed Path A JSON and ground report issues/improvements in Path B evidence when Path A is unavailable.
+# v5.2.10: Stop startup AI provider seeding so legacy duplicate provider rows cannot block container startup.

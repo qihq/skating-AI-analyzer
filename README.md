@@ -8,12 +8,13 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.9`.
+The current pipeline version is `v5.2.10`.
 
 ## Recent Updates
 
-The latest release focuses on making dual-path AI output more resilient and keeping reports actionable when one AI path returns malformed JSON.
+The latest release keeps NAS upgrades from failing on legacy AI provider rows while preserving the UI-based model setup flow.
 
+- `v5.2.10`: startup no longer seeds AI provider rows; configure model instances from `/settings/api`, and legacy duplicate provider rows no longer block container startup.
 - `v5.2.9`: Path A now requests stricter JSON, recovers malformed model output, retries a JSON-only repair pass, and reports fall back to Path B/top-issue evidence with action-specific drills.
 - `v5.2.8`: reused lost tracker boxes can be used as padded pose crop hints for distant tiny skaters.
 - `v5.2.7`: tracker-style crop padding is applied to overlap-safe rejected tracker hints when they become reference boxes.
@@ -103,12 +104,14 @@ cp .env.example .env
 Example:
 
 ```bash
-QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# AI keys are optional at startup. Prefer configuring model instances from
+# Parent Settings -> API Settings after the app is running.
+# QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 QWEN_VISION_MODEL=qwen3.6-plus
 QWEN_VISION_DAILY_COST_LIMIT_CNY=30
 QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 # VIDEO_TEMPORAL_MAX_FRAMES=12
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
 
 # Optional: enable phase-2 multi-pose tracking
@@ -122,6 +125,8 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 Notes:
 
 - `.env` is not tracked by Git.
+- AI provider rows are not auto-seeded on backend startup. Use `/settings/api` to create text, primary vision, Path A, and Path B model instances, then activate the desired provider per slot.
+- Existing NAS databases can keep their old provider rows; duplicate legacy rows will not stop the container from starting.
 - The default vision model is `qwen3.6-plus`; `qwen-vl-max-latest` is only kept as legacy migration input.
 - `QWEN_VISION_DAILY_COST_LIMIT_CNY` caps daily vision spend.
 - `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` estimates one video-temporal call.
@@ -277,6 +282,7 @@ All-in-one notes:
 - If `.env` is mounted, include `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task` when using the MediaPipe task model.
 - Include `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt` when using mounted YOLO weights.
 - If environment variables are configured directly in NAS or Container Manager, mounting `.env` is optional.
+- AI provider API keys can be configured after startup from `/settings/api`; only `SECRET_KEY` is required to encrypt saved keys.
 - `data`, `backups`, and `models` should remain host-mounted volumes so runtime data and model files are not baked into the image.
 - Older analysis rows that still store Windows absolute paths fall back to `/data/uploads/<analysis_id>/source.*` inside the all-in-one container.
 

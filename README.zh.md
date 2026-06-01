@@ -8,12 +8,13 @@
 
 Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
 
-当前分析管线版本为 `v5.2.9`。
+当前分析管线版本为 `v5.2.10`。
 
 ## 最近更新
 
-最新版本重点提升双路径 AI 输出的韧性，并确保某一路 AI 返回非标准 JSON 时，报告仍然可执行。
+最新版本重点避免 NAS 升级时旧 AI 供应商数据阻塞容器启动，同时保留通过 UI 配置模型实例的流程。
 
+- `v5.2.10`：后端启动不再自动 seed AI provider；请在 `/settings/api` 创建模型实例。旧数据库里重复的历史 provider 行不会再阻塞容器启动。
 - `v5.2.9`：Path A 会请求更严格的 JSON、恢复非标准模型输出、追加一次 JSON-only 修复重试；报告在 Path A 不可用时会回退使用 Path B/top issues 证据和动作专项训练建议。
 - `v5.2.8`：丢失后复用的 tracker bbox 可作为带 padding 的 pose crop hint，用于远距离小目标滑行者。
 - `v5.2.7`：当 overlap-safe rejected tracker hint 成为 reference bbox 时，应用 tracker 风格的 crop padding。
@@ -103,12 +104,14 @@ cp .env.example .env
 示例：
 
 ```bash
-QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# AI Key 启动时可不填。推荐应用启动后进入
+# 家长设置 -> API 设置，创建模型实例并保存 Key。
+# QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 QWEN_VISION_MODEL=qwen3.6-plus
 QWEN_VISION_DAILY_COST_LIMIT_CNY=30
 QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 # VIDEO_TEMPORAL_MAX_FRAMES=12
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SECRET_KEY=replace-with-a-random-32-char-secret
 
 # 可选：启用二期多姿态跟踪
@@ -122,6 +125,8 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 说明：
 
 - `.env` 不会提交到 Git。
+- 后端启动时不会再自动写入 AI provider 行。请在 `/settings/api` 创建文本报告、主视觉、Path A 和 Path B 模型实例，并按 slot 激活需要使用的供应商。
+- NAS 上已有的旧数据库可以继续复用；重复的历史 provider 行不会再导致容器启动失败。
 - 默认视觉模型为 `qwen3.6-plus`；`qwen-vl-max-latest` 只作为历史迁移输入保留。
 - `QWEN_VISION_DAILY_COST_LIMIT_CNY` 控制每日视觉成本上限。
 - `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` 用于估算单次视频语义调用成本。
@@ -277,6 +282,7 @@ all-in-one 说明：
 - 如果挂载 `.env`，启用 MediaPipe task 模型时请包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`。
 - 使用挂载 YOLO 权重时请包含 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。
 - 如果在 NAS 或 Container Manager 里直接配置环境变量，可以不挂载 `.env`。
+- AI provider 的 API Key 可以在启动后进入 `/settings/api` 配置；容器启动只要求 `SECRET_KEY` 用于加密保存的 Key。
 - `data`、`backups` 和 `models` 应保持宿主机挂载，避免运行时数据和模型文件被打进镜像。
 - 旧分析记录如果保存的是 Windows 绝对路径，all-in-one 会回退到容器内 `/data/uploads/<analysis_id>/source.*` 查找原视频。
 
