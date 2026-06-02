@@ -347,7 +347,8 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
         )
         with ExitStack() as stack:
             stack.enter_context(patch("app.routers.debug.precheck_video", AsyncMock(return_value=None)))
-            stack.enter_context(patch("app.routers.debug.extract_motion_sampled_frames", AsyncMock(return_value=(sampled, motion_scores, sampling))))
+            stack.enter_context(patch("app.services.video.detect_video_duration", return_value=5.0))
+            extract_mock = stack.enter_context(patch("app.routers.debug.extract_motion_sampled_frames", AsyncMock(return_value=(sampled, motion_scores, sampling))))
             pipeline_mock = stack.enter_context(patch("app.routers.debug.run_semantic_keyframe_pipeline", AsyncMock(return_value=semantic_result)))
             stack.enter_context(patch("app.routers.debug.extract_pose", side_effect=AssertionError("pose should not run")))
             stack.enter_context(patch("app.routers.analysis.analyze_frames_dual", side_effect=AssertionError("image AI should not run")))
@@ -355,6 +356,8 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
             await debug_router.process_debug_run(run_id)
 
         pipeline_mock.assert_awaited_once()
+        self.assertEqual(extract_mock.await_args.kwargs["input_window"].input_window_mode, "full_context")
+        self.assertEqual(pipeline_mock.await_args.kwargs["input_window"].input_window_mode, "full_context")
         self.assertEqual(pipeline_mock.await_args.kwargs["analyzed_video_kind"], "debug_action_window_ai")
         self.assertFalse(pipeline_mock.await_args.kwargs["precheck"])
         self.assertEqual(
@@ -371,6 +374,62 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved_run.result_json["semantic_frames"][0]["frame_id"], "semantic_0001")
             response = await debug_router.get_debug_run_frame(run_id, "semantic_0001.jpg", session)
             self.assertEqual(Path(response.path), semantic_frame)
+
+    async def test_video_ai_debug_upload_uses_manual_input_window(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+        from app.services.semantic_keyframe_pipeline import SemanticKeyframePipelineResult
+        from app.services.video import VideoSamplingMetadata
+
+        run_id = str(uuid4())
+        debug_root = Path(self.tmp.name) / "uploads" / "_debug" / run_id
+        frames_dir = debug_root / "frames"
+        semantic_dir = debug_root / "semantic_frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        semantic_dir.mkdir(parents=True, exist_ok=True)
+        source_video = debug_root / "source.mp4"
+        source_video.write_bytes(b"fake-video")
+        sampled = [frames_dir / "frame_0001.jpg"]
+        sampled[0].write_bytes(b"frame")
+        semantic_result = SemanticKeyframePipelineResult(
+            ai_clip={"path": str(debug_root / "action_window_ai.mp4"), "duration_sec": 10.0, "source_duration_sec": 30.0, "fps": 15.0, "timestamp_offset_sec": 10.0},
+            video_temporal={"valid": True, "confidence": 0.9, "quality_flags": []},
+            resolved_keyframes={"source": "video_ai_refined", "confidence": 0.9, "quality_flags": [], "selected": []},
+            quality_flags=[],
+            used_semantic_frames=False,
+        )
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="video_ai_keyframes",
+                    source_type="upload",
+                    video_path=str(source_video),
+                    action_type="è·³è·ƒ",
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    status="pending",
+                    summary={"manual_action_window_start_sec": 10.0, "manual_action_window_end_sec": 20.0},
+                )
+            )
+            await session.commit()
+
+        motion_scores = {"selected": [{"frame_id": "frame_0001", "timestamp": 10.2, "motion_score": 0.9}], "scores": [0.9]}
+        sampling = VideoSamplingMetadata(10.0, 20.0, 10.0, 20.0, 10.0, 30.0, False)
+        with ExitStack() as stack:
+            stack.enter_context(patch("app.routers.debug.precheck_video", AsyncMock(return_value=None)))
+            stack.enter_context(patch("app.services.video.detect_video_duration", return_value=30.0))
+            extract_mock = stack.enter_context(patch("app.routers.debug.extract_motion_sampled_frames", AsyncMock(return_value=(sampled, motion_scores, sampling))))
+            pipeline_mock = stack.enter_context(patch("app.routers.debug.run_semantic_keyframe_pipeline", AsyncMock(return_value=semantic_result)))
+            await debug_router.process_debug_run(run_id)
+
+        self.assertEqual(extract_mock.await_args.kwargs["input_window"].input_window_mode, "manual_window")
+        self.assertEqual(extract_mock.await_args.kwargs["input_window"].input_window_start_sec, 10.0)
+        self.assertEqual(pipeline_mock.await_args.kwargs["input_window"].input_window_end_sec, 20.0)
+        async with self.database.AsyncSessionLocal() as session:
+            saved_run = await session.get(models.DebugRun, run_id)
+            self.assertEqual(saved_run.result_json["input_window"]["input_window_mode"], "manual_window")
 
     async def test_video_ai_debug_from_analysis_passes_bio_candidates_to_semantic_pipeline(self) -> None:
         import app.models as models

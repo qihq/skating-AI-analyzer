@@ -38,11 +38,13 @@ ACTION_CLIP_MAX_MB = int(os.getenv("ACTION_CLIP_MAX_MB", "100"))
 ACTION_AI_CLIP_SIZE = os.getenv("ACTION_AI_CLIP_SIZE", "640x360")
 ACTION_AI_CLIP_FPS = float(os.getenv("ACTION_AI_CLIP_FPS", "15"))
 ACTION_AI_CLIP_CRF = int(os.getenv("ACTION_AI_CLIP_CRF", "30"))
+ACTION_AI_CLIP_MAX_SECONDS = float(os.getenv("ACTION_AI_CLIP_MAX_SECONDS", str(max(ACTION_CLIP_MAX_SECONDS, 15.0))))
 ACTION_AI_CLIP_MAX_MB = int(os.getenv("ACTION_AI_CLIP_MAX_MB", "40"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
 ACTION_WINDOW_DETECTION_FPS = 2
+JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS = float(os.getenv("JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS", "15"))
 BLUR_THRESHOLD = float(os.getenv("FRAME_BLUR_THRESHOLD", "80.0"))
 MIN_VIDEO_DURATION_SECONDS = 0.5
 MIN_VIDEO_WIDTH = 320
@@ -105,6 +107,28 @@ class VideoSamplingMetadata:
     effective_fps: float
     source_fps: float
     is_slow_motion: bool
+
+
+@dataclass(slots=True)
+class VideoInputWindow:
+    source_duration_sec: float | None
+    input_window_start_sec: float
+    input_window_end_sec: float
+    input_window_duration_sec: float
+    input_window_mode: str
+    input_window_truncated: bool
+    input_window_reason: str
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "source_duration_sec": round(self.source_duration_sec, 3) if isinstance(self.source_duration_sec, (int, float)) else None,
+            "input_window_start_sec": round(self.input_window_start_sec, 3),
+            "input_window_end_sec": round(self.input_window_end_sec, 3),
+            "input_window_duration_sec": round(self.input_window_duration_sec, 3),
+            "input_window_mode": self.input_window_mode,
+            "input_window_truncated": self.input_window_truncated,
+            "input_window_reason": self.input_window_reason,
+        }
 
 
 @dataclass(slots=True)
@@ -186,6 +210,108 @@ def _effective_sampling_context(
     # 设计说明: N 个采样帧只有 N-1 个时间间隔；慢动作源视频先折算回动作真实时间轴。
     effective_fps = (max(sample_count, 2) - 1) / effective_duration
     return window_start_sec, window_end_sec, round(effective_fps, 3)
+
+
+def _normalize_manual_input_window(
+    manual_start_sec: float | None,
+    manual_end_sec: float | None,
+    *,
+    source_duration_sec: float | None,
+) -> tuple[float, float] | None:
+    if manual_start_sec is None and manual_end_sec is None:
+        return None
+    if manual_start_sec is None or manual_end_sec is None:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window requires both start and end seconds.",
+        )
+    try:
+        start = float(manual_start_sec)
+        end = float(manual_end_sec)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window start/end must be valid numbers.",
+        ) from exc
+    if start < 0:
+        raise AnalysisPipelineError(AnalysisErrorCode.VIDEO_FORMAT_INVALID, "Manual action window start must be >= 0.")
+    if end <= start:
+        raise AnalysisPipelineError(AnalysisErrorCode.VIDEO_FORMAT_INVALID, "Manual action window end must be greater than start.")
+    if source_duration_sec is not None and source_duration_sec > 0:
+        if start >= source_duration_sec:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+                "Manual action window start is outside the source video duration.",
+            )
+        if end > source_duration_sec + 0.01:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+                "Manual action window end is outside the source video duration.",
+            )
+        end = min(end, source_duration_sec)
+    if end - start < MIN_VIDEO_DURATION_SECONDS:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window is too short for analysis.",
+        )
+    return round(start, 3), round(end, 3)
+
+
+def build_video_input_window(
+    video_path: Path,
+    *,
+    manual_start_sec: float | None = None,
+    manual_end_sec: float | None = None,
+) -> VideoInputWindow:
+    duration = detect_video_duration(video_path)
+    source_duration = float(duration) if duration and duration > 0 else None
+    manual_window = _normalize_manual_input_window(
+        manual_start_sec,
+        manual_end_sec,
+        source_duration_sec=source_duration,
+    )
+    if manual_window is not None:
+        start, end = manual_window
+        return VideoInputWindow(
+            source_duration_sec=source_duration,
+            input_window_start_sec=start,
+            input_window_end_sec=end,
+            input_window_duration_sec=round(end - start, 3),
+            input_window_mode="manual_window",
+            input_window_truncated=True,
+            input_window_reason="manual_action_window",
+        )
+
+    end = source_duration if source_duration is not None else float(MAX_SECONDS)
+    mode = "full_context"
+    truncated = False
+    reason = "full_context"
+    if source_duration is None:
+        end = float(MAX_SECONDS)
+        mode = "system_truncated"
+        truncated = True
+        reason = "source_duration_unknown_fallback"
+    return VideoInputWindow(
+        source_duration_sec=source_duration,
+        input_window_start_sec=0.0,
+        input_window_end_sec=round(end, 3),
+        input_window_duration_sec=round(end, 3),
+        input_window_mode=mode,
+        input_window_truncated=truncated,
+        input_window_reason=reason,
+    )
+
+
+def attach_input_window_payload(
+    motion_payload: dict[str, object],
+    input_window: VideoInputWindow | None,
+) -> dict[str, object]:
+    if input_window is None:
+        return motion_payload
+    payload = input_window.to_payload()
+    motion_payload["input_window"] = payload
+    motion_payload.update(payload)
+    return motion_payload
 
 
 def _frame_dimensions() -> tuple[str, str]:
@@ -508,6 +634,19 @@ def _fallback_profile_window(action_type: str, analysis_profile: str | None, sou
     return 0.0, min(float(MAX_SECONDS), source_window_size + 2.0)
 
 
+def _short_jump_full_context_duration(video_path: Path, analysis_profile: str | None, source_fps: float) -> float | None:
+    profile = (analysis_profile or "").strip().lower()
+    if profile != "jump" or source_fps >= SLOW_MOTION_THRESHOLD_FPS:
+        return None
+    max_duration = min(float(MAX_SECONDS), max(0.0, JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS))
+    if max_duration <= 0.0:
+        return None
+    duration = detect_video_duration(video_path)
+    if duration is None or duration <= 0.0 or duration > max_duration:
+        return None
+    return min(float(duration), float(MAX_SECONDS))
+
+
 def _action_window_padding(analysis_profile: str | None) -> tuple[float, float]:
     profile = (analysis_profile or "").strip().lower()
     if profile == "jump":
@@ -727,6 +866,18 @@ async def detect_action_window(
         })
         return 0.0, float(MAX_SECONDS)
 
+    short_jump_duration = _short_jump_full_context_duration(video_path, analysis_profile, source_fps)
+    if short_jump_duration is not None:
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "jump_short_video_full_context",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "source_duration_sec": round(short_jump_duration, 3),
+            "selected_start_sec": 0.0,
+            "selected_end_sec": round(short_jump_duration, 3),
+        })
+        return 0.0, short_jump_duration
+
     thumbs_dir = PROCESSING_ROOT / "_action_windows" / f"{video_path.stem}_{uuid.uuid4().hex}"
     try:
         if thumbs_dir.exists():
@@ -935,6 +1086,8 @@ async def cut_action_window_ai_clip(
     window_start_sec: float,
     window_end_sec: float,
     out_path: Path,
+    *,
+    max_duration_sec: float | None = None,
 ) -> Path:
     """
     Create the compact action-window clip used only for AI video inputs.
@@ -944,8 +1097,8 @@ async def cut_action_window_ai_clip(
     """
     start = max(0.0, float(window_start_sec))
     end = max(start + 0.5, float(window_end_sec))
-    if end - start > ACTION_CLIP_MAX_SECONDS:
-        end = start + ACTION_CLIP_MAX_SECONDS
+    if max_duration_sec is not None and end - start > max_duration_sec:
+        end = start + max_duration_sec
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.unlink(missing_ok=True)
@@ -1738,6 +1891,7 @@ async def extract_motion_sampled_frames(
     *,
     dense_peak_bursts: bool = False,
     full_video_window: bool = False,
+    input_window: VideoInputWindow | None = None,
 ) -> tuple[list[Path], dict[str, object], VideoSamplingMetadata]:
     for existing_frame in frames_dir.glob("frame_*.jpg"):
         existing_frame.unlink(missing_ok=True)
@@ -1750,7 +1904,19 @@ async def extract_motion_sampled_frames(
     slow_motion_scale = get_slow_motion_scale(source_fps) if is_slow_motion else 1.0
     frame_rate = get_frame_rate_for_profile(analysis_profile)
     sample_count = get_max_frames_for_profile(analysis_profile)
-    if full_video_window:
+    if input_window is not None:
+        start_sec = input_window.input_window_start_sec
+        end_sec = input_window.input_window_end_sec
+        window_diagnostics: dict[str, object] = {
+            "selection_reason": input_window.input_window_reason,
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+            "input_window_mode": input_window.input_window_mode,
+            "input_window_truncated": input_window.input_window_truncated,
+        }
+    elif full_video_window:
         duration = detect_video_duration(video_path)
         start_sec = 0.0
         end_sec = min(float(MAX_SECONDS), float(duration)) if duration and duration > 0 else float(MAX_SECONDS)
@@ -1884,6 +2050,7 @@ async def extract_motion_sampled_frames(
         "selected": selected_records,
         "scores": [round(score, 4) for score in scores],
     }
+    attach_input_window_payload(motion_payload, input_window)
 
     return output_paths, motion_payload, sampling_metadata
 

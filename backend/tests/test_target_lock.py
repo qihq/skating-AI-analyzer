@@ -311,6 +311,85 @@ class TargetLockTests(unittest.TestCase):
         self.assertGreaterEqual(payload["lock_confidence"], 0.78)
         self.assertIn("target_lock_stable_zoomed_aggregate_confidence_auto_locked", payload["quality_flags"])
 
+    def test_build_target_preview_requires_manual_for_ambiguous_zoomed_people(self) -> None:
+        preview = build_target_preview(
+            "analysis-1",
+            ["frame_0001.jpg", "frame_0002.jpg"],
+            detected_candidates=[
+                {
+                    "id": "candidate_auto_stable",
+                    "bbox": {"x": 0.6066, "y": 0.2, "width": 0.0486, "height": 0.2605},
+                    "confidence": 0.8975,
+                    "source": "yolo_zoomed_content",
+                    "support_count": 35,
+                    "support_frame_count": 9,
+                    "support_confidence": 0.8743,
+                    "anchor_frame": "frame_0002.jpg",
+                    "anchor_index": 1,
+                },
+                {
+                    "id": "other_zoomed_person",
+                    "bbox": {"x": 0.4804, "y": 0.2676, "width": 0.032, "height": 0.1201},
+                    "confidence": 0.8614,
+                    "source": "yolo_zoomed_content",
+                    "support_count": 35,
+                    "support_frame_count": 9,
+                    "support_confidence": 0.8743,
+                    "anchor_frame": "frame_0002.jpg",
+                    "anchor_index": 1,
+                },
+            ],
+        )
+
+        self.assertEqual(preview.target_lock_status, "awaiting_manual")
+        self.assertEqual(preview.auto_candidate_id, "candidate_auto_stable")
+        self.assertIn("target_lock_zoomed_multiperson_manual_review", preview.candidates[0]["quality_flags"])
+        payload = build_target_lock_payload(preview)
+        self.assertIsNone(payload["selected_bbox"])
+        self.assertIn("target_lock_zoomed_multiperson_manual_review", payload["quality_flags"])
+
+    def test_build_target_preview_requires_manual_when_other_anchor_frame_has_multiple_zoomed_people(self) -> None:
+        preview = build_target_preview(
+            "analysis-1",
+            ["frame_0001.jpg", "frame_0002.jpg", "frame_0003.jpg", "frame_0004.jpg"],
+            detected_candidates=[
+                {
+                    "id": "candidate_auto_stable",
+                    "bbox": {"x": 0.4402, "y": 0.2001, "width": 0.0484, "height": 0.234},
+                    "confidence": 0.909,
+                    "source": "yolo_zoomed_content",
+                    "support_count": 32,
+                    "support_frame_count": 7,
+                    "support_confidence": 0.8571,
+                    "anchor_frame": "frame_0002.jpg",
+                    "anchor_index": 1,
+                },
+                {
+                    "id": "other_anchor_person_1",
+                    "bbox": {"x": 0.3828, "y": 0.2, "width": 0.0502, "height": 0.1524},
+                    "confidence": 0.8741,
+                    "source": "yolo_zoomed_content",
+                    "anchor_frame": "frame_0004.jpg",
+                    "anchor_index": 3,
+                },
+                {
+                    "id": "other_anchor_person_2",
+                    "bbox": {"x": 0.5354, "y": 0.237, "width": 0.0303, "height": 0.1245},
+                    "confidence": 0.8685,
+                    "source": "yolo_zoomed_content",
+                    "anchor_frame": "frame_0004.jpg",
+                    "anchor_index": 3,
+                },
+            ],
+        )
+
+        self.assertEqual(preview.target_lock_status, "awaiting_manual")
+        self.assertEqual(preview.auto_candidate_id, "candidate_auto_stable")
+        self.assertIn("target_lock_zoomed_multiperson_manual_review", preview.candidates[0]["quality_flags"])
+        payload = build_target_lock_payload(preview)
+        self.assertIsNone(payload["selected_bbox"])
+        self.assertIn("target_lock_zoomed_multiperson_manual_review", payload["quality_flags"])
+
     def test_select_stable_target_candidate_computes_frame_level_support_confidence(self) -> None:
         candidates = []
         for index, confidence in enumerate([0.84, 0.90, 0.88, 0.86, 0.83, 0.81, 0.89, 0.87, 0.85, 0.82], start=1):

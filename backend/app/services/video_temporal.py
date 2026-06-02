@@ -171,6 +171,7 @@ JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_PEAK_LAG_SECONDS = 0.20
 JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_SPAN_SECONDS = 0.25
 JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_STRONG_RECORDS = 3
 JUMP_COHERENT_TAL_SKELETON_CONFLICT_CONFIDENCE = 0.60
+JUMP_COHERENT_TAL_FALLBACK_SKELETON_CONFLICT_CONFIDENCE = 0.50
 JUMP_COHERENT_TAL_SKELETON_CONFLICT_MIN_SHIFT_SECONDS = 1.0
 JUMP_COHERENT_TAL_LATE_MAIN_CLUSTER_TAKEOFF_TOLERANCE_SECONDS = 0.08
 JUMP_COHERENT_TAL_LATE_MAIN_CLUSTER_APEX_LEAD_SECONDS = 0.20
@@ -2278,20 +2279,6 @@ def _jump_coherent_tal_motion_conflict_flags(
     severe_occlusion_risk = _video_temporal_has_severe_occlusion_risk(video_ai_result)
     revisible_glide_out_risk = _video_temporal_mentions_revisible_glide_out(video_ai_result)
     failed_landing_followthrough = _video_temporal_has_failed_landing_followthrough(video_ai_result)
-    if (
-        profile != "jump"
-        or not (
-            explicit_video_fallback
-            or occlusion_risk
-            or weak_jump_risk
-            or is_quality_retry
-            or uncertain_timestamp_recommendation
-            or skeleton_timeline_check_possible
-        )
-        or not motion_records
-        or duration_sec <= 0
-    ):
-        return []
 
     key_moments = video_ai_result.get("key_moments")
     if not isinstance(key_moments, dict):
@@ -2304,6 +2291,47 @@ def _jump_coherent_tal_motion_conflict_flags(
     if not (
         t_value + SEMANTIC_ORDER_MIN_GAP_SECONDS < a_value
         and a_value + SEMANTIC_ORDER_MIN_GAP_SECONDS < l_value
+    ):
+        return []
+
+    skeleton_takeoff_ts = _candidate_timestamp(skeleton_takeoff) if isinstance(skeleton_takeoff, dict) else None
+    skeleton_apex_ts = _candidate_timestamp(skeleton_apex) if isinstance(skeleton_apex, dict) else None
+    skeleton_landing = skeleton_candidates.get("L") if isinstance(skeleton_candidates, dict) else None
+    skeleton_landing_ts = _candidate_timestamp(skeleton_landing) if isinstance(skeleton_landing, dict) else None
+    skeleton_fallback_timeline_conflict = (
+        profile == "jump"
+        and explicit_video_fallback
+        and skeleton_takeoff_ts is not None
+        and skeleton_apex_ts is not None
+        and skeleton_landing_ts is not None
+        and _candidate_confidence(skeleton_takeoff) >= JUMP_COHERENT_TAL_FALLBACK_SKELETON_CONFLICT_CONFIDENCE
+        and _candidate_confidence(skeleton_apex) >= JUMP_COHERENT_TAL_FALLBACK_SKELETON_CONFLICT_CONFIDENCE
+        and _candidate_confidence(skeleton_landing) >= JUMP_COHERENT_TAL_FALLBACK_SKELETON_CONFLICT_CONFIDENCE
+        and skeleton_takeoff_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS < skeleton_apex_ts
+        and skeleton_apex_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS < skeleton_landing_ts
+        and t_value - skeleton_takeoff_ts >= JUMP_COHERENT_TAL_SKELETON_CONFLICT_MIN_SHIFT_SECONDS
+        and a_value - skeleton_apex_ts >= JUMP_COHERENT_TAL_SKELETON_CONFLICT_MIN_SHIFT_SECONDS
+        and l_value - skeleton_landing_ts >= JUMP_COHERENT_TAL_SKELETON_CONFLICT_MIN_SHIFT_SECONDS
+    )
+    if skeleton_fallback_timeline_conflict and confidence < JUMP_COHERENT_TAL_FALLBACK_GLIDE_OUT_CONFIDENCE:
+        return [
+            "video_temporal_resolver_coherent_tal_skeleton_timeline_conflict",
+            "video_temporal_resolver_coherent_tal_advisory_fallback_skeleton_conflict",
+            "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+        ]
+
+    if (
+        profile != "jump"
+        or not (
+            explicit_video_fallback
+            or occlusion_risk
+            or weak_jump_risk
+            or is_quality_retry
+            or uncertain_timestamp_recommendation
+            or skeleton_timeline_check_possible
+        )
+        or not motion_records
+        or duration_sec <= 0
     ):
         return []
 
@@ -2455,8 +2483,6 @@ def _jump_coherent_tal_motion_conflict_flags(
             "video_temporal_resolver_coherent_tal_retry_tail_motion_conflict",
             "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
         ]
-    skeleton_takeoff_ts = _candidate_timestamp(skeleton_takeoff) if isinstance(skeleton_takeoff, dict) else None
-    skeleton_apex_ts = _candidate_timestamp(skeleton_apex) if isinstance(skeleton_apex, dict) else None
     skeleton_early_timeline_conflict = (
         skeleton_takeoff_ts is not None
         and skeleton_apex_ts is not None
@@ -3288,6 +3314,7 @@ def resolve_semantic_keyframes(
         isinstance(normalized_video, dict)
         and explicit_video_fallback
         and motion_conflict_rejected
+        and "video_temporal_resolver_coherent_tal_advisory_fallback_skeleton_conflict" not in flags
         and not _video_temporal_has_severe_occlusion_risk(normalized_video)
         and not conflicted_small_occluded_target
     )

@@ -718,6 +718,45 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertIn("video_temporal_resolver_takeoff_backward_refinement_guard", plan["quality_flags"])
         self.assertIn("video_temporal_resolver_landing_refinement_phase_tolerance", plan["quality_flags"])
 
+    def test_advisory_fallback_rejects_late_tal_when_skeleton_timeline_conflicts(self) -> None:
+        payload = _video_payload(0.65)
+        payload["fallback_recommendation"] = "use_sampled_frames"
+        payload["quality_flags"] = ["video_temporal_not_high_confidence", "video_temporal_fallback_recommended"]
+        payload["phase_segments"] = [
+            {"phase_code": "approach", "phase_label": "approach", "time_start": 4.15, "time_end": 6.15, "key_frame_hint": 5.65, "confidence": 0.9},
+            {"phase_code": "preparation", "phase_label": "preparation", "time_start": 6.15, "time_end": 6.95, "key_frame_hint": 6.65, "confidence": 0.8},
+            {"phase_code": "takeoff", "phase_label": "takeoff", "time_start": 6.95, "time_end": 7.35, "key_frame_hint": 7.15, "confidence": 0.7},
+            {"phase_code": "air", "phase_label": "air", "time_start": 7.35, "time_end": 7.75, "key_frame_hint": 7.55, "confidence": 0.6},
+            {"phase_code": "landing", "phase_label": "landing", "time_start": 7.75, "time_end": 7.95, "key_frame_hint": 7.85, "confidence": 0.6},
+            {"phase_code": "glide_out", "phase_label": "glide_out", "time_start": 7.95, "time_end": 8.75, "key_frame_hint": 8.35, "confidence": 0.8},
+        ]
+        payload["key_moments"] = {"T_takeoff_sec": 7.15, "A_air_sec": 7.55, "L_landing_sec": 7.85}
+        video = validate_video_temporal_payload(
+            normalize_video_temporal_payload(payload, "mimo", "mimo-v2.5"),
+            duration_sec=8.75,
+        )
+        skeleton = {
+            "key_frame_candidates": {
+                "T": {"frame_id": "frame_0003", "timestamp": 4.463, "confidence": 0.534},
+                "A": {"frame_id": "frame_0012", "timestamp": 5.588, "confidence": 0.643},
+                "L": {"frame_id": "frame_0016", "timestamp": 6.463, "confidence": 0.754},
+            }
+        }
+
+        plan = resolve_semantic_keyframes(
+            video,
+            skeleton,
+            {"selected": [], "scores": []},
+            video_duration_sec=8.75,
+            analysis_profile="jump",
+        )
+
+        self.assertEqual(plan["source"], "skeleton_fallback")
+        self.assertFalse(semantic_keyframes_are_reliable(plan))
+        self.assertIn("video_temporal_resolver_coherent_tal_advisory_fallback_skeleton_conflict", plan["quality_flags"])
+        self.assertEqual([item["timestamp"] for item in plan["selected"]], [6.463])
+        self.assertIn("video_temporal_resolver_partial_skeleton_fallback", plan["quality_flags"])
+
     def test_high_confidence_jump_tal_overrides_advisory_video_fallback_as_blended(self) -> None:
         plan = resolve_semantic_keyframes(
             _validated_moderate_fallback_video(0.85),

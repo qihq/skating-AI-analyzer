@@ -37,6 +37,8 @@ TARGET_LOCK_COMPLETE_BODY_MAX_AREA = 0.18
 TARGET_LOCK_COMPLETE_BODY_MIN_HEIGHT = 0.35
 TARGET_LOCK_COMPLETE_BODY_MIN_WIDTH = 0.07
 TARGET_LOCK_COMPLETE_BODY_CONFIDENCE_ADVANTAGE = 0.15
+TARGET_LOCK_ZOOMED_MULTIPERSON_MIN_CONFIDENCE = 0.55
+TARGET_LOCK_ZOOMED_MULTIPERSON_MIN_CENTER_DISTANCE = 0.08
 
 
 @dataclass(slots=True)
@@ -288,6 +290,40 @@ def _distant_single_jump_auto_lock_flags(
         "target_lock_distant_single_jump_auto_locked",
         "target_lock_tiny_zoomed_low_support_manual_review",
     ]
+
+
+def _zoomed_multiperson_manual_review_flags(
+    candidate: dict[str, Any],
+    candidates: Sequence[dict[str, Any]],
+) -> list[str]:
+    if str(candidate.get("source") or "") != "yolo_zoomed_content":
+        return []
+
+    by_anchor_frame: dict[str, list[dict[str, Any]]] = {}
+    for item in candidates:
+        if not isinstance(item, dict) or str(item.get("source") or "") != "yolo_zoomed_content":
+            continue
+        if _candidate_confidence(item) < TARGET_LOCK_ZOOMED_MULTIPERSON_MIN_CONFIDENCE:
+            continue
+        if not isinstance(item.get("bbox"), dict):
+            continue
+        anchor_frame = str(item.get("anchor_frame") or "")
+        if not anchor_frame:
+            continue
+        by_anchor_frame.setdefault(anchor_frame, []).append(item)
+
+    for frame_candidates in by_anchor_frame.values():
+        for index, first in enumerate(frame_candidates):
+            first_bbox = first.get("bbox")
+            if not isinstance(first_bbox, dict):
+                continue
+            for second in frame_candidates[index + 1 :]:
+                second_bbox = second.get("bbox")
+                if not isinstance(second_bbox, dict):
+                    continue
+                if _bbox_center_distance(first_bbox, second_bbox) >= TARGET_LOCK_ZOOMED_MULTIPERSON_MIN_CENTER_DISTANCE:
+                    return ["target_lock_zoomed_multiperson_manual_review"]
+    return []
 
 
 def _candidate_confidence(candidate: dict[str, Any]) -> float:
@@ -632,14 +668,32 @@ def build_target_preview(
         if distant_single_jump_auto_lock:
             flags = top_candidate.get("quality_flags") if isinstance(top_candidate.get("quality_flags"), list) else []
             top_candidate["quality_flags"] = _merge_strings(flags, distant_single_jump_flags)
+        zoomed_multiperson_flags = _zoomed_multiperson_manual_review_flags(top_candidate, candidates)
+        zoomed_multiperson_manual_review = bool(zoomed_multiperson_flags)
+        if zoomed_multiperson_manual_review:
+            flags = top_candidate.get("quality_flags") if isinstance(top_candidate.get("quality_flags"), list) else []
+            top_candidate["quality_flags"] = _merge_strings(flags, zoomed_multiperson_flags)
         if tiny_zoomed_manual_review:
             flags = top_candidate.get("quality_flags") if isinstance(top_candidate.get("quality_flags"), list) else []
             top_candidate["quality_flags"] = _merge_strings(flags, ["target_lock_tiny_zoomed_low_support_manual_review"])
-        if (lock_confidence < TARGET_LOCK_AUTO_THRESHOLD or tiny_zoomed_manual_review) and not stable_zoomed_auto_lock and not distant_single_jump_auto_lock:
+        if (
+            lock_confidence < TARGET_LOCK_AUTO_THRESHOLD
+            or tiny_zoomed_manual_review
+            or zoomed_multiperson_manual_review
+        ) and not stable_zoomed_auto_lock and not distant_single_jump_auto_lock:
             flags = top_candidate.get("quality_flags") if isinstance(top_candidate.get("quality_flags"), list) else []
             top_candidate["quality_flags"] = _merge_strings(flags, ["target_lock_manual_review_low_confidence"])
-        global_auto_lock = lock_confidence >= TARGET_LOCK_AUTO_THRESHOLD and not tiny_zoomed_manual_review
-        target_lock_status = "auto_locked" if global_auto_lock or stable_zoomed_auto_lock or distant_single_jump_auto_lock else "awaiting_manual"
+        global_auto_lock = (
+            lock_confidence >= TARGET_LOCK_AUTO_THRESHOLD
+            and not tiny_zoomed_manual_review
+            and not zoomed_multiperson_manual_review
+        )
+        target_lock_status = (
+            "auto_locked"
+            if (global_auto_lock or stable_zoomed_auto_lock or distant_single_jump_auto_lock)
+            and not zoomed_multiperson_manual_review
+            else "awaiting_manual"
+        )
         candidates.sort(
             key=lambda item: (
                 1 if _candidate_id(item) == auto_candidate_id else 0,

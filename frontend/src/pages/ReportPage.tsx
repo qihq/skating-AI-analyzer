@@ -146,6 +146,31 @@ function formatDuration(value?: number | null) {
   return `${value.toFixed(2)}s`;
 }
 
+function analysisInputWindowText(analysis: AnalysisDetail) {
+  if (analysis.input_window_start_sec == null || analysis.input_window_end_sec == null) {
+    return null;
+  }
+  const range = `${analysis.input_window_start_sec.toFixed(1)}s - ${analysis.input_window_end_sec.toFixed(1)}s`;
+  const source = analysis.source_duration_sec != null ? ` / 原视频 ${analysis.source_duration_sec.toFixed(1)}s` : "";
+  if (analysis.input_window_mode === "manual_window") {
+    return `手动片段：${range}${source}`;
+  }
+  if (analysis.input_window_mode === "full_context") {
+    return `全量上下文：${range}${source}`;
+  }
+  if (analysis.input_window_mode === "system_truncated") {
+    return `系统截断：${range}${source}`;
+  }
+  return `AI 输入范围：${range}${source}`;
+}
+
+function analysisWindowFallbackText(analysis: AnalysisDetail) {
+  if (analysis.action_window_start == null || analysis.action_window_end == null) {
+    return null;
+  }
+  return `分析窗口：${analysis.action_window_start.toFixed(1)}s - ${analysis.action_window_end.toFixed(1)}s`;
+}
+
 function formatLogTimestamp(value: string) {
   return apiDateTimeFormatter({
     month: "2-digit",
@@ -1023,6 +1048,12 @@ export default function ReportPage() {
             </div>
           ) : null}
 
+          {isParentMode && deferredAnalysis.input_window_truncated && deferredAnalysis.input_window_mode === "system_truncated" ? (
+            <div className="rounded-[28px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-700">
+              本次 AI 没有看到完整视频：{analysisInputWindowText(deferredAnalysis)}
+            </div>
+          ) : null}
+
           <section className="app-card overflow-hidden p-6 tablet:p-8">
             <div className="grid gap-6 tablet:grid-cols-[minmax(220px,240px)_1fr] tablet:items-center web:gap-8">
               <div className="flex justify-center tablet:justify-start">
@@ -1043,11 +1074,12 @@ export default function ReportPage() {
                   {deferredAnalysis.skater_name ? <span>练习档案：{deferredAnalysis.skater_name}</span> : null}
                   {deferredAnalysis.skill_category ? <span>技能分类：{deferredAnalysis.skill_category}</span> : null}
                 </div>
-                {isParentMode && deferredAnalysis.action_window_start != null && deferredAnalysis.action_window_end != null ? (
+                {isParentMode && (analysisInputWindowText(deferredAnalysis) || (deferredAnalysis.action_window_start != null && deferredAnalysis.action_window_end != null)) ? (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                    <span>
-                      分析窗口：{deferredAnalysis.action_window_start.toFixed(1)}s - {deferredAnalysis.action_window_end.toFixed(1)}s
-                    </span>
+                    {analysisInputWindowText(deferredAnalysis) ? <span>{analysisInputWindowText(deferredAnalysis)}</span> : null}
+                    {!analysisInputWindowText(deferredAnalysis) && analysisWindowFallbackText(deferredAnalysis) ? (
+                      <span>{analysisWindowFallbackText(deferredAnalysis)}</span>
+                    ) : null}
                     {deferredAnalysis.is_slow_motion ? (
                       <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-bold text-orange-600">
                         慢动作 {Math.round(deferredAnalysis.source_fps ?? 0)}fps

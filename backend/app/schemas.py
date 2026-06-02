@@ -106,6 +106,15 @@ class AnalysisDetail(BaseModel):
     target_lock_status: str | None = None
     action_window_start: float | None = None
     action_window_end: float | None = None
+    manual_action_window_start: float | None = None
+    manual_action_window_end: float | None = None
+    source_duration_sec: float | None = None
+    input_window_start_sec: float | None = None
+    input_window_end_sec: float | None = None
+    input_window_duration_sec: float | None = None
+    input_window_mode: str | None = None
+    input_window_truncated: bool = False
+    input_window_reason: str | None = None
     source_fps: float | None = None
     is_slow_motion: bool = False
     force_score: int | None = None

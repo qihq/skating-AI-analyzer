@@ -43,6 +43,9 @@ from app.services.target_lock import (
 )
 from app.services.video import (
     VideoSamplingMetadata,
+    VideoInputWindow,
+    attach_input_window_payload,
+    build_video_input_window,
     extract_motion_sampled_frames,
     precheck_video,
     restore_sampled_frames,
@@ -160,6 +163,45 @@ def _sampling_metadata_payload(metadata: VideoSamplingMetadata) -> dict[str, Any
     }
 
 
+def _input_window_payload_from_motion(motion_scores: dict[str, Any] | object) -> dict[str, Any]:
+    if not isinstance(motion_scores, dict):
+        return {}
+    payload = motion_scores.get("input_window")
+    if isinstance(payload, dict):
+        return _as_jsonable(payload)
+    return {
+        key: motion_scores.get(key)
+        for key in (
+            "source_duration_sec",
+            "input_window_start_sec",
+            "input_window_end_sec",
+            "input_window_duration_sec",
+            "input_window_mode",
+            "input_window_truncated",
+            "input_window_reason",
+        )
+        if key in motion_scores
+    }
+
+
+def _manual_input_window_from_summary(run: DebugRun) -> tuple[float | None, float | None]:
+    summary = run.summary if isinstance(run.summary, dict) else {}
+    start = summary.get("manual_action_window_start_sec")
+    end = summary.get("manual_action_window_end_sec")
+    try:
+        return (
+            float(start) if start is not None else None,
+            float(end) if end is not None else None,
+        )
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _debug_input_window_for_run(run: DebugRun, video_path: Path) -> VideoInputWindow:
+    manual_start, manual_end = _manual_input_window_from_summary(run)
+    return build_video_input_window(video_path, manual_start_sec=manual_start, manual_end_sec=manual_end)
+
+
 def _sampling_metadata_from_payload(payload: object) -> VideoSamplingMetadata | None:
     if not isinstance(payload, dict):
         return None
@@ -233,6 +275,7 @@ async def _prepare_formal_debug_sampling(
     precheck_start = time.monotonic()
     await precheck_video(video_path)
     timings["precheck_s"] = _elapsed(precheck_start)
+    input_window = _debug_input_window_for_run(run, video_path)
 
     analysis = await _source_analysis_for_run(run)
     if analysis is not None and isinstance(analysis.frame_motion_scores, dict):
@@ -243,6 +286,24 @@ async def _prepare_formal_debug_sampling(
             timings["extract_frames_s"] = _elapsed(extract_start)
             if sampled_frames:
                 motion_scores = _as_jsonable(analysis.frame_motion_scores)
+                if not _input_window_payload_from_motion(motion_scores):
+                    if analysis.action_window_start is not None and analysis.action_window_end is not None:
+                        legacy_start = float(analysis.action_window_start)
+                        legacy_end = float(analysis.action_window_end)
+                        attach_input_window_payload(
+                            motion_scores,
+                            VideoInputWindow(
+                                source_duration_sec=input_window.source_duration_sec,
+                                input_window_start_sec=legacy_start,
+                                input_window_end_sec=legacy_end,
+                                input_window_duration_sec=round(max(0.0, legacy_end - legacy_start), 3),
+                                input_window_mode="legacy_action_window",
+                                input_window_truncated=False,
+                                input_window_reason="legacy_saved_analysis",
+                            ),
+                        )
+                    else:
+                        attach_input_window_payload(motion_scores, input_window)
                 sampling_metadata = _sampling_metadata_from_analysis(analysis, motion_scores)
                 return sampled_frames, motion_scores, sampling_metadata, DEBUG_SAMPLING_ANALYSIS_REPLAY
 
@@ -252,7 +313,9 @@ async def _prepare_formal_debug_sampling(
         frames_dir,
         run.action_type,
         run.analysis_profile,
+        input_window=input_window,
     )
+    attach_input_window_payload(motion_scores, input_window)
     timings["extract_frames_s"] = _elapsed(extract_start)
     sampling_source = DEBUG_SAMPLING_FORMAL_RESAMPLE if run.source_type == "analysis" else DEBUG_SAMPLING_UPLOAD_FORMAL
     return sampled_frames, _as_jsonable(motion_scores), sampling_metadata, sampling_source
@@ -667,6 +730,8 @@ async def _create_debug_run(
     action_subtype: str | None,
     analysis_profile: str | None,
     note: str | None,
+    manual_action_window_start_sec: float | None,
+    manual_action_window_end_sec: float | None,
     session: AsyncSession,
 ) -> DebugRunCreateResponse:
     if mode not in DEBUG_MODES:
@@ -703,6 +768,19 @@ async def _create_debug_run(
         raise HTTPException(status_code=400, detail="Invalid action_type.")
     resolved_action_subtype = normalize_action_subtype(resolved_action_type, resolved_action_subtype)
     resolved_profile = resolved_profile or infer_profile_hint(resolved_action_type, resolved_action_subtype)
+    input_window = build_video_input_window(
+        video_path,
+        manual_start_sec=manual_action_window_start_sec,
+        manual_end_sec=manual_action_window_end_sec,
+    )
+    manual_payload = (
+        {
+            "manual_action_window_start_sec": input_window.input_window_start_sec,
+            "manual_action_window_end_sec": input_window.input_window_end_sec,
+        }
+        if input_window.input_window_mode == "manual_window"
+        else {}
+    )
 
     run = DebugRun(
         id=run_id,
@@ -715,7 +793,7 @@ async def _create_debug_run(
         analysis_profile=resolved_profile,
         note=note,
         status="pending",
-        summary={"status": "pending"},
+        summary={"status": "pending", **manual_payload, "input_window": input_window.to_payload()},
         result_json=None,
     )
     session.add(run)
@@ -749,6 +827,7 @@ async def _run_local_pose_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict
         )
     if sampling_metadata is None:
         raise RuntimeError("Debug sampling metadata is not available.")
+    input_window_payload = _input_window_payload_from_motion(motion_scores)
 
     source_target_lock = await _source_target_lock_for_run(run) if sampling_source == DEBUG_SAMPLING_ANALYSIS_REPLAY else None
     source_target_lock_status = str(source_target_lock.get("status")) if isinstance(source_target_lock, dict) else None
@@ -789,6 +868,7 @@ async def _run_local_pose_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict
             "note": run.note,
             "sampling_source": sampling_source,
             "sampling_metadata": _sampling_metadata_payload(sampling_metadata),
+            "input_window": input_window_payload,
             "motion_scores": motion_scores,
             "sampled_frames": _frame_records(run.id, sampled_frames, motion_scores.get("selected") if isinstance(motion_scores, dict) else None),
             "target_preview": preview_payload,
@@ -801,6 +881,7 @@ async def _run_local_pose_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict
             "timings": timings,
             "frame_count": len(sampled_frames),
             "sampling_source": sampling_source,
+            "input_window": input_window_payload,
             "target_preview": preview_payload,
             "quality_flags": ["debug_awaiting_manual_target_lock"],
         }
@@ -851,6 +932,7 @@ async def _run_local_pose_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict
         "note": run.note,
         "sampling_source": sampling_source,
         "sampling_metadata": _sampling_metadata_payload(sampling_metadata),
+        "input_window": input_window_payload,
         "motion_scores": motion_scores,
         "sampled_frames": _frame_records(run.id, sampled_frames, selected_records),
         "target_preview": {
@@ -874,6 +956,7 @@ async def _run_local_pose_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict
         "timings": timings,
         "frame_count": len(sampled_frames),
         "sampling_source": sampling_source,
+        "input_window": input_window_payload,
         "analysis_profile": analysis_profile,
         "tracker": tracker_summary,
         "pose": pose_summary,
@@ -888,12 +971,14 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
     timings: dict[str, float] = {}
     video_path = _require_debug_video_path(run)
     frames_dir = _debug_frames_dir(run.id)
+    initial_input_window = _debug_input_window_for_run(run, video_path)
 
     await _update_run_progress(
         run.id,
         stage="sampling",
         label="Preparing sampled frames from the formal pipeline.",
         progress=0.08,
+        input_window=initial_input_window.to_payload(),
     )
     sampled_frames, motion_scores, sampling_metadata, sampling_source = await _prepare_formal_debug_sampling(
         run,
@@ -901,6 +986,8 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
         frames_dir,
         timings,
     )
+    input_window_payload = _input_window_payload_from_motion(motion_scores)
+    input_window = _debug_input_window_for_run(run, video_path)
     await _update_run_progress(
         run.id,
         stage="video_ai",
@@ -909,6 +996,7 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
         timings=timings,
         frame_count=len(sampled_frames),
         sampling_source=sampling_source,
+        input_window=input_window_payload,
     )
     bio_data, pose_data, target_lock, tracker_summary = await _video_ai_debug_bio_data(
         run,
@@ -940,6 +1028,7 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
         analysis_profile=run.analysis_profile,
         bio_data=bio_data,
         analyzed_video_kind="debug_action_window_ai",
+        input_window=input_window,
         precheck=False,
         progress_callback=_semantic_progress,
     )
@@ -960,6 +1049,7 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
         "note": run.note,
         "sampling_source": sampling_source,
         "sampling_metadata": _sampling_metadata_payload(sampling_metadata),
+        "input_window": input_window_payload,
         "motion_scores": motion_scores,
         "sampled_frames": _frame_records(run.id, sampled_frames, motion_scores.get("selected") if isinstance(motion_scores, dict) else None),
         "target_lock": target_lock,
@@ -987,6 +1077,7 @@ async def _run_video_ai_keyframes(run: DebugRun) -> tuple[dict[str, Any], dict[s
         "timings": timings,
         "sampling_source": sampling_source,
         "action_window": action_window_summary,
+        "input_window": input_window_payload,
         "timestamp_source": effective_source,
         "video_ai_confidence": semantic_result.video_temporal.get("confidence") if isinstance(semantic_result.video_temporal, dict) else None,
         "resolved_source": effective_source,
@@ -1064,6 +1155,8 @@ async def create_local_pose_debug_run(
     action_subtype: str | None = Form(default=None),
     analysis_profile: str | None = Form(default=None),
     note: str | None = Form(default=None),
+    manual_action_window_start_sec: float | None = Form(default=None),
+    manual_action_window_end_sec: float | None = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> DebugRunCreateResponse:
     return await _create_debug_run(
@@ -1075,6 +1168,8 @@ async def create_local_pose_debug_run(
         action_subtype=action_subtype,
         analysis_profile=analysis_profile,
         note=note,
+        manual_action_window_start_sec=manual_action_window_start_sec,
+        manual_action_window_end_sec=manual_action_window_end_sec,
         session=session,
     )
 
@@ -1088,6 +1183,8 @@ async def create_video_ai_debug_run(
     action_subtype: str | None = Form(default=None),
     analysis_profile: str | None = Form(default=None),
     note: str | None = Form(default=None),
+    manual_action_window_start_sec: float | None = Form(default=None),
+    manual_action_window_end_sec: float | None = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> DebugRunCreateResponse:
     return await _create_debug_run(
@@ -1099,6 +1196,8 @@ async def create_video_ai_debug_run(
         action_subtype=action_subtype,
         analysis_profile=analysis_profile,
         note=note,
+        manual_action_window_start_sec=manual_action_window_start_sec,
+        manual_action_window_end_sec=manual_action_window_end_sec,
         session=session,
     )
 

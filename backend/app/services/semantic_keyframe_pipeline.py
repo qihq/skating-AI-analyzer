@@ -9,7 +9,9 @@ from typing import Any, Awaitable, Callable, Sequence
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
 from app.services.person_tracker import detect_person_candidates
 from app.services.video import (
+    VideoInputWindow,
     VideoSamplingMetadata,
+    build_video_input_window,
     cut_action_window_ai_clip,
     detect_video_duration,
     detect_video_fps,
@@ -110,6 +112,7 @@ class VideoTemporalTaskHandle:
     clip_fps: float
     timestamp_offset_sec: float
     analyzed_video_kind: str
+    input_window: VideoInputWindow
 
     def ai_clip_payload(self) -> dict[str, Any]:
         return {
@@ -118,6 +121,7 @@ class VideoTemporalTaskHandle:
             "source_duration_sec": self.source_duration_sec,
             "fps": self.clip_fps,
             "timestamp_offset_sec": self.timestamp_offset_sec,
+            **self.input_window.to_payload(),
         }
 
 
@@ -1796,17 +1800,20 @@ async def start_video_temporal_task(
     action_type: str,
     action_subtype: str | None,
     analyzed_video_kind: str,
+    input_window: VideoInputWindow | None = None,
     retry_context: dict[str, Any] | None = None,
     precheck: bool = True,
 ) -> VideoTemporalTaskHandle:
     if precheck:
         await precheck_video(video_path)
-    source_duration_sec = detect_video_duration(video_path)
+    effective_input_window = input_window or build_video_input_window(video_path)
+    source_duration_sec = effective_input_window.source_duration_sec or detect_video_duration(video_path)
     ai_clip_path = await cut_action_window_ai_clip(
         video_path,
-        sampling_metadata.action_window_start,
-        sampling_metadata.action_window_end,
+        effective_input_window.input_window_start_sec,
+        effective_input_window.input_window_end_sec,
         work_dir / "action_window_ai.mp4",
+        max_duration_sec=None,
     )
     clip_duration_sec = detect_video_duration(ai_clip_path)
     clip_fps = detect_video_fps(ai_clip_path)
@@ -1818,7 +1825,7 @@ async def start_video_temporal_task(
             video_duration_sec=clip_duration_sec,
             source_video_duration_sec=source_duration_sec,
             source_fps=clip_fps,
-            timestamp_offset_sec=sampling_metadata.action_window_start,
+            timestamp_offset_sec=effective_input_window.input_window_start_sec,
             analyzed_video_kind=analyzed_video_kind,
             retry_context=retry_context,
         )
@@ -1829,8 +1836,9 @@ async def start_video_temporal_task(
         source_duration_sec=source_duration_sec,
         clip_duration_sec=clip_duration_sec,
         clip_fps=clip_fps,
-        timestamp_offset_sec=sampling_metadata.action_window_start,
+        timestamp_offset_sec=effective_input_window.input_window_start_sec,
         analyzed_video_kind=analyzed_video_kind,
+        input_window=effective_input_window,
     )
 
 
@@ -2047,6 +2055,7 @@ async def retry_video_temporal_if_needed(
     analysis_profile: str | None,
     bio_data: dict[str, Any] | None = None,
     analyzed_video_kind: str = "action_window_ai",
+    input_window: VideoInputWindow | None = None,
     progress_callback: SemanticPipelineProgressCallback | None = None,
 ) -> SemanticKeyframePipelineResult:
     video_temporal = result.video_temporal
@@ -2081,6 +2090,7 @@ async def retry_video_temporal_if_needed(
         action_type=action_type,
         action_subtype=action_subtype,
         analyzed_video_kind=f"{analyzed_video_kind}_retry",
+        input_window=input_window,
         retry_context=retry_context,
         precheck=False,
     )
@@ -2178,6 +2188,7 @@ async def run_semantic_keyframe_pipeline(
     analysis_profile: str | None,
     bio_data: dict[str, Any] | None = None,
     analyzed_video_kind: str = "action_window_ai",
+    input_window: VideoInputWindow | None = None,
     precheck: bool = True,
     progress_callback: SemanticPipelineProgressCallback | None = None,
 ) -> SemanticKeyframePipelineResult:
@@ -2188,6 +2199,7 @@ async def run_semantic_keyframe_pipeline(
         action_type=action_type,
         action_subtype=action_subtype,
         analyzed_video_kind=analyzed_video_kind,
+        input_window=input_window,
         precheck=precheck,
     )
     if progress_callback is not None:
@@ -2225,6 +2237,7 @@ async def run_semantic_keyframe_pipeline(
         analysis_profile=analysis_profile,
         bio_data=bio_data,
         analyzed_video_kind=analyzed_video_kind,
+        input_window=input_window,
         progress_callback=progress_callback,
     )
     if progress_callback is not None:

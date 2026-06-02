@@ -147,6 +147,8 @@ async def _run_migrations(conn) -> None:
         ("processing_logs", "JSON"),
         ("target_lock", "JSON"),
         ("target_lock_status", "TEXT"),
+        ("manual_action_window_start", "REAL"),
+        ("manual_action_window_end", "REAL"),
         ("auto_unlocked_skill", "TEXT REFERENCES skill_nodes(id)"),
     ]
 
@@ -321,6 +323,8 @@ async def _apply_patch_e(conn) -> None:
     for column_name, column_type in [
         ("action_window_start", "REAL"),
         ("action_window_end", "REAL"),
+        ("manual_action_window_start", "REAL"),
+        ("manual_action_window_end", "REAL"),
         ("source_fps", "REAL"),
         ("is_slow_motion", "INTEGER DEFAULT 0"),
     ]:

@@ -65,6 +65,8 @@ class Analysis(Base):
     target_lock_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     action_window_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     action_window_end: Mapped[float | None] = mapped_column(Float, nullable=True)
+    manual_action_window_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    manual_action_window_end: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_slow_motion: Mapped[bool] = mapped_column(Boolean, default=False)
     force_score: Mapped[int | None] = mapped_column(Integer, nullable=True)

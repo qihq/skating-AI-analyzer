@@ -170,6 +170,15 @@ export interface AnalysisDetail extends AnalysisListItem {
   target_lock_status: string | null;
   action_window_start: number | null;
   action_window_end: number | null;
+  manual_action_window_start: number | null;
+  manual_action_window_end: number | null;
+  source_duration_sec: number | null;
+  input_window_start_sec: number | null;
+  input_window_end_sec: number | null;
+  input_window_duration_sec: number | null;
+  input_window_mode: string | null;
+  input_window_truncated: boolean;
+  input_window_reason: string | null;
   source_fps: number | null;
   is_slow_motion: boolean;
   skill_node_id: string | null;
@@ -466,6 +475,8 @@ export interface DebugRunCreatePayload {
   actionType?: string | null;
   actionSubtype?: string | null;
   analysisProfile?: string | null;
+  manualActionWindowStartSec?: string | number | null;
+  manualActionWindowEndSec?: string | number | null;
   note?: string | null;
 }
 
@@ -1080,6 +1091,10 @@ function buildDebugRunFormData(payload: DebugRunCreatePayload) {
   }
   if (payload.analysisProfile) {
     formData.append("analysis_profile", payload.analysisProfile);
+  }
+  if (payload.manualActionWindowStartSec != null && payload.manualActionWindowEndSec != null) {
+    formData.append("manual_action_window_start_sec", String(payload.manualActionWindowStartSec));
+    formData.append("manual_action_window_end_sec", String(payload.manualActionWindowEndSec));
   }
   if (payload.note) {
     formData.append("note", payload.note);

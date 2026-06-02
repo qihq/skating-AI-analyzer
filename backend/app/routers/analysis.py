@@ -90,7 +90,10 @@ from app.services.target_lock import (
     target_preview_anchor_frame_indices,
 )
 from app.services.video import (
+    VideoInputWindow,
     VideoSamplingMetadata,
+    attach_input_window_payload,
+    build_video_input_window,
     build_timestamp_map,
     build_processing_frames_dir,
     build_upload_paths,
@@ -190,6 +193,47 @@ def _sampling_metadata_from_saved(
         source_fps=round(source_fps, 3),
         is_slow_motion=is_slow_motion,
     )
+
+
+def _input_window_payload_from_motion(motion_scores: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(motion_scores, dict):
+        return {}
+    payload = motion_scores.get("input_window")
+    if isinstance(payload, dict):
+        return payload
+    return {
+        key: motion_scores.get(key)
+        for key in (
+            "source_duration_sec",
+            "input_window_start_sec",
+            "input_window_end_sec",
+            "input_window_duration_sec",
+            "input_window_mode",
+            "input_window_truncated",
+            "input_window_reason",
+        )
+        if key in motion_scores
+    }
+
+
+def _input_window_payload_for_saved_analysis(analysis: Analysis) -> dict[str, Any]:
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    payload = _input_window_payload_from_motion(motion_scores)
+    if payload:
+        return payload
+    if analysis.action_window_start is None or analysis.action_window_end is None:
+        return {}
+    start = float(analysis.action_window_start)
+    end = float(analysis.action_window_end)
+    return {
+        "source_duration_sec": None,
+        "input_window_start_sec": start,
+        "input_window_end_sec": end,
+        "input_window_duration_sec": round(max(0.0, end - start), 3),
+        "input_window_mode": "legacy_action_window",
+        "input_window_truncated": False,
+        "input_window_reason": "legacy_saved_analysis",
+    }
 
 
 def _skater_display_name(skater: Skater) -> str:
@@ -974,6 +1018,7 @@ async def _start_video_temporal_task_if_missing(
     action_subtype: str | None,
     motion_scores: dict[str, object],
     current_task: asyncio.Task | None,
+    input_window: VideoInputWindow | None,
 ) -> tuple[asyncio.Task | None, float | None]:
     if current_task is not None or isinstance(motion_scores.get("video_temporal"), dict):
         return current_task, None
@@ -984,6 +1029,7 @@ async def _start_video_temporal_task_if_missing(
         action_type=action_type,
         action_subtype=action_subtype,
         analyzed_video_kind="action_window_ai",
+        input_window=input_window,
         precheck=False,
     )
     await _append_analysis_log(
@@ -993,8 +1039,9 @@ async def _start_video_temporal_task_if_missing(
         message='已启动视频 AI 语义时间定位。',
         detail='video_temporal_task_started',
         analyzed_video_path=str(handle.ai_clip_path),
-        timestamp_offset_sec=sampling_metadata.action_window_start,
+        timestamp_offset_sec=handle.timestamp_offset_sec,
         clip_duration_sec=handle.clip_duration_sec,
+        input_window=handle.input_window.to_payload(),
     )
     return handle.task, handle.source_duration_sec
 
@@ -1014,6 +1061,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
     saved_action_window_end = 0.0
     saved_source_fps = 30.0
     saved_is_slow_motion = False
+    input_window: VideoInputWindow | None = None
     video_temporal_task: asyncio.Task | None = None
     video_temporal_result: dict[str, Any] | None = None
     resolved_keyframes: dict[str, Any] | None = None
@@ -1056,6 +1104,11 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             saved_action_window_end = float(analysis.action_window_end or 0.0)
             saved_source_fps = float(analysis.source_fps or 30.0)
             saved_is_slow_motion = bool(analysis.is_slow_motion)
+            input_window = build_video_input_window(
+                video_path,
+                manual_start_sec=analysis.manual_action_window_start,
+                manual_end_sec=analysis.manual_action_window_end,
+            )
 
         if retry_from_stage == "report":
             await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
@@ -1093,6 +1146,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES and upload_frames_dir is not None and upload_frames_dir.exists():
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
+                motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
                 sampling_metadata = _sampling_metadata_from_saved(
                     action_window_start=saved_action_window_start,
                     action_window_end=saved_action_window_end,
@@ -1110,6 +1164,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         action_subtype=action_subtype,
                         motion_scores=motion_scores,
                         current_task=video_temporal_task,
+                        input_window=input_window,
                     )
                     if started_duration is not None:
                         video_temporal_duration_sec = started_duration
@@ -1144,7 +1199,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         processing_frames_dir,
                         action_type,
                         analysis_profile_hint,
+                        input_window=input_window,
                     )
+                    motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
                     video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
                         analysis_id=analysis_id,
                         video_path=video_path,
@@ -1154,6 +1211,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         action_subtype=action_subtype,
                         motion_scores=motion_scores,
                         current_task=video_temporal_task,
+                        input_window=input_window,
                     )
                     if started_duration is not None:
                         video_temporal_duration_sec = started_duration
@@ -1226,6 +1284,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 raise RuntimeError('?????????????????')
             sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
             motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
+            motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
             sampling_metadata = _sampling_metadata_from_saved(
                 action_window_start=saved_action_window_start,
                 action_window_end=saved_action_window_end,
@@ -1243,6 +1302,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     action_subtype=action_subtype,
                     motion_scores=motion_scores,
                     current_task=video_temporal_task,
+                    input_window=input_window,
                 )
                 if started_duration is not None:
                     video_temporal_duration_sec = started_duration
@@ -1523,6 +1583,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_profile=analysis_profile,
                 bio_data=bio_data,
                 analyzed_video_kind="action_window_ai",
+                input_window=input_window,
             )
             video_temporal_result = semantic_pipeline.video_temporal
             resolved_keyframes = semantic_pipeline.resolved_keyframes
@@ -1576,9 +1637,10 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     try:
                         path_a_clip_path = await cut_action_window_ai_clip(
                             video_path,
-                            sampling_metadata.action_window_start,
-                            sampling_metadata.action_window_end,
+                            input_window.input_window_start_sec if input_window else sampling_metadata.action_window_start,
+                            input_window.input_window_end_sec if input_window else sampling_metadata.action_window_end,
                             processing_frames_dir.parent / 'action_window_ai.mp4',
+                            max_duration_sec=None,
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning('Analysis %s AI action-window clip failed; Path A will use frames: %s', analysis_id, exc)
@@ -2092,6 +2154,7 @@ def _detail_from_analysis(
     *,
     include_error_detail: bool = False,
 ) -> AnalysisDetail:
+    input_window = _input_window_payload_for_saved_analysis(analysis)
     return AnalysisDetail(
         id=analysis.id,
         skater_id=analysis.skater_id,
@@ -2125,6 +2188,15 @@ def _detail_from_analysis(
         target_lock_status=analysis.target_lock_status,
         action_window_start=analysis.action_window_start,
         action_window_end=analysis.action_window_end,
+        manual_action_window_start=analysis.manual_action_window_start,
+        manual_action_window_end=analysis.manual_action_window_end,
+        source_duration_sec=input_window.get("source_duration_sec"),
+        input_window_start_sec=input_window.get("input_window_start_sec"),
+        input_window_end_sec=input_window.get("input_window_end_sec"),
+        input_window_duration_sec=input_window.get("input_window_duration_sec"),
+        input_window_mode=input_window.get("input_window_mode"),
+        input_window_truncated=bool(input_window.get("input_window_truncated", False)),
+        input_window_reason=input_window.get("input_window_reason"),
         source_fps=analysis.source_fps,
         is_slow_motion=analysis.is_slow_motion,
         force_score=analysis.force_score,
@@ -2556,6 +2628,11 @@ async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Anal
                 processing_frames_dir,
                 analysis.action_type,
                 analysis.analysis_profile or infer_profile_hint(analysis.action_type, analysis.action_subtype),
+                input_window=build_video_input_window(
+                    video_path,
+                    manual_start_sec=analysis.manual_action_window_start,
+                    manual_end_sec=analysis.manual_action_window_end,
+                ),
             )
             persist_frames(restored_paths, frames_dir)
             analysis.frame_motion_scores = motion_scores
@@ -3289,6 +3366,8 @@ async def upload_analysis(
     skill_category: str | None = Form(default=None),
     note: str | None = Form(default=None),
     session_id: str | None = Form(default=None),
+    manual_action_window_start_sec: float | None = Form(default=None),
+    manual_action_window_end_sec: float | None = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisUploadResponse:
     if action_type not in VALID_ACTION_TYPES:
@@ -3311,6 +3390,11 @@ async def upload_analysis(
     try:
         await save_upload_file(file, video_path)
         await precheck_video(video_path)
+        manual_window = build_video_input_window(
+            video_path,
+            manual_start_sec=manual_action_window_start_sec,
+            manual_end_sec=manual_action_window_end_sec,
+        )
     except AnalysisPipelineError as exc:
         video_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail={"code": exc.code.value, "message": exc.detail}) from exc
@@ -3331,6 +3415,8 @@ async def upload_analysis(
         analysis_profile=inferred_input_profile,
         pipeline_version=CURRENT_PIPELINE_VERSION,
         video_path=str(video_path),
+        manual_action_window_start=manual_window.input_window_start_sec if manual_window.input_window_mode == "manual_window" else None,
+        manual_action_window_end=manual_window.input_window_end_sec if manual_window.input_window_mode == "manual_window" else None,
         note=_normalize_optional_text(note),
         status="pending",
         processing_timings=None,

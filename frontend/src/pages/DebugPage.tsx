@@ -24,6 +24,7 @@ import PoseViewer from "../components/PoseViewer";
 import ProviderMetricsPanel from "../components/ProviderMetricsPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
+import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
@@ -279,6 +280,40 @@ function JsonBlock({ value }: { value: unknown }) {
     <pre className="max-h-[34rem] overflow-auto rounded-[18px] bg-slate-950 p-4 text-xs leading-6 text-slate-100">
       {JSON.stringify(value ?? {}, null, 2)}
     </pre>
+  );
+}
+
+function inputWindowLabel(value: unknown) {
+  const inputWindow = asRecord(value);
+  const mode = typeof inputWindow.input_window_mode === "string" ? inputWindow.input_window_mode : "-";
+  const start = formatDuration(inputWindow.input_window_start_sec);
+  const end = formatDuration(inputWindow.input_window_end_sec);
+  const sourceDuration = formatDuration(inputWindow.source_duration_sec);
+  const truncated = Boolean(inputWindow.input_window_truncated);
+  return {
+    mode,
+    range: `${start} - ${end}`,
+    sourceDuration,
+    reason: typeof inputWindow.input_window_reason === "string" ? inputWindow.input_window_reason : "-",
+    truncated,
+  };
+}
+
+function InputWindowPanel({ value }: { value: unknown }) {
+  const label = inputWindowLabel(value);
+  if (label.mode === "-") {
+    return null;
+  }
+  return (
+    <div className={`rounded-[18px] border p-4 ${label.truncated ? "border-amber-200 bg-amber-50" : "border-emerald-100 bg-emerald-50"}`}>
+      <p className="text-xs font-semibold text-slate-500">AI 输入范围</p>
+      <p className="mt-2 text-sm font-semibold text-slate-900">
+        {label.mode} · {label.range}
+      </p>
+      <p className="mt-1 text-xs text-slate-500">
+        source {label.sourceDuration} · {label.reason}
+      </p>
+    </div>
   );
 }
 
@@ -764,6 +799,9 @@ function DebugRunForm({
   const [note, setNote] = useState("");
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
+  const [manualWindowStart, setManualWindowStart] = useState("");
+  const [manualWindowEnd, setManualWindowEnd] = useState("");
 
   useEffect(() => {
     if (!analysisId && defaultAnalysisId) {
@@ -772,7 +810,16 @@ function DebugRunForm({
   }, [analysisId, defaultAnalysisId]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setFile(event.target.files?.[0] ?? null);
+    const nextFile = event.target.files?.[0] ?? null;
+    setFile(nextFile);
+    setVideoDurationSec(null);
+    setManualWindowStart("");
+    setManualWindowEnd("");
+    if (nextFile) {
+      void readVideoDuration(nextFile)
+        .then((duration) => setVideoDurationSec(duration))
+        .catch(() => setVideoDurationSec(null));
+    }
   };
 
   const handleSubmit = async (event: FormEvent) => {
@@ -780,7 +827,7 @@ function DebugRunForm({
     setState("loading");
     setError(null);
     try {
-      const payload = {
+      const payload: Parameters<typeof createLocalDebugRun>[0] = {
         analysisId: source === "analysis" ? analysisId : null,
         file: source === "upload" ? file : null,
         actionType: source === "upload" ? actionType : null,
@@ -793,6 +840,14 @@ function DebugRunForm({
       }
       if (source === "upload" && !payload.file) {
         throw new Error("请选择要调试的视频文件。");
+      }
+      const windowError = source === "upload" ? validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec) : null;
+      if (windowError) {
+        throw new Error(windowError);
+      }
+      if (source === "upload" && manualWindowStart.trim() && manualWindowEnd.trim()) {
+        payload.manualActionWindowStartSec = manualWindowStart.trim();
+        payload.manualActionWindowEndSec = manualWindowEnd.trim();
       }
       const response = mode === "local_pose_keyframes" ? await createLocalDebugRun(payload) : await createVideoAiDebugRun(payload);
       setState("ready");
@@ -851,6 +906,36 @@ function DebugRunForm({
               <span className="text-xs font-semibold text-slate-500">视频文件</span>
               <input type="file" accept="video/mp4,video/quicktime,video/x-msvideo,.mp4,.mov,.avi" onChange={handleFileChange} className="app-input mt-2 rounded-[18px] text-sm" />
             </label>
+            {videoDurationSec != null ? <p className="text-xs text-slate-500">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
+            {shouldShowManualWindow(videoDurationSec) ? (
+              <div className="rounded-[18px] border border-amber-100 bg-amber-50 p-3">
+                <p className="text-xs font-semibold text-slate-600">AI 输入片段</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <label className="block">
+                    <span className="text-xs font-semibold text-slate-500">开始秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowStart}
+                      onChange={(event) => setManualWindowStart(event.target.value)}
+                      className="app-input mt-1 rounded-[14px] text-sm"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold text-slate-500">结束秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowEnd}
+                      onChange={(event) => setManualWindowEnd(event.target.value)}
+                      className="app-input mt-1 rounded-[14px] text-sm"
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block">
                 <span className="text-xs font-semibold text-slate-500">动作类型</span>
@@ -1016,6 +1101,7 @@ function DebugRunDetailPanel({
   const resolved = asRecord(result.resolved_keyframes);
   const motionScores = asRecord(result.motion_scores);
   const samplingMetadata = asRecord(result.sampling_metadata);
+  const inputWindow = result.input_window ?? summary.input_window ?? motionScores.input_window;
   const effectiveTimestampSource =
     typeof result.effective_timestamp_source === "string"
       ? result.effective_timestamp_source
@@ -1092,6 +1178,7 @@ function DebugRunDetailPanel({
       <div className="mt-5 min-w-0">
         {activeTab === "overview" ? (
           <div className="space-y-4">
+            <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-[18px] border border-slate-200 bg-slate-50 p-4">
                 <p className="text-xs font-semibold text-slate-500">总耗时</p>
@@ -1198,6 +1285,7 @@ function DebugRunDetailPanel({
 
         {activeTab === "video" ? (
           <div className="space-y-4">
+            <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-[18px] border border-slate-200 bg-white p-4">
                 <p className="text-xs font-semibold text-slate-500">Provider</p>

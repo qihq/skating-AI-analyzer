@@ -20,6 +20,7 @@ import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey } from "../utils/datetime";
+import { appendManualWindow, readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -165,6 +166,9 @@ export default function ReviewPage() {
   const [uploadProgress, setUploadProgress] = useState({ loaded: 0, total: 0, percent: 0 });
   const [pendingAnalysisId, setPendingAnalysisId] = useState<string | null>(null);
   const [processingStatus, setProcessingStatus] = useState<AnalysisStatus>("pending");
+  const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
+  const [manualWindowStart, setManualWindowStart] = useState("");
+  const [manualWindowEnd, setManualWindowEnd] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -412,7 +416,15 @@ export default function ReviewPage() {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
     setSelectedFile(file);
+    setVideoDurationSec(null);
+    setManualWindowStart("");
+    setManualWindowEnd("");
     setError(null);
+    if (file) {
+      void readVideoDuration(file)
+        .then((duration) => setVideoDurationSec(duration))
+        .catch(() => setVideoDurationSec(null));
+    }
   };
 
   const handleActionTypeChange = (nextType: ActionType) => {
@@ -484,6 +496,12 @@ export default function ReviewPage() {
       return;
     }
 
+    const windowError = validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec);
+    if (windowError) {
+      setError(windowError);
+      return;
+    }
+
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("action_type", selectedActionType);
@@ -499,6 +517,7 @@ export default function ReviewPage() {
     if (selectedSessionId) {
       formData.append("session_id", selectedSessionId);
     }
+    appendManualWindow(formData, manualWindowStart, manualWindowEnd);
 
     setIsSubmitting(true);
     setError(null);
@@ -601,7 +620,38 @@ export default function ReviewPage() {
               <p className="mt-2 text-sm text-slate-500">
                 {selectedFile ? formatFileSize(selectedFile.size) : "点击上方按钮选择本次训练视频。"}
               </p>
+              {videoDurationSec != null ? <p className="mt-2 text-xs text-slate-500">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
             </div>
+
+            {shouldShowManualWindow(videoDurationSec) ? (
+              <div className="mt-4 rounded-[24px] border border-amber-100 bg-amber-50/70 p-4">
+                <p className="text-sm font-semibold text-slate-900">AI 输入片段</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="text-xs font-semibold text-slate-500">开始秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowStart}
+                      onChange={(event) => setManualWindowStart(event.target.value)}
+                      className="app-input rounded-[18px] text-sm"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="text-xs font-semibold text-slate-500">结束秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowEnd}
+                      onChange={(event) => setManualWindowEnd(event.target.value)}
+                      className="app-input rounded-[18px] text-sm"
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-5 rounded-[28px] border border-slate-200 bg-white p-5">
               <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
