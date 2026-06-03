@@ -402,6 +402,7 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                     "app.routers.analysis.encode_frames",
                     AsyncMock(return_value=[SimpleNamespace(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]),
                 ),
+                patch("app.routers.analysis.cut_action_window_ai_clip", AsyncMock(return_value=upload_dir / "path_a_input_window_ai.mp4")),
                 patch("app.routers.analysis.analyze_frames_dual", AsyncMock(return_value=dual)),
                 patch("app.routers.analysis.dual_path_summary", return_value={"recommended": "A"}),
                 patch("app.routers.analysis._provider_for_slot", AsyncMock(return_value=SimpleNamespace())),

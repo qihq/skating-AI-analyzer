@@ -594,7 +594,7 @@ export default function ReportPage() {
         if (cancelled) {
           return;
         }
-        if (data.status === "awaiting_target_selection") {
+        if (data.status === "awaiting_target_selection" || data.target_lock_status === "awaiting_manual") {
           navigate(`/report/${data.id}/target`, { replace: true });
           return;
         }
@@ -1048,7 +1048,7 @@ export default function ReportPage() {
             </div>
           ) : null}
 
-          {isParentMode && deferredAnalysis.input_window_truncated && deferredAnalysis.input_window_mode === "system_truncated" ? (
+          {isParentMode && deferredAnalysis.input_window_truncated ? (
             <div className="rounded-[28px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-700">
               本次 AI 没有看到完整视频：{analysisInputWindowText(deferredAnalysis)}
             </div>

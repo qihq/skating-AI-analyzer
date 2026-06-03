@@ -239,6 +239,19 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(input_window.input_window_truncated)
         self.assertEqual(input_window.input_window_start_sec, 10.0)
         self.assertEqual(input_window.input_window_end_sec, 10.6)
+        self.assertEqual(input_window.input_window_reason, "manual window selected by user")
+
+    def test_build_video_input_window_manual_full_range_is_not_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "source.mp4"
+            video_path.write_bytes(b"fake")
+            with patch("app.services.video.detect_video_duration", return_value=30.0):
+                input_window = build_video_input_window(video_path, manual_start_sec=0.0, manual_end_sec=30.0)
+
+        self.assertEqual(input_window.input_window_mode, "manual_window")
+        self.assertFalse(input_window.input_window_truncated)
+        self.assertEqual(input_window.input_window_start_sec, 0.0)
+        self.assertEqual(input_window.input_window_end_sec, 30.0)
 
     async def test_extract_motion_sampled_frames_uses_explicit_input_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

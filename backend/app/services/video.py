@@ -272,14 +272,19 @@ def build_video_input_window(
     )
     if manual_window is not None:
         start, end = manual_window
+        full_source_range = (
+            source_duration is not None
+            and abs(start) <= 0.01
+            and abs(end - source_duration) <= 0.01
+        )
         return VideoInputWindow(
             source_duration_sec=source_duration,
             input_window_start_sec=start,
             input_window_end_sec=end,
             input_window_duration_sec=round(end - start, 3),
             input_window_mode="manual_window",
-            input_window_truncated=True,
-            input_window_reason="manual_action_window",
+            input_window_truncated=not full_source_range,
+            input_window_reason="manual window selected by user",
         )
 
     end = source_duration if source_duration is not None else float(MAX_SECONDS)
@@ -290,7 +295,7 @@ def build_video_input_window(
         end = float(MAX_SECONDS)
         mode = "system_truncated"
         truncated = True
-        reason = "source_duration_unknown_fallback"
+        reason = "source duration unavailable; used system fallback window"
     return VideoInputWindow(
         source_duration_sec=source_duration,
         input_window_start_sec=0.0,

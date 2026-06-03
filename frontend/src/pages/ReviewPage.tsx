@@ -297,14 +297,14 @@ export default function ReviewPage() {
           setProcessingStatus(data.status);
         });
 
-        if (data.status === "completed") {
+        if (data.status === "completed" && data.target_lock_status !== "awaiting_manual") {
           window.localStorage.removeItem(DRAFT_STORAGE_KEY);
           setIsSubmitting(false);
           navigate(`/report/${data.id}`);
           return;
         }
 
-        if (data.status === "awaiting_target_selection") {
+        if (data.status === "awaiting_target_selection" || data.target_lock_status === "awaiting_manual") {
           setIsSubmitting(false);
           navigate(`/report/${data.id}/target`);
           return;

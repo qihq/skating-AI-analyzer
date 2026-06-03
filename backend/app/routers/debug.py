@@ -184,6 +184,13 @@ def _input_window_payload_from_motion(motion_scores: dict[str, Any] | object) ->
     }
 
 
+def _with_input_window_fields(payload: dict[str, Any], input_window: dict[str, Any] | None = None) -> dict[str, Any]:
+    window = input_window if isinstance(input_window, dict) else payload.get("input_window")
+    if not isinstance(window, dict):
+        return payload
+    return {**payload, "input_window": window, **_as_jsonable(window)}
+
+
 def _manual_input_window_from_summary(run: DebugRun) -> tuple[float | None, float | None]:
     summary = run.summary if isinstance(run.summary, dict) else {}
     start = summary.get("manual_action_window_start_sec")
@@ -617,6 +624,8 @@ async def _update_run_progress(run_id: str, *, stage: str, label: str, progress:
             update_extra = dict(extra)
             if "timings" in update_extra and isinstance(update_extra["timings"], dict):
                 timings = {**timings, **update_extra.pop("timings")}
+            if isinstance(update_extra.get("input_window"), dict):
+                update_extra = _with_input_window_fields(update_extra)
             summary.update(
                 {
                     "status": run.status,
@@ -647,8 +656,8 @@ async def _mark_run_completed(run_id: str, *, result_json: dict[str, Any], summa
             if run is None:
                 return
             run.status = "completed"
-            run.result_json = _as_jsonable(result_json)
-            run.summary = _as_jsonable(summary)
+            run.result_json = _as_jsonable(_with_input_window_fields(dict(result_json)))
+            run.summary = _as_jsonable(_with_input_window_fields(dict(summary)))
             run.error_code = None
             run.error_detail = None
             run.updated_at = _utc_now()
@@ -666,8 +675,10 @@ async def _mark_run_failed(run_id: str, *, code: str, detail: str, result_json: 
             run.status = "failed"
             run.error_code = code
             run.error_detail = detail
-            run.result_json = _as_jsonable(result_json or {"error": detail})
-            run.summary = _as_jsonable({"status": "failed", "error_code": code})
+            existing_summary = run.summary if isinstance(run.summary, dict) else {}
+            existing_input_window = existing_summary.get("input_window") if isinstance(existing_summary.get("input_window"), dict) else None
+            run.result_json = _as_jsonable(_with_input_window_fields(result_json or {"error": detail}, existing_input_window))
+            run.summary = _as_jsonable(_with_input_window_fields({"status": "failed", "error_code": code}, existing_input_window))
             run.updated_at = _utc_now()
             await session.commit()
 
@@ -681,8 +692,8 @@ async def _mark_run_awaiting_target_selection(run_id: str, *, result_json: dict[
             if run is None:
                 return
             run.status = "awaiting_target_selection"
-            run.result_json = _as_jsonable(result_json)
-            run.summary = _as_jsonable(summary)
+            run.result_json = _as_jsonable(_with_input_window_fields(dict(result_json)))
+            run.summary = _as_jsonable(_with_input_window_fields(dict(summary)))
             run.error_code = None
             run.error_detail = None
             run.updated_at = _utc_now()
@@ -793,7 +804,7 @@ async def _create_debug_run(
         analysis_profile=resolved_profile,
         note=note,
         status="pending",
-        summary={"status": "pending", **manual_payload, "input_window": input_window.to_payload()},
+        summary=_with_input_window_fields({"status": "pending", **manual_payload, "input_window": input_window.to_payload()}),
         result_json=None,
     )
     session.add(run)

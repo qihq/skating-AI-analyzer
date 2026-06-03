@@ -430,6 +430,11 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
         async with self.database.AsyncSessionLocal() as session:
             saved_run = await session.get(models.DebugRun, run_id)
             self.assertEqual(saved_run.result_json["input_window"]["input_window_mode"], "manual_window")
+            self.assertEqual(saved_run.result_json["input_window_mode"], "manual_window")
+            self.assertEqual(saved_run.result_json["source_duration_sec"], 30.0)
+            self.assertTrue(saved_run.result_json["input_window_truncated"])
+            self.assertEqual(saved_run.summary["input_window_mode"], "manual_window")
+            self.assertEqual(saved_run.summary["input_window_start_sec"], 10.0)
 
     async def test_video_ai_debug_from_analysis_passes_bio_candidates_to_semantic_pipeline(self) -> None:
         import app.models as models

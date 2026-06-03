@@ -5,6 +5,7 @@ import { confirmTargetLock, fetchAnalysis, fetchTargetPreview, TargetBBox, Targe
 
 const AUTO_CONFIRM_THRESHOLD = 0.72;
 const MIN_BBOX_SIZE = 0.02;
+type SelectionMode = "candidate" | "manual";
 
 function candidateLabel(candidate: TargetCandidate, isAuto: boolean) {
   return `${isAuto ? "自动推荐" : "候选"} · ${(candidate.confidence * 100).toFixed(0)}%`;
@@ -33,6 +34,7 @@ export default function TargetSelectionPage() {
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [preview, setPreview] = useState<TargetPreviewResponse | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>("candidate");
   const [manualBBox, setManualBBox] = useState<TargetBBox | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
@@ -56,7 +58,8 @@ export default function TargetSelectionPage() {
           return;
         }
         setPreview(previewData);
-        setSelectedCandidateId(previewData.lock_confidence >= AUTO_CONFIRM_THRESHOLD ? previewData.auto_candidate_id : null);
+        setSelectedCandidateId(null);
+        setSelectionMode("candidate");
       } catch {
         if (!cancelled) {
           setError("主滑行者预览加载失败，请稍后重试。");
@@ -74,9 +77,23 @@ export default function TargetSelectionPage() {
     () => preview?.candidates.find((candidate) => candidate.id === selectedCandidateId) ?? null,
     [preview, selectedCandidateId],
   );
-  const activeBBox = draftBBox ?? manualBBox ?? selectedCandidate?.bbox ?? null;
+  const activeBBox = selectionMode === "manual" ? draftBBox ?? manualBBox : selectedCandidate?.bbox ?? null;
   const requiresChoice = (preview?.lock_confidence ?? 0) < AUTO_CONFIRM_THRESHOLD;
   const noPersonDetected = preview?.target_lock_status === "no_person_detected";
+
+  const selectCandidate = (candidateId: string) => {
+    setSelectionMode("candidate");
+    setSelectedCandidateId(candidateId);
+    setManualBBox(null);
+    setDraftBBox(null);
+    setError(null);
+  };
+
+  const enableManualSelection = () => {
+    setSelectionMode("manual");
+    setSelectedCandidateId(null);
+    setError(null);
+  };
 
   const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = previewRef.current?.getBoundingClientRect();
@@ -90,6 +107,9 @@ export default function TargetSelectionPage() {
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (selectionMode !== "manual") {
+      return;
+    }
     const point = pointFromEvent(event);
     if (!point) {
       return;
@@ -135,7 +155,7 @@ export default function TargetSelectionPage() {
       return;
     }
     if (!manualBBox && !selectedCandidateId) {
-      setError(requiresChoice ? "请先选择候选框，或在画面中拖拽框出主滑行者。" : "请先确认主滑行者。");
+      setError(requiresChoice ? "请先选择自动候选，或切到手动框选。" : "请先选择自动候选，或手动框选主滑行者。");
       return;
     }
     setIsSubmitting(true);
@@ -159,11 +179,43 @@ export default function TargetSelectionPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Target Lock</p>
         <h1 className="mt-3 text-3xl font-semibold text-slate-900">确认主滑行者</h1>
         <p className="mt-4 max-w-2xl text-base leading-8 text-slate-500">
-          冰场多人同框时，请确认这次要分析的选手。可以点击候选框，也可以直接在画面里拖拽框出目标。
+          冰场多人同框时，请确认这次要分析的选手。可以选择自动候选，也可以切换到手动框选。
         </p>
       </section>
 
       <section className="app-card p-6 tablet:p-8">
+        <div className="mb-4 flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setSelectionMode("candidate");
+              setManualBBox(null);
+              setDraftBBox(null);
+              setError(null);
+            }}
+            className={`app-pill min-h-[44px] px-4 text-sm font-semibold ${
+              selectionMode === "candidate" ? "text-blue-600 ring-2 ring-blue-100" : "text-slate-600"
+            }`}
+          >
+            自动候选
+          </button>
+          <button
+            type="button"
+            onClick={enableManualSelection}
+            className={`app-pill min-h-[44px] px-4 text-sm font-semibold ${
+              selectionMode === "manual" ? "text-emerald-700 ring-2 ring-emerald-100" : "text-slate-600"
+            }`}
+          >
+            手动框选
+          </button>
+        </div>
+
+        {selectionMode === "manual" ? (
+          <p className="mb-4 rounded-[18px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            在画面中按住并拖拽，框出主滑行者完整身体范围。
+          </p>
+        ) : null}
+
         <div
           ref={previewRef}
           onPointerDown={handlePointerDown}
@@ -178,33 +230,11 @@ export default function TargetSelectionPage() {
             <div className="p-8 text-sm text-slate-500">预览帧加载中...</div>
           )}
 
-          {preview?.candidates.map((candidate) => {
-            const isSelected = candidate.id === selectedCandidateId && !manualBBox;
-            return (
-              <button
-                key={candidate.id}
-                type="button"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => {
-                  setSelectedCandidateId(candidate.id);
-                  setManualBBox(null);
-                  setError(null);
-                }}
-                className={`absolute border-2 transition ${isSelected ? "border-blue-400 bg-blue-400/15" : "border-white/80 bg-slate-950/10"}`}
-                style={{
-                  left: `${candidate.bbox.x * 100}%`,
-                  top: `${candidate.bbox.y * 100}%`,
-                  width: `${candidate.bbox.width * 100}%`,
-                  height: `${candidate.bbox.height * 100}%`,
-                }}
-                aria-label={candidateLabel(candidate, candidate.id === preview.auto_candidate_id)}
-              />
-            );
-          })}
-
           {activeBBox ? (
             <div
-              className="pointer-events-none absolute border-2 border-emerald-300 bg-emerald-300/15"
+              className={`pointer-events-none absolute border-2 ${
+                selectionMode === "manual" ? "border-emerald-300 bg-emerald-300/15" : "border-blue-400 bg-blue-400/15"
+              }`}
               style={{
                 left: `${activeBBox.x * 100}%`,
                 top: `${activeBBox.y * 100}%`,
@@ -223,11 +253,7 @@ export default function TargetSelectionPage() {
               <button
                 key={candidate.id}
                 type="button"
-                onClick={() => {
-                  setSelectedCandidateId(candidate.id);
-                  setManualBBox(null);
-                  setError(null);
-                }}
+                onClick={() => selectCandidate(candidate.id)}
                 className={`rounded-[24px] border p-4 text-left transition ${
                   isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300"
                 }`}

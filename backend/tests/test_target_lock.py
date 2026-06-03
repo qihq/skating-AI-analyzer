@@ -348,7 +348,7 @@ class TargetLockTests(unittest.TestCase):
         self.assertIsNone(payload["selected_bbox"])
         self.assertIn("target_lock_zoomed_multiperson_manual_review", payload["quality_flags"])
 
-    def test_build_target_preview_requires_manual_when_other_anchor_frame_has_multiple_zoomed_people(self) -> None:
+    def test_build_target_preview_requires_manual_when_any_anchor_frame_has_multiple_zoomed_people(self) -> None:
         preview = build_target_preview(
             "analysis-1",
             ["frame_0001.jpg", "frame_0002.jpg", "frame_0003.jpg", "frame_0004.jpg"],
@@ -387,6 +387,7 @@ class TargetLockTests(unittest.TestCase):
         self.assertEqual(preview.auto_candidate_id, "candidate_auto_stable")
         self.assertIn("target_lock_zoomed_multiperson_manual_review", preview.candidates[0]["quality_flags"])
         payload = build_target_lock_payload(preview)
+        self.assertEqual(payload["status"], "awaiting_manual")
         self.assertIsNone(payload["selected_bbox"])
         self.assertIn("target_lock_zoomed_multiperson_manual_review", payload["quality_flags"])
 
@@ -548,7 +549,7 @@ class TargetLockTests(unittest.TestCase):
         self.assertEqual(preview.target_lock_status, "auto_locked")
         self.assertEqual(preview.auto_candidate_id, "candidate_auto_stable")
         self.assertIn("target_lock_distant_single_jump_auto_locked", preview.candidates[0]["quality_flags"])
-        self.assertIn("target_lock_tiny_zoomed_low_support_manual_review", preview.candidates[0]["quality_flags"])
+        self.assertNotIn("target_lock_tiny_zoomed_low_support_manual_review", preview.candidates[0]["quality_flags"])
         payload = build_target_lock_payload(preview)
         self.assertEqual(payload["status"], "auto_locked")
         self.assertEqual(payload["selected_bbox"], {"x": 0.4601, "y": 0.5922, "width": 0.033, "height": 0.0685})

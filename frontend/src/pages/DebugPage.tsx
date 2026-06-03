@@ -29,6 +29,7 @@ import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
 type DebugTab = "overview" | "frames" | "tracking" | "video" | "raw";
+type TargetSelectionMode = "candidate" | "manual";
 
 const ACTION_TYPES = ["跳跃", "旋转", "步法", "自由滑"];
 const PROFILE_OPTIONS = ["jump", "spin", "step", "spiral"];
@@ -285,7 +286,15 @@ function JsonBlock({ value }: { value: unknown }) {
 
 function inputWindowLabel(value: unknown) {
   const inputWindow = asRecord(value);
-  const mode = typeof inputWindow.input_window_mode === "string" ? inputWindow.input_window_mode : "-";
+  const rawMode = typeof inputWindow.input_window_mode === "string" ? inputWindow.input_window_mode : "-";
+  const mode =
+    rawMode === "full_context"
+      ? "全量上下文"
+      : rawMode === "manual_window"
+        ? "手动片段"
+        : rawMode === "system_truncated"
+          ? "系统截断"
+          : rawMode;
   const start = formatDuration(inputWindow.input_window_start_sec);
   const end = formatDuration(inputWindow.input_window_end_sec);
   const sourceDuration = formatDuration(inputWindow.source_duration_sec);
@@ -455,14 +464,29 @@ function DebugTargetSelectionPanel({
   const candidates = asArray(preview.candidates).map(candidateFromRecord).filter((candidate): candidate is TargetCandidate => Boolean(candidate));
   const autoCandidateId = typeof preview.auto_candidate_id === "string" ? preview.auto_candidate_id : null;
   const previewFrameUrl = typeof preview.preview_frame_url === "string" ? preview.preview_frame_url : undefined;
-  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(autoCandidateId);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState<TargetSelectionMode>("candidate");
   const [manualBBox, setManualBBox] = useState<TargetBBox | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const selectedCandidate = candidates.find((candidate) => candidate.id === selectedCandidateId) ?? null;
-  const activeBBox = draftBBox ?? manualBBox ?? selectedCandidate?.bbox ?? null;
+  const activeBBox = selectionMode === "manual" ? draftBBox ?? manualBBox : selectedCandidate?.bbox ?? null;
+
+  const selectCandidate = (candidateId: string) => {
+    setSelectionMode("candidate");
+    setSelectedCandidateId(candidateId);
+    setManualBBox(null);
+    setDraftBBox(null);
+    setError(null);
+  };
+
+  const enableManualSelection = () => {
+    setSelectionMode("manual");
+    setSelectedCandidateId(null);
+    setError(null);
+  };
 
   const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = previewNode?.getBoundingClientRect();
@@ -476,6 +500,9 @@ function DebugTargetSelectionPanel({
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (selectionMode !== "manual") {
+      return;
+    }
     const point = pointFromEvent(event);
     if (!point) {
       return;
@@ -518,7 +545,7 @@ function DebugTargetSelectionPanel({
 
   const handleSubmit = async () => {
     if (!manualBBox && !selectedCandidateId) {
-      setError("请先选择候选框，或直接在画面里拖拽框出主要人物。");
+      setError("请先选择自动候选，或切到手动框选。");
       return;
     }
     setSubmitting(true);
@@ -546,6 +573,38 @@ function DebugTargetSelectionPanel({
         <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">awaiting target</span>
       </div>
 
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={() => {
+            setSelectionMode("candidate");
+            setManualBBox(null);
+            setDraftBBox(null);
+            setError(null);
+          }}
+          className={`rounded-full bg-white px-4 py-2 text-sm font-semibold transition ${
+            selectionMode === "candidate" ? "text-blue-600 ring-2 ring-blue-100" : "text-slate-600"
+          }`}
+        >
+          自动候选
+        </button>
+        <button
+          type="button"
+          onClick={enableManualSelection}
+          className={`rounded-full bg-white px-4 py-2 text-sm font-semibold transition ${
+            selectionMode === "manual" ? "text-emerald-700 ring-2 ring-emerald-100" : "text-slate-600"
+          }`}
+        >
+          手动框选
+        </button>
+      </div>
+
+      {selectionMode === "manual" ? (
+        <p className="mt-3 rounded-[18px] bg-white px-4 py-3 text-sm text-emerald-700">
+          在画面中按住并拖拽，框出主要人物完整身体范围。
+        </p>
+      ) : null}
+
       <div
         ref={setPreviewNode}
         onPointerDown={handlePointerDown}
@@ -559,32 +618,11 @@ function DebugTargetSelectionPanel({
         ) : (
           <div className="flex min-h-[260px] items-center justify-center text-sm text-slate-400">Preview frame unavailable</div>
         )}
-        {candidates.map((candidate) => {
-          const selected = candidate.id === selectedCandidateId && !manualBBox;
-          return (
-            <button
-              key={candidate.id}
-              type="button"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => {
-                setSelectedCandidateId(candidate.id);
-                setManualBBox(null);
-                setError(null);
-              }}
-              className={`absolute border-2 transition ${selected ? "border-blue-300 bg-blue-300/20" : "border-white/80 bg-slate-950/10"}`}
-              style={{
-                left: `${candidate.bbox.x * 100}%`,
-                top: `${candidate.bbox.y * 100}%`,
-                width: `${candidate.bbox.width * 100}%`,
-                height: `${candidate.bbox.height * 100}%`,
-              }}
-              aria-label={`candidate ${candidate.id}`}
-            />
-          );
-        })}
         {activeBBox ? (
           <div
-            className="pointer-events-none absolute border-2 border-emerald-300 bg-emerald-300/15"
+            className={`pointer-events-none absolute border-2 ${
+              selectionMode === "manual" ? "border-emerald-300 bg-emerald-300/15" : "border-blue-300 bg-blue-300/20"
+            }`}
             style={{
               left: `${activeBBox.x * 100}%`,
               top: `${activeBBox.y * 100}%`,
@@ -600,11 +638,7 @@ function DebugTargetSelectionPanel({
           <button
             key={candidate.id}
             type="button"
-            onClick={() => {
-              setSelectedCandidateId(candidate.id);
-              setManualBBox(null);
-              setError(null);
-            }}
+            onClick={() => selectCandidate(candidate.id)}
             className={`rounded-[18px] border px-4 py-3 text-left text-sm transition ${
               candidate.id === selectedCandidateId && !manualBBox ? "border-blue-300 bg-white text-slate-900" : "border-amber-100 bg-white/70 text-slate-600"
             }`}

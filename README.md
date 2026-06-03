@@ -8,12 +8,13 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.10`.
+The current pipeline version is `v5.2.11`.
 
 ## Recent Updates
 
-The latest release keeps NAS upgrades from failing on legacy AI provider rows while preserving the UI-based model setup flow.
+The latest release makes AI video input explicit: default analysis uses the full source-video timeline, optional manual windows are recorded and displayed, and multi-person target locks with manual-review flags now stop for parent confirmation.
 
+- `v5.2.11`: videos use full-context AI input by default, optional manual start/end windows are supported in review and debug flows, reports/debug views show the actual AI input range, Path A consumes the generated AI clip, and review-flagged multi-person target locks require manual selection.
 - `v5.2.10`: startup no longer seeds AI provider rows; configure model instances from `/settings/api`, and legacy duplicate provider rows no longer block container startup.
 - `v5.2.9`: Path A now requests stricter JSON, recovers malformed model output, retries a JSON-only repair pass, and reports fall back to Path B/top-issue evidence with action-specific drills.
 - `v5.2.8`: reused lost tracker boxes can be used as padded pose crop hints for distant tiny skaters.
@@ -30,28 +31,29 @@ The latest release keeps NAS upgrades from failing on legacy AI provider rows wh
 
 - Video upload with asynchronous analysis and stage-aware retry.
 - Motion sampling, video precheck, blur filtering, and larger nginx upload limits.
-- Target preview, manual target lock, YOLO + ByteTrack person tracking, and per-frame bbox diagnostics.
+- Target preview, hidden-by-default candidate boxes, manual target bbox selection, YOLO + ByteTrack person tracking, and per-frame bbox diagnostics.
 - MediaPipe pose extraction with smoothing, multi-candidate handling, and crop fallback logic.
 - Biomechanics metrics for phase timing, jump evidence, rotation estimation, and pose quality.
 - Qwen 3.6 Plus video temporal localization for semantic takeoff/apex/landing intervals.
 - Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
 - Dual-path vision analysis with video-aware context, provider fallback, malformed-JSON recovery, retry handling, and cost limits.
 - AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
-- Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, timings, and logs.
+- Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, AI input windows, timings, and logs.
 - Docker Compose and all-in-one Docker deployment for NAS or local single-container use.
 
 ## Analysis Pipeline
 
 1. Upload the source video and create an analysis record.
-2. Run video precheck, motion sampling, and action-window detection.
-3. Build target preview candidates and wait for manual selection when confidence is low.
-4. Track the selected skater with YOLO/ByteTrack and per-frame bbox continuity checks.
-5. Extract pose landmarks from regular, tracker-guided, and fallback crops.
-6. Smooth pose signals and compute biomechanics, jump features, and keyframe candidates.
-7. Run video-temporal AI when configured and resolve semantic T/A/L timestamps.
-8. Extract semantic keyframes with FFmpeg and pass video context to image AI.
-9. Fuse pose, biomechanics, video AI, Path A pure vision, and Path B skeleton-grounded evidence into structured report data.
-10. Persist frames, logs, timings, debug summaries, and retry checkpoints.
+2. Resolve the AI input window: manual start/end when provided, otherwise the full source-video timeline unless a hard provider fallback is explicitly recorded.
+3. Run video precheck, motion sampling, and keyframe/action timing on source-video absolute timestamps.
+4. Build target preview candidates and wait for manual selection when confidence is low or a multi-person/manual-review flag is present.
+5. Track the selected skater with YOLO/ByteTrack and per-frame bbox continuity checks.
+6. Extract pose landmarks from regular, tracker-guided, and fallback crops.
+7. Smooth pose signals and compute biomechanics, jump features, and keyframe candidates.
+8. Run video-temporal AI when configured and resolve semantic T/A/L timestamps.
+9. Extract semantic keyframes with FFmpeg and pass video context or AI clips to vision models.
+10. Fuse pose, biomechanics, video AI, Path A pure vision, and Path B skeleton-grounded evidence into structured report data.
+11. Persist frames, logs, timings, debug summaries, input-window metadata, and retry checkpoints.
 
 ## Tech Stack
 

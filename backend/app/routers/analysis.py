@@ -161,6 +161,21 @@ IN_PROGRESS_ANALYSIS_STATUSES = {
 }
 
 
+def _target_lock_has_manual_review_flag(target_lock: dict[str, Any] | None) -> bool:
+    if not isinstance(target_lock, dict):
+        return False
+    flags = target_lock.get("quality_flags")
+    if not isinstance(flags, list):
+        return False
+    return any("_manual_review" in str(flag) for flag in flags)
+
+
+def _is_confirmed_target_lock(target_lock: dict[str, Any] | None) -> bool:
+    if not isinstance(target_lock, dict):
+        return False
+    return str(target_lock.get("status") or "") in CONFIRMED_TARGET_LOCK_STATUSES and not _target_lock_has_manual_review_flag(target_lock)
+
+
 def _sampling_metadata_from_saved(
     *,
     action_window_start: float,
@@ -1019,9 +1034,9 @@ async def _start_video_temporal_task_if_missing(
     motion_scores: dict[str, object],
     current_task: asyncio.Task | None,
     input_window: VideoInputWindow | None,
-) -> tuple[asyncio.Task | None, float | None]:
+) -> tuple[asyncio.Task | None, float | None, dict[str, Any] | None]:
     if current_task is not None or isinstance(motion_scores.get("video_temporal"), dict):
-        return current_task, None
+        return current_task, None, None
     handle = await start_video_temporal_task(
         video_path=video_path,
         work_dir=processing_frames_dir.parent,
@@ -1043,7 +1058,7 @@ async def _start_video_temporal_task_if_missing(
         clip_duration_sec=handle.clip_duration_sec,
         input_window=handle.input_window.to_payload(),
     )
-    return handle.task, handle.source_duration_sec
+    return handle.task, handle.source_duration_sec, handle.ai_clip_payload()
 
 
 async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
@@ -1064,6 +1079,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
     input_window: VideoInputWindow | None = None
     video_temporal_task: asyncio.Task | None = None
     video_temporal_result: dict[str, Any] | None = None
+    video_temporal_ai_clip: dict[str, Any] | None = None
     resolved_keyframes: dict[str, Any] | None = None
     video_temporal_duration_sec: float | None = None
     retry_from_stage: str | None = retry_from if _is_retry_stage(retry_from) else None
@@ -1143,7 +1159,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             )
             await _set_analysis_status(analysis_id, 'extracting_frames')
             extract_start = time.monotonic()
-            if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES and upload_frames_dir is not None and upload_frames_dir.exists():
+            existing_target_lock_confirmed = _is_confirmed_target_lock(existing_target_lock)
+            if existing_target_lock_confirmed and upload_frames_dir is not None and upload_frames_dir.exists():
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
                 motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
@@ -1155,7 +1172,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     motion_scores=motion_scores,
                 )
                 try:
-                    video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
+                    video_temporal_task, started_duration, started_ai_clip = await _start_video_temporal_task_if_missing(
                         analysis_id=analysis_id,
                         video_path=video_path,
                         processing_frames_dir=processing_frames_dir,
@@ -1168,6 +1185,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     )
                     if started_duration is not None:
                         video_temporal_duration_sec = started_duration
+                    if isinstance(started_ai_clip, dict):
+                        video_temporal_ai_clip = started_ai_clip
                         await _append_analysis_log(
                             analysis_id,
                             stage='extract_frames',
@@ -1202,7 +1221,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         input_window=input_window,
                     )
                     motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
-                    video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
+                    video_temporal_task, started_duration, started_ai_clip = await _start_video_temporal_task_if_missing(
                         analysis_id=analysis_id,
                         video_path=video_path,
                         processing_frames_dir=processing_frames_dir,
@@ -1215,6 +1234,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     )
                     if started_duration is not None:
                         video_temporal_duration_sec = started_duration
+                    if isinstance(started_ai_clip, dict):
+                        video_temporal_ai_clip = started_ai_clip
                 except Exception as exc:  # noqa: BLE001
                     failure = classify_video_failure(exc)
                     timings['total_s'] = _elapsed_seconds(total_start)
@@ -1241,11 +1262,11 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_profile=analysis_profile_hint,
                 detected_candidates=(
                     []
-                    if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES
+                    if existing_target_lock_confirmed
                     else _formal_target_preview_candidates(sampled_frames, motion_scores)
                 ),
             )
-            target_lock = existing_target_lock if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES else build_target_lock_payload(preview)
+            target_lock = existing_target_lock if existing_target_lock_confirmed else build_target_lock_payload(preview)
 
             async with AsyncSessionLocal() as session:
                 analysis = await session.get(Analysis, analysis_id)
@@ -1262,7 +1283,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis.retry_from_stage = 'pose'
                 await session.commit()
 
-            if (not existing_target_lock or str(existing_target_lock.get('status')) not in CONFIRMED_TARGET_LOCK_STATUSES) and preview.target_lock_status != "auto_locked":
+            if not existing_target_lock_confirmed and preview.target_lock_status != "auto_locked":
                 if video_temporal_task is not None and not video_temporal_task.done():
                     video_temporal_task.cancel()
                 if upload_frames_dir is not None:
@@ -1293,7 +1314,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 motion_scores=motion_scores,
             )
             try:
-                video_temporal_task, started_duration = await _start_video_temporal_task_if_missing(
+                video_temporal_task, started_duration, started_ai_clip = await _start_video_temporal_task_if_missing(
                     analysis_id=analysis_id,
                     video_path=video_path,
                     processing_frames_dir=processing_frames_dir,
@@ -1306,6 +1327,8 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 )
                 if started_duration is not None:
                     video_temporal_duration_sec = started_duration
+                if isinstance(started_ai_clip, dict):
+                    video_temporal_ai_clip = started_ai_clip
                     await _append_analysis_log(
                         analysis_id,
                         stage='extract_frames',
@@ -1330,11 +1353,11 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 analysis_profile=analysis_profile_hint,
                 detected_candidates=(
                     []
-                    if existing_target_lock and str(existing_target_lock.get('status')) in CONFIRMED_TARGET_LOCK_STATUSES
+                    if _is_confirmed_target_lock(existing_target_lock)
                     else _formal_target_preview_candidates(sampled_frames, motion_scores)
                 ),
             )
-            target_lock = existing_target_lock if existing_target_lock else build_target_lock_payload(preview)
+            target_lock = existing_target_lock if _is_confirmed_target_lock(existing_target_lock) else build_target_lock_payload(preview)
             await _append_analysis_log(
                 analysis_id,
                 stage='extract_frames',
@@ -1342,6 +1365,33 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 message=f'分段重试复用缓存关键帧，共 {len(sampled_frames)} 帧。',
                 retry_from_stage=retry_from_stage,
             )
+            if not _is_confirmed_target_lock(existing_target_lock) and preview.target_lock_status != "auto_locked":
+                async with AsyncSessionLocal() as session:
+                    analysis = await session.get(Analysis, analysis_id)
+                    if analysis is None:
+                        return
+                    analysis.frame_motion_scores = motion_scores
+                    analysis.processing_timings = dict(timings)
+                    analysis.action_window_start = sampling_metadata.action_window_start
+                    analysis.action_window_end = sampling_metadata.action_window_end
+                    analysis.source_fps = sampling_metadata.source_fps
+                    analysis.is_slow_motion = sampling_metadata.is_slow_motion
+                    analysis.target_lock = target_lock
+                    analysis.target_lock_status = target_lock["status"]
+                    analysis.retry_from_stage = "pose"
+                    await session.commit()
+                timings["total_s"] = _elapsed_seconds(total_start)
+                await _persist_processing_timings(analysis_id, timings)
+                _log_analysis_timings(analysis_id, timings, context="awaiting_target_selection_retry_cache")
+                await _append_analysis_log(
+                    analysis_id,
+                    stage="extract_frames",
+                    level="warning",
+                    message="Target lock requires manual review; waiting for target selection.",
+                    timings=timings,
+                )
+                await _set_analysis_status(analysis_id, "awaiting_target_selection")
+                return
 
         pose_data: dict[str, Any]
         if run_pose:
@@ -1629,21 +1679,27 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     )
                 timestamps = build_timestamp_map({"selected": resolved_keyframes.get("selected")}) if use_semantic_frames and isinstance(resolved_keyframes, dict) else build_timestamp_map(motion_scores)
                 raw_payloads = await encode_frames(vision_frame_paths, timestamps=timestamps)
-                clip_path = None
-                path_a_clip_path = None if use_semantic_frames else clip_path
                 provider_path_a = await _provider_for_slot("vision_path_a")
                 provider_path_b = await _provider_for_slot("vision_path_b")
-                if not use_semantic_frames:
+                path_a_clip_path = None
+                semantic_ai_clip = semantic_pipeline.ai_clip if isinstance(semantic_pipeline.ai_clip, dict) else None
+                semantic_ai_clip_path = semantic_ai_clip.get("path") if isinstance(semantic_ai_clip, dict) else None
+                video_temporal_ai_clip_path = video_temporal_ai_clip.get("path") if isinstance(video_temporal_ai_clip, dict) else None
+                if isinstance(semantic_ai_clip_path, str) and semantic_ai_clip_path:
+                    path_a_clip_path = Path(semantic_ai_clip_path)
+                elif isinstance(video_temporal_ai_clip_path, str) and video_temporal_ai_clip_path:
+                    path_a_clip_path = Path(video_temporal_ai_clip_path)
+                else:
                     try:
                         path_a_clip_path = await cut_action_window_ai_clip(
                             video_path,
                             input_window.input_window_start_sec if input_window else sampling_metadata.action_window_start,
                             input_window.input_window_end_sec if input_window else sampling_metadata.action_window_end,
-                            processing_frames_dir.parent / 'action_window_ai.mp4',
+                            processing_frames_dir.parent / 'path_a_input_window_ai.mp4',
                             max_duration_sec=None,
                         )
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning('Analysis %s AI action-window clip failed; Path A will use frames: %s', analysis_id, exc)
+                        logger.warning('Analysis %s AI input-window clip failed; Path A will use frames: %s', analysis_id, exc)
                 prompt_context = await build_analysis_prompt_context(
                     action_type=action_type,
                     action_subtype=action_subtype,
@@ -3808,12 +3864,7 @@ async def retry_analysis(
     analysis.processing_timings = None
     analysis.pipeline_version = CURRENT_PIPELINE_VERSION
     analysis.retry_from_stage = retry_from_stage
-    target_lock_status = (
-        str(analysis.target_lock.get("status"))
-        if isinstance(analysis.target_lock, dict) and analysis.target_lock.get("status") is not None
-        else None
-    )
-    if retry_from_stage in {None, 'extract_frames', 'pose'} and target_lock_status not in CONFIRMED_TARGET_LOCK_STATUSES:
+    if retry_from_stage in {None, 'extract_frames', 'pose'} and not _is_confirmed_target_lock(analysis.target_lock):
         analysis.target_lock_status = 'pending'
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
