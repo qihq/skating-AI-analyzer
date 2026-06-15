@@ -15,8 +15,10 @@ from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
 
 class PipelineVersionPersistenceTests(unittest.IsolatedAsyncioTestCase):
-    def test_current_pipeline_version_is_v5_2_10(self) -> None:
-        self.assertEqual(CURRENT_PIPELINE_VERSION, "v5.2.10")
+    def test_current_pipeline_version_uses_semver_label(self) -> None:
+        self.assertRegex(CURRENT_PIPELINE_VERSION, r"^v\d+\.\d+\.\d+$")
+        changelog = (Path(__file__).resolve().parents[1] / "app" / "services" / "pipeline_version.py").read_text(encoding="utf-8")
+        self.assertIn(f"# {CURRENT_PIPELINE_VERSION}:", changelog)
 
     async def test_init_db_adds_pipeline_columns_and_new_analysis_uses_current_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

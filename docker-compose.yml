@@ -1,5 +1,6 @@
 services:
   backend:
+    image: skating-analyzer-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -24,21 +25,13 @@ services:
     restart: unless-stopped
 
   backup:
-    image: alpine:3.19
+    image: skating-analyzer-backend:latest
     container_name: skating-backup
+    depends_on:
+      - backend
     volumes:
       - ./data:/data:ro
       - ./backups:/backups
-    command: >
-      sh -c "
-        echo '备份服务启动' &&
-        while true; do
-          TIMESTAMP=$$(date +%Y%m%d_%H%M) &&
-          cp /data/skating-analyzer.db /backups/skating_$${TIMESTAMP}.db &&
-          echo \"备份完成: skating_$${TIMESTAMP}.db\" &&
-          find /backups -name '*.db' -mtime +7 -delete &&
-          echo '清理7天前备份完成' &&
-          sleep 86400;
-        done
-      "
+      - ./scripts/sqlite_online_backup_loop.py:/sqlite_online_backup_loop.py:ro
+    command: ["python", "/sqlite_online_backup_loop.py"]
     restart: unless-stopped

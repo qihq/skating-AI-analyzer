@@ -257,18 +257,15 @@ async def refresh_skater_profile(session: AsyncSession, skater_id: str) -> None:
     skater.total_xp = total_xp
     skater.avatar_level = avatar_level_for_xp(total_xp)
 
-    analyses = list(
-        (
-            await session.execute(
-                select(Analysis)
-                .where(Analysis.skater_id == skater_id, Analysis.status == "completed")
-                .order_by(Analysis.created_at.desc())
-            )
-        ).scalars().all()
+    analysis_created_at_result = await session.execute(
+        select(Analysis.created_at)
+        .where(Analysis.skater_id == skater_id, Analysis.status == "completed")
+        .order_by(Analysis.created_at.desc())
     )
     active_dates = [
-        (analysis.created_at.replace(tzinfo=timezone.utc) if analysis.created_at.tzinfo is None else analysis.created_at.astimezone(timezone.utc)).date()
-        for analysis in analyses
+        (created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)).date()
+        for created_at in analysis_created_at_result.scalars().all()
+        if created_at is not None
     ]
     skater.current_streak = calculate_current_streak(active_dates)
     skater.longest_streak = calculate_longest_streak(active_dates)

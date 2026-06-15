@@ -37,6 +37,8 @@ from app.services.vision_vote_config import load_vision_vote_config
 
 logger = logging.getLogger(__name__)
 AI_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+AI_RATE_LIMIT_RETRY_DELAYS_SECONDS = (8.0, 20.0, 45.0, 90.0)
+AI_RETRY_AFTER_MAX_SECONDS = 120.0
 DEFAULT_QWEN_VISION_MODEL = "qwen3.6-plus"
 DEPRECATED_QWEN_VISION_MODELS = {"qwen-vl-max-latest"}
 DEFAULT_DOUBAO_VISION_MODEL = "doubao-1.5-vision-pro-32k"
@@ -188,6 +190,53 @@ def _env_vision_provider_config(provider_name: str) -> ActiveProviderConfig | No
         vision_model=None,
         api_key=api_key,
         notes="env VISION_PROVIDERS",
+    )
+
+
+def _env_report_provider_config() -> ActiveProviderConfig | None:
+    provider_name = os.getenv("REPORT_PROVIDER", "mimo").strip().lower() or "mimo"
+    api_key = _resolve_preset_api_key(provider_name)
+    if not api_key:
+        return None
+
+    default_base_urls = {
+        "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+        "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+        "glm": "https://open.bigmodel.cn/api/paas/v4",
+        "kimi": "https://api.moonshot.cn/v1",
+        "minimax": "https://api.minimax.chat/v1",
+        "mimo": MIMO_BASE_URL,
+    }
+    default_models = {
+        "mimo": DEFAULT_MIMO_REPORT_MODEL,
+        "qwen": "qwen3.6-plus",
+        "deepseek": "deepseek-chat",
+        "doubao": "doubao-seed-2-0-250615",
+        "glm": "glm-5",
+        "kimi": "kimi-k2.5",
+        "minimax": "MiniMax-Text-01",
+    }
+    base_url = (
+        os.getenv("REPORT_BASE_URL", "").strip()
+        or os.getenv(f"{provider_name.upper()}_REPORT_BASE_URL", "").strip()
+        or default_base_urls.get(provider_name, "")
+    )
+    model_id = (
+        os.getenv("REPORT_MODEL", "").strip()
+        or os.getenv(f"{provider_name.upper()}_REPORT_MODEL", "").strip()
+        or default_models.get(provider_name, provider_name)
+    )
+    return ActiveProviderConfig(
+        id=f"env:report:{provider_name}",
+        slot="report",
+        name=f"{provider_name} report",
+        provider=provider_name,
+        base_url=base_url,
+        model_id=model_id,
+        vision_model=None,
+        api_key=api_key,
+        notes="env REPORT_PROVIDER",
     )
 
 
@@ -396,6 +445,37 @@ def _is_retryable_completion_error(exc: Exception) -> bool:
     )
 
 
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw_value = headers.get("retry-after") if hasattr(headers, "get") else None
+    if raw_value is None:
+        return None
+    try:
+        seconds = float(str(raw_value).strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, AI_RETRY_AFTER_MAX_SECONDS)
+
+
+def _completion_retry_delay_seconds(exc: Exception, attempt: int) -> float | None:
+    if not _is_retryable_completion_error(exc):
+        return None
+    status_code = _extract_status_code(exc)
+    delays = AI_RATE_LIMIT_RETRY_DELAYS_SECONDS if status_code == 429 else AI_RETRY_DELAYS_SECONDS
+    if attempt >= len(delays):
+        return None
+    delay = delays[attempt]
+    retry_after = _retry_after_seconds(exc)
+    if status_code == 429 and retry_after is not None:
+        return max(delay, retry_after)
+    return delay
+
+
 def _as_pipeline_completion_error(exc: Exception) -> Exception:
     failure = classify_ai_failure(exc)
     if failure.code in {
@@ -409,15 +489,18 @@ def _as_pipeline_completion_error(exc: Exception) -> Exception:
 
 async def _with_completion_retry(operation) -> str:
     last_exc: Exception | None = None
-    for attempt in range(len(AI_RETRY_DELAYS_SECONDS) + 1):
+    attempt = 0
+    while True:
         try:
             return await operation()
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if not _is_retryable_completion_error(exc) or attempt >= len(AI_RETRY_DELAYS_SECONDS):
+            delay = _completion_retry_delay_seconds(exc, attempt)
+            if delay is None:
                 raise _as_pipeline_completion_error(exc) from exc
             # 设计说明: 仅对瞬时网络/限流/服务端错误退避，避免认证类 4xx 被无意义重试。
-            await asyncio.sleep(AI_RETRY_DELAYS_SECONDS[attempt])
+            await asyncio.sleep(delay)
+            attempt += 1
 
     if last_exc is not None:
         raise _as_pipeline_completion_error(last_exc) from last_exc
@@ -852,6 +935,7 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
     owns_session = session is None
     if owns_session:
         session = AsyncSessionLocal()
+    report_env_fallback = _env_report_provider_config() if slot == "report" else None
 
     try:
         result = await session.execute(
@@ -859,10 +943,19 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
         )
         provider = result.scalar_one_or_none()
         if provider is None:
+            if report_env_fallback is not None:
+                return report_env_fallback
             raise RuntimeError(f"未找到 slot={slot} 的激活供应商。")
 
         api_key = decrypt_api_key(provider.api_key)
         if not api_key:
+            if report_env_fallback is not None:
+                logger.warning(
+                    "Active report provider %s has no API key; falling back to env REPORT_PROVIDER=%s.",
+                    provider.provider,
+                    report_env_fallback.provider,
+                )
+                return report_env_fallback
             raise RuntimeError(f"{provider.name} 尚未配置 API Key。")
 
         return _active_provider_config_from_model(provider, api_key)

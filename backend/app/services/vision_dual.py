@@ -39,6 +39,7 @@ PATH_B_TIMEOUT = 120.0
 PATH_B_IMAGE_MAX_WIDTH = 640
 PATH_B_IMAGE_JPEG_QUALITY = 72
 PATH_A_ERROR_EXCERPT_CHARS = 1200
+SEMANTIC_MANUAL_LOCK_BLANK_POSE_FLAG = "semantic_pose_manual_lock_unaligned_blank_pose"
 
 
 def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> dict[str, Any]:
@@ -63,8 +64,35 @@ def _motion_features_for_prompt(frame_motion_scores: dict[str, Any] | None) -> d
     return summary
 
 
-def _uses_semantic_keyframes(resolved_keyframes: dict[str, Any] | None) -> bool:
-    return semantic_keyframes_are_reliable(resolved_keyframes)
+def _selected_semantic_frame_ids(resolved_keyframes: dict[str, Any] | None) -> set[str]:
+    selected = resolved_keyframes.get("selected") if isinstance(resolved_keyframes, dict) else None
+    if not isinstance(selected, list):
+        return set()
+    frame_ids: set[str] = set()
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        frame_id = str(item.get("frame_id") or "").strip()
+        if not frame_id.startswith("semantic_"):
+            continue
+        frame_ids.add(frame_id)
+    return frame_ids
+
+
+def _uses_semantic_keyframes(
+    resolved_keyframes: dict[str, Any] | None,
+    raw_frame_payloads: list[FramePayload] | None = None,
+) -> bool:
+    if semantic_keyframes_are_reliable(resolved_keyframes):
+        return True
+    source = str(resolved_keyframes.get("source") or "") if isinstance(resolved_keyframes, dict) else ""
+    if source not in {"video_ai_refined", "blended"}:
+        return False
+    semantic_frame_ids = _selected_semantic_frame_ids(resolved_keyframes)
+    if not semantic_frame_ids or not raw_frame_payloads:
+        return False
+    payload_ids = {payload.frame_id for payload in raw_frame_payloads}
+    return semantic_frame_ids <= payload_ids
 
 
 def _path_a_error_payload(error: str, detail: str | None = None) -> dict[str, Any]:
@@ -85,8 +113,24 @@ def _semantic_pose_for_annotation(
     frame_paths: list[Path],
     work_dir: Path,
     *,
+    target_lock: dict[str, Any] | None = None,
     effective_fps: float | None = None,
 ) -> dict[str, Any]:
+    manual_lock_mode = bool(isinstance(target_lock, dict) and target_lock.get("manual_override"))
+    if manual_lock_mode:
+        return {
+            "frames": [],
+            "connections": [],
+            "quality_flags": [SEMANTIC_MANUAL_LOCK_BLANK_POSE_FLAG],
+            "pose_diagnostics": {
+                "total_frames": len(frame_paths),
+                "tracked_frames": 0,
+                "lost_frames": len(frame_paths),
+                "low_confidence_frames": len(frame_paths),
+                "manual_lock_unaligned_semantic_frames": len(frame_paths),
+            },
+        }
+
     pose_input_dir = work_dir / "_semantic_pose_input"
     if pose_input_dir.exists():
         shutil.rmtree(pose_input_dir, ignore_errors=True)
@@ -184,6 +228,7 @@ async def analyze_frames_dual(
     prompt_context: AnalysisPromptContext | None = None,
     video_temporal: dict[str, Any] | None = None,
     resolved_keyframes: dict[str, Any] | None = None,
+    target_lock: dict[str, Any] | None = None,
 ) -> DualPathResult:
     """
     Run dual-path analysis and cross validation.
@@ -194,7 +239,7 @@ async def analyze_frames_dual(
     if annotated_dir is None:
         annotated_dir = (frame_paths[0].parent.parent / "annotated") if frame_paths else Path("/tmp/annotated")
 
-    uses_semantic_keyframes = _uses_semantic_keyframes(resolved_keyframes)
+    uses_semantic_keyframes = _uses_semantic_keyframes(resolved_keyframes, raw_frame_payloads)
     annotation_pose_data = pose_data
     annotation_source = "main_pose"
     if uses_semantic_keyframes:
@@ -207,9 +252,19 @@ async def analyze_frames_dual(
                 _semantic_pose_for_annotation,
                 frame_paths,
                 annotated_dir.parent,
+                target_lock=target_lock,
                 effective_fps=effective_fps,
             )
-            annotation_source = "semantic_light_pose"
+            annotation_flags = (
+                annotation_pose_data.get("quality_flags")
+                if isinstance(annotation_pose_data, dict) and isinstance(annotation_pose_data.get("quality_flags"), list)
+                else []
+            )
+            annotation_source = (
+                "semantic_manual_lock_blank_pose"
+                if SEMANTIC_MANUAL_LOCK_BLANK_POSE_FLAG in annotation_flags
+                else "semantic_light_pose"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Semantic frame light pose failed; Path B will use original semantic frames: %s", exc)
             annotation_pose_data = {"frames": [], "connections": []}

@@ -13,6 +13,120 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_save_failed_does_not_downgrade_completed_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.services.analysis_errors import AnalysisErrorCode
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        video_path=str(Path(tmpdir) / "source.mp4"),
+                        status="completed",
+                        report={"summary": "saved"},
+                        force_score=76,
+                        processing_logs=[],
+                    )
+                )
+                await session.commit()
+
+            await analysis_router._mark_analysis_failed(
+                analysis_id,
+                AnalysisErrorCode.REPORT_SAVE_FAILED,
+                "sqlite3.OperationalError: disk I/O error",
+                stage="report",
+                timings={"total_s": 12.3},
+            )
+
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.status, "completed")
+                self.assertIsNone(saved.error_code)
+                self.assertEqual(saved.report, {"summary": "saved"})
+                self.assertEqual(saved.force_score, 76)
+                self.assertEqual(saved.processing_timings, {"total_s": 12.3})
+                self.assertEqual(saved.processing_logs[-1]["error_code"], "REPORT_SAVE_FAILED")
+                self.assertTrue(saved.processing_logs[-1]["preserved_completed_state"])
+
+    async def test_get_analysis_recovers_failed_report_save_with_complete_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            frames_dir = upload_dir / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+            for index in range(1, 4):
+                (frames_dir / f"frame_{index:04d}.jpg").write_bytes(b"fake-frame")
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="failed",
+                        error_code="REPORT_SAVE_FAILED",
+                        error_message="save failed",
+                        report={"summary": "saved", "issues": [], "improvements": []},
+                        force_score=76,
+                        vision_structured={"frame_analysis": []},
+                        pose_data={"frames": [{"frame": "frame_0001.jpg", "keypoints": [{"x": 0.5, "y": 0.5}]}]},
+                        bio_data={"key_frames": {"T": "frame_0001", "A": "frame_0002", "L": "frame_0003"}},
+                        frame_motion_scores={"selected": []},
+                        processing_logs=[],
+                    )
+                )
+                await session.commit()
+
+            async with database.AsyncSessionLocal() as session:
+                detail = await analysis_router.get_analysis(analysis_id, session=session)
+                self.assertEqual(detail.status, "completed")
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.status, "completed")
+                self.assertIsNone(saved.error_code)
+                self.assertTrue(saved.processing_logs[-1]["restored_completed_state"])
+
     async def test_retry_awaiting_target_selection_resumes_when_preview_auto_locks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir
@@ -186,6 +300,53 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("target_lock_manual_review_low_confidence", saved.target_lock["quality_flags"])
                 self.assertIn("target_lock_tiny_zoomed_low_support_manual_review", saved.target_lock["quality_flags"])
 
+    async def test_locked_manual_review_candidate_counts_as_confirmed_for_resume(self) -> None:
+        for module_name in [
+            "app.routers.analysis",
+            "app.services.target_lock",
+        ]:
+            sys.modules.pop(module_name, None)
+
+        import app.routers.analysis as analysis_router
+        from app.services.target_lock import build_target_preview
+
+        preview = build_target_preview(
+            "analysis-1",
+            ["frame_0001.jpg", "frame_0002.jpg"],
+            detected_candidates=[
+                {
+                    "id": "candidate_auto_stable",
+                    "bbox": {"x": 0.4402, "y": 0.2001, "width": 0.0484, "height": 0.234},
+                    "confidence": 0.909,
+                    "source": "yolo_zoomed_content",
+                    "support_count": 32,
+                    "support_frame_count": 7,
+                    "support_confidence": 0.8571,
+                    "anchor_frame": "frame_0002.jpg",
+                    "anchor_index": 1,
+                },
+                {
+                    "id": "other_anchor_person_1",
+                    "bbox": {"x": 0.3828, "y": 0.2, "width": 0.0502, "height": 0.1524},
+                    "confidence": 0.8741,
+                    "source": "yolo_zoomed_content",
+                    "anchor_frame": "frame_0002.jpg",
+                    "anchor_index": 1,
+                },
+            ],
+        )
+        selected = next(item for item in preview.candidates if item["id"] == "candidate_auto_stable")
+        target_lock = {
+            "status": "locked",
+            "selected_candidate_id": selected["id"],
+            "selected_bbox": selected["bbox"],
+            "lock_confidence": selected["confidence"],
+            "quality_flags": ["target_lock_zoomed_multiperson_manual_review"],
+        }
+
+        self.assertIn("target_lock_zoomed_multiperson_manual_review", target_lock["quality_flags"])
+        self.assertTrue(analysis_router._is_confirmed_target_lock(target_lock))
+
     async def test_retry_from_report_reuses_saved_outputs_without_source_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir
@@ -340,7 +501,20 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 "quality_flags": [],
                 "profile_evidence": {"quality_flags": [], "negative_constraints": []},
             }
-            motion_scores = {"selected": [], "source": "test"}
+            motion_scores = {
+                "selected": [],
+                "source": "test",
+                "resolved_keyframes": {
+                    "source": "skeleton_fallback",
+                    "confidence": 0.9,
+                    "quality_flags": [],
+                    "selected": [
+                        {"frame_id": "frame_0001", "timestamp": 0.1, "phase_code": "takeoff", "key_moment": "T_takeoff_sec"},
+                        {"frame_id": "frame_0002", "timestamp": 0.2, "phase_code": "air", "key_moment": "A_air_sec"},
+                        {"frame_id": "frame_0003", "timestamp": 0.3, "phase_code": "landing", "key_moment": "L_landing_sec"},
+                    ],
+                },
+            }
             target_lock = {"status": "locked", "selected_candidate_id": "candidate_center"}
             vision_structured = {
                 "frame_analysis": [
@@ -420,7 +594,9 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.status, "completed")
                 self.assertEqual(saved.retry_from_stage, None)
                 self.assertEqual(saved.pose_data, pose_data)
-                self.assertEqual(saved.bio_data["key_frames"], bio_data["key_frames"])
+                self.assertEqual(saved.bio_data["key_frames"], {})
+                self.assertIn("bio_key_frames_not_synced_unreliable_resolved_keyframes", saved.bio_data["quality_flags"])
+                self.assertIn("bio_key_frames_not_restored_unreliable_candidates", saved.bio_data["quality_flags"])
                 self.assertIsInstance(saved.vision_structured, dict)
                 self.assertEqual(saved.vision_path_a, vision_structured)
                 self.assertEqual(saved.vision_path_b, {"path": "B", "error": "mocked"})

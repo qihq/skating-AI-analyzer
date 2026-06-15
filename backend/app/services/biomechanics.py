@@ -21,6 +21,86 @@ MAX_AIR_TIME_SECONDS = 1.5
 MAX_HEIGHT_CM = 120.0
 MAX_TAKEOFF_SPEED_MPS = 6.5
 MAX_ROTATION_RPS = 6.0
+KEYFRAME_CANDIDATE_RESTORE_BLOCKING_FLAGS = {
+    "keyframe_candidates_motion_fallback_from_takeoff_anchor",
+    "keyframe_candidates_motion_fallback_tail_window",
+    "keyframe_candidates_motion_fallback_tiny_target_full_frame_motion_risk",
+    "keyframe_candidates_motion_fallback_takeoff_anchor_tail_window",
+    "tal_candidate_apex_landing_gap_compressed",
+    "tal_candidate_apex_landing_gap_unreliable",
+    "tal_candidate_compressed_temporal_geometry",
+    "tal_candidate_core_gap_compressed",
+    "tal_candidate_landing_geometry_absent",
+    "tal_candidate_motion_fallback_compressed",
+    "tal_candidate_motion_fallback_cross_segment_unreliable",
+    "tal_candidate_motion_fallback_foreground_motion_risk",
+    "tal_candidate_motion_fallback_low_precision",
+    "tal_candidate_motion_fallback_tail_window",
+    "tal_candidate_incomplete",
+    "tal_candidate_sparse_track_stitched",
+    "tal_candidate_skeleton_drifted_after_takeoff",
+    "tal_candidate_takeoff_apex_gap_compressed",
+    "tal_candidate_takeoff_apex_gap_unreliable",
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_order_unresolved",
+    "tal_candidate_unreliable_sparse_track_stitch",
+    "tal_candidate_weak_geometry",
+}
+WEAK_TAKEOFF_APEX_RESTORE_MAX_GAP_SEC = 0.10
+WEAK_TAKEOFF_APEX_WARNINGS = {
+    "apex_local_minimum_not_clear",
+    "apex_motion_bounded_unclear_fallback",
+    "apex_geometry_weak",
+}
+BOUNDED_MOTION_FALLBACK_RESTORE_FLAGS = {
+    "keyframe_candidates_motion_fallback_bounded_to_reliable_pose",
+    "keyframe_candidates_motion_fallback_from_takeoff_anchor",
+    "tal_candidate_motion_fallback_low_precision",
+    "tal_candidate_skeleton_drifted_after_takeoff",
+}
+DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_RESTORE_FLAGS = {
+    "keyframe_candidates_motion_fallback",
+    "keyframe_candidates_motion_fallback_bounded_to_reliable_pose",
+    "keyframe_candidates_motion_fallback_excluded_rejected_tail_window",
+    "keyframe_candidates_motion_fallback_dense_scores",
+}
+DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_ALLOWED_BLOCKING_FLAGS = {
+    "tal_candidate_incomplete",
+    "tal_order_unresolved",
+}
+MIN_BOUNDED_MOTION_FALLBACK_RESTORE_CONFIDENCE = 0.4
+MIN_BOUNDED_MOTION_FALLBACK_RESTORE_AVG_CONFIDENCE = 0.5
+MIN_DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_RESTORE_AVG_CONFIDENCE = 0.48
+MIN_BOUNDED_MOTION_FALLBACK_PHASE_GAP_SEC = 0.12
+MAX_BOUNDED_MOTION_FALLBACK_TAL_SPAN_SEC = 1.8
+DEGRADED_SEMANTIC_SYNC_MIN_CONFIDENCE = 0.60
+DEGRADED_SEMANTIC_SYNC_MIN_PHASE_CONFIDENCE = 0.50
+DEGRADED_SEMANTIC_SYNC_MIN_TAL_SPAN_SEC = 0.25
+DEGRADED_SEMANTIC_SYNC_MAX_TAL_SPAN_SEC = 2.0
+DEGRADED_SEMANTIC_SYNC_SUPPORT_FLAGS = {
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_tal_conflict_ignored_weak_temporal_geometry",
+    "semantic_keyframes_tracker_final_loss_motion_fallback_ignored",
+    "semantic_keyframes_weak_refinement_late_candidate_conflict_ignored_low_visibility_no_pose_support",
+    "video_temporal_resolver_coherent_tal_used",
+}
+DEGRADED_SEMANTIC_SYNC_REASON_FLAGS = {
+    "bio_key_frames_not_synced_tracker_final_loss_motion_fallback": (
+        "bio_key_frames_degraded_semantic_tracker_final_loss_motion_fallback"
+    ),
+    "bio_key_frames_not_synced_tracker_final_loss_weak_geometry": (
+        "bio_key_frames_degraded_semantic_tracker_final_loss_weak_geometry"
+    ),
+    "bio_key_frames_not_synced_unreliable_resolved_keyframes": (
+        "bio_key_frames_degraded_semantic_unreliable_resolved_keyframes"
+    ),
+    "bio_key_frames_not_synced_unresolved_semantic_tal_conflict": (
+        "bio_key_frames_degraded_semantic_unresolved_semantic_tal_conflict"
+    ),
+    "bio_key_frames_not_synced_incomplete_resolved_tal": (
+        "bio_key_frames_degraded_semantic_incomplete_resolved_tal"
+    ),
+}
 
 
 def _empty_jump_metrics() -> dict[str, Any]:
@@ -211,6 +291,783 @@ def calc_center_of_mass_trajectory(pose_data: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_frame_name(frame: str) -> str:
     return PathLikeFrame(frame).stem
+
+
+def _key_for_resolved_record(record: dict[str, Any]) -> str | None:
+    key_moment = str(record.get("key_moment") or "").strip()
+    if key_moment.startswith("T_"):
+        return "T"
+    if key_moment.startswith("A_"):
+        return "A"
+    if key_moment.startswith("L_"):
+        return "L"
+
+    phase_code = str(record.get("phase_code") or "").strip()
+    if phase_code == "takeoff":
+        return "T"
+    if phase_code == "air":
+        return "A"
+    if phase_code == "landing":
+        return "L"
+    if phase_code in {"spin_entry", "spin_main", "spin_exit"}:
+        return {
+            "spin_entry": "旋转入",
+            "spin_main": "旋转中",
+            "spin_exit": "旋转出",
+        }[phase_code]
+    if phase_code in {"spiral_hold", "step_sequence"}:
+        return "峰值" if phase_code == "spiral_hold" else "步法序列"
+    return None
+
+
+def _resolved_keyframe_maps(resolved_keyframes: dict[str, Any] | None) -> tuple[dict[str, str], dict[str, float]]:
+    selected = resolved_keyframes.get("selected") if isinstance(resolved_keyframes, dict) else None
+    if not isinstance(selected, list):
+        return {}, {}
+
+    frames: dict[str, str] = {}
+    timestamps: dict[str, float] = {}
+    for record in selected:
+        if not isinstance(record, dict):
+            continue
+        key = _key_for_resolved_record(record)
+        frame_id = _normalize_frame_name(str(record.get("frame_id") or ""))
+        if key is None or not frame_id:
+            continue
+        frames[key] = frame_id
+        timestamp = _to_float(record.get("timestamp"))
+        if timestamp is not None:
+            timestamps[key] = round(timestamp, 3)
+    return frames, timestamps
+
+
+def _resolved_late_pose_core_candidate_fallback_can_sync(
+    bio_data: dict[str, Any],
+    resolved_keyframes: dict[str, Any],
+) -> bool:
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return False
+    candidate_flags = {
+        str(flag).strip()
+        for flag in candidates.get("quality_flags", [])
+        if str(flag).strip()
+    }
+    if "keyframe_candidates_late_pose_core_reselected" not in candidate_flags:
+        return False
+    if str(resolved_keyframes.get("source") or "") != "skeleton_fallback":
+        return False
+    if "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates" not in {
+        str(flag).strip()
+        for flag in resolved_keyframes.get("quality_flags", [])
+        if isinstance(resolved_keyframes.get("quality_flags"), list) and str(flag).strip()
+    }:
+        return False
+    selected = resolved_keyframes.get("selected")
+    if not isinstance(selected, list):
+        return False
+    core_records = [
+        record
+        for record in selected
+        if isinstance(record, dict) and _key_for_resolved_record(record) in {"T", "A", "L"}
+    ]
+    return (
+        len(core_records) >= 3
+        and all(str(record.get("selection_reason") or "") == "fallback_to_keyframe_candidates" for record in core_records[:3])
+    )
+
+
+def _candidate_keyframe_maps(bio_data: dict[str, Any]) -> tuple[dict[str, str], dict[str, float], list[float]]:
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return {}, {}, []
+    frames: dict[str, str] = {}
+    timestamps: dict[str, float] = {}
+    confidences: list[float] = []
+    for key in ("T", "A", "L"):
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        frame_id = _normalize_frame_name(str(candidate.get("frame_id") or ""))
+        if frame_id:
+            frames[key] = frame_id
+        timestamp = _to_float(candidate.get("timestamp"))
+        if timestamp is not None:
+            timestamps[key] = round(timestamp, 3)
+        confidence = _to_float(candidate.get("confidence"))
+        if confidence is not None:
+            confidences.append(confidence)
+    return frames, timestamps, confidences
+
+
+def _bio_quality_flag_set(bio_data: dict[str, Any]) -> set[str]:
+    flags: set[str] = set()
+    raw_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
+    flags.update(str(flag).strip() for flag in raw_flags if str(flag).strip())
+
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return flags
+    candidate_flags = candidates.get("quality_flags") if isinstance(candidates.get("quality_flags"), list) else []
+    flags.update(str(flag).strip() for flag in candidate_flags if str(flag).strip())
+    for key in ("T", "A", "L"):
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        warnings = candidate.get("warnings") if isinstance(candidate.get("warnings"), list) else []
+        flags.update(str(flag).strip() for flag in warnings if str(flag).strip())
+    return flags
+
+
+def _candidate_warnings(bio_data: dict[str, Any], key: str) -> set[str]:
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return set()
+    candidate = candidates.get(key)
+    if not isinstance(candidate, dict):
+        return set()
+    warnings = candidate.get("warnings") if isinstance(candidate.get("warnings"), list) else []
+    return {str(flag).strip() for flag in warnings if str(flag).strip()}
+
+
+def _candidate_restore_blocked_by_weak_takeoff_apex(bio_data: dict[str, Any]) -> bool:
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return False
+    flags = _bio_quality_flag_set(bio_data)
+    if "tal_candidate_takeoff_geometry_weak" not in flags and "takeoff_geometry_weak" not in flags:
+        return False
+
+    takeoff = candidates.get("T")
+    apex = candidates.get("A")
+    if not isinstance(takeoff, dict) or not isinstance(apex, dict):
+        return False
+    takeoff_ts = _to_float(takeoff.get("timestamp"))
+    apex_ts = _to_float(apex.get("timestamp"))
+    if takeoff_ts is None or apex_ts is None:
+        return False
+    if not (0.0 <= apex_ts - takeoff_ts <= WEAK_TAKEOFF_APEX_RESTORE_MAX_GAP_SEC):
+        return False
+
+    apex_warnings = _candidate_warnings(bio_data, "A")
+    if not (apex_warnings & WEAK_TAKEOFF_APEX_WARNINGS):
+        return False
+    takeoff_warnings = _candidate_warnings(bio_data, "T")
+    return bool(takeoff_warnings & {"takeoff_geometry_weak", "knee_extension_weak", "com_ascent_weak"})
+
+
+def _candidate_keyframes_are_restoreable(bio_data: dict[str, Any]) -> bool:
+    flags = _bio_quality_flag_set(bio_data)
+    _, timestamps, confidences = _candidate_keyframe_maps(bio_data)
+    if len(confidences) < 3:
+        return False
+    if _candidate_restore_blocked_by_weak_takeoff_apex(bio_data):
+        return False
+    if flags & KEYFRAME_CANDIDATE_RESTORE_BLOCKING_FLAGS:
+        return _candidate_keyframes_are_bounded_motion_fallback_restoreable(
+            bio_data,
+            flags=flags,
+            timestamps=timestamps,
+            confidences=confidences,
+        )
+    return len(confidences) >= 3
+
+
+def _candidate_keyframes_are_bounded_motion_fallback_restoreable(
+    bio_data: dict[str, Any],
+    *,
+    flags: set[str] | None = None,
+    timestamps: dict[str, float] | None = None,
+    confidences: list[float] | None = None,
+) -> bool:
+    flags = flags if flags is not None else _bio_quality_flag_set(bio_data)
+    if not flags & BOUNDED_MOTION_FALLBACK_RESTORE_FLAGS:
+        return False
+    if _bio_tracker_final_unrecovered(flags):
+        return False
+    dense_tail_window_fallback = _candidate_is_dense_tail_window_bounded_motion_fallback(flags)
+    allowed_blocking_flags = set(BOUNDED_MOTION_FALLBACK_RESTORE_FLAGS)
+    if dense_tail_window_fallback:
+        allowed_blocking_flags.update(DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_ALLOWED_BLOCKING_FLAGS)
+    hard_blocking_flags = KEYFRAME_CANDIDATE_RESTORE_BLOCKING_FLAGS - allowed_blocking_flags
+    if flags & hard_blocking_flags:
+        return False
+
+    frames, inferred_timestamps, inferred_confidences = _candidate_keyframe_maps(bio_data)
+    timestamps = timestamps if timestamps is not None else inferred_timestamps
+    confidences = confidences if confidences is not None else inferred_confidences
+    if not {"T", "A", "L"}.issubset(frames) or not {"T", "A", "L"}.issubset(timestamps):
+        return False
+    if len(confidences) < 3:
+        return False
+    if min(confidences) < MIN_BOUNDED_MOTION_FALLBACK_RESTORE_CONFIDENCE:
+        return False
+    avg_confidence_threshold = (
+        MIN_DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_RESTORE_AVG_CONFIDENCE
+        if dense_tail_window_fallback
+        else MIN_BOUNDED_MOTION_FALLBACK_RESTORE_AVG_CONFIDENCE
+    )
+    if (sum(confidences) / len(confidences)) < avg_confidence_threshold:
+        return False
+
+    takeoff = timestamps["T"]
+    apex = timestamps["A"]
+    landing = timestamps["L"]
+    if not (takeoff < apex < landing):
+        return False
+    if (apex - takeoff) < MIN_BOUNDED_MOTION_FALLBACK_PHASE_GAP_SEC:
+        return False
+    if (landing - apex) < MIN_BOUNDED_MOTION_FALLBACK_PHASE_GAP_SEC:
+        return False
+    if (landing - takeoff) > MAX_BOUNDED_MOTION_FALLBACK_TAL_SPAN_SEC:
+        return False
+    return True
+
+
+def _candidate_is_dense_tail_window_bounded_motion_fallback(flags: set[str]) -> bool:
+    return DENSE_TAIL_WINDOW_BOUNDED_MOTION_FALLBACK_RESTORE_FLAGS.issubset(flags)
+
+
+def _selected_resolved_core_records(resolved_keyframes: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    selected = resolved_keyframes.get("selected")
+    if not isinstance(selected, list):
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for record in selected:
+        if not isinstance(record, dict):
+            continue
+        key = _key_for_resolved_record(record)
+        if key in {"T", "A", "L"}:
+            records[key] = record
+    return records
+
+
+def _raw_jump_keyframes_complete(bio_data: dict[str, Any]) -> bool:
+    raw_frames = bio_data.get("raw_biomechanics_key_frames")
+    return isinstance(raw_frames, dict) and {"T", "A", "L"}.issubset(raw_frames)
+
+
+def _degraded_semantic_keyframes_can_fill_bio(
+    bio_data: dict[str, Any],
+    resolved_keyframes: dict[str, Any],
+    *,
+    analysis_profile: str | None,
+    frames: dict[str, str],
+    timestamps: dict[str, float],
+) -> bool:
+    profile = str(analysis_profile or bio_data.get("analysis_profile") or "").strip().lower()
+    if profile != "jump":
+        return False
+    flags = _bio_quality_flag_set(bio_data)
+    degraded_semantic_already_synced = "bio_key_frames_synced_from_degraded_semantic_keyframes" in flags
+    if _candidate_keyframes_are_restoreable(bio_data):
+        return False
+    if _raw_jump_keyframes_complete(bio_data) and not degraded_semantic_already_synced:
+        return False
+    source = str(resolved_keyframes.get("source") or "").strip()
+    if source not in {"video_ai_refined", "blended"}:
+        return False
+    if not {"T", "A", "L"}.issubset(frames) or not {"T", "A", "L"}.issubset(timestamps):
+        return False
+    takeoff = timestamps["T"]
+    apex = timestamps["A"]
+    landing = timestamps["L"]
+    if not (takeoff < apex < landing):
+        return False
+    if not (DEGRADED_SEMANTIC_SYNC_MIN_TAL_SPAN_SEC <= landing - takeoff <= DEGRADED_SEMANTIC_SYNC_MAX_TAL_SPAN_SEC):
+        return False
+
+    raw_flags = resolved_keyframes.get("quality_flags")
+    flags = {str(flag) for flag in raw_flags if isinstance(flag, str)} if isinstance(raw_flags, list) else set()
+    if "semantic_keyframes_unreliable_candidate_early_takeoff_conflict" in flags:
+        return False
+    if "semantic_keyframes_unreliable_fallback_to_sampled_frames" not in flags:
+        return False
+    if not (flags & DEGRADED_SEMANTIC_SYNC_SUPPORT_FLAGS):
+        return False
+
+    confidence = _to_float(resolved_keyframes.get("confidence"))
+    if confidence is None or confidence < DEGRADED_SEMANTIC_SYNC_MIN_CONFIDENCE:
+        return False
+    records = _selected_resolved_core_records(resolved_keyframes)
+    if not {"T", "A", "L"}.issubset(records):
+        return False
+    for record in records.values():
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _to_float(record.get("confidence"))
+        if phase_confidence is None or phase_confidence < DEGRADED_SEMANTIC_SYNC_MIN_PHASE_CONFIDENCE:
+            return False
+    return True
+
+
+def _sync_resolved_keyframe_maps_into_bio(
+    bio_data: dict[str, Any],
+    resolved_keyframes: dict[str, Any],
+    *,
+    frames: dict[str, str],
+    timestamps: dict[str, float],
+    degraded_semantic: bool = False,
+) -> dict[str, Any]:
+    updated = dict(bio_data)
+    existing = updated.get("key_frames") if isinstance(updated.get("key_frames"), dict) else {}
+    if existing and existing != frames and "raw_biomechanics_key_frames" not in updated:
+        updated["raw_biomechanics_key_frames"] = dict(existing)
+    updated["key_frames"] = frames
+    if timestamps:
+        updated["key_frame_timestamps"] = timestamps
+    updated["key_frame_source"] = str(resolved_keyframes.get("source") or "resolved_keyframes")
+    confidence = _to_float(resolved_keyframes.get("confidence"))
+    if confidence is not None:
+        updated["key_frame_confidence"] = round(confidence, 3)
+
+    flags = updated.get("quality_flags") if isinstance(updated.get("quality_flags"), list) else []
+    next_flags = [
+        flag
+        for flag in flags
+        if not (isinstance(flag, str) and flag.startswith("bio_key_frames_not_synced_"))
+    ]
+    if "bio_key_frames_synced_from_resolved_keyframes" not in next_flags:
+        next_flags.append("bio_key_frames_synced_from_resolved_keyframes")
+    if degraded_semantic and "bio_key_frames_synced_from_degraded_semantic_keyframes" not in next_flags:
+        next_flags.append("bio_key_frames_synced_from_degraded_semantic_keyframes")
+    resolved_flags = {
+        str(flag)
+        for flag in (resolved_keyframes.get("quality_flags") or [])
+        if isinstance(flag, str)
+    }
+    if (
+        "semantic_keyframes_long_unresolved_motion_fallback_partial_tal_promoted" in resolved_flags
+        and "bio_key_frames_synced_from_long_unresolved_visual_tal" not in next_flags
+    ):
+        next_flags.append("bio_key_frames_synced_from_long_unresolved_visual_tal")
+    updated["quality_flags"] = next_flags
+    return updated
+
+
+def _bio_has_tracker_final_loss_motion_fallback(bio_data: dict[str, Any]) -> bool:
+    flags = _bio_quality_flag_set(bio_data)
+    if not _bio_tracker_final_unrecovered(flags):
+        return False
+    fallback_low_precision = (
+        "tal_candidate_motion_fallback_low_precision" in flags
+        or "tal_candidate_incomplete" in flags
+        or "tal_order_unresolved" in flags
+        or "tal_candidate_skeleton_drifted_after_takeoff" in flags
+    )
+    motion_fallback = (
+        "keyframe_candidates_motion_fallback" in flags
+        or "keyframe_candidates_motion_fallback_from_takeoff_anchor" in flags
+    )
+    return fallback_low_precision and motion_fallback
+
+
+def _bio_tracker_final_unrecovered(flags: set[str]) -> bool:
+    return (
+        "person_tracker_final_unrecovered" in flags
+        or "person_tracker_final_loss_unrecovered" in flags
+        or (
+            "person_tracker_target_lost" in flags
+            and "person_tracker_transient_loss_recovered" not in flags
+            and (
+                "person_tracker_relock_rejected" in flags
+                or "person_tracker_relock_pending" in flags
+                or "person_tracker_continuity_rejected" in flags
+            )
+        )
+    )
+
+
+def _bio_has_tracker_final_loss_weak_geometry(bio_data: dict[str, Any]) -> bool:
+    flags = _bio_quality_flag_set(bio_data)
+    if not _bio_tracker_final_unrecovered(flags):
+        return False
+    return "tal_candidate_weak_geometry" in flags
+
+
+def _bio_has_absent_landing_geometry_only(bio_data: dict[str, Any]) -> bool:
+    flags = _bio_quality_flag_set(bio_data)
+    if not _bio_tracker_final_unrecovered(flags):
+        return False
+    if "tal_candidate_landing_geometry_absent" not in flags or "tal_candidate_weak_geometry" not in flags:
+        return False
+    stronger_unreliable_flags = {
+        "keyframe_candidates_motion_fallback",
+        "keyframe_candidates_motion_fallback_from_takeoff_anchor",
+        "tal_candidate_motion_fallback_low_precision",
+        "tal_candidate_incomplete",
+        "tal_order_unresolved",
+        "tal_candidate_skeleton_drifted_after_takeoff",
+    }
+    return not bool(flags & stronger_unreliable_flags)
+
+
+def _resolved_accepted_absent_landing_geometry(resolved_keyframes: dict[str, Any]) -> bool:
+    raw_flags = resolved_keyframes.get("quality_flags")
+    flags = {str(flag) for flag in raw_flags if isinstance(flag, str)} if isinstance(raw_flags, list) else set()
+    accepted_flags = {
+        "semantic_keyframes_candidate_tal_conflict_ignored_weak_geometry",
+        "semantic_keyframes_tracker_final_loss_weak_semantic_motion_ignored",
+    }
+    if not flags & accepted_flags:
+        return False
+    for key in ("semantic_candidate_tal_conflict", "semantic_tracker_final_loss_weak_semantic_motion"):
+        diagnostic = resolved_keyframes.get(key)
+        if not isinstance(diagnostic, dict):
+            continue
+        if str(diagnostic.get("decision") or "") in {
+            "ignored_absent_landing_geometry_candidate",
+            "ignored_retry_absent_landing_geometry_candidate",
+        }:
+            return True
+    return False
+
+
+def _tracker_final_loss_motion_fallback_unreliable(bio_data: dict[str, Any], resolved_keyframes: dict[str, Any]) -> bool:
+    source = str(resolved_keyframes.get("source") or "").strip()
+    if source not in {"video_ai_refined", "blended"}:
+        return False
+    raw_flags = resolved_keyframes.get("quality_flags")
+    flags = {str(flag) for flag in raw_flags if isinstance(flag, str)} if isinstance(raw_flags, list) else set()
+    if "semantic_keyframes_tracker_final_loss_motion_fallback_ignored" in flags:
+        diagnostic = resolved_keyframes.get("semantic_tracker_final_loss_motion_fallback")
+        if isinstance(diagnostic, dict) and str(diagnostic.get("decision") or "") in {
+            "ignored_reliable_pose_bounded_motion_fallback",
+            "ignored_unbounded_motion_fallback",
+            "ignored_reused_semantic_over_low_visibility_bounded_motion_fallback",
+        }:
+            return False
+    if "semantic_keyframes_tracker_final_loss_visual_tal_promoted" in flags:
+        diagnostic = resolved_keyframes.get("semantic_tracker_final_loss_visual_promotion")
+        if isinstance(diagnostic, dict) and str(diagnostic.get("decision") or "") == "promoted_visible_video_tal_over_low_visibility_motion_fallback":
+            return False
+    if "semantic_keyframes_phase_range_visual_tal_promoted" in flags:
+        diagnostic = resolved_keyframes.get("semantic_phase_range_visual_promotion")
+        if (
+            isinstance(diagnostic, dict)
+            and str(diagnostic.get("decision") or "")
+            == "promoted_video_phase_range_tal_over_low_visibility_motion_fallback"
+        ):
+            return False
+    if "semantic_keyframes_reused_from_matching_video" in flags and (
+        "semantic_keyframes_reused_ignored_low_visibility_bounded_motion_fallback" in flags
+        or "semantic_keyframes_reuse_candidate_conflict_ignored_insufficient_pose_low_visibility_fallback" in flags
+        or "semantic_keyframes_reused_over_long_unresolved_motion_fallback" in flags
+        or "semantic_keyframes_reused_ignored_long_unresolved_motion_fallback" in flags
+        or "semantic_keyframes_reuse_candidate_conflict_ignored_long_unresolved_motion_fallback" in flags
+    ):
+        return False
+    if "semantic_keyframes_long_unresolved_motion_fallback_partial_tal_promoted" in flags:
+        diagnostic = resolved_keyframes.get("semantic_long_unresolved_motion_fallback_partial_promotion")
+        if (
+            isinstance(diagnostic, dict)
+            and str(diagnostic.get("decision") or "") == "promoted_partial_video_tal_over_long_unresolved_motion_fallback"
+        ):
+            return False
+    return _bio_has_tracker_final_loss_motion_fallback(bio_data)
+
+
+def _tracker_final_loss_weak_geometry_unreliable(bio_data: dict[str, Any], resolved_keyframes: dict[str, Any]) -> bool:
+    source = str(resolved_keyframes.get("source") or "").strip()
+    if source not in {"video_ai_refined", "blended"}:
+        return False
+    if _bio_has_absent_landing_geometry_only(bio_data) and _resolved_accepted_absent_landing_geometry(resolved_keyframes):
+        return False
+    return _bio_has_tracker_final_loss_weak_geometry(bio_data)
+
+
+def _restore_biomechanics_key_frames(
+    bio_data: dict[str, Any],
+    *,
+    flag: str,
+    analysis_profile: str | None,
+) -> dict[str, Any]:
+    updated = dict(bio_data)
+    profile = str(analysis_profile or bio_data.get("analysis_profile") or "").strip().lower()
+    candidate_frames, candidate_timestamps, candidate_confidences = _candidate_keyframe_maps(bio_data)
+    restore_candidates = _candidate_keyframes_are_restoreable(bio_data)
+    restored_frames = candidate_frames if restore_candidates else {}
+    restored_timestamps = candidate_timestamps if restore_candidates else {}
+    restored_confidence = (
+        round(sum(candidate_confidences) / len(candidate_confidences), 3)
+        if restore_candidates and candidate_confidences
+        else None
+    )
+    restored_source = "biomechanics_candidates"
+
+    if profile == "jump" and (not restore_candidates or not {"T", "A", "L"}.issubset(restored_frames)):
+        raw_frames = bio_data.get("raw_biomechanics_key_frames")
+        restored_frames = dict(raw_frames) if isinstance(raw_frames, dict) else {}
+        restored_timestamps = {}
+        restored_confidence = None
+        restored_source = "raw_biomechanics_key_frames"
+
+    if restored_frames and (profile != "jump" or {"T", "A", "L"}.issubset(restored_frames)):
+        updated["key_frames"] = restored_frames
+        if restored_timestamps:
+            updated["key_frame_timestamps"] = restored_timestamps
+        else:
+            updated.pop("key_frame_timestamps", None)
+        updated["key_frame_source"] = restored_source
+        if restored_confidence is not None:
+            updated["key_frame_confidence"] = restored_confidence
+        else:
+            updated.pop("key_frame_confidence", None)
+        updated.pop("raw_biomechanics_key_frames", None)
+    elif profile == "jump":
+        updated["key_frames"] = {}
+        updated.pop("key_frame_timestamps", None)
+        updated.pop("key_frame_source", None)
+        updated.pop("key_frame_confidence", None)
+        updated.pop("raw_biomechanics_key_frames", None)
+
+    flags = updated.get("quality_flags") if isinstance(updated.get("quality_flags"), list) else []
+    next_flags = [item for item in flags if item != "bio_key_frames_synced_from_resolved_keyframes"]
+    if flag not in next_flags:
+        next_flags.append(flag)
+    if (
+        _bio_has_tracker_final_loss_motion_fallback(bio_data)
+        or _bio_has_tracker_final_loss_weak_geometry(bio_data)
+    ) and "tal_candidate_unreliable_tracker_final_loss" not in next_flags:
+        next_flags.append("tal_candidate_unreliable_tracker_final_loss")
+    if not restore_candidates and "bio_key_frames_not_restored_unreliable_candidates" not in next_flags:
+        next_flags.append("bio_key_frames_not_restored_unreliable_candidates")
+    if (
+        restore_candidates
+        and _candidate_keyframes_are_bounded_motion_fallback_restoreable(bio_data)
+        and "bio_key_frames_restored_bounded_motion_fallback" not in next_flags
+    ):
+        next_flags.append("bio_key_frames_restored_bounded_motion_fallback")
+    updated["quality_flags"] = next_flags
+    return updated
+
+
+def sync_key_frames_from_resolved_keyframes(
+    bio_data: dict[str, Any],
+    resolved_keyframes: dict[str, Any] | None,
+    *,
+    analysis_profile: str | None = None,
+) -> dict[str, Any]:
+    """Align legacy bio_data.key_frames with reliable semantic selections.
+
+    ``key_frame_candidates`` remains the skeleton/motion evidence.  Once the
+    semantic resolver has selected reliable frames used for vision/reporting,
+    the legacy ``key_frames`` field should point at those same frames.  If the
+    semantic selection is rejected and the pipeline falls back to sampled
+    frames, keep the biomechanics frames instead of propagating rejected T/A/L
+    into smoothing, prompts, reports, or compare views.
+    """
+    if not isinstance(bio_data, dict):
+        return bio_data
+
+    if not isinstance(resolved_keyframes, dict):
+        return bio_data
+
+    try:
+        from app.services.video_temporal import (
+            resolved_keyframes_accept_insufficient_pose_low_visibility_fallback,
+            semantic_keyframes_are_reliable,
+        )
+    except Exception:  # noqa: BLE001
+        resolved_keyframes_accept_insufficient_pose_low_visibility_fallback = None  # type: ignore[assignment]
+        semantic_keyframes_are_reliable = None  # type: ignore[assignment]
+
+    resolved_flags = set(
+        str(flag)
+        for flag in resolved_keyframes.get("quality_flags", [])
+        if isinstance(resolved_keyframes.get("quality_flags"), list)
+    )
+    accepted_unreliable_pose_motion_fallback = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_unreliable_pose_fallback" in resolved_flags
+    )
+    accepted_near_candidate_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_near_skeleton_candidate" in resolved_flags
+    )
+    accepted_weak_temporal_geometry_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_weak_temporal_geometry" in resolved_flags
+    )
+    accepted_early_approach_motion_peak_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_early_approach_motion_peak" in resolved_flags
+    )
+    accepted_phase_range_late_reanchor_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_phase_range_late_reanchor" in resolved_flags
+    )
+    accepted_reused_phase_range_late_reanchor_motion_conflict = (
+        "semantic_keyframes_reuse_motion_cluster_conflict_ignored_phase_range_late_reanchor" in resolved_flags
+    )
+    accepted_tracker_final_loss_visual_promotion = (
+        "semantic_keyframes_tracker_final_loss_visual_tal_promoted" in resolved_flags
+    )
+    accepted_phase_range_visual_promotion = (
+        "semantic_keyframes_phase_range_visual_tal_promoted" in resolved_flags
+    )
+    accepted_distant_full_context_visual_promotion = (
+        "semantic_keyframes_distant_full_context_visual_tal_promoted" in resolved_flags
+    )
+    accepted_main_motion_supported_weak_geometry_conflict = (
+        "semantic_keyframes_candidate_tal_conflict_ignored_main_motion_supported_weak_geometry"
+        in resolved_flags
+    )
+    accepted_insufficient_pose_low_visibility_fallback = (
+        callable(resolved_keyframes_accept_insufficient_pose_low_visibility_fallback)
+        and resolved_keyframes_accept_insufficient_pose_low_visibility_fallback(resolved_keyframes)
+    )
+    accepted_late_pose_core_candidate_fallback = _resolved_late_pose_core_candidate_fallback_can_sync(
+        bio_data,
+        resolved_keyframes,
+    )
+    frames, timestamps = _resolved_keyframe_maps(resolved_keyframes)
+
+    def restore_or_sync_degraded(flag: str) -> dict[str, Any]:
+        if _degraded_semantic_keyframes_can_fill_bio(
+            bio_data,
+            resolved_keyframes,
+            analysis_profile=analysis_profile,
+            frames=frames,
+            timestamps=timestamps,
+        ):
+            updated = _sync_resolved_keyframe_maps_into_bio(
+                bio_data,
+                resolved_keyframes,
+                frames=frames,
+                timestamps=timestamps,
+                degraded_semantic=True,
+            )
+            flags = updated.get("quality_flags") if isinstance(updated.get("quality_flags"), list) else []
+            next_flags = list(flags)
+            degraded_reason_flag = DEGRADED_SEMANTIC_SYNC_REASON_FLAGS.get(flag, flag)
+            if degraded_reason_flag not in next_flags:
+                next_flags.append(degraded_reason_flag)
+            if (
+                _bio_has_tracker_final_loss_motion_fallback(bio_data)
+                or _bio_has_tracker_final_loss_weak_geometry(bio_data)
+            ) and "tal_candidate_unreliable_tracker_final_loss" not in next_flags:
+                next_flags.append("tal_candidate_unreliable_tracker_final_loss")
+            if "bio_key_frames_not_restored_unreliable_candidates" not in next_flags:
+                next_flags.append("bio_key_frames_not_restored_unreliable_candidates")
+            updated["quality_flags"] = next_flags
+            return updated
+        return _restore_biomechanics_key_frames(
+            bio_data,
+            flag=flag,
+            analysis_profile=analysis_profile,
+        )
+
+    if (
+        "semantic_keyframes_unreliable_fallback_to_sampled_frames" in resolved_flags
+        and not accepted_unreliable_pose_motion_fallback
+        and not accepted_near_candidate_motion_conflict
+        and not accepted_weak_temporal_geometry_motion_conflict
+        and not accepted_early_approach_motion_peak_conflict
+        and not accepted_phase_range_late_reanchor_motion_conflict
+        and not accepted_reused_phase_range_late_reanchor_motion_conflict
+        and not accepted_tracker_final_loss_visual_promotion
+        and not accepted_phase_range_visual_promotion
+        and not accepted_distant_full_context_visual_promotion
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_late_pose_core_candidate_fallback
+        and _tracker_final_loss_motion_fallback_unreliable(bio_data, resolved_keyframes)
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_tracker_final_loss_motion_fallback")
+    if (
+        "semantic_keyframes_unreliable_fallback_to_sampled_frames" in resolved_flags
+        and not accepted_unreliable_pose_motion_fallback
+        and not accepted_near_candidate_motion_conflict
+        and not accepted_weak_temporal_geometry_motion_conflict
+        and not accepted_early_approach_motion_peak_conflict
+        and not accepted_phase_range_late_reanchor_motion_conflict
+        and not accepted_reused_phase_range_late_reanchor_motion_conflict
+        and not accepted_tracker_final_loss_visual_promotion
+        and not accepted_phase_range_visual_promotion
+        and not accepted_distant_full_context_visual_promotion
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_late_pose_core_candidate_fallback
+        and _tracker_final_loss_weak_geometry_unreliable(bio_data, resolved_keyframes)
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_tracker_final_loss_weak_geometry")
+    if (
+        "semantic_keyframes_unreliable_fallback_to_sampled_frames" in resolved_flags
+        and not accepted_unreliable_pose_motion_fallback
+        and not accepted_near_candidate_motion_conflict
+        and not accepted_weak_temporal_geometry_motion_conflict
+        and not accepted_early_approach_motion_peak_conflict
+        and not accepted_phase_range_late_reanchor_motion_conflict
+        and not accepted_reused_phase_range_late_reanchor_motion_conflict
+        and not accepted_tracker_final_loss_visual_promotion
+        and not accepted_phase_range_visual_promotion
+        and not accepted_distant_full_context_visual_promotion
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_late_pose_core_candidate_fallback
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_unreliable_resolved_keyframes")
+
+    unresolved_conflict = (
+        (
+            "video_temporal_quality_retry_skeleton_tal_conflict" in resolved_flags
+            or "video_temporal_quality_retry_motion_cluster_conflict" in resolved_flags
+            or "video_temporal_resolver_coherent_tal_motion_conflict_rejected" in resolved_flags
+        )
+        and "video_temporal_quality_retry_used" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_fallback_used" not in resolved_flags
+        and "video_temporal_resolver_motion_cluster_fallback_used" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_conflict_ignored_unreliable_pose_fallback" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_conflict_ignored_near_skeleton_candidate" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_conflict_ignored_weak_temporal_geometry" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_conflict_ignored_early_approach_motion_peak" not in resolved_flags
+        and "video_temporal_quality_retry_motion_cluster_conflict_ignored_phase_range_late_reanchor" not in resolved_flags
+        and "semantic_keyframes_reuse_motion_cluster_conflict_ignored_phase_range_late_reanchor" not in resolved_flags
+        and "semantic_keyframes_tracker_final_loss_visual_tal_promoted" not in resolved_flags
+        and "semantic_keyframes_phase_range_visual_tal_promoted" not in resolved_flags
+        and "semantic_keyframes_distant_full_context_visual_tal_promoted" not in resolved_flags
+        and "semantic_keyframes_candidate_tal_conflict_ignored_main_motion_supported_weak_geometry" not in resolved_flags
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_late_pose_core_candidate_fallback
+    )
+    if unresolved_conflict:
+        return restore_or_sync_degraded("bio_key_frames_not_synced_unresolved_semantic_tal_conflict")
+
+    if (
+        not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_late_pose_core_candidate_fallback
+        and _tracker_final_loss_motion_fallback_unreliable(bio_data, resolved_keyframes)
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_tracker_final_loss_motion_fallback")
+    if (
+        not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_late_pose_core_candidate_fallback
+        and _tracker_final_loss_weak_geometry_unreliable(bio_data, resolved_keyframes)
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_tracker_final_loss_weak_geometry")
+
+    profile = str(analysis_profile or bio_data.get("analysis_profile") or "").strip().lower()
+    if profile == "jump" and frames and not {"T", "A", "L"}.issubset(frames):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_incomplete_resolved_tal")
+
+    if (
+        callable(semantic_keyframes_are_reliable)
+        and not semantic_keyframes_are_reliable(resolved_keyframes)
+        and not accepted_late_pose_core_candidate_fallback
+    ):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_unreliable_resolved_keyframes")
+
+    if not frames:
+        return bio_data
+
+    if profile == "jump" and not {"T", "A", "L"}.issubset(frames):
+        return restore_or_sync_degraded("bio_key_frames_not_synced_incomplete_resolved_tal")
+
+    return _sync_resolved_keyframe_maps_into_bio(
+        bio_data,
+        resolved_keyframes,
+        frames=frames,
+        timestamps=timestamps,
+    )
 
 
 def _find_descent_start(points: list[dict[str, Any]], apex_index: int) -> int:

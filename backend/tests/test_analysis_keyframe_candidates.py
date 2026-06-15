@@ -97,6 +97,91 @@ def _motion_scores() -> dict[str, object]:
 
 
 class AnalysisKeyframeCandidatesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detail_does_not_backfill_intentionally_empty_unreliable_keyframes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            frames_dir = upload_dir / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+            for index in range(1, 10):
+                (frames_dir / f"frame_{index:04d}.jpg").write_bytes(b"fake-frame")
+
+            async with database.AsyncSessionLocal() as session:
+                analysis = models.Analysis(
+                    id=analysis_id,
+                    action_type="jump",
+                    action_subtype="single",
+                    analysis_profile="jump",
+                    pipeline_version=CURRENT_PIPELINE_VERSION,
+                    video_path=str(upload_dir / "source.mp4"),
+                    frame_motion_scores=_motion_scores(),
+                    pose_data=_pose_data(),
+                    bio_data={
+                        "analysis_profile": "jump",
+                        "key_frames": {},
+                        "quality_flags": [
+                            "bio_key_frames_not_synced_unreliable_resolved_keyframes",
+                            "bio_key_frames_not_restored_unreliable_candidates",
+                        ],
+                        "key_frame_candidates": {
+                            "quality_flags": [
+                                "tal_candidate_temporal_geometry_unreliable",
+                                "tal_candidate_weak_geometry",
+                            ],
+                            "T": {"frame_id": "frame_0004", "timestamp": 0.3, "confidence": 0.34},
+                            "A": {"frame_id": "frame_0005", "timestamp": 0.4, "confidence": 0.34},
+                            "L": {"frame_id": "frame_0006", "timestamp": 0.5, "confidence": 0.34},
+                        },
+                        "jump_metrics_status": "invalid",
+                        "jump_metrics": {},
+                    },
+                    target_lock={"status": "locked"},
+                    target_lock_status="locked",
+                    action_window_start=0.0,
+                    action_window_end=0.8,
+                    source_fps=30.0,
+                    is_slow_motion=False,
+                    status="completed",
+                    force_score=80,
+                    report={"summary": "ok"},
+                    vision_structured={"frame_analysis": []},
+                )
+                session.add(analysis)
+                await session.commit()
+
+                detail = await analysis_router.get_analysis(analysis_id, session=session)
+                self.assertIsInstance(detail.bio_data, dict)
+                assert isinstance(detail.bio_data, dict)
+                self.assertEqual(detail.bio_data["key_frames"], {})
+                self.assertIn("bio_key_frames_not_restored_unreliable_candidates", detail.bio_data["quality_flags"])
+
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertIsInstance(saved.bio_data, dict)
+                assert isinstance(saved.bio_data, dict)
+                self.assertEqual(saved.bio_data["key_frames"], {})
+
     async def test_biomechanics_retry_persists_candidates_and_detail_returns_them(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir
@@ -211,7 +296,7 @@ class AnalysisKeyframeCandidatesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("key_frame_candidates", saved.bio_data)
                 self.assertEqual(saved.bio_data["key_frame_candidates"]["T"]["frame_id"], "frame_0004")
                 self.assertEqual(saved.bio_data["key_frame_candidates"]["A"]["frame_id"], "frame_0006")
-                self.assertEqual(saved.bio_data["key_frame_candidates"]["L"]["frame_id"], "frame_0008")
+                self.assertEqual(saved.bio_data["key_frame_candidates"]["L"]["frame_id"], "frame_0007")
 
                 detail = await analysis_router.get_analysis(analysis_id, session=session)
                 self.assertIsInstance(detail.bio_data, dict)

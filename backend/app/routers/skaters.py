@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
-from app.database import DATA_DIR, UPLOADS_DIR, get_session
+from app.database import DATA_DIR, UPLOADS_DIR, get_session, run_db_read_with_retry
 from app.models import Analysis, Skater, TrainingSession
 from app.routers.analysis import _build_stale_analysis_snapshot
 from app.schemas import (
@@ -133,7 +134,10 @@ async def build_session_detail(session: AsyncSession, training_session: Training
 
 @router.get("/", response_model=list[SkaterPublic])
 async def list_skaters(session: AsyncSession = Depends(get_session)) -> list[SkaterPublic]:
-    result = await session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc()))
+    result = await run_db_read_with_retry(
+        lambda: session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc())),
+        context="list_skaters",
+    )
     return list(result.scalars().all())
 
 
@@ -393,26 +397,30 @@ async def delete_training_session(session_id: str, session: AsyncSession = Depen
 @system_router.get("/info", response_model=SystemInfoResponse)
 async def get_system_info() -> SystemInfoResponse:
     database_path = DATA_DIR / "skating-analyzer.db"
+    db_size_bytes, uploads_size_bytes = await asyncio.gather(
+        asyncio.to_thread(directory_size_bytes, database_path),
+        asyncio.to_thread(directory_size_bytes, UPLOADS_DIR),
+    )
     return SystemInfoResponse(
         version=APP_VERSION,
-        db_size_bytes=directory_size_bytes(database_path),
-        uploads_size_bytes=directory_size_bytes(UPLOADS_DIR),
+        db_size_bytes=db_size_bytes,
+        uploads_size_bytes=uploads_size_bytes,
     )
 
 
 @admin_router.get("/storage-stats", response_model=StorageStatsResponse)
 async def get_storage_stats() -> StorageStatsResponse:
-    return StorageStatsResponse(**build_storage_stats())
+    return StorageStatsResponse(**await asyncio.to_thread(build_storage_stats))
 
 
 @admin_router.get("/backups", response_model=BackupListResponse)
 async def get_backups() -> BackupListResponse:
-    return BackupListResponse(items=list_backups())
+    return BackupListResponse(items=await asyncio.to_thread(list_backups))
 
 
 @admin_router.post("/backups", response_model=BackupActionResponse)
 async def create_backup(payload: BackupCreateRequest) -> BackupActionResponse:
-    backup_path = create_manual_backup(payload.label)
+    backup_path = await asyncio.to_thread(create_manual_backup, payload.label)
     return BackupActionResponse(
         detail="备份已创建。",
         filename=backup_path.name,
@@ -422,7 +430,7 @@ async def create_backup(payload: BackupCreateRequest) -> BackupActionResponse:
 @admin_router.post("/backups/restore", response_model=BackupActionResponse)
 async def restore_backup_route(payload: BackupRestoreRequest) -> BackupActionResponse:
     try:
-        backup_path = restore_backup(payload.filename)
+        backup_path = await asyncio.to_thread(restore_backup, payload.filename)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -235,6 +235,40 @@ class VideoPreciseExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(refined[2]["refinement_phase_start_tolerance_used"])
         self.assertIn("semantic_keyframe_refinement_phase_start_tolerance_used", flags)
 
+    async def test_landing_refinement_rejects_peak_too_close_to_apex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            video_path = root / "synthetic.mp4"
+            video_path.write_bytes(b"fake")
+            records = [
+                {"timestamp": 1.2, "phase_code": "takeoff", "key_moment": "T_takeoff_sec", "phase_time_start": 1.0, "phase_time_end": 1.4, "max_refinement_delta_sec": 0.20},
+                {"timestamp": 1.6, "phase_code": "air", "key_moment": "A_air_sec", "phase_time_start": 1.4, "phase_time_end": 1.8},
+                {
+                    "timestamp": 1.9,
+                    "phase_code": "landing",
+                    "key_moment": "L_landing_sec",
+                    "phase_time_start": 1.8,
+                    "phase_time_end": 2.1,
+                    "max_refinement_delta_sec": 0.30,
+                    "phase_time_start_refinement_tolerance_sec": 0.22,
+                    "refinement_window_seconds": 0.30,
+                },
+            ]
+
+            with patch("app.services.video._refine_motion_peak_timestamp", AsyncMock(side_effect=[(1.053, 30.0, 0.6), (1.633, 30.0, 0.9)])):
+                refined, flags = await refine_semantic_keyframe_timestamps(
+                    video_path,
+                    root / "work",
+                    records,
+                    source_fps=30.0,
+                    video_duration_sec=7.3,
+                )
+
+        self.assertEqual([item["timestamp"] for item in refined], [1.053, 1.6, 1.9])
+        self.assertEqual(refined[2]["refinement_method"], "local_motion_peak_order_rejected")
+        self.assertEqual(refined[2]["refinement_candidate_timestamp"], 1.633)
+        self.assertIn("semantic_keyframe_refinement_order_rejected", flags)
+
     async def test_refinement_rejects_large_motion_peak_delta(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

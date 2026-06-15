@@ -67,6 +67,7 @@ class AutoEvalTests(unittest.TestCase):
         self.assertTrue(payload["phase_sequence_valid"])
         self.assertEqual(payload["high_confidence_conflicts"], [])
         self.assertEqual(payload["key_frame_signature"], "T:frame_0004@0.90|A:frame_0006@0.90|L:frame_0008@0.90")
+        self.assertEqual(payload["key_frame_signature_source"], "key_frame_candidates")
         json.dumps(payload, ensure_ascii=False)
 
     def test_invalid_key_frame_order_is_flagged(self) -> None:
@@ -80,6 +81,32 @@ class AutoEvalTests(unittest.TestCase):
         self.assertFalse(payload["key_frame_order_valid"])
         self.assertIn("auto_eval_key_frame_order_invalid", payload["data_quality_flags"])
         self.assertTrue(payload["key_frame_signature"].startswith("T:frame_0008"))
+
+    def test_final_key_frame_timestamps_override_candidate_frame_order(self) -> None:
+        bio_data = _bio_candidates(t_frame="frame_0016", a_frame="frame_0017", l_frame="frame_0017", confidence=0.49)
+        bio_data["key_frames"] = {"T": "semantic_0001", "A": "semantic_0002", "L": "semantic_0003"}
+        bio_data["key_frame_timestamps"] = {"T": 5.187, "A": 5.8, "L": 5.967}
+        bio_data["key_frame_confidence"] = 0.65
+        bio_data["key_frame_source"] = "blended"
+
+        payload = build_auto_eval_payload(
+            bio_data,
+            _vision(
+                [
+                    ("semantic_0001", "takeoff", 0.5),
+                    ("semantic_0002", "air", 0.5),
+                    ("semantic_0003", "air", 0.5),
+                ]
+            ),
+            {"quality_flags": []},
+            "jump",
+        )
+
+        self.assertTrue(payload["key_frame_order_valid"])
+        self.assertNotIn("auto_eval_key_frame_order_invalid", payload["data_quality_flags"])
+        self.assertEqual(payload["key_frame_signature_source"], "bio_key_frames")
+        self.assertEqual(payload["key_frame_signature"], "T:semantic_0001@0.65|A:semantic_0002@0.65|L:semantic_0003@0.65")
+        self.assertEqual(payload["candidate_key_frame_signature"], "T:frame_0016@0.49|A:frame_0017@0.49|L:frame_0017@0.49")
 
     def test_missing_candidates_returns_stable_missing_signature(self) -> None:
         payload = build_auto_eval_payload(

@@ -27,7 +27,13 @@ from app.routers.analysis import (
     _tracker_debug_summary,
 )
 from app.schemas import DebugRunCreateResponse, DebugRunDetail, DebugRunSummary
-from app.services.action_profiles import infer_analysis_profile, infer_profile_from_input, infer_profile_hint, normalize_action_subtype
+from app.services.action_profiles import (
+    infer_analysis_profile,
+    infer_profile_from_input,
+    infer_profile_hint,
+    is_mixed_action_input,
+    normalize_action_subtype,
+)
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError, stringify_exception
 from app.services.biomechanics import analyze_biomechanics, attach_key_frame_candidates
 from app.services.person_tracker import detect_person_candidates
@@ -778,7 +784,8 @@ async def _create_debug_run(
     if resolved_action_type not in VALID_ACTION_TYPES:
         raise HTTPException(status_code=400, detail="Invalid action_type.")
     resolved_action_subtype = normalize_action_subtype(resolved_action_type, resolved_action_subtype)
-    resolved_profile = resolved_profile or infer_profile_hint(resolved_action_type, resolved_action_subtype)
+    if resolved_profile is None and not is_mixed_action_input(resolved_action_type, resolved_action_subtype):
+        resolved_profile = infer_profile_hint(resolved_action_type, resolved_action_subtype)
     input_window = build_video_input_window(
         video_path,
         manual_start_sec=manual_action_window_start_sec,

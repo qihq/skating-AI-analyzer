@@ -72,7 +72,14 @@ def normalize_action_subtype(action_type: str, action_subtype: str | None) -> st
     return subtype if subtype in options else options[0]
 
 
-def infer_profile_from_input(action_type: str, action_subtype: str | None) -> str:
+def is_mixed_action_input(action_type: str, action_subtype: str | None) -> bool:
+    subtype = (action_subtype or "").strip()
+    return action_type == "自由滑" and (not subtype or subtype == "节目片段")
+
+
+def infer_profile_from_input(action_type: str, action_subtype: str | None) -> str | None:
+    if is_mixed_action_input(action_type, action_subtype):
+        return None
     text = f"{action_type} {action_subtype or ''}".lower()
     if any(keyword.lower() in text for keyword in JUMP_KEYWORDS):
         return "jump"
@@ -82,7 +89,7 @@ def infer_profile_from_input(action_type: str, action_subtype: str | None) -> st
         return "spiral"
     if any(keyword.lower() in text for keyword in STEP_KEYWORDS):
         return "step"
-    return "jump"
+    return None
 
 
 def infer_profile_hint(action_type: str, action_subtype: str | None) -> str:
@@ -358,6 +365,7 @@ def infer_analysis_profile(
 ) -> tuple[str, dict[str, Any]]:
     subtype = normalize_action_subtype(action_type, action_subtype)
     hinted_profile = infer_profile_hint(action_type, subtype)
+    mixed_action_input = is_mixed_action_input(action_type, subtype)
     max_motion, avg_motion = _motion_stats(frame_motion_scores)
     vertical_range = _max_vertical_range(pose_data)
     person_height = _person_height_normalized(pose_data)
@@ -389,7 +397,24 @@ def infer_analysis_profile(
         "spiral_gate_passed": spiral_gate,
         "quality_flags": [],
         "negative_constraints": [],
+        "mixed_action_input": mixed_action_input,
     }
+
+    if mixed_action_input:
+        evidence["profile_hint"] = "mixed_auto"
+        mixed_jump_gate = jump_gate and airborne_frames >= 1
+        evidence["mixed_jump_gate_passed"] = mixed_jump_gate
+        if mixed_jump_gate:
+            evidence["profile_confidence"] = "medium"
+            evidence["quality_flags"].append("mixed_action_profile_inferred_jump_from_motion")
+            return "jump", evidence
+        if rotation_signal >= 0.15 and max_motion >= 0.04:
+            evidence["profile_confidence"] = "medium"
+            evidence["quality_flags"].append("mixed_action_profile_inferred_spin_from_rotation")
+            return "spin", evidence
+        evidence["profile_confidence"] = "low"
+        evidence["quality_flags"].append("mixed_action_profile_defaulted_step")
+        return "step", evidence
 
     if spiral_gate:
         evidence["negative_constraints"].append("燕式滑行/螺旋线不是跳跃，除非存在清晰腾空阶段")

@@ -519,6 +519,10 @@ export interface CompareKeyframePair {
   label: string;
   before: CompareKeyframeSide;
   after: CompareKeyframeSide;
+  delta_seconds?: number | null;
+  before_offset_seconds?: number | null;
+  after_offset_seconds?: number | null;
+  relative_delta_seconds?: number | null;
 }
 
 export interface CompareVideoSide {
@@ -889,7 +893,7 @@ export async function fetchAnalyses(params?: { action_type?: string; skater_id?:
 
 export async function fetchAnalysisCompare(idA: string, idB: string) {
   const response = await apiClient.get<AnalysisCompareResponse>("/analysis/compare", {
-    params: { id_a: idA, id_b: idB },
+    params: { id_a: idA, id_b: idB, _ts: Date.now() },
   });
   return response.data;
 }

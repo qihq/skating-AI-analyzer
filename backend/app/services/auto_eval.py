@@ -119,27 +119,94 @@ def _candidate_confidence(candidates: dict[str, Any], label: str) -> float | Non
     return _clamp(confidence) if confidence is not None else None
 
 
-def _key_frame_order_valid(candidates: dict[str, Any] | None, flags: list[str]) -> bool | None:
-    if not isinstance(candidates, dict):
+def _final_key_frame_records(bio_data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(bio_data, dict):
+        return None
+    key_frames = bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {}
+    timestamps = (
+        bio_data.get("key_frame_timestamps")
+        if isinstance(bio_data.get("key_frame_timestamps"), dict)
+        else {}
+    )
+    confidence = _to_float(bio_data.get("key_frame_confidence"))
+    records: dict[str, Any] = {}
+    for label in ("T", "A", "L"):
+        frame_id = key_frames.get(label)
+        timestamp = _to_float(timestamps.get(label)) if isinstance(timestamps, dict) else None
+        if not frame_id and timestamp is None:
+            continue
+        record: dict[str, Any] = {}
+        if frame_id:
+            record["frame_id"] = str(frame_id)
+        if timestamp is not None:
+            record["timestamp"] = timestamp
+        if confidence is not None:
+            record["confidence"] = confidence
+        records[label] = record
+    return records or None
+
+
+def _ordered_key_frame_values(
+    records: dict[str, Any] | None,
+    *,
+    prefer_timestamps: bool,
+) -> tuple[float | int, float | int, float | int] | None:
+    if not isinstance(records, dict):
+        return None
+    timestamps: list[float | None] = [
+        _to_float(record.get("timestamp")) if isinstance((record := records.get(label)), dict) else None
+        for label in ("T", "A", "L")
+    ]
+    frame_numbers = [_candidate_frame_number(records, label) for label in ("T", "A", "L")]
+    if prefer_timestamps and all(value is not None for value in timestamps):
+        return timestamps[0], timestamps[1], timestamps[2]  # type: ignore[return-value]
+    if all(value is not None for value in frame_numbers):
+        return frame_numbers[0], frame_numbers[1], frame_numbers[2]  # type: ignore[return-value]
+    if all(value is not None for value in timestamps):
+        return timestamps[0], timestamps[1], timestamps[2]  # type: ignore[return-value]
+    return None
+
+
+def _key_frame_order_valid(
+    final_key_frames: dict[str, Any] | None,
+    candidates: dict[str, Any] | None,
+    flags: list[str],
+) -> bool | None:
+    values = _ordered_key_frame_values(final_key_frames, prefer_timestamps=True)
+    if values is None:
+        values = _ordered_key_frame_values(candidates, prefer_timestamps=False)
+    if values is None:
+        if isinstance(final_key_frames, dict) or isinstance(candidates, dict):
+            flags.append("auto_eval_incomplete_key_frame_candidates")
+            return None
         flags.append("auto_eval_missing_key_frame_candidates")
         return None
-    frame_numbers = [_candidate_frame_number(candidates, label) for label in ("T", "A", "L")]
-    if any(value is None for value in frame_numbers):
-        flags.append("auto_eval_incomplete_key_frame_candidates")
-        return None
-    return bool(frame_numbers[0] < frame_numbers[1] < frame_numbers[2])
+    return bool(values[0] < values[1] < values[2])
 
 
-def _key_frame_signature(candidates: dict[str, Any] | None) -> str:
-    if not isinstance(candidates, dict):
+def _key_frame_signature_records(
+    final_key_frames: dict[str, Any] | None,
+    candidates: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    if _ordered_key_frame_values(final_key_frames, prefer_timestamps=True) is not None:
+        return final_key_frames, "bio_key_frames"
+    if isinstance(candidates, dict):
+        return candidates, "key_frame_candidates"
+    if isinstance(final_key_frames, dict):
+        return final_key_frames, "bio_key_frames"
+    return None, "missing"
+
+
+def _key_frame_signature(records: dict[str, Any] | None) -> str:
+    if not isinstance(records, dict):
         return "missing"
     parts: list[str] = []
     for label in ("T", "A", "L"):
-        candidate = candidates.get(label)
+        candidate = records.get(label)
         if not isinstance(candidate, dict) or not candidate.get("frame_id"):
             parts.append(f"{label}:missing")
             continue
-        confidence = _candidate_confidence(candidates, label)
+        confidence = _candidate_confidence(records, label)
         confidence_text = "na" if confidence is None else f"{confidence:.2f}"
         parts.append(f"{label}:{candidate.get('frame_id')}@{confidence_text}")
     return "|".join(parts)
@@ -226,6 +293,15 @@ def _high_confidence_conflicts(
             continue
         expected = _expected_phase_for_label(label)
         nearby = _nearby_frames(phase_sequence, frame_number)
+        if not any(_frame_number(item.get("frame_id")) == frame_number for item in nearby):
+            expected_nearby = [
+                item
+                for item in nearby
+                if str(item.get("phase") or "unknown") == expected
+                and (_to_float(item.get("confidence")) or 0.0) >= HIGH_CONFIDENCE_THRESHOLD
+            ]
+            if expected_nearby:
+                continue
         for item in nearby:
             vision_confidence = _to_float(item.get("confidence")) or 0.0
             phase = str(item.get("phase") or "unknown")
@@ -286,11 +362,13 @@ def build_auto_eval_payload(
     profile = str(analysis_profile or "jump").strip().lower() or "jump"
     auto_flags: list[str] = []
     candidates = bio_data.get("key_frame_candidates") if isinstance(bio_data, dict) else None
+    final_key_frames = _final_key_frame_records(bio_data)
+    signature_records, signature_source = _key_frame_signature_records(final_key_frames, candidates)
 
-    key_frame_order_valid = _key_frame_order_valid(candidates, auto_flags)
+    key_frame_order_valid = _key_frame_order_valid(final_key_frames, candidates, auto_flags)
     phase_sequence = _phase_sequence(vision_structured, profile)
     phase_sequence_valid, phase_violations = _phase_sequence_valid(phase_sequence, profile, auto_flags)
-    conflicts = _high_confidence_conflicts(candidates, phase_sequence)
+    conflicts = _high_confidence_conflicts(signature_records, phase_sequence)
     if conflicts:
         auto_flags.append("auto_eval_high_confidence_conflict")
     if key_frame_order_valid is False:
@@ -306,7 +384,9 @@ def build_auto_eval_payload(
         "high_confidence_conflicts": conflicts,
         "high_confidence_conflict_rate": round(len(conflicts) / max(1, len(phase_sequence)), 3),
         "data_quality_flags": _collect_quality_flags(bio_data, vision_structured, frame_motion_scores, auto_flags),
-        "key_frame_signature": _key_frame_signature(candidates),
+        "key_frame_signature": _key_frame_signature(signature_records),
+        "key_frame_signature_source": signature_source,
+        "candidate_key_frame_signature": _key_frame_signature(candidates),
         "phase_sequence": [
             {
                 "frame_id": item["frame_id"],

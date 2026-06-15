@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ ACTION_AI_CLIP_CRF = int(os.getenv("ACTION_AI_CLIP_CRF", "30"))
 ACTION_AI_CLIP_MAX_SECONDS = float(os.getenv("ACTION_AI_CLIP_MAX_SECONDS", str(max(ACTION_CLIP_MAX_SECONDS, 15.0))))
 ACTION_AI_CLIP_MAX_MB = int(os.getenv("ACTION_AI_CLIP_MAX_MB", "40"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
+VIDEO_HASH_CHUNK_BYTES = 1024 * 1024
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
 ACTION_WINDOW_DETECTION_FPS = 2
@@ -527,8 +529,18 @@ async def save_upload_file(upload_file: UploadFile, target_path: Path) -> Path:
         raise
     finally:
         await upload_file.close()
-
     return target_path
+
+
+def compute_video_sha256(video_path: Path) -> str:
+    hasher = hashlib.sha256()
+    with video_path.open("rb") as handle:
+        while True:
+            chunk = handle.read(VIDEO_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 async def extract_frames(video_path: Path, frames_dir: Path, frame_rate: int = FRAME_RATE) -> list[Path]:
@@ -1601,7 +1613,7 @@ def _record_rejected_refinement_candidate(
     output["refinement_reject_reason"] = reason
 
 
-def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.02) -> bool:
+def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.10) -> bool:
     if key == "T":
         apex = anchors.get("A")
         landing = anchors.get("L")

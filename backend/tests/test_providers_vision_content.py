@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.providers import (
+    get_active_provider,
     request_dashscope_video_completion,
     request_doubao_vision_completion,
     request_mimo_video_completion,
@@ -17,6 +18,20 @@ from app.services.providers import (
 
 
 class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_provider_falls_back_to_mimo_env_config(self) -> None:
+        execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+        session = SimpleNamespace(execute=AsyncMock(return_value=execute_result))
+
+        with patch.dict("os.environ", {"MIMO_API_KEY": "test-mimo-key"}, clear=False):
+            provider = await get_active_provider("report", session)
+
+        self.assertEqual(provider.id, "env:report:mimo")
+        self.assertEqual(provider.slot, "report")
+        self.assertEqual(provider.provider, "mimo")
+        self.assertEqual(provider.base_url, "https://api.xiaomimimo.com/v1")
+        self.assertEqual(provider.model_id, "mimo-v2.5-pro")
+        self.assertEqual(provider.api_key, "test-mimo-key")
+
     async def test_claude_provider_translates_openai_vision_content(self) -> None:
         provider = SimpleNamespace(
             provider="claude_compatible",

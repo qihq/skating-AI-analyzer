@@ -8,10 +8,32 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.providers import _active_provider_config_from_model, get_vision_providers
+from app.services.providers import _active_provider_config_from_model, _env_report_provider_config, get_vision_providers
 
 
 class VisionVoteConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_env_report_provider_defaults_to_mimo(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "MIMO_API_KEY": "mimo-key",
+                "REPORT_PROVIDER": "",
+                "REPORT_MODEL": "",
+                "REPORT_BASE_URL": "",
+                "DEEPSEEK_API_KEY": "",
+            },
+            clear=False,
+        ):
+            provider = _env_report_provider_config()
+
+        self.assertIsNotNone(provider)
+        assert provider is not None
+        self.assertEqual(provider.slot, "report")
+        self.assertEqual(provider.provider, "mimo")
+        self.assertEqual(provider.model_id, "mimo-v2.5-pro")
+        self.assertEqual(provider.base_url, "https://api.xiaomimimo.com/v1")
+        self.assertEqual(provider.api_key, "mimo-key")
+
     async def test_qwen_dual_path_slots_keep_their_configured_model_ids(self) -> None:
         path_a = _provider("path-a", "qwen", "encrypted-a", slot="vision_path_a", model_id="qwen3-omni-flash")
         path_b = _provider("path-b", "qwen", "encrypted-b", slot="vision_path_b", model_id="qwen3.6-plus")

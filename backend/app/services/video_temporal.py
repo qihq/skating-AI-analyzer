@@ -138,6 +138,9 @@ JUMP_COHERENT_TAL_CONFIDENCE = 0.60
 JUMP_COHERENT_TAL_RETRY_CONFIDENCE_FLOOR = 0.50
 JUMP_COHERENT_TAL_PHASE_CONFIDENCE = 0.50
 JUMP_COHERENT_TAL_RETRY_PHASE_CONFIDENCE = 0.60
+JUMP_COHERENT_TAL_RETRY_WEAK_GEOMETRY_PHASE_CONFIDENCE = 0.30
+JUMP_COHERENT_TAL_RETRY_WEAK_PHASE_MIN_SPAN_SECONDS = 0.45
+JUMP_COHERENT_TAL_RETRY_WEAK_PHASE_MAX_SPAN_SECONDS = 1.50
 JUMP_CORE_PHASE_CODES = ("takeoff", "air", "landing")
 JUMP_COHERENT_TAL_COMPRESSED_SECONDS = 0.85
 JUMP_COHERENT_TAL_EARLY_COMPRESSED_SECONDS = 0.55
@@ -173,6 +176,9 @@ JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_STRONG_RECORDS = 3
 JUMP_COHERENT_TAL_SKELETON_CONFLICT_CONFIDENCE = 0.60
 JUMP_COHERENT_TAL_FALLBACK_SKELETON_CONFLICT_CONFIDENCE = 0.50
 JUMP_COHERENT_TAL_SKELETON_CONFLICT_MIN_SHIFT_SECONDS = 1.0
+JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_MAX_DELTA_SECONDS = 0.12
+JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_AVG_CONFIDENCE = 0.50
+JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_STRONG_CONFIDENCE = 0.62
 JUMP_COHERENT_TAL_LATE_MAIN_CLUSTER_TAKEOFF_TOLERANCE_SECONDS = 0.08
 JUMP_COHERENT_TAL_LATE_MAIN_CLUSTER_APEX_LEAD_SECONDS = 0.20
 JUMP_COHERENT_TAL_LATE_MAIN_CLUSTER_LANDING_DRIFT_SECONDS = 0.18
@@ -197,12 +203,65 @@ JUMP_MOTION_CLUSTER_FALLBACK_MAX_GAP_SECONDS = 0.22
 JUMP_MOTION_CLUSTER_FALLBACK_TAKEOFF_LEAD_SECONDS = 0.25
 JUMP_MOTION_CLUSTER_FALLBACK_APEX_MIN_CONFIDENCE = 0.50
 JUMP_MOTION_CLUSTER_FALLBACK_LANDING_MIN_GAP_SECONDS = 0.05
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_MIN_SCORE = 0.09
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_MAX_GAP_SECONDS = 0.28
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_MIN_SCORE = 0.045
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_SCORE_RATIO = 0.35
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_SEMANTIC_SHIFT_SECONDS = 0.45
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_CORE_PEAK_RATIO = 0.50
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LOOKAHEAD_SECONDS = 2.00
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_APEX_TARGET_SECONDS = 0.25
+JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LANDING_TARGET_SECONDS = 0.80
+JUMP_WEAK_MOTION_CLUSTER_HIGH_CONFIDENCE_MIN_SEMANTIC_SHIFT_SECONDS = 0.45
 VIDEO_TEMPORAL_PHASE_END_TAIL_TOLERANCE_SECONDS = 0.05
 VIDEO_TEMPORAL_HARD_FAILURE_FLAGS = {
     "video_temporal_invalid_json",
     "video_temporal_parse_failed",
     "video_temporal_payload_not_object",
     "video_temporal_missing_phase_segments",
+}
+VIDEO_TEMPORAL_UNRESOLVED_TAL_CONFLICT_FLAGS = {
+    "video_temporal_quality_retry_skeleton_tal_conflict",
+    "video_temporal_quality_retry_motion_cluster_conflict",
+}
+VIDEO_TEMPORAL_WEAK_TAL_CANDIDATE_GEOMETRY_FLAGS = {
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_candidate_takeoff_apex_gap_unreliable",
+    "tal_candidate_takeoff_apex_gap_compressed",
+    "tal_candidate_apex_landing_gap_unreliable",
+    "tal_candidate_apex_landing_gap_compressed",
+    "tal_candidate_core_gap_compressed",
+}
+VIDEO_TEMPORAL_ACCEPTED_TAL_REPAIR_FLAGS = {
+    "video_temporal_quality_retry_used",
+    "video_temporal_quality_retry_motion_cluster_fallback_used",
+    "video_temporal_quality_retry_takeoff_partial_merge_used",
+    "video_temporal_resolver_motion_cluster_fallback_used",
+    "video_temporal_resolver_weak_motion_cluster_fallback_used",
+    "semantic_keyframes_phase_range_visual_tal_promoted",
+    "semantic_keyframes_distant_full_context_visual_tal_promoted",
+    "semantic_keyframes_tracker_final_loss_visual_tal_promoted",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_tal_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_tal_conflict_ignored_main_motion_supported_weak_geometry",
+    "semantic_keyframes_reuse_candidate_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_reuse_candidate_conflict_ignored_sparse_track_stitched_candidate",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_near_skeleton_candidate",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_occlusion_contaminated_candidate",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_weak_temporal_geometry",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_early_approach_motion_peak",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_phase_range_late_reanchor",
+    "semantic_keyframes_reuse_motion_cluster_conflict_ignored_phase_range_late_reanchor",
+    "semantic_keyframes_reuse_motion_cluster_conflict_ignored_sparse_track_stitched_candidate",
+}
+VIDEO_TEMPORAL_INSUFFICIENT_POSE_LOW_VISIBILITY_ACCEPTED_FLAGS = {
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_tal_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_reuse_candidate_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_reuse_candidate_conflict_ignored_sparse_track_stitched_candidate",
+}
+VIDEO_TEMPORAL_WEAK_GEOMETRY_MAIN_MOTION_ACCEPTED_FLAGS = {
+    "semantic_keyframes_candidate_tal_conflict_ignored_main_motion_supported_weak_geometry",
 }
 VIDEO_TEMPORAL_OCCLUSION_TERMS = (
     "遮挡",
@@ -328,25 +387,332 @@ def _semantic_key_from_record(record: dict[str, Any]) -> str | None:
     return None
 
 
+def _has_original_unresolved_tal_conflict_diagnostic(resolved_keyframes: dict[str, Any]) -> bool:
+    skeleton_conflicts = resolved_keyframes.get("semantic_skeleton_tal_conflicts")
+    if isinstance(skeleton_conflicts, list) and any(isinstance(item, dict) for item in skeleton_conflicts):
+        return True
+
+    motion_conflict = resolved_keyframes.get("semantic_motion_cluster_conflict")
+    if isinstance(motion_conflict, dict):
+        decision = str(motion_conflict.get("decision") or "").strip()
+        accepted_decisions = {
+            "ignored_near_skeleton_candidate_tal",
+            "ignored_unreliable_pose_motion_fallback_cluster",
+            "ignored_occlusion_contaminated_candidate_motion_window",
+            "ignored_reused_phase_range_late_reanchor_motion_cluster",
+        }
+        if decision not in accepted_decisions:
+            return True
+
+    return False
+
+
+def resolved_keyframes_accept_insufficient_pose_low_visibility_fallback(
+    resolved_keyframes: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(resolved_keyframes, dict):
+        return False
+    flags = {
+        flag for flag in (resolved_keyframes.get("quality_flags") or []) if isinstance(flag, str)
+    }
+    if not (flags & VIDEO_TEMPORAL_INSUFFICIENT_POSE_LOW_VISIBILITY_ACCEPTED_FLAGS):
+        return False
+
+    accepted_decision = "ignored_insufficient_pose_low_visibility_motion_fallback_candidate"
+    for key in ("semantic_candidate_tal_conflict", "semantic_reuse_current_candidate_conflict"):
+        diagnostic = resolved_keyframes.get(key)
+        if not isinstance(diagnostic, dict):
+            continue
+        if str(diagnostic.get("decision") or "") != accepted_decision:
+            continue
+        low_visibility_keys = diagnostic.get("low_visibility_motion_fallback_keys")
+        if not (
+            isinstance(low_visibility_keys, list)
+            and any(str(item).strip().upper() in {"T", "A", "L"} for item in low_visibility_keys)
+        ):
+            continue
+        candidate_flags = {
+            str(flag)
+            for flag in (diagnostic.get("candidate_quality_flags") or [])
+            if isinstance(flag, str)
+        }
+        if "keyframe_candidates_motion_fallback" not in candidate_flags:
+            continue
+        if not (
+            candidate_flags
+            & {
+                "tal_candidate_motion_fallback_low_precision",
+                "tal_candidate_incomplete",
+                "tal_order_unresolved",
+                "keyframe_candidates_motion_fallback_bounded_to_reliable_pose",
+                "keyframe_candidates_motion_fallback_filtered_unreliable_pose_records",
+                "keyframe_candidates_motion_fallback_multiperson_relock_instability_risk",
+                "tal_candidate_motion_fallback_foreground_motion_risk",
+            }
+        ):
+            continue
+        return True
+    return False
+
+
 def semantic_keyframes_are_reliable(resolved_keyframes: dict[str, Any] | None) -> bool:
     if not isinstance(resolved_keyframes, dict):
         return False
     selected = resolved_keyframes.get("selected")
     if not isinstance(selected, list) or not selected:
         return False
+    top_level_quality_flags = [
+        flag for flag in (resolved_keyframes.get("quality_flags") or []) if isinstance(flag, str)
+    ]
+    accepted_unreliable_pose_motion_fallback = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_unreliable_pose_fallback" in top_level_quality_flags
+    )
+    accepted_near_candidate_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_near_skeleton_candidate" in top_level_quality_flags
+    )
+    accepted_occlusion_contaminated_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_occlusion_contaminated_candidate"
+        in top_level_quality_flags
+    )
+    accepted_weak_temporal_geometry_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_weak_temporal_geometry"
+        in top_level_quality_flags
+    )
+    accepted_early_approach_motion_peak_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_early_approach_motion_peak"
+        in top_level_quality_flags
+    )
+    accepted_phase_range_late_reanchor_motion_conflict = (
+        "video_temporal_quality_retry_motion_cluster_conflict_ignored_phase_range_late_reanchor"
+        in top_level_quality_flags
+    )
+    accepted_reused_phase_range_late_reanchor_motion_conflict = (
+        "semantic_keyframes_reuse_motion_cluster_conflict_ignored_phase_range_late_reanchor"
+        in top_level_quality_flags
+    )
+    accepted_sparse_track_stitched_motion_conflict = (
+        "semantic_keyframes_reuse_motion_cluster_conflict_ignored_sparse_track_stitched_candidate"
+        in top_level_quality_flags
+    )
+    accepted_tracker_final_loss_visual_promotion = (
+        "semantic_keyframes_tracker_final_loss_visual_tal_promoted" in top_level_quality_flags
+    )
+    accepted_phase_range_visual_promotion = (
+        "semantic_keyframes_phase_range_visual_tal_promoted" in top_level_quality_flags
+    )
+    accepted_weak_skeleton_cluster_visual_promotion = (
+        "semantic_keyframes_weak_skeleton_cluster_visual_tal_promoted" in top_level_quality_flags
+    )
+    accepted_distant_full_context_visual_promotion = (
+        "semantic_keyframes_distant_full_context_visual_tal_promoted" in top_level_quality_flags
+    )
+    accepted_long_unresolved_partial_promotion = (
+        "semantic_keyframes_long_unresolved_motion_fallback_partial_tal_promoted" in top_level_quality_flags
+    )
+    accepted_full_context_takeoff_anchor_fallback = (
+        "semantic_keyframes_candidate_motion_window_conflict_ignored_full_context_takeoff_anchor_fallback"
+        in top_level_quality_flags
+    )
+    accepted_early_takeoff_anchor_fallback = (
+        "semantic_keyframes_candidate_motion_window_conflict_ignored_early_takeoff_anchor_fallback"
+        in top_level_quality_flags
+    )
+    accepted_early_candidate_approach_window = (
+        "semantic_keyframes_candidate_motion_window_conflict_ignored_early_candidate_approach_window"
+        in top_level_quality_flags
+    )
+    accepted_takeoff_anchor_phase_shift = (
+        "semantic_keyframes_candidate_motion_window_conflict_ignored_takeoff_anchor_phase_shift"
+        in top_level_quality_flags
+    )
+    accepted_full_context_weak_candidate_motion_conflict = (
+        "semantic_keyframes_candidate_motion_window_conflict_ignored_full_context_weak_candidate"
+        in top_level_quality_flags
+    )
+    accepted_near_candidate_refinement_rejection = (
+        "semantic_keyframe_refinement_rejection_ignored_near_skeleton_candidate" in top_level_quality_flags
+    )
+    accepted_weak_temporal_geometry_refinement_rejection = (
+        "semantic_keyframe_refinement_rejection_ignored_weak_temporal_geometry" in top_level_quality_flags
+    )
+    accepted_weak_temporal_geometry_conflict = (
+        "video_temporal_quality_retry_skeleton_tal_conflict_ignored_weak_temporal_geometry" in top_level_quality_flags
+        or "semantic_keyframes_candidate_tal_conflict_ignored_weak_temporal_geometry" in top_level_quality_flags
+    )
+    accepted_main_motion_supported_weak_geometry_conflict = bool(
+        set(top_level_quality_flags) & VIDEO_TEMPORAL_WEAK_GEOMETRY_MAIN_MOTION_ACCEPTED_FLAGS
+    )
+    accepted_insufficient_pose_low_visibility_fallback = (
+        resolved_keyframes_accept_insufficient_pose_low_visibility_fallback(resolved_keyframes)
+    )
+    accepted_degraded_semantic_low_visibility_reuse = (
+        accepted_insufficient_pose_low_visibility_fallback
+        and "semantic_keyframes_reused_from_matching_video" in top_level_quality_flags
+        and "semantic_keyframes_reused_from_degraded_semantic_low_visibility_source" in top_level_quality_flags
+    )
+    accepted_clean_video_tal_late_weak_candidate_reuse = (
+        "semantic_keyframes_reused_from_matching_video" in top_level_quality_flags
+        and "semantic_keyframes_reused_from_clean_video_tal_late_weak_candidate_source" in top_level_quality_flags
+    )
+    accepted_sparse_track_stitched_reuse_conflict = (
+        "semantic_keyframes_reuse_candidate_conflict_ignored_sparse_track_stitched_candidate"
+        in top_level_quality_flags
+    )
+    hard_unreliable_flags = {
+        "semantic_frame_extract_failed",
+        "semantic_keyframe_refinement_order_rejected",
+        "semantic_keyframe_core_foreground_occlusion",
+        "semantic_keyframes_unreliable_candidate_tal_conflict",
+        "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+        "semantic_keyframes_unreliable_candidate_takeoff_single_conflict",
+        "semantic_keyframes_unreliable_candidate_early_takeoff_conflict",
+        "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+        "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+        "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+        "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion",
+        "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+        "semantic_keyframes_unreliable_reused_current_candidate_conflict",
+        "semantic_keyframes_unreliable_reused_motion_cluster_conflict",
+        "semantic_keyframes_unreliable_after_visibility_check",
+        "semantic_keyframes_unreliable_after_retry_rejection",
+    }
+    if (
+        accepted_full_context_takeoff_anchor_fallback
+        or accepted_early_takeoff_anchor_fallback
+        or accepted_early_candidate_approach_window
+        or accepted_takeoff_anchor_phase_shift
+        or accepted_full_context_weak_candidate_motion_conflict
+    ):
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframe_refinement_phase_rejected",
+            "semantic_keyframe_refinement_delta_rejected",
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+            "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+            "semantic_keyframes_unreliable_after_refinement",
+        }
+    if accepted_early_approach_motion_peak_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframe_refinement_phase_rejected",
+            "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+            "semantic_keyframes_unreliable_after_refinement",
+        }
+    if accepted_phase_range_late_reanchor_motion_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_after_refinement",
+            "semantic_keyframes_unreliable_after_retry_rejection",
+        }
+    if accepted_reused_phase_range_late_reanchor_motion_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_reused_motion_cluster_conflict",
+        }
+    if accepted_sparse_track_stitched_motion_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_reused_motion_cluster_conflict",
+        }
+    if accepted_sparse_track_stitched_reuse_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_reused_current_candidate_conflict",
+        }
+    if accepted_near_candidate_refinement_rejection or accepted_weak_temporal_geometry_refinement_rejection:
+        hard_unreliable_flags = hard_unreliable_flags - {"semantic_keyframe_refinement_order_rejected"}
+    if accepted_tracker_final_loss_visual_promotion:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+            "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+        }
+    if accepted_phase_range_visual_promotion or accepted_weak_skeleton_cluster_visual_promotion:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+            "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+            "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+            "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+            "semantic_keyframes_unreliable_after_retry_rejection",
+        }
+    if accepted_distant_full_context_visual_promotion:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+            "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+            "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+            "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+        }
+    if accepted_main_motion_supported_weak_geometry_conflict:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_after_refinement",
+        }
+    if accepted_degraded_semantic_low_visibility_reuse:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion",
+        }
+    if accepted_clean_video_tal_late_weak_candidate_reuse:
+        hard_unreliable_flags = hard_unreliable_flags - {
+            "semantic_keyframe_refinement_delta_rejected",
+            "semantic_keyframe_refinement_phase_rejected",
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_after_refinement",
+        }
+    if any(flag in hard_unreliable_flags for flag in top_level_quality_flags):
+        return False
+    if (
+        "semantic_keyframes_unreliable_fallback_to_sampled_frames" in top_level_quality_flags
+        and not accepted_unreliable_pose_motion_fallback
+        and not accepted_near_candidate_motion_conflict
+        and not accepted_occlusion_contaminated_motion_conflict
+        and not accepted_weak_temporal_geometry_motion_conflict
+        and not accepted_early_approach_motion_peak_conflict
+        and not accepted_phase_range_late_reanchor_motion_conflict
+        and not accepted_reused_phase_range_late_reanchor_motion_conflict
+        and not accepted_sparse_track_stitched_motion_conflict
+        and not accepted_tracker_final_loss_visual_promotion
+        and not accepted_phase_range_visual_promotion
+        and not accepted_weak_skeleton_cluster_visual_promotion
+        and not accepted_distant_full_context_visual_promotion
+        and not accepted_long_unresolved_partial_promotion
+        and not accepted_full_context_takeoff_anchor_fallback
+        and not accepted_early_takeoff_anchor_fallback
+        and not accepted_early_candidate_approach_window
+        and not accepted_takeoff_anchor_phase_shift
+        and not accepted_full_context_weak_candidate_motion_conflict
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_clean_video_tal_late_weak_candidate_reuse
+        and not accepted_sparse_track_stitched_reuse_conflict
+    ):
+        return False
     retry_rejection_flags = set()
     if (
-        "video_temporal_quality_retry_rejected" in (resolved_keyframes.get("quality_flags") or [])
+        "video_temporal_quality_retry_rejected" in top_level_quality_flags
         and isinstance(resolved_keyframes.get("video_temporal_quality_retry_rejection_flags"), list)
     ):
         retry_rejection_flags = {
             flag for flag in resolved_keyframes.get("video_temporal_quality_retry_rejection_flags", []) if isinstance(flag, str)
         }
+    if (
+        any(flag in VIDEO_TEMPORAL_UNRESOLVED_TAL_CONFLICT_FLAGS for flag in top_level_quality_flags)
+        and _has_original_unresolved_tal_conflict_diagnostic(resolved_keyframes)
+        and not any(flag in VIDEO_TEMPORAL_ACCEPTED_TAL_REPAIR_FLAGS for flag in top_level_quality_flags)
+        and not accepted_weak_temporal_geometry_conflict
+        and not accepted_main_motion_supported_weak_geometry_conflict
+        and not accepted_insufficient_pose_low_visibility_fallback
+        and not accepted_clean_video_tal_late_weak_candidate_reuse
+        and not accepted_sparse_track_stitched_reuse_conflict
+        and not accepted_sparse_track_stitched_motion_conflict
+    ):
+        return False
     quality_flags = [
         flag
-        for flag in (resolved_keyframes.get("quality_flags") or [])
-        if isinstance(flag, str) and flag not in retry_rejection_flags
+        for flag in top_level_quality_flags
+        if flag not in retry_rejection_flags
     ]
+    if accepted_unreliable_pose_motion_fallback:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag != "semantic_keyframes_unreliable_fallback_to_sampled_frames"
+        ]
     if "video_temporal_resolver_motion_cluster_fallback_used" in quality_flags:
         quality_flags = [
             flag
@@ -359,6 +725,235 @@ def semantic_keyframes_are_reliable(resolved_keyframes: dict[str, Any] | None) -
             for flag in quality_flags
             if flag != "video_temporal_resolver_coherent_tal_motion_conflict_rejected"
         ]
+    if "video_temporal_quality_retry_motion_cluster_conflict_ignored_unreliable_pose_fallback" in quality_flags:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag != "video_temporal_resolver_coherent_tal_motion_conflict_rejected"
+        ]
+    if accepted_near_candidate_motion_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_occlusion_contaminated_motion_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_weak_temporal_geometry_motion_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_early_approach_motion_peak_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframe_refinement_phase_rejected",
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+                "semantic_keyframes_unreliable_after_refinement",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_phase_range_late_reanchor_motion_conflict or accepted_reused_phase_range_late_reanchor_motion_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_reused_motion_cluster_conflict",
+                "semantic_keyframes_unreliable_after_refinement",
+                "semantic_keyframes_unreliable_after_retry_rejection",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_sparse_track_stitched_motion_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_reused_motion_cluster_conflict",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_tracker_final_loss_visual_promotion:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+                "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+            }
+        ]
+    if accepted_phase_range_visual_promotion or accepted_weak_skeleton_cluster_visual_promotion:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+                "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+                "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates",
+                "semantic_keyframes_unreliable_after_retry_rejection",
+                "video_temporal_quality_retry_skeleton_tal_conflict",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_distant_full_context_visual_promotion:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+                "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+                "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates",
+                "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+                "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+                "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+            }
+        ]
+    if accepted_long_unresolved_partial_promotion:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_after_refinement",
+                "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_near_candidate_refinement_rejection or accepted_weak_temporal_geometry_refinement_rejection:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag != "semantic_keyframe_refinement_order_rejected"
+        ]
+    if accepted_weak_temporal_geometry_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag not in {
+                "video_temporal_quality_retry_skeleton_tal_conflict",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+            }
+        ]
+    if accepted_main_motion_supported_weak_geometry_conflict:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag not in {
+                "video_temporal_quality_retry_skeleton_tal_conflict",
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+                "semantic_keyframes_unreliable_after_refinement",
+            }
+        ]
+    if (
+        accepted_full_context_takeoff_anchor_fallback
+        or accepted_early_takeoff_anchor_fallback
+        or accepted_early_candidate_approach_window
+        or accepted_takeoff_anchor_phase_shift
+        or accepted_full_context_weak_candidate_motion_conflict
+    ):
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframe_refinement_phase_rejected",
+                "semantic_keyframe_refinement_delta_rejected",
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+                "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+                "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+                "semantic_keyframes_unreliable_after_refinement",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+            }
+        ]
+    if accepted_insufficient_pose_low_visibility_fallback:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+                "video_temporal_quality_retry_motion_cluster_conflict",
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+            }
+        ]
+    if accepted_degraded_semantic_low_visibility_reuse:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag != "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion"
+        ]
+    if accepted_clean_video_tal_late_weak_candidate_reuse:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframe_refinement_delta_rejected",
+                "semantic_keyframe_refinement_phase_rejected",
+                "semantic_keyframes_unreliable_candidate_tal_conflict",
+                "semantic_keyframes_unreliable_after_refinement",
+                "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+            }
+        ]
+    if "semantic_keyframes_phase_range_visual_tal_promoted" in quality_flags:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+                "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+                "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+            }
+        ]
+    if "semantic_keyframes_distant_full_context_visual_tal_promoted" in quality_flags:
+        quality_flags = [
+            flag
+            for flag in quality_flags
+            if flag
+            not in {
+                "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+                "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+                "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+            }
+        ]
     if any(
         flag
         in {
@@ -366,27 +961,50 @@ def semantic_keyframes_are_reliable(resolved_keyframes: dict[str, Any] | None) -
             "semantic_keyframe_refinement_order_rejected",
             "semantic_keyframes_unreliable_fallback_to_sampled_frames",
             "semantic_keyframe_core_foreground_occlusion",
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+            "semantic_keyframes_unreliable_candidate_takeoff_single_conflict",
+            "semantic_keyframes_unreliable_candidate_early_takeoff_conflict",
+            "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+            "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+            "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+            "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion",
+            "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
             "semantic_keyframes_unreliable_after_visibility_check",
+            "semantic_keyframes_unreliable_after_retry_rejection",
             "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
         }
         for flag in quality_flags
     ):
         return False
+    if (
+        any(flag in VIDEO_TEMPORAL_UNRESOLVED_TAL_CONFLICT_FLAGS for flag in quality_flags)
+        and not any(flag in VIDEO_TEMPORAL_ACCEPTED_TAL_REPAIR_FLAGS for flag in quality_flags)
+    ):
+        return False
     source = resolved_keyframes.get("source")
     anchors: dict[str, float] = {}
+    selected_phase_codes: set[str] = set()
     for item in selected:
         if not isinstance(item, dict):
             continue
+        phase_code = str(item.get("phase_code") or "")
+        if phase_code:
+            selected_phase_codes.add(phase_code)
         key = _semantic_key_from_record(item)
         timestamp = _to_float(item.get("timestamp"))
         if key in {"T", "A", "L"} and timestamp is not None:
             anchors[key] = timestamp
+    if anchors and not {"T", "A", "L"}.issubset(anchors):
+        return False
     if {"T", "A", "L"}.issubset(anchors) and not (
         anchors["T"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["A"]
         and anchors["A"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["L"]
     ):
         return False
     if source in {"video_ai_refined", "blended"}:
+        if selected_phase_codes & JUMP_PHASE_CODES:
+            return {"T", "A", "L"}.issubset(anchors)
         return True
     if source != "skeleton_fallback":
         return False
@@ -855,6 +1473,7 @@ def build_video_temporal_prompts(
     *,
     action_type: str,
     action_subtype: str | None = None,
+    user_note: str | None = None,
     video_duration_sec: float | None = None,
     source_fps: float | None = None,
     skater_level: str = "儿童初级 / Free Skate 1",
@@ -867,6 +1486,20 @@ def build_video_temporal_prompts(
     duration_text = "unknown" if video_duration_sec is None else f"{max(0.0, float(video_duration_sec)):.2f}"
     fps_text = "unknown" if source_fps is None else f"{max(0.0, float(source_fps)):.2f}"
     model_text = DEFAULT_MODEL if not _string(model) or model in {"qwen-vl-max-latest"} else _string(model)
+    action_type_text = _string(action_type, "unknown")
+    action_subtype_text = _string(action_subtype, "unknown")
+    user_note_text = _string(user_note)
+    user_note_section = f"- 上传备注/额外 comments: {user_note_text}\n" if user_note_text else ""
+    mixed_action_mode = action_type_text == "自由滑" and action_subtype_text in {"unknown", "节目片段"}
+    mixed_action_section = (
+        "\n混合动作自动识别要求：\n"
+        "- action_type_hint=自由滑 且 action_subtype_hint=节目片段 表示视频可能是跳跃、旋转、步法或螺旋线中的任意一种，不代表一定是跳跃。\n"
+        "- 必须先判断实际动作类型；不要为了填 T/A/L 把旋转、步法、螺旋线或普通滑行解释成小跳。\n"
+        "- 只有清楚看到主滑行者完成离冰/腾空/首次落冰三段证据时，action_family 才能填 jump，并输出 takeoff/air/landing 与 T/A/L。\n"
+        "- 如果没有清楚腾空：旋转使用 spin_entry/spin_main/spin_exit；步法使用 step_sequence；螺旋线/燕式使用 spiral_entry/spiral_hold/spiral_exit；key_moments 的 T/A/L 保持 null。\n"
+        if mixed_action_mode
+        else ""
+    )
 
     system_prompt = (
         "你是一名专业花样滑冰技术分析师，熟悉儿童初级训练、ISU 技术要素、基础运动生物力学和视频时间定位。\n\n"
@@ -942,6 +1575,8 @@ def build_video_temporal_prompts(
                 "A previous JSON response was parsed but rejected by downstream quality gates. "
                 "Re-evaluate the same clip using the structured diagnostics below. "
                 "Top motion records are full-frame signals and may come from foreground occlusion, another skater, camera motion, or glide_out; do not move T/A/L solely because a later motion peak is larger. "
+                "If skeleton_candidate_tal is present, treat those timestamps as noisy but useful target-skater instance anchors: when they are close to the previous T/A/L, refine within the same local action instance instead of jumping to an earlier or later skating segment. "
+                "If you disagree with those anchors, keep the same target skater and explain the visible takeoff, apex, or first-contact landing evidence through phase timing rather than selecting a different motion cluster. "
                 "Keep previous T/A/L when the main skater's takeoff-air-landing sequence supports them, and change them only when first-contact landing, takeoff, or apex evidence is clearer elsewhere. "
                 "Keep hard uncertainty as fallback, but if the target skater's takeoff-air-landing sequence is visible, return the most coherent T/A/L sequence for the main skater only.\n"
                 f"{retry_json}\n"
@@ -952,6 +1587,7 @@ def build_video_temporal_prompts(
         "已知信息：\n"
         f"- action_type_hint: {_string(action_type, 'unknown')}\n"
         f"- action_subtype_hint: {_string(action_subtype, 'unknown')}\n"
+        f"{user_note_section}"
         f"- skater_level: {skater_level}\n"
         f"- video_duration_sec: {duration_text}\n"
         f"- source_fps: {fps_text}\n"
@@ -963,12 +1599,14 @@ def build_video_temporal_prompts(
         "1. 确认实际动作类型和子类型。\n"
         "2. 输出每个动作阶段的 time_start/time_end。\n"
         "3. 对每个关键阶段输出 key_frame_hint，表示该阶段最有代表性的时间点。\n"
-        "4. 对跳跃给出 T/A/L 建议时间：T = 最后一只脚离冰的瞬间，A = 身体重心达到最高点的瞬间，L = 冰刀首次接触冰面的瞬间。\n"
+        "4. 仅当实际动作是跳跃时，给出 T/A/L 建议时间：T = 最后一只脚离冰的瞬间，A = 身体重心达到最高点的瞬间，L = 冰刀首次接触冰面的瞬间。\n"
         "   - 只看主滑行者；如果有旁人或近景遮挡经过，忽略遮挡物造成的大运动量。\n"
         "   - L 必须是第一次触冰，不是落冰后滑出、重新露出画面或手臂打开的时间。\n"
+        "   - 如果实际动作不是跳跃，T/A/L 必须保持 null，不要编造 takeoff/air/landing。\n"
         "5. 输出宏观技术评价：节奏、速度、轴心、入跳/入转、落冰/出转/滑出、整体流畅度。\n"
         "6. 输出整体印象和置信度。\n"
         "7. 如果主滑行者不清楚、多人遮挡、画面太远或动作不完整，请降低 confidence 并说明原因。\n\n"
+        f"{mixed_action_section}"
         "只输出 JSON，schema_version 必须为 \"video_temporal_v1\"。\n"
         f"简洁 JSON schema 示例：{json.dumps(schema_hint, ensure_ascii=False, separators=(',', ':'))}"
         f"{retry_section}"
@@ -1042,6 +1680,8 @@ def _compact_retry_context_payload(
         "rejected_selected_frames": _compact_selected_frames(retry_context.get("rejected_selected_frames"), selected_count),
         "video_quality_flags": _compact_string_list(retry_context.get("video_quality_flags"), quality_flag_count),
         "resolver_quality_flags": _compact_string_list(retry_context.get("resolver_quality_flags"), quality_flag_count),
+        "skeleton_candidate_tal": _compact_skeleton_candidate_tal(retry_context.get("skeleton_candidate_tal")),
+        "keyframe_candidate_quality_flags": _compact_string_list(retry_context.get("keyframe_candidate_quality_flags"), quality_flag_count),
         "rejected_source": retry_context.get("rejected_source"),
         "action_window": retry_context.get("action_window"),
         "top_motion_records": _compact_motion_records(retry_context.get("top_motion_records"), motion_count),
@@ -1072,6 +1712,25 @@ def _compact_selected_frames(value: Any, limit: int) -> list[dict[str, Any]]:
             }
         )
     return selected
+
+
+def _compact_skeleton_candidate_tal(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    records: list[dict[str, Any]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            {
+                "key": item.get("key"),
+                "t": item.get("timestamp"),
+                "conf": item.get("confidence"),
+                "raw_conf": item.get("raw_confidence"),
+                "delta": item.get("delta_from_rejected_tal_sec"),
+            }
+        )
+    return records
 
 
 def _compact_motion_records(value: Any, limit: int) -> list[dict[str, Any]]:
@@ -1245,6 +1904,7 @@ async def analyze_video_temporal(
     *,
     action_type: str,
     action_subtype: str | None = None,
+    user_note: str | None = None,
     video_duration_sec: float | None = None,
     source_video_duration_sec: float | None = None,
     source_fps: float | None = None,
@@ -1289,6 +1949,7 @@ async def analyze_video_temporal(
     system_prompt, user_prompt = build_video_temporal_prompts(
         action_type=action_type,
         action_subtype=action_subtype,
+        user_note=user_note,
         video_duration_sec=video_duration_sec,
         source_fps=source_fps,
         model=request_model,
@@ -1542,7 +2203,16 @@ def _fallback_skeleton_selected(
     return selected, flags
 
 
-def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+def _motion_cluster_from_records(
+    records: list[dict[str, Any]],
+    *,
+    min_score: float,
+    score_ratio: float,
+    min_records: int,
+    min_span_seconds: float,
+    max_gap_seconds: float,
+    mode: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
     if not records:
         return None
     valid_records = [
@@ -1553,9 +2223,9 @@ def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str
     if not valid_records:
         return None
     global_peak = max((_motion_score_value(record) for record in valid_records), default=0.0)
-    threshold = max(JUMP_MOTION_CLUSTER_FALLBACK_MIN_SCORE, global_peak * JUMP_MOTION_CLUSTER_FALLBACK_SCORE_RATIO)
+    threshold = max(min_score, global_peak * score_ratio)
     strong_records = [record for record in valid_records if _motion_score_value(record) >= threshold]
-    if len(strong_records) < JUMP_MOTION_CLUSTER_FALLBACK_MIN_RECORDS:
+    if len(strong_records) < min_records:
         return None
 
     strong_records.sort(key=lambda record: _to_float(record.get("timestamp")) or 0.0)
@@ -1566,7 +2236,7 @@ def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str
         timestamp = _to_float(record.get("timestamp"))
         if timestamp is None:
             continue
-        if current and last_ts is not None and timestamp - last_ts > JUMP_MOTION_CLUSTER_FALLBACK_MAX_GAP_SECONDS:
+        if current and last_ts is not None and timestamp - last_ts > max_gap_seconds:
             clusters.append(current)
             current = []
         current.append(record)
@@ -1587,7 +2257,7 @@ def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str
     end_ts = _to_float(cluster[-1].get("timestamp"))
     if start_ts is None or end_ts is None:
         return None
-    if end_ts - start_ts < JUMP_MOTION_CLUSTER_FALLBACK_MIN_SPAN_SECONDS:
+    if end_ts - start_ts < min_span_seconds:
         return None
     peak_record = max(cluster, key=_motion_score_value)
     peak_ts = _to_float(peak_record.get("timestamp"))
@@ -1600,13 +2270,54 @@ def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str
         "peak_score": round(_motion_score_value(peak_record), 4),
         "threshold": round(threshold, 4),
         "record_count": len(cluster),
+        "mode": mode,
     }
+
+
+def _strong_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    return _motion_cluster_from_records(
+        records,
+        min_score=JUMP_MOTION_CLUSTER_FALLBACK_MIN_SCORE,
+        score_ratio=JUMP_MOTION_CLUSTER_FALLBACK_SCORE_RATIO,
+        min_records=JUMP_MOTION_CLUSTER_FALLBACK_MIN_RECORDS,
+        min_span_seconds=JUMP_MOTION_CLUSTER_FALLBACK_MIN_SPAN_SECONDS,
+        max_gap_seconds=JUMP_MOTION_CLUSTER_FALLBACK_MAX_GAP_SECONDS,
+        mode="strong",
+    )
+
+
+def _weak_motion_cluster(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    return _motion_cluster_from_records(
+        records,
+        min_score=JUMP_WEAK_MOTION_CLUSTER_FALLBACK_MIN_SCORE,
+        score_ratio=JUMP_MOTION_CLUSTER_FALLBACK_SCORE_RATIO,
+        min_records=JUMP_MOTION_CLUSTER_FALLBACK_MIN_RECORDS,
+        min_span_seconds=JUMP_MOTION_CLUSTER_FALLBACK_MIN_SPAN_SECONDS,
+        max_gap_seconds=JUMP_WEAK_MOTION_CLUSTER_FALLBACK_MAX_GAP_SECONDS,
+        mode="weak",
+    )
 
 
 def _nearest_record_timestamp(records: list[dict[str, Any]], target: float) -> float | None:
     if not records:
         return None
     best = min(records, key=lambda record: abs((_to_float(record.get("timestamp")) or target) - target))
+    return _to_float(best.get("timestamp"))
+
+
+def _best_record_timestamp_in_range(records: list[dict[str, Any]], start: float, end: float) -> float | None:
+    candidates = _records_in_range(records, start, end)
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda record: (_motion_score_value(record), -abs((_to_float(record.get("timestamp")) or start) - ((start + end) / 2.0))))
+    return _to_float(best.get("timestamp"))
+
+
+def _nearest_record_timestamp_in_range(records: list[dict[str, Any]], target: float, start: float, end: float) -> float | None:
+    candidates = _records_in_range(records, start, end)
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda record: abs((_to_float(record.get("timestamp")) or target) - target))
     return _to_float(best.get("timestamp"))
 
 
@@ -1635,7 +2346,11 @@ def _jump_motion_cluster_fallback_selected(
     ):
         return [], []
 
+    cluster_mode = "strong"
     cluster_result = _strong_motion_cluster(motion_records)
+    if cluster_result is None and "video_temporal_resolver_coherent_tal_weak_jump_late_main_motion_cluster_conflict" in flag_set:
+        cluster_result = _weak_motion_cluster(motion_records)
+        cluster_mode = "weak"
     if cluster_result is None:
         return [], []
     cluster, diagnostics = cluster_result
@@ -1657,7 +2372,13 @@ def _jump_motion_cluster_fallback_selected(
     takeoff_anchor_supports_cluster = (
         skeleton_takeoff_ts is not None
         and skeleton_takeoff_conf >= SKELETON_ANCHOR_CONFIDENCE
-        and cluster_start - 0.15 <= skeleton_takeoff_ts <= cluster_peak + 0.10
+        and (
+            cluster_start - 0.15 <= skeleton_takeoff_ts <= cluster_peak + 0.10
+            or (
+                cluster_mode == "weak"
+                and cluster_start - 0.15 <= skeleton_takeoff_ts <= cluster_end + 0.20
+            )
+        )
     )
     apex_landing_anchors_support_cluster = (
         skeleton_apex_ts is not None
@@ -1691,10 +2412,27 @@ def _jump_motion_cluster_fallback_selected(
             )
             or (
                 "video_temporal_resolver_coherent_tal_weak_jump_late_main_motion_cluster_conflict" in flag_set
-                and rejected_t >= cluster_start + MOTION_SNAP_TOLERANCE_SECONDS
+                and (
+                    rejected_t >= cluster_start + MOTION_SNAP_TOLERANCE_SECONDS
+                    or (
+                        cluster_mode == "weak"
+                        and takeoff_anchor_supports_cluster
+                        and skeleton_takeoff_ts is not None
+                        and rejected_t - skeleton_takeoff_ts >= JUMP_WEAK_MOTION_CLUSTER_FALLBACK_SEMANTIC_SHIFT_SECONDS
+                    )
+                )
                 and rejected_a >= cluster_start + JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_APEX_LEAD_SECONDS
                 and rejected_l >= cluster_end + JUMP_COHERENT_TAL_LANDING_AFTER_MOTION_PEAK_SECONDS
-                and rejected_l <= cluster_end + JUMP_COHERENT_TAL_MOTION_CONFLICT_LOOKAHEAD_SECONDS
+                and rejected_l <= cluster_end + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LOOKAHEAD_SECONDS
+            )
+            or (
+                "video_temporal_quality_retry_extreme_late_motion_cluster_conflict" in flag_set
+                and cluster_mode == "weak"
+                and takeoff_anchor_supports_cluster
+                and skeleton_takeoff_ts is not None
+                and rejected_t - skeleton_takeoff_ts >= JUMP_WEAK_MOTION_CLUSTER_FALLBACK_SEMANTIC_SHIFT_SECONDS
+                and rejected_a >= cluster_start + JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_APEX_LEAD_SECONDS
+                and rejected_l >= cluster_end + JUMP_COHERENT_TAL_LANDING_AFTER_MOTION_PEAK_SECONDS
             )
             or (
                 "video_temporal_resolver_coherent_tal_late_main_motion_cluster_conflict" in flag_set
@@ -1725,23 +2463,66 @@ def _jump_motion_cluster_fallback_selected(
 
     takeoff_ts = cluster_start - JUMP_MOTION_CLUSTER_FALLBACK_TAKEOFF_LEAD_SECONDS
     if takeoff_anchor_supports_cluster and skeleton_takeoff_ts is not None:
-        takeoff_ts = min(takeoff_ts, skeleton_takeoff_ts - max(SEMANTIC_ORDER_MIN_GAP_SECONDS * 2, 0.05))
+        if cluster_mode == "weak":
+            takeoff_ts = skeleton_takeoff_ts
+        else:
+            takeoff_ts = min(takeoff_ts, skeleton_takeoff_ts - max(SEMANTIC_ORDER_MIN_GAP_SECONDS * 2, 0.05))
     takeoff_ts = max(0.0, min(video_duration_sec, takeoff_ts))
 
     apex_ts: float | None = None
     if (
+        cluster_mode != "weak"
+        and
         skeleton_apex_ts is not None
         and 0 <= skeleton_apex_ts <= video_duration_sec
         and skeleton_apex_conf >= JUMP_MOTION_CLUSTER_FALLBACK_APEX_MIN_CONFIDENCE
         and cluster_start - 0.20 <= skeleton_apex_ts <= cluster_end
     ):
         apex_ts = skeleton_apex_ts
+    elif cluster_mode == "weak":
+        apex_floor = max(
+            JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_MIN_SCORE,
+            _motion_score_value(max(cluster, key=_motion_score_value)) * JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_SCORE_RATIO,
+        )
+        apex_ts = _nearest_record_timestamp_in_range(
+            [
+                record
+                for record in motion_records
+                if _motion_score_value(record) >= apex_floor
+            ],
+            min(video_duration_sec, takeoff_ts + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_APEX_TARGET_SECONDS),
+            max(takeoff_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS, cluster_start),
+            min(video_duration_sec, cluster_end + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_APEX_TARGET_SECONDS),
+        )
+        if apex_ts is None:
+            apex_ts = _best_record_timestamp_in_range(
+                motion_records,
+                max(takeoff_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS, cluster_peak),
+                min(video_duration_sec, cluster_end + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_APEX_TARGET_SECONDS),
+            )
+        if apex_ts is None or apex_ts <= takeoff_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS:
+            apex_ts = _nearest_record_timestamp(cluster, max(takeoff_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS, cluster_end))
     else:
         apex_ts = _nearest_record_timestamp(cluster, (cluster_start + cluster_peak) / 2.0)
     if apex_ts is None:
         return [], []
 
     landing_ts = cluster_peak
+    if cluster_mode == "weak":
+        tail_floor = max(
+            JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_MIN_SCORE,
+            _motion_score_value(max(cluster, key=_motion_score_value)) * JUMP_WEAK_MOTION_CLUSTER_FALLBACK_TAIL_SCORE_RATIO,
+        )
+        landing_ts = _nearest_record_timestamp_in_range(
+            [
+                record
+                for record in motion_records
+                if _motion_score_value(record) >= tail_floor
+            ],
+            min(video_duration_sec, takeoff_ts + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LANDING_TARGET_SECONDS),
+            apex_ts + max(JUMP_MOTION_CLUSTER_FALLBACK_LANDING_MIN_GAP_SECONDS, SEMANTIC_ORDER_MIN_GAP_SECONDS),
+            min(video_duration_sec, cluster_end + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LANDING_TARGET_SECONDS),
+        ) or cluster_end
     if landing_ts <= apex_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS:
         later_records = [
             record
@@ -1762,6 +2543,19 @@ def _jump_motion_cluster_fallback_selected(
         return [], []
 
     confidence = JUMP_MOTION_CLUSTER_FALLBACK_CONFIDENCE
+    if cluster_mode == "weak":
+        takeoff_phase_start = round(max(0.0, takeoff_ts - 0.20), 3)
+        takeoff_phase_end = round(
+            min(video_duration_sec, max(takeoff_ts + 0.12, min(apex_ts - SEMANTIC_ORDER_MIN_GAP_SECONDS, takeoff_ts + 0.25))),
+            3,
+        )
+        landing_phase_start = round(max(0.0, apex_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS, landing_ts - 0.20), 3)
+        landing_phase_end = round(min(video_duration_sec, landing_ts + 0.18), 3)
+    else:
+        takeoff_phase_start = round(max(0.0, takeoff_ts - 0.20), 3)
+        takeoff_phase_end = round(min(video_duration_sec, cluster_start + 0.10), 3)
+        landing_phase_start = round(max(0.0, apex_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS), 3)
+        landing_phase_end = round(min(video_duration_sec, cluster_end + 0.12), 3)
     selected = [
         {
             "frame_id": "semantic_0001",
@@ -1771,8 +2565,8 @@ def _jump_motion_cluster_fallback_selected(
             "key_moment": "T_takeoff_sec",
             "selection_reason": "motion_cluster_fallback_takeoff_lead",
             "confidence": confidence,
-            "phase_time_start": round(max(0.0, takeoff_ts - 0.20), 3),
-            "phase_time_end": round(min(video_duration_sec, cluster_start + 0.10), 3),
+            "phase_time_start": takeoff_phase_start,
+            "phase_time_end": takeoff_phase_end,
             "max_refinement_delta_sec": 0.12,
         },
         {
@@ -1798,8 +2592,8 @@ def _jump_motion_cluster_fallback_selected(
             "key_moment": "L_landing_sec",
             "selection_reason": "motion_cluster_fallback_landing_peak",
             "confidence": confidence,
-            "phase_time_start": round(max(0.0, apex_ts + SEMANTIC_ORDER_MIN_GAP_SECONDS), 3),
-            "phase_time_end": round(min(video_duration_sec, cluster_end + 0.12), 3),
+            "phase_time_start": landing_phase_start,
+            "phase_time_end": landing_phase_end,
             "max_refinement_delta_sec": 0.12,
             "visibility_repair_max_delta_sec": 0.12,
             "visibility_repair_preserve_timestamp": True,
@@ -1809,6 +2603,12 @@ def _jump_motion_cluster_fallback_selected(
         "video_temporal_resolver_motion_cluster_fallback_used",
         "video_temporal_resolver_motion_cluster_fallback_low_confidence",
     ]
+    if cluster_mode == "weak":
+        flags.append("video_temporal_resolver_weak_motion_cluster_fallback_used")
+        if takeoff_anchor_supports_cluster:
+            flags.append("video_temporal_resolver_weak_motion_cluster_takeoff_anchor_used")
+        if skeleton_apex_conf < SKELETON_FALLBACK_CONFIDENCE or skeleton_landing_conf < SKELETON_FALLBACK_CONFIDENCE:
+            flags.append("video_temporal_resolver_weak_motion_cluster_replaced_low_confidence_apex_landing")
     selected[0]["motion_cluster_diagnostics"] = diagnostics
     return selected[:max_frames], flags
 
@@ -1886,6 +2686,56 @@ def _fill_key_moments_from_phase_hints(payload: dict[str, Any]) -> None:
             payload.get("quality_flags"),
             ["video_temporal_recovered_key_moments_from_phase_hints"],
         )
+
+
+def _phase_segment_for_key_moment(
+    segments: list[dict[str, Any]],
+    phase_code: str,
+    key_moment_value: float | None,
+    duration_sec: float,
+    *,
+    require_contains: bool = False,
+) -> dict[str, Any] | None:
+    matching_segments = [
+        segment
+        for segment in segments
+        if isinstance(segment, dict) and str(segment.get("phase_code") or "") == phase_code
+    ]
+    if not matching_segments:
+        return None
+    if key_moment_value is not None:
+        for segment in matching_segments:
+            phase_range = _valid_phase_time_range(segment, duration_sec)
+            if phase_range is None:
+                continue
+            start, end = phase_range
+            if start <= key_moment_value <= end:
+                return segment
+        if require_contains:
+            return None
+    return matching_segments[0]
+
+
+def _segment_matches_core_key_moment(
+    segment: dict[str, Any],
+    key_moments: dict[str, Any],
+    duration_sec: float,
+    segment_counts: dict[str, int] | None = None,
+) -> bool:
+    phase_code = str(segment.get("phase_code") or "")
+    key = PHASE_KEY_MOMENTS.get(phase_code)
+    if key is None:
+        return True
+    if segment_counts is not None and segment_counts.get(phase_code, 0) <= 1:
+        return True
+    value = _to_float(key_moments.get(key))
+    if value is None:
+        return True
+    phase_range = _valid_phase_time_range(segment, duration_sec)
+    if phase_range is None:
+        return False
+    start, end = phase_range
+    return start <= value <= end
 
 
 def _valid_phase_time_range(segment: dict[str, Any], duration_sec: float) -> tuple[float, float] | None:
@@ -2093,12 +2943,100 @@ def _selected_has_complete_ordered_core_tal(
     )
 
 
+def _weak_retry_motion_conflict_should_preserve_video_tal(
+    video_ai_result: dict[str, Any] | None,
+    skeleton_candidates: dict[str, dict[str, Any]],
+    *,
+    confidence: float,
+    analysis_profile: str | None,
+) -> bool:
+    if (
+        str(analysis_profile or "").strip().lower() != "jump"
+        or not isinstance(video_ai_result, dict)
+        or confidence < JUMP_COHERENT_TAL_FALLBACK_GLIDE_OUT_CONFIDENCE
+    ):
+        return False
+    quality_flags = [flag for flag in (video_ai_result.get("quality_flags") or []) if isinstance(flag, str)]
+    if "video_temporal_quality_retry" not in quality_flags or not _video_temporal_has_weak_jump_risk(video_ai_result):
+        return False
+    takeoff = skeleton_candidates.get("T")
+    apex = skeleton_candidates.get("A")
+    landing = skeleton_candidates.get("L")
+    if not isinstance(takeoff, dict) or _candidate_confidence(takeoff) < SKELETON_ANCHOR_CONFIDENCE:
+        return False
+    if isinstance(apex, dict) and _candidate_confidence(apex) >= SKELETON_FALLBACK_CONFIDENCE:
+        return False
+    if isinstance(landing, dict) and _candidate_confidence(landing) >= SKELETON_FALLBACK_CONFIDENCE:
+        return False
+    return True
+
+
+def _candidate_quality_flags(skeleton_candidates: dict[str, dict[str, Any]]) -> set[str]:
+    flags: set[str] = set()
+    for candidate in skeleton_candidates.values():
+        if not isinstance(candidate, dict):
+            continue
+        values = candidate.get("quality_flags")
+        if isinstance(values, list):
+            flags.update(str(flag) for flag in values if isinstance(flag, str))
+        values = candidate.get("warnings")
+        if isinstance(values, list):
+            flags.update(str(flag) for flag in values if isinstance(flag, str))
+    return flags
+
+
+def _retry_tal_can_use_weak_phase_ranges(
+    video_ai_result: dict[str, Any],
+    skeleton_candidates: dict[str, dict[str, Any]],
+    *,
+    confidence: float,
+    duration_sec: float,
+    analysis_profile: str | None,
+    tal_anchors: tuple[float, float, float],
+) -> bool:
+    if str(analysis_profile or "").strip().lower() != "jump":
+        return False
+    quality_flags = [flag for flag in (video_ai_result.get("quality_flags") or []) if isinstance(flag, str)]
+    if "video_temporal_quality_retry" not in quality_flags:
+        return False
+    if confidence < JUMP_COHERENT_TAL_RETRY_CONFIDENCE_FLOOR:
+        return False
+    candidate_flags = _candidate_quality_flags(skeleton_candidates)
+    if not (candidate_flags & VIDEO_TEMPORAL_WEAK_TAL_CANDIDATE_GEOMETRY_FLAGS):
+        return False
+
+    t_value, _, l_value = tal_anchors
+    tal_span = l_value - t_value
+    if not (
+        JUMP_COHERENT_TAL_RETRY_WEAK_PHASE_MIN_SPAN_SECONDS
+        <= tal_span
+        <= JUMP_COHERENT_TAL_RETRY_WEAK_PHASE_MAX_SPAN_SECONDS
+    ):
+        return False
+
+    segments = [segment for segment in video_ai_result.get("phase_segments") or [] if isinstance(segment, dict)]
+    for phase_code, timestamp in zip(JUMP_CORE_PHASE_CODES, tal_anchors, strict=True):
+        segment = _phase_segment_for_key_moment(segments, phase_code, timestamp, duration_sec)
+        if not isinstance(segment, dict):
+            return False
+        phase_range = _valid_phase_time_range(segment, duration_sec)
+        if phase_range is None:
+            return False
+        start, end = phase_range
+        if not (start <= timestamp <= end):
+            return False
+        if _clamp_confidence(segment.get("confidence")) < JUMP_COHERENT_TAL_RETRY_WEAK_GEOMETRY_PHASE_CONFIDENCE:
+            return False
+    return True
+
+
 def _jump_coherent_tal_is_usable(
     video_ai_result: dict[str, Any],
     *,
     confidence: float,
     duration_sec: float,
     analysis_profile: str | None,
+    skeleton_candidates: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
     profile = str(analysis_profile or "").strip().lower()
     quality_flags = [flag for flag in (video_ai_result.get("quality_flags") or []) if isinstance(flag, str)]
@@ -2131,17 +3069,17 @@ def _jump_coherent_tal_is_usable(
     ):
         return False
 
-    segments = video_ai_result.get("phase_segments")
-    if not isinstance(segments, list):
+    raw_segments = video_ai_result.get("phase_segments")
+    if not isinstance(raw_segments, list):
         return False
-    segment_by_code = {str(segment.get("phase_code") or ""): segment for segment in segments if isinstance(segment, dict)}
+    segments = [segment for segment in raw_segments if isinstance(segment, dict)]
     expected = {
         "takeoff": t_value,
         "air": a_value,
         "landing": l_value,
     }
     for phase_code, timestamp in expected.items():
-        segment = segment_by_code.get(phase_code)
+        segment = _phase_segment_for_key_moment(segments, phase_code, timestamp, duration_sec)
         if not isinstance(segment, dict):
             return False
         phase_range = _valid_phase_time_range(segment, duration_sec)
@@ -2151,7 +3089,15 @@ def _jump_coherent_tal_is_usable(
         if not (start <= timestamp <= end):
             return False
         if _clamp_confidence(segment.get("confidence")) < phase_confidence_floor:
-            return False
+            if not _retry_tal_can_use_weak_phase_ranges(
+                video_ai_result,
+                skeleton_candidates or {},
+                confidence=confidence,
+                duration_sec=duration_sec,
+                analysis_profile=analysis_profile,
+                tal_anchors=(t_value, a_value, l_value),
+            ):
+                return False
     return True
 
 
@@ -2298,6 +3244,32 @@ def _jump_coherent_tal_motion_conflict_flags(
     skeleton_apex_ts = _candidate_timestamp(skeleton_apex) if isinstance(skeleton_apex, dict) else None
     skeleton_landing = skeleton_candidates.get("L") if isinstance(skeleton_candidates, dict) else None
     skeleton_landing_ts = _candidate_timestamp(skeleton_landing) if isinstance(skeleton_landing, dict) else None
+    skeleton_core_candidates = {
+        "T": skeleton_takeoff,
+        "A": skeleton_apex,
+        "L": skeleton_landing,
+    }
+    skeleton_core_timestamps = {
+        key: _candidate_timestamp(candidate) if isinstance(candidate, dict) else None
+        for key, candidate in skeleton_core_candidates.items()
+    }
+    skeleton_core_confidences = [
+        _candidate_confidence(candidate)
+        for candidate in skeleton_core_candidates.values()
+        if isinstance(candidate, dict)
+    ]
+    near_skeleton_candidate_tal_support = (
+        len(skeleton_core_confidences) == 3
+        and all(timestamp is not None for timestamp in skeleton_core_timestamps.values())
+        and all(
+            abs(video_timestamp - float(skeleton_core_timestamps[key])) <= JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_MAX_DELTA_SECONDS
+            for key, video_timestamp in {"T": t_value, "A": a_value, "L": l_value}.items()
+        )
+        and (
+            (sum(skeleton_core_confidences) / len(skeleton_core_confidences)) >= JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_AVG_CONFIDENCE
+            or max(skeleton_core_confidences) >= JUMP_COHERENT_TAL_NEAR_SKELETON_CANDIDATE_STRONG_CONFIDENCE
+        )
+    )
     skeleton_fallback_timeline_conflict = (
         profile == "jump"
         and explicit_video_fallback
@@ -2402,6 +3374,10 @@ def _jump_coherent_tal_motion_conflict_flags(
     )
     failed_landing_motion_support_flags = [
         "video_temporal_resolver_coherent_tal_failed_landing_motion_supported",
+        "video_temporal_resolver_coherent_tal_motion_supported_despite_late_motion",
+    ]
+    near_skeleton_candidate_motion_support_flags = [
+        "video_temporal_resolver_coherent_tal_near_skeleton_candidate_supported",
         "video_temporal_resolver_coherent_tal_motion_supported_despite_late_motion",
     ]
     phase_ranges = [
@@ -2526,6 +3502,8 @@ def _jump_coherent_tal_motion_conflict_flags(
             )
         )
     ):
+        if near_skeleton_candidate_tal_support:
+            return near_skeleton_candidate_motion_support_flags
         return _merge_flags(
             [
                 "video_temporal_resolver_coherent_tal_compressed",
@@ -2544,11 +3522,45 @@ def _jump_coherent_tal_motion_conflict_flags(
         and last_strong_ts - first_strong_ts >= JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_SPAN_SECONDS
         and skeleton_takeoff_ts is not None
         and _candidate_confidence(skeleton_takeoff) >= SKELETON_ANCHOR_CONFIDENCE
-        and first_strong_ts - 0.15 <= skeleton_takeoff_ts <= global_peak_ts + 0.10
+        and first_strong_ts - 0.15 <= skeleton_takeoff_ts <= last_strong_ts + 0.20
+        and (
+            confidence < JUMP_COHERENT_TAL_FALLBACK_GLIDE_OUT_CONFIDENCE
+            or t_value - skeleton_takeoff_ts >= JUMP_WEAK_MOTION_CLUSTER_HIGH_CONFIDENCE_MIN_SEMANTIC_SHIFT_SECONDS
+            or (
+                skeleton_apex_ts is not None
+                and skeleton_landing_ts is not None
+                and _candidate_confidence(skeleton_apex) >= JUMP_MOTION_CLUSTER_FALLBACK_APEX_MIN_CONFIDENCE
+                and _candidate_confidence(skeleton_landing) >= SKELETON_FALLBACK_CONFIDENCE
+            )
+        )
         and t_value >= first_strong_ts + MOTION_SNAP_TOLERANCE_SECONDS
         and a_value >= first_strong_ts + JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_APEX_LEAD_SECONDS
         and l_value >= last_strong_ts + JUMP_COHERENT_TAL_LANDING_AFTER_MOTION_PEAK_SECONDS
-        and l_value <= last_strong_ts + JUMP_COHERENT_TAL_MOTION_CONFLICT_LOOKAHEAD_SECONDS
+        and l_value <= last_strong_ts + JUMP_WEAK_MOTION_CLUSTER_FALLBACK_LOOKAHEAD_SECONDS
+    ):
+        return [
+            "video_temporal_resolver_coherent_tal_weak_jump_late_main_motion_cluster_conflict",
+            "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+        ]
+    if (
+        weak_jump_risk
+        and uses_video_timestamps
+        and first_strong_ts is not None
+        and last_strong_ts is not None
+        and len(strong_records) >= JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_STRONG_RECORDS
+        and last_strong_ts - first_strong_ts >= JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_MIN_SPAN_SECONDS
+        and skeleton_takeoff_ts is not None
+        and _candidate_confidence(skeleton_takeoff) >= SKELETON_ANCHOR_CONFIDENCE
+        and first_strong_ts - 0.15 <= skeleton_takeoff_ts <= last_strong_ts + 0.20
+        and t_value - skeleton_takeoff_ts >= JUMP_WEAK_MOTION_CLUSTER_FALLBACK_SEMANTIC_SHIFT_SECONDS
+        and a_value >= first_strong_ts + JUMP_COHERENT_TAL_RETRY_MAIN_MOTION_APEX_LEAD_SECONDS
+        and l_value >= last_strong_ts + JUMP_COHERENT_TAL_LANDING_AFTER_MOTION_PEAK_SECONDS
+        and _motion_peak_score_in_range(
+            motion_records,
+            max(0.0, t_value - MOTION_SNAP_TOLERANCE_SECONDS),
+            min(duration_sec, l_value + MOTION_SNAP_TOLERANCE_SECONDS),
+        )
+        < global_peak * JUMP_WEAK_MOTION_CLUSTER_FALLBACK_CORE_PEAK_RATIO
     ):
         return [
             "video_temporal_resolver_coherent_tal_weak_jump_late_main_motion_cluster_conflict",
@@ -2725,6 +3737,8 @@ def _jump_coherent_tal_motion_conflict_flags(
             confidence < JUMP_COHERENT_TAL_MOTION_CONFLICT_CONFIDENCE_CEILING
             and l_value <= first_strong_ts + JUMP_COHERENT_TAL_MOTION_CONFLICT_LOOKAHEAD_SECONDS
         ):
+            if near_skeleton_candidate_tal_support:
+                return near_skeleton_candidate_motion_support_flags
             if failed_landing_followthrough and core_phase_motion_supported:
                 return failed_landing_motion_support_flags
             return [
@@ -2738,6 +3752,8 @@ def _jump_coherent_tal_motion_conflict_flags(
             and l_value >= first_strong_ts + JUMP_COHERENT_TAL_LANDING_AFTER_MOTION_PEAK_SECONDS
             and l_value <= first_strong_ts + JUMP_COHERENT_TAL_MOTION_CONFLICT_LOOKAHEAD_SECONDS
         ):
+            if near_skeleton_candidate_tal_support:
+                return near_skeleton_candidate_motion_support_flags
             if failed_landing_followthrough and core_phase_motion_supported:
                 return failed_landing_motion_support_flags
             return [
@@ -2746,6 +3762,8 @@ def _jump_coherent_tal_motion_conflict_flags(
                 "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
             ]
         if preparation_range is None or takeoff_boundary_motion or preparation_boundary_motion:
+            if near_skeleton_candidate_tal_support:
+                return near_skeleton_candidate_motion_support_flags
             if failed_landing_followthrough and core_phase_motion_supported:
                 return failed_landing_motion_support_flags
             return [
@@ -2879,6 +3897,7 @@ def _resolver_phase_is_usable(
     coherent_profile_override: bool = False,
     analysis_profile: str | None = None,
     duration_sec: float,
+    weak_retry_phase_override: bool = False,
 ) -> bool:
     confidence = _clamp_confidence(segment.get("confidence"))
     if confidence >= 0.60 and segment.get("valid") is not False:
@@ -2891,7 +3910,12 @@ def _resolver_phase_is_usable(
         return phase_code in profile_codes and confidence >= 0.60 and _valid_phase_time_range(segment, duration_sec) is not None
     return (
         phase_code in JUMP_CORE_PHASE_CODES
-        and confidence >= JUMP_COHERENT_TAL_PHASE_CONFIDENCE
+        and confidence
+        >= (
+            JUMP_COHERENT_TAL_RETRY_WEAK_GEOMETRY_PHASE_CONFIDENCE
+            if weak_retry_phase_override
+            else JUMP_COHERENT_TAL_PHASE_CONFIDENCE
+        )
         and _valid_phase_time_range(segment, duration_sec) is not None
     )
 
@@ -3060,6 +4084,7 @@ def _resolve_segment_timestamp(
     motion_records: list[dict[str, Any]],
     prefer_key_moments: bool = False,
     preserve_key_moments: bool = False,
+    prefer_key_moments_before_skeleton: bool = False,
     skeleton_phase_edge_anchors: dict[str, float] | None = None,
 ) -> tuple[float | None, str, str | None, list[str]]:
     flags: list[str] = []
@@ -3073,6 +4098,10 @@ def _resolve_segment_timestamp(
     key_moment = PHASE_KEY_MOMENTS.get(phase_code)
     skeleton_label = {"T_takeoff_sec": "T", "A_air_sec": "A", "L_landing_sec": "L"}.get(key_moment or "")
     skeleton_candidate = skeleton_candidates.get(skeleton_label or "")
+    if prefer_key_moments_before_skeleton:
+        key_value = _to_float(video_ai_result.get("key_moments", {}).get(key_moment)) if key_moment else None
+        if key_value is not None and start <= key_value <= end:
+            return key_value, "video_phase_range_key_moment", key_moment, flags
     if skeleton_label and skeleton_phase_edge_anchors:
         skeleton_edge_ts = skeleton_phase_edge_anchors.get(skeleton_label)
         if (
@@ -3255,6 +4284,7 @@ def resolve_semantic_keyframes(
             confidence=confidence,
             duration_sec=duration,
             analysis_profile=effective_analysis_profile,
+            skeleton_candidates=skeleton_candidates,
         )
         if isinstance(normalized_video, dict)
         else False
@@ -3306,6 +4336,31 @@ def resolve_semantic_keyframes(
             if not motion_supported_despite_late_motion:
                 coherent_tal_override = False
     motion_conflict_rejected = "video_temporal_resolver_coherent_tal_motion_conflict_rejected" in flags
+    preserve_video_tal_despite_weak_retry_motion_conflict = (
+        motion_conflict_rejected
+        and not motion_supported_despite_late_motion
+        and _weak_retry_motion_conflict_should_preserve_video_tal(
+            normalized_video,
+            skeleton_candidates,
+            confidence=confidence,
+            analysis_profile=effective_analysis_profile,
+        )
+    )
+    if preserve_video_tal_despite_weak_retry_motion_conflict:
+        flags = [
+            flag
+            for flag in flags
+            if flag
+            not in {
+                "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+                "video_temporal_resolver_coherent_tal_compressed",
+                "video_temporal_resolver_coherent_tal_late_motion_conflict",
+                "video_temporal_resolver_coherent_tal_weak_jump_late_main_motion_cluster_conflict",
+            }
+        ]
+        flags.append("video_temporal_resolver_weak_retry_motion_conflict_preserved_video_tal")
+        coherent_tal_override = True
+        motion_conflict_rejected = False
     conflicted_small_occluded_target = (
         _video_temporal_has_small_target_risk(normalized_video)
         and _video_temporal_has_occlusion_risk(normalized_video)
@@ -3369,6 +4424,16 @@ def resolve_semantic_keyframes(
         flags.append("video_temporal_resolver_coherent_tal_used")
         if confidence < 0.80:
             flags.append("video_temporal_resolver_moderate_confidence_tal_used")
+        if (
+            "video_temporal_quality_retry" in normalized_video.get("quality_flags", [])
+            and any(
+                isinstance(segment, dict)
+                and str(segment.get("phase_code") or "") in JUMP_CORE_PHASE_CODES
+                and _clamp_confidence(segment.get("confidence")) < JUMP_COHERENT_TAL_RETRY_PHASE_CONFIDENCE
+                for segment in normalized_video.get("phase_segments", [])
+            )
+        ):
+            flags.append("video_temporal_resolver_retry_weak_phase_tal_preserved")
     if coherent_profile_override:
         flags.append("video_temporal_resolver_coherent_profile_phases_used")
     if skeleton_phase_edge_anchors:
@@ -3378,11 +4443,35 @@ def resolve_semantic_keyframes(
         flags.append("video_temporal_resolver_tal_order_blended")
     if validation.get("valid") is False and (confidence < 0.80 or normalized_video.get("fallback_recommendation") != "use_video_timestamps"):
         flags.append("video_temporal_resolver_video_validation_not_clean")
+    key_moments = normalized_video.get("key_moments") if isinstance(normalized_video.get("key_moments"), dict) else {}
+    weak_retry_phase_override = False
+    if coherent_tal_override:
+        tal_values = (
+            _to_float(key_moments.get("T_takeoff_sec")),
+            _to_float(key_moments.get("A_air_sec")),
+            _to_float(key_moments.get("L_landing_sec")),
+        )
+        if all(value is not None for value in tal_values):
+            weak_retry_phase_override = _retry_tal_can_use_weak_phase_ranges(
+                normalized_video,
+                skeleton_candidates,
+                confidence=confidence,
+                duration_sec=duration,
+                analysis_profile=effective_analysis_profile,
+                tal_anchors=(tal_values[0], tal_values[1], tal_values[2]),  # type: ignore[arg-type]
+            )
 
     selected: list[dict[str, Any]] = []
     seen: set[tuple[str, float]] = set()
     allow_core_candidate_phase = coherent_tal_override or preserve_rejected_semantic_candidates
-    for segment in _resolver_phase_order(effective_analysis_profile, normalized_video):
+    preserve_core_key_moments = allow_core_candidate_phase or preserve_video_tal_despite_weak_retry_motion_conflict
+    ordered_segments = _resolver_phase_order(effective_analysis_profile, normalized_video)
+    segment_counts: dict[str, int] = {}
+    for segment in ordered_segments:
+        code = str(segment.get("phase_code") or "") if isinstance(segment, dict) else ""
+        if code:
+            segment_counts[code] = segment_counts.get(code, 0) + 1
+    for segment in ordered_segments:
         if len(selected) >= max_frames:
             flags.append("video_temporal_resolver_frame_budget_trimmed")
             break
@@ -3392,10 +4481,18 @@ def resolve_semantic_keyframes(
             coherent_profile_override=coherent_profile_override,
             analysis_profile=effective_analysis_profile,
             duration_sec=duration,
+            weak_retry_phase_override=weak_retry_phase_override,
         ):
             flags.append(f"video_temporal_resolver_phase_{segment.get('phase_code')}_fallback")
             continue
         phase_code = str(segment.get("phase_code") or "")
+        if (
+            str(effective_analysis_profile or "").strip().lower() == "jump"
+            and phase_code in PHASE_KEY_MOMENTS
+            and not _segment_matches_core_key_moment(segment, key_moments, duration, segment_counts)
+        ):
+            flags.append(f"video_temporal_resolver_skipped_duplicate_{phase_code}_outside_key_moment")
+            continue
         if str(effective_analysis_profile or "").strip().lower() == "step" and phase_code == "step_sequence":
             coverage_records, coverage_flags = _step_sequence_coverage_records(
                 segment,
@@ -3421,7 +4518,8 @@ def resolve_semantic_keyframes(
             skeleton_candidates=skeleton_candidates,
             motion_records=motion_records,
             prefer_key_moments=allow_core_candidate_phase and explicit_video_fallback,
-            preserve_key_moments=allow_core_candidate_phase,
+            preserve_key_moments=preserve_core_key_moments,
+            prefer_key_moments_before_skeleton=preserve_video_tal_despite_weak_retry_motion_conflict,
             skeleton_phase_edge_anchors=skeleton_phase_edge_anchors,
         )
         flags.extend(segment_flags)
@@ -3703,12 +4801,41 @@ def validate_video_temporal_payload(payload: dict[str, Any], duration_sec: float
         l_value = _to_float(key_moments.get("L_landing_sec"))
         if t_value is not None and a_value is not None and l_value is not None and not (t_value < a_value < l_value):
             warnings.append("video_temporal_tal_order_invalid")
-        segment_by_code = {segment.get("phase_code"): segment for segment in normalized_segments if isinstance(segment, dict)}
-        if t_value is not None and not _phase_contains_time(segment_by_code.get("takeoff", {}), t_value):
+        if (
+            t_value is not None
+            and _phase_segment_for_key_moment(
+                normalized_segments,
+                "takeoff",
+                t_value,
+                duration,
+                require_contains=True,
+            )
+            is None
+        ):
             warnings.append("video_temporal_T_takeoff_outside_takeoff_phase")
-        if a_value is not None and not _phase_contains_time(segment_by_code.get("air", {}), a_value):
+        if (
+            a_value is not None
+            and _phase_segment_for_key_moment(
+                normalized_segments,
+                "air",
+                a_value,
+                duration,
+                require_contains=True,
+            )
+            is None
+        ):
             warnings.append("video_temporal_A_air_outside_air_phase")
-        if l_value is not None and not _phase_contains_time(segment_by_code.get("landing", {}), l_value):
+        if (
+            l_value is not None
+            and _phase_segment_for_key_moment(
+                normalized_segments,
+                "landing",
+                l_value,
+                duration,
+                require_contains=True,
+            )
+            is None
+        ):
             warnings.append("video_temporal_L_landing_outside_landing_phase")
 
     for item in errors:

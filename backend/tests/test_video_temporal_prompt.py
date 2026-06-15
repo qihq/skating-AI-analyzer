@@ -68,6 +68,19 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("- model: qwen3.6-plus", user_prompt)
         self.assertNotIn("- model: qwen-vl-max-latest", user_prompt)
 
+    def test_user_note_is_included_in_prompt_context(self) -> None:
+        _, user_prompt = build_video_temporal_prompts(
+            action_type="跳跃",
+            action_subtype=None,
+            user_note="我不确定具体动作名，重点看落冰为什么飘。",
+            video_duration_sec=6.0,
+            source_fps=30.0,
+        )
+
+        self.assertIn("上传备注/额外 comments", user_prompt)
+        self.assertIn("我不确定具体动作名", user_prompt)
+        self.assertIn("重点看落冰为什么飘", user_prompt)
+
     def test_retry_context_is_included_when_quality_gate_retries(self) -> None:
         _, user_prompt = build_video_temporal_prompts(
             action_type="jump",
@@ -77,6 +90,11 @@ class VideoTemporalPromptTests(unittest.TestCase):
             retry_context={
                 "retry_reason_flags": ["video_temporal_resolver_coherent_tal_motion_conflict_rejected"],
                 "rejected_key_moments": {"T_takeoff_sec": 6.12, "A_air_sec": 6.45, "L_landing_sec": 6.72},
+                "skeleton_candidate_tal": [
+                    {"key": "T", "timestamp": 6.1, "confidence": 0.72, "raw_confidence": 0.72, "delta_from_rejected_tal_sec": -0.02},
+                    {"key": "A", "timestamp": 6.48, "confidence": 0.55, "raw_confidence": 0.55, "delta_from_rejected_tal_sec": 0.03},
+                    {"key": "L", "timestamp": 6.7, "confidence": 0.52, "raw_confidence": 0.52, "delta_from_rejected_tal_sec": -0.02},
+                ],
                 "top_motion_records": [{"timestamp": 7.775, "motion_score": 0.2166}],
             },
         )
@@ -88,6 +106,9 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("full-frame signals", user_prompt)
         self.assertIn("do not move T/A/L solely", user_prompt)
         self.assertIn("glide_out", user_prompt)
+        self.assertIn("skeleton_candidate_tal", user_prompt)
+        self.assertIn("same local action instance", user_prompt)
+        self.assertIn("\"delta\":-0.02", user_prompt)
 
     def test_large_retry_context_remains_valid_json_and_keeps_core_fields(self) -> None:
         _, user_prompt = build_video_temporal_prompts(
@@ -116,6 +137,12 @@ class VideoTemporalPromptTests(unittest.TestCase):
                 ],
                 "video_quality_flags": [f"video_flag_{index}" for index in range(20)],
                 "resolver_quality_flags": [f"resolver_flag_{index}" for index in range(20)],
+                "skeleton_candidate_tal": [
+                    {"key": "T", "timestamp": 6.8, "confidence": 0.7, "raw_confidence": 0.7, "delta_from_rejected_tal_sec": 0.0},
+                    {"key": "A", "timestamp": 7.1, "confidence": 0.51, "raw_confidence": 0.51, "delta_from_rejected_tal_sec": 0.0},
+                    {"key": "L", "timestamp": 7.35, "confidence": 0.5, "raw_confidence": 0.5, "delta_from_rejected_tal_sec": 0.0},
+                ],
+                "keyframe_candidate_quality_flags": [f"candidate_flag_{index}" for index in range(20)],
                 "rejected_source": "skeleton_fallback",
                 "action_window": {"start_sec": 4.65, "end_sec": 9.25},
                 "top_motion_records": [
@@ -139,6 +166,8 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertEqual(retry_payload["rejected_key_moments"]["T_takeoff_sec"], 6.8)
         self.assertEqual(retry_payload["action_window"]["start_sec"], 4.65)
         self.assertLessEqual(len(json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":"))), 1800)
+        self.assertEqual(retry_payload["skeleton_candidate_tal"][0]["key"], "T")
+        self.assertEqual(retry_payload["skeleton_candidate_tal"][0]["t"], 6.8)
         self.assertTrue(retry_payload["top_motion_records"])
         self.assertIn("relation", retry_payload["top_motion_records"][0])
 

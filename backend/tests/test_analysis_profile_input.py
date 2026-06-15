@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.action_profiles import infer_profile_from_input
+from app.services.action_profiles import infer_profile_from_input, is_mixed_action_input
 from app.services.video import (
     VideoInputWindow,
     _select_motion_weighted_indices,
@@ -26,6 +26,14 @@ from app.services.video import (
 class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
     def test_infer_profile_from_axel_input_returns_jump(self) -> None:
         self.assertEqual(infer_profile_from_input("è·³è·ƒ", "Axel è·³è·ƒ"), "jump")
+
+    def test_mixed_freeskate_input_defers_profile_inference(self) -> None:
+        self.assertTrue(is_mixed_action_input("自由滑", "节目片段"))
+        self.assertIsNone(infer_profile_from_input("自由滑", "节目片段"))
+
+    def test_explicit_jump_input_still_returns_jump(self) -> None:
+        self.assertFalse(is_mixed_action_input("跳跃", "单跳"))
+        self.assertEqual(infer_profile_from_input("跳跃", "单跳"), "jump")
 
     def test_profile_sampling_configuration_prefers_jump_over_defaults(self) -> None:
         self.assertEqual(get_frame_rate_for_profile("jump"), 16)

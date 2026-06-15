@@ -5,10 +5,11 @@ import asyncio
 import json
 import shutil
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
@@ -17,7 +18,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
-from app.database import AsyncSessionLocal, UPLOADS_DIR, get_session
+from app.database import (
+    AsyncSessionLocal,
+    SQLITE_WRITE_RETRY_ATTEMPTS,
+    SQLITE_WRITE_RETRY_BASE_SECONDS,
+    UPLOADS_DIR,
+    get_session,
+    is_transient_sqlite_write_error,
+    run_db_read_with_retry,
+    run_db_write_with_retry,
+)
 from app.models import Analysis, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
     AnalysisCompareResponse,
@@ -51,6 +61,7 @@ from app.services.action_profiles import (
     infer_jump_subtype_evidence,
     infer_profile_from_input,
     infer_profile_hint,
+    is_mixed_action_input,
     normalize_action_subtype,
 )
 from app.services.analysis_errors import (
@@ -63,10 +74,21 @@ from app.services.analysis_errors import (
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
 from app.services.auto_eval import AUTO_EVAL_VERSION, build_auto_eval_payload
-from app.services.biomechanics import analyze_biomechanics, attach_key_frame_candidates, sanitize_biomechanics_data
+from app.services.biomechanics import (
+    analyze_biomechanics,
+    attach_key_frame_candidates,
+    sanitize_biomechanics_data,
+    sync_key_frames_from_resolved_keyframes,
+)
 from app.services.bbox_tracker import track_bbox
 from app.services.person_tracker import (
     PERSON_TRACKER_FAILED_FLAG,
+    PERSON_TRACKER_FINAL_UNRECOVERED_FLAG,
+    PERSON_TRACKER_MANUAL_LOCK_FALLBACK_BLOCKED_FLAG,
+    PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG,
+    PERSON_TRACKER_MULTIPERSON_RELOCK_INSTABILITY_RISK_FLAG,
+    PERSON_TRACKER_TARGET_LOST_FLAG,
+    PERSON_TRACKER_TINY_TARGET_LOW_POSE_TRACKING_RISK_FLAG,
     PERSON_TRACKER_UNAVAILABLE_FLAG,
     PersonTrackerUnavailable,
     detect_person_candidates,
@@ -84,6 +106,7 @@ from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
     build_target_lock_payload,
     build_target_preview,
+    candidate_matches_target_anchor,
     frame_names_from_dir,
     resolve_manual_candidate,
     select_stable_target_candidate,
@@ -98,6 +121,7 @@ from app.services.video import (
     build_processing_frames_dir,
     build_upload_paths,
     cleanup_processing_dir,
+    compute_video_sha256,
     cut_action_window_ai_clip,
     encode_frames,
     extract_motion_sampled_frames,
@@ -108,13 +132,18 @@ from app.services.video import (
     save_upload_file,
 )
 from app.services.semantic_keyframe_pipeline import (
+    SemanticKeyframePipelineResult,
     effective_timestamp_source,
     merge_frame_motion_payload,
     resolve_semantic_keyframe_pipeline,
     retry_video_temporal_if_needed,
     start_video_temporal_task,
+    validate_semantic_keyframes_against_current_evidence,
 )
-from app.services.video_temporal import semantic_keyframes_are_reliable
+from app.services.video_temporal import (
+    resolved_keyframes_accept_insufficient_pose_low_visibility_fallback,
+    semantic_keyframes_are_reliable,
+)
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 from app.services.providers import get_active_provider, request_text_completion
 
@@ -146,12 +175,251 @@ NON_JUMP_METRIC_LABELS = {
     "trunk_pitch_degrees": ("躯干倾角", "°"),
 }
 COMPARE_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+COMPARE_SAME_VIDEO_KEYFRAME_STABILITY_SECONDS = 0.10
+COMPARE_SAME_VIDEO_SCORE_STABILITY_DELTA = 1.0
+COMPARE_SAME_VIDEO_SUBSCORE_STABILITY_DELTA = 1.0
+COMPARE_SAME_VIDEO_METRIC_STABILITY_DELTA = 0.10
+MIXED_ACTION_AUTO_LOCK_INPUT_PROFILE = "step"
+SUPPORTED_VIDEO_AI_PROFILES = {"jump", "spin", "spiral", "step"}
+SEMANTIC_REUSE_PROFILE_PHASES = {
+    "spin": ("spin_entry", "spin_main", "spin_exit"),
+    "spiral": ("spiral_entry", "spiral_hold", "spiral_exit"),
+    "step": ("step_sequence",),
+}
+SEMANTIC_REUSE_PROFILE_REQUIRED_PHASES = {
+    "spin": ("spin_entry", "spin_main", "spin_exit"),
+    "spiral": ("spiral_hold",),
+    "step": ("step_sequence",),
+}
+MIXED_ACTION_JUMP_RECOVERY_MAX_ROTATION_SIGNAL = 0.12
+MIXED_ACTION_JUMP_RECOVERY_MIN_RELATIVE_VERTICAL = 0.35
+MIXED_ACTION_JUMP_RECOVERY_MIN_AVG_CANDIDATE_CONFIDENCE = 0.32
+MIXED_ACTION_JUMP_RECOVERY_MIN_CORE_GAP_SECONDS = 0.04
+MIXED_ACTION_JUMP_RECOVERY_MAX_TAL_SPAN_SECONDS = 2.50
+MIXED_ACTION_JUMP_RECOVERY_REJECT_CANDIDATE_FLAGS = {
+    "tal_order_invalid",
+    "tal_order_unresolved",
+    "tal_candidate_confidence_low",
+    "tal_candidate_incomplete",
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_candidate_tiny_target_weak_geometry",
+    "keyframe_candidates_excluded_unreliable_pose_frames",
+    "keyframe_candidates_missing_pose",
+    "keyframe_candidates_not_applicable_for_profile",
+}
+MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MIN_CONFIDENCE = 0.82
+MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MAX_ROTATION_SIGNAL = 0.18
+MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MIN_CONFIDENCE = 0.86
+MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MIN_AIRBORNE_FRAMES = 4
+MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MIN_RELATIVE_VERTICAL = 0.45
+MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MAX_ROTATION_SIGNAL = 0.20
+MIXED_ACTION_PROFILE_REUSE_MIN_PIPELINE_VERSION = "v5.2.246"
+MIXED_ACTION_PROFILE_REUSE_LOW_VIDEO_AI_CONFIDENCE = 0.70
+MIXED_ACTION_PROFILE_REUSE_MIN_MATCHES = 2
+MIXED_ACTION_PROFILE_REUSE_MIN_RATIO = 0.67
+MIXED_ACTION_PROFILE_REUSE_MIN_VIDEO_AI_BACKED = 1
+MIXED_ACTION_PRIOR_NON_JUMP_GUARD_MIN_RATIO = 0.50
+MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_CURRENT_CONFIDENCE = 0.70
+MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_BACKED_COUNT = 2
+MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_BEST_CONFIDENCE = 0.85
+MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_WEAK_JUMP_CANDIDATE_FLAGS = {
+    "tal_candidate_confidence_low",
+    "tal_candidate_incomplete",
+    "tal_candidate_skeleton_drifted_after_takeoff",
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_candidate_weak_geometry",
+    "tal_order_unresolved",
+    "keyframe_candidates_motion_fallback",
+    "keyframe_candidates_motion_fallback_from_takeoff_anchor",
+    "keyframe_candidates_motion_fallback_takeoff_anchor_tail_window",
+    "keyframe_candidates_motion_fallback_tiny_target_full_frame_motion_risk",
+    "keyframe_candidates_motion_fallback_multiperson_relock_instability_risk",
+    "keyframe_candidates_motion_fallback_unreliable_pose_state",
+    "tal_candidate_motion_fallback_low_precision",
+}
+MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_REJECT_FLAGS = {
+    "video_temporal_not_high_confidence",
+    "video_temporal_fallback_recommended",
+    "video_temporal_low_confidence",
+    "severe_visual_obstruction",
+    "low_resolution",
+    "frequent_occlusion",
+    "motion_blur",
+    "unclear_subject",
+}
+MIXED_ACTION_WEAK_VIDEO_AI_JUMP_FLAGS = {
+    "mixed_action_video_ai_jump_profile_low_confidence",
+    "mixed_action_video_ai_jump_profile_rejected_low_quality",
+    "mixed_action_video_ai_jump_profile_rejected_rotation_conflict",
+}
+MIXED_ACTION_SKELETON_JUMP_KEEP_MIN_AVG_CANDIDATE_CONFIDENCE = 0.58
+MIXED_ACTION_SKELETON_JUMP_HARD_MIN_AVG_CANDIDATE_CONFIDENCE = 0.50
+MIXED_ACTION_SKELETON_JUMP_SUBTYPE_SUPPORT_MIN_CONFIDENCE = 0.50
+MIXED_ACTION_MATCHING_JUMP_HISTORY_MIN_CURRENT_VIDEO_AI_CONFIDENCE = 0.70
+MIXED_ACTION_SKELETON_JUMP_WEAK_CANDIDATE_FLAGS = {
+    "tal_candidate_confidence_low",
+    "tal_candidate_incomplete",
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_candidate_weak_geometry",
+    "tal_candidate_takeoff_geometry_weak",
+    "tal_candidate_landing_geometry_weak",
+    "tal_order_unresolved",
+}
+MIXED_ACTION_SKELETON_JUMP_MAX_ROTATION_SIGNAL_WHEN_VIDEO_WEAK = 0.24
 logger = logging.getLogger(__name__)
 PIPELINE_STAGES = ["extract_frames", "pose", "biomechanics", "vision", "report"]
 MAX_ANALYSIS_LOG_ENTRIES = 200
 CONFIRMED_TARGET_LOCK_STATUSES = {"auto_locked", "locked", "manual"}
 STALE_ANALYSIS_TIMEOUT_SECONDS = 600
 VIDEO_TEMPORAL_WAIT_TIMEOUT_SECONDS = 210.0
+ANALYSIS_DB_WRITE_RETRY_ATTEMPTS = SQLITE_WRITE_RETRY_ATTEMPTS
+ANALYSIS_DB_WRITE_RETRY_BASE_SECONDS = SQLITE_WRITE_RETRY_BASE_SECONDS
+VIDEO_IDENTITY_VERSION = "video_identity_v1"
+SEMANTIC_REUSE_MIN_PIPELINE_VERSION = "v5.2.60"
+SEMANTIC_REUSE_UNSTABLE_SOURCE_FLAGS = {
+    "semantic_frame_extract_failed",
+    "semantic_keyframe_core_foreground_occlusion",
+    "semantic_keyframe_core_foreground_occlusion_repaired",
+    "semantic_keyframes_unreliable_after_refinement",
+    "semantic_keyframes_unreliable_after_visibility_check",
+    "semantic_keyframes_unreliable_candidate_motion_window_conflict",
+    "semantic_keyframes_unreliable_candidate_takeoff_single_conflict",
+    "semantic_keyframes_unreliable_candidate_early_takeoff_conflict",
+    "semantic_keyframes_unreliable_candidate_tal_conflict",
+    "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+    "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+    "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion",
+    "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+    "video_temporal_quality_retry_late_drift_rejected",
+    "video_temporal_quality_retry_motion_cluster_conflict",
+    "video_temporal_quality_retry_rejected",
+    "video_temporal_quality_retry_skeleton_tal_conflict",
+    "video_temporal_quality_retry_skeleton_tal_conflict_rejected",
+    "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+}
+SEMANTIC_REUSE_LONG_UNRESOLVED_ALLOWED_SOURCE_FLAGS = {
+    "semantic_keyframe_core_foreground_occlusion_repaired",
+    "video_temporal_quality_retry_rejected",
+}
+SEMANTIC_REUSE_VISUAL_PROMOTION_ALLOWED_SOURCE_FLAGS = {
+    "semantic_keyframes_unreliable_after_refinement",
+    "semantic_keyframes_unreliable_candidate_tal_conflict",
+    "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+    "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+    "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+    "semantic_keyframes_unreliable_weak_refinement_late_candidate_conflict",
+    "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates",
+    "video_temporal_resolver_coherent_tal_motion_conflict_rejected",
+}
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_REQUIRED_SOURCE_FLAGS = {
+    "semantic_keyframe_refinement_rejection_ignored_weak_temporal_geometry",
+    "semantic_keyframes_candidate_tal_conflict_ignored_weak_temporal_geometry",
+    "semantic_keyframes_unreliable_after_refinement",
+    "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    "video_temporal_quality_retry_motion_cluster_conflict",
+}
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_ALLOWED_SOURCE_FLAGS = {
+    "semantic_keyframes_unreliable_after_refinement",
+    "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    "video_temporal_quality_retry_motion_cluster_conflict",
+    "video_temporal_quality_retry_rejected",
+}
+SEMANTIC_REUSE_PHASE_RANGE_LATE_REANCHOR_SOURCE_FLAGS = {
+    "semantic_keyframes_phase_range_late_reanchored",
+    "video_temporal_resolver_phase_range_late_reanchored",
+    "semantic_keyframes_candidate_tal_conflict_ignored_weak_temporal_geometry",
+    "video_temporal_quality_retry_motion_cluster_conflict_ignored_phase_range_late_reanchor",
+}
+SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_ALLOWED_SOURCE_FLAGS = {
+    "semantic_keyframe_core_foreground_occlusion_repaired",
+    "video_temporal_quality_retry_rejected",
+    "video_temporal_quality_retry_skeleton_tal_conflict",
+}
+SEMANTIC_REUSE_INSUFFICIENT_POSE_LOW_VISIBILITY_ALLOWED_SOURCE_FLAGS = {
+    "video_temporal_quality_retry_motion_cluster_conflict",
+    "video_temporal_quality_retry_rejected",
+}
+SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_ALLOWED_SOURCE_FLAGS = {
+    "semantic_keyframes_unreliable_after_refinement",
+    "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+    "semantic_keyframes_unreliable_tracker_final_loss_weak_semantic_motion",
+    "video_temporal_quality_retry_rejected",
+}
+SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_ACCEPTED_FLAGS = {
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_tal_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_reuse_candidate_conflict_ignored_insufficient_pose_low_visibility_fallback",
+}
+SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_MIN_SOURCE_CONFIDENCE = 0.55
+SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_MIN_PHASE_CONFIDENCE = 0.50
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_SOURCE_CONFIDENCE = 0.85
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_PHASE_CONFIDENCE = 0.85
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_TAL_SPAN_SEC = 0.25
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MAX_TAL_SPAN_SEC = 1.50
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_LATE_CANDIDATE_MIN_SHIFT_SEC = 0.75
+SEMANTIC_REUSE_CLEAN_VIDEO_TAL_LATE_CANDIDATE_MAX_CONFIDENCE = 0.40
+SEMANTIC_REUSE_SPARSE_TRACK_STITCHED_REQUIRED_CANDIDATE_FLAGS = {
+    "tal_candidate_sparse_track_stitched",
+    "tal_candidate_unreliable_sparse_track_stitch",
+}
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_SOURCE_CONFIDENCE = 0.75
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_PHASE_CONFIDENCE = 0.70
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_ACTION_CONFIDENCE = 0.75
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC = 0.25
+SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC = 1.50
+SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_MAX_SUPPORTED_MEAN_DELTA_SEC = 0.50
+SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_MAX_SUPPORTED_DELTA_SEC = 0.75
+SEMANTIC_REUSE_SOURCE_PENALTY_FLAGS = {
+    "semantic_keyframe_refinement_order_rejected",
+    "semantic_keyframe_refinement_phase_rejected",
+}
+SEMANTIC_REUSE_CURRENT_CANDIDATE_MIN_SUPPORTED_KEYS = 2
+SEMANTIC_REUSE_POSE_SUPPORT_MIN_VISIBILITY = 0.25
+SEMANTIC_REUSE_LOW_VISIBILITY_MAX_POSE_VISIBILITY = 0.08
+SEMANTIC_REUSE_MISSING_DELTA_SECONDS = 999.0
+SEMANTIC_REUSE_LONG_UNRESOLVED_MOTION_FALLBACK_MIN_TAL_SPAN_SEC = 2.20
+SEMANTIC_REUSE_POSE_SIGNAL_COMPONENTS = {
+    "knee_angle_change",
+    "knee_extension",
+    "com_ascent",
+    "ankle_return",
+    "knee_absorption",
+    "com_descent",
+}
+SEMANTIC_REUSE_RANKING_UNRELIABLE_CANDIDATE_FLAGS = {
+    "keyframe_candidates_motion_fallback",
+    "keyframe_candidates_motion_fallback_from_takeoff_anchor",
+    "keyframe_candidates_motion_fallback_takeoff_anchor_tail_window",
+    "keyframe_candidates_motion_fallback_tiny_target_full_frame_motion_risk",
+    "tal_candidate_motion_fallback_low_precision",
+    "tal_candidate_motion_fallback_foreground_motion_risk",
+    "tal_candidate_motion_fallback_tail_window",
+    "tal_candidate_temporal_geometry_unreliable",
+    "tal_candidate_takeoff_apex_gap_unreliable",
+    "tal_candidate_takeoff_apex_gap_compressed",
+    "tal_candidate_apex_landing_gap_unreliable",
+    "tal_candidate_apex_landing_gap_compressed",
+    "tal_candidate_core_gap_compressed",
+    "tal_candidate_sparse_track_stitched",
+    "tal_candidate_unreliable_sparse_track_stitch",
+    "tal_candidate_motion_window_occlusion_contaminated",
+    "tal_candidate_motion_window_unreliable_tracker_state",
+}
+SEMANTIC_REUSE_ACCEPTED_SOURCE_CANDIDATE_CONFLICT_FLAGS = {
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_full_context_takeoff_anchor_fallback",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_early_takeoff_anchor_fallback",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_early_candidate_approach_window",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_takeoff_anchor_phase_shift",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_early_approach_motion_peak",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_low_visibility_no_pose_support",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_insufficient_pose_low_visibility_fallback",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_compressed_candidate",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_weak_candidate",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_full_context_weak_candidate",
+    "semantic_keyframes_candidate_motion_window_conflict_ignored_weak_geometry_candidate",
+}
 IN_PROGRESS_ANALYSIS_STATUSES = {
     "pending",
     "processing",
@@ -173,7 +441,12 @@ def _target_lock_has_manual_review_flag(target_lock: dict[str, Any] | None) -> b
 def _is_confirmed_target_lock(target_lock: dict[str, Any] | None) -> bool:
     if not isinstance(target_lock, dict):
         return False
-    return str(target_lock.get("status") or "") in CONFIRMED_TARGET_LOCK_STATUSES and not _target_lock_has_manual_review_flag(target_lock)
+    status = str(target_lock.get("status") or "")
+    if status in {"locked", "manual"}:
+        return True
+    if status == "auto_locked":
+        return isinstance(target_lock.get("selected_bbox"), dict) and not _target_lock_has_manual_review_flag(target_lock)
+    return False
 
 
 def _sampling_metadata_from_saved(
@@ -292,6 +565,42 @@ def _provider_label(provider: Any) -> str:
     provider_name = str(getattr(provider, "provider", "") or "").strip() or "unknown"
     model = str(getattr(provider, "model_id", "") or getattr(provider, "vision_model", "") or "").strip()
     return f"{provider_name}/{model}" if model else provider_name
+
+
+async def _commit_analysis_session(
+    session: AsyncSession,
+    *,
+    context: str,
+    refresh: Analysis | None = None,
+) -> None:
+    try:
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        if is_transient_sqlite_write_error(exc):
+            logger.warning("Transient SQLite write error during %s: %s", context, exc)
+        raise
+    if refresh is not None:
+        await session.refresh(refresh)
+
+
+async def _save_analysis_fields_with_retry(
+    analysis_id: str,
+    values: dict[str, Any],
+    *,
+    context: str,
+) -> bool:
+    async def _write() -> bool:
+        async with AsyncSessionLocal() as session:
+            analysis = await session.get(Analysis, analysis_id)
+            if analysis is None:
+                return False
+            for key, value in values.items():
+                setattr(analysis, key, value)
+            await session.commit()
+            return True
+
+    return bool(await run_db_write_with_retry(_write, context=context))
 
 
 def _provider_fallback_note(provider: Any) -> str | None:
@@ -444,6 +753,2456 @@ def _merge_frame_motion_payload(
         video_temporal=video_temporal,
         resolved_keyframes=resolved_keyframes,
     )
+
+
+def _merge_quality_flags(*sources: object) -> list[str]:
+    flags: list[str] = []
+    for source in sources:
+        values = source.get("quality_flags") if isinstance(source, dict) else source
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            flag = str(value).strip()
+            if flag and flag not in flags:
+                flags.append(flag)
+    return flags
+
+
+def _initial_analysis_profile(action_type: str, action_subtype: str | None) -> str | None:
+    if is_mixed_action_input(action_type, action_subtype):
+        return None
+    return infer_profile_from_input(action_type, action_subtype)
+
+
+def _analysis_profile_hint_for_sampling(action_type: str, action_subtype: str | None, stored_profile: str | None) -> str | None:
+    if stored_profile:
+        return stored_profile
+    if is_mixed_action_input(action_type, action_subtype):
+        return MIXED_ACTION_AUTO_LOCK_INPUT_PROFILE
+    return infer_profile_hint(action_type, action_subtype)
+
+
+def _video_ai_action_family(video_temporal: dict[str, Any] | None) -> str | None:
+    if not isinstance(video_temporal, dict):
+        return None
+    action_confirmation = video_temporal.get("action_confirmation")
+    if not isinstance(action_confirmation, dict):
+        return None
+    family = str(action_confirmation.get("action_family") or "").strip().lower()
+    return family if family in SUPPORTED_VIDEO_AI_PROFILES else None
+
+
+def _video_ai_action_confidence_from_payload(video_temporal: dict[str, Any] | None) -> float:
+    if not isinstance(video_temporal, dict):
+        return 0.0
+    action_confirmation = video_temporal.get("action_confirmation")
+    if not isinstance(action_confirmation, dict):
+        return 0.0
+    value = _float_or_none(action_confirmation.get("confidence"))
+    return max(0.0, min(1.0, value or 0.0))
+
+
+def _video_ai_action_confidence(video_temporal: dict[str, Any] | None) -> float:
+    selected, _source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    return _video_ai_action_confidence_from_payload(selected)
+
+
+def _select_mixed_action_video_ai_profile_payload(
+    video_temporal: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(video_temporal, dict):
+        return None, None
+
+    candidates: list[tuple[dict[str, Any], str]] = [(video_temporal, "primary")]
+    retry_attempt = video_temporal.get("retry_attempt")
+    if isinstance(retry_attempt, dict):
+        candidates.append((retry_attempt, "retry_attempt"))
+
+    viable: list[tuple[dict[str, Any], str, str, float]] = []
+    for payload, source in candidates:
+        family = _video_ai_action_family(payload)
+        if family is None:
+            continue
+        viable.append((payload, source, family, _video_ai_action_confidence_from_payload(payload)))
+    if not viable:
+        return None, None
+
+    # A high-confidence retry often corrects a low-confidence first pass on
+    # mixed free-skate clips. Prefer it so basic gliding/step clips are not
+    # forced into jump T/A/L just because skeleton motion had a small peak.
+    for payload, source, family, confidence in viable:
+        if source == "retry_attempt" and family in {"spin", "spiral", "step"} and confidence >= 0.80:
+            return payload, source
+    best_payload, best_source, _family, _confidence = max(viable, key=lambda item: item[3])
+    return best_payload, best_source
+
+
+def _profile_from_video_ai_for_mixed_action(
+    action_type: str,
+    action_subtype: str | None,
+    video_temporal: dict[str, Any] | None,
+    profile_evidence: dict[str, Any] | None = None,
+) -> tuple[str | None, list[str]]:
+    if not is_mixed_action_input(action_type, action_subtype):
+        return None, []
+    selected_video_temporal, selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    if family is None:
+        return None, []
+    confidence = _video_ai_action_confidence_from_payload(selected_video_temporal)
+    if family == "jump":
+        video_flags = {
+            str(flag)
+            for flag in (selected_video_temporal.get("quality_flags") if isinstance(selected_video_temporal, dict) else []) or []
+            if isinstance(flag, str)
+        }
+        rotation_signal = (
+            _float_or_none((profile_evidence or {}).get("hip_rotation_signal"))
+            if isinstance(profile_evidence, dict)
+            else None
+        ) or 0.0
+        if confidence < MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MIN_CONFIDENCE:
+            return None, ["mixed_action_video_ai_jump_profile_low_confidence"]
+        if video_flags & MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_REJECT_FLAGS:
+            return None, ["mixed_action_video_ai_jump_profile_rejected_low_quality"]
+        if rotation_signal > MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MAX_ROTATION_SIGNAL:
+            return None, ["mixed_action_video_ai_jump_profile_rejected_rotation_conflict"]
+    elif _mixed_action_non_jump_video_ai_should_yield_to_strong_skeleton_jump(
+        selected_source=selected_source,
+        family=family,
+        confidence=confidence,
+        video_temporal=selected_video_temporal,
+        profile_evidence=profile_evidence,
+    ):
+        return None, ["mixed_action_video_ai_non_jump_profile_rejected_strong_skeleton_jump"]
+    floor = 0.50 if family == "step" else 0.60
+    if confidence < floor:
+        return None, ["mixed_action_video_ai_profile_low_confidence"]
+    flags = ["mixed_action_profile_overridden_by_video_ai"]
+    if selected_source == "retry_attempt":
+        flags.append("mixed_action_profile_overridden_by_video_ai_retry_attempt")
+    return family, flags
+
+
+def _mixed_action_non_jump_video_ai_should_yield_to_strong_skeleton_jump(
+    *,
+    selected_source: str | None,
+    family: str,
+    confidence: float,
+    video_temporal: dict[str, Any] | None,
+    profile_evidence: dict[str, Any] | None,
+) -> bool:
+    if family not in {"spin", "spiral", "step"} or not isinstance(profile_evidence, dict):
+        return False
+    if not bool(profile_evidence.get("mixed_jump_gate_passed")):
+        return False
+    airborne_frames = int(_float_or_none(profile_evidence.get("airborne_frames_detected")) or 0)
+    relative_vertical = _float_or_none(profile_evidence.get("relative_vertical_range")) or 0.0
+    rotation_signal = _float_or_none(profile_evidence.get("hip_rotation_signal")) or 0.0
+    strong_skeleton_jump = (
+        airborne_frames >= MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MIN_AIRBORNE_FRAMES
+        and relative_vertical >= MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MIN_RELATIVE_VERTICAL
+        and rotation_signal <= MIXED_ACTION_VIDEO_AI_NON_JUMP_OVERRIDE_STRONG_SKELETON_MAX_ROTATION_SIGNAL
+    )
+    if not strong_skeleton_jump:
+        return False
+    if selected_source == "retry_attempt":
+        if confidence >= 0.80 and _mixed_action_retry_non_jump_profile_is_coherent(video_temporal, family):
+            return False
+        return True
+    return True
+
+
+def _profile_from_resolved_video_ai_for_mixed_action(
+    action_type: str,
+    action_subtype: str | None,
+    *,
+    current_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+    resolved_keyframes: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None = None,
+) -> tuple[str | None, list[str]]:
+    if not is_mixed_action_input(action_type, action_subtype):
+        return None, []
+    selected_video_temporal, selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    if family not in {"spin", "spiral", "step"}:
+        return None, []
+    normalized_current = str(current_profile or "").strip().lower()
+    if family == normalized_current:
+        return None, []
+    resolved_flags = set(_merge_quality_flags(resolved_keyframes))
+    resolver_confirmed = (
+        "video_temporal_resolver_profile_overridden_by_video_ai" in resolved_flags
+        and "video_temporal_resolver_coherent_profile_phases_used" in resolved_flags
+    )
+    retry_confirmed = (
+        selected_source == "retry_attempt"
+        and _video_ai_action_confidence_from_payload(selected_video_temporal) >= 0.80
+        and _mixed_action_retry_non_jump_profile_is_coherent(selected_video_temporal, family)
+        and _mixed_action_current_jump_profile_is_weak(normalized_current, bio_data)
+    )
+    if not resolver_confirmed and not retry_confirmed:
+        return None, []
+    flags = ["mixed_action_profile_overridden_by_video_ai_after_resolver"]
+    if selected_source == "retry_attempt":
+        flags.append("mixed_action_profile_overridden_by_video_ai_retry_attempt")
+    return family, flags
+
+
+def _mixed_action_retry_non_jump_profile_is_coherent(
+    video_temporal: dict[str, Any] | None,
+    family: str,
+) -> bool:
+    if not isinstance(video_temporal, dict):
+        return False
+    expected_codes = {
+        "spin": {"spin_entry", "spin_main", "spin_exit"},
+        "spiral": {"spiral_hold"},
+        "step": {"step_sequence"},
+    }.get(family)
+    if not expected_codes:
+        return False
+    segments = video_temporal.get("phase_segments")
+    if not isinstance(segments, list):
+        return False
+    present_codes = {
+        str(segment.get("phase_code") or "").strip().lower()
+        for segment in segments
+        if isinstance(segment, dict)
+        and bool(segment.get("valid", True))
+        and _candidate_confidence(segment) >= 0.70
+    }
+    return expected_codes.issubset(present_codes)
+
+
+def _mixed_action_current_jump_profile_is_weak(
+    current_profile: str,
+    bio_data: dict[str, Any] | None,
+) -> bool:
+    if current_profile != "jump":
+        return True
+    if not isinstance(bio_data, dict):
+        return False
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return True
+    candidate_items = [
+        candidates.get(key) if isinstance(candidates.get(key), dict) else None
+        for key in ("T", "A", "L")
+    ]
+    if not all(candidate and candidate.get("frame_id") for candidate in candidate_items):
+        return True
+    average_confidence = sum(_candidate_confidence(candidate) for candidate in candidate_items) / 3.0
+    flags = {str(flag) for flag in candidates.get("quality_flags", []) if isinstance(flag, str)}
+    weak_flags = {
+        "tal_candidate_confidence_low",
+        "tal_candidate_incomplete",
+        "tal_candidate_temporal_geometry_unreliable",
+        "tal_candidate_weak_geometry",
+        "tal_order_unresolved",
+    }
+    return average_confidence < 0.45 or bool(flags & weak_flags)
+
+
+def _mixed_action_jump_candidates_are_weak_for_non_jump_stability(
+    bio_data: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(bio_data, dict):
+        return True
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return True
+    candidate_items = [
+        candidates.get(key) if isinstance(candidates.get(key), dict) else None
+        for key in ("T", "A", "L")
+    ]
+    if not all(candidate and candidate.get("frame_id") for candidate in candidate_items):
+        return True
+    average_confidence = sum(_candidate_confidence(candidate) for candidate in candidate_items) / 3.0
+    candidate_flags = {
+        str(flag)
+        for flag in candidates.get("quality_flags", [])
+        if isinstance(flag, str)
+    }
+    return (
+        average_confidence < MIXED_ACTION_SKELETON_JUMP_KEEP_MIN_AVG_CANDIDATE_CONFIDENCE
+        or bool(candidate_flags & MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_WEAK_JUMP_CANDIDATE_FLAGS)
+    )
+
+
+def _mixed_action_weak_jump_can_yield_to_stable_non_jump_history(
+    *,
+    current_profile: str,
+    video_ai_profile: str | None,
+    video_ai_profile_flags: list[str],
+    video_temporal: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+) -> bool:
+    if str(current_profile or "").strip().lower() != "jump" or video_ai_profile is not None:
+        return False
+    selected_video_temporal, _selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    confidence = _video_ai_action_confidence_from_payload(selected_video_temporal)
+    if confidence < MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_CURRENT_CONFIDENCE:
+        return False
+    selected_quality_flags = {
+        str(flag)
+        for flag in (selected_video_temporal.get("quality_flags") if isinstance(selected_video_temporal, dict) else []) or []
+        if isinstance(flag, str)
+    }
+    weak_ai_flags = set(video_ai_profile_flags or []) & (
+        MIXED_ACTION_WEAK_VIDEO_AI_JUMP_FLAGS
+        | {"mixed_action_video_ai_non_jump_profile_rejected_strong_skeleton_jump"}
+    )
+    weak_ai_evidence = bool(weak_ai_flags)
+    weak_ai_evidence = weak_ai_evidence or (
+        family == "jump" and confidence < MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MIN_CONFIDENCE
+    )
+    weak_ai_evidence = weak_ai_evidence or bool(selected_quality_flags & MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_REJECT_FLAGS)
+    if not weak_ai_evidence:
+        return False
+    return _mixed_action_jump_candidates_are_weak_for_non_jump_stability(bio_data)
+
+
+def _mixed_action_jump_subtype_supports_skeleton_jump(
+    profile_evidence: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(profile_evidence, dict):
+        return False
+    subtype_evidence = profile_evidence.get("jump_subtype_evidence")
+    if not isinstance(subtype_evidence, dict):
+        return False
+    support_scores = [
+        _float_or_none(subtype_evidence.get("toe_pick_confidence")) or 0.0,
+        _float_or_none(subtype_evidence.get("free_leg_swing_confidence")) or 0.0,
+        _float_or_none(subtype_evidence.get("takeoff_foot_confidence")) or 0.0,
+    ]
+    return max(support_scores, default=0.0) >= MIXED_ACTION_SKELETON_JUMP_SUBTYPE_SUPPORT_MIN_CONFIDENCE
+
+
+def _mixed_action_matching_jump_history_blocks_downgrade(
+    *,
+    current_profile: str,
+    video_ai_profile: str | None,
+    video_ai_profile_flags: list[str],
+    video_temporal: dict[str, Any] | None,
+    profile_evidence: dict[str, Any] | None,
+    matching_profile_reuse: dict[str, Any] | None,
+) -> bool:
+    if str(current_profile or "").strip().lower() != "jump" or video_ai_profile is not None:
+        return False
+    flags = set(video_ai_profile_flags or [])
+    if not bool(flags & MIXED_ACTION_WEAK_VIDEO_AI_JUMP_FLAGS):
+        return False
+    if "mixed_action_video_ai_jump_profile_rejected_rotation_conflict" in flags:
+        return False
+
+    selected_video_temporal, _selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    if _video_ai_action_family(selected_video_temporal) != "jump":
+        return False
+    if (
+        _video_ai_action_confidence_from_payload(selected_video_temporal)
+        < MIXED_ACTION_MATCHING_JUMP_HISTORY_MIN_CURRENT_VIDEO_AI_CONFIDENCE
+    ):
+        return False
+
+    if not isinstance(profile_evidence, dict) or not bool(profile_evidence.get("mixed_jump_gate_passed")):
+        return False
+    rotation_signal = _float_or_none(profile_evidence.get("hip_rotation_signal")) or 0.0
+    if rotation_signal > MIXED_ACTION_SKELETON_JUMP_MAX_ROTATION_SIGNAL_WHEN_VIDEO_WEAK:
+        return False
+
+    if not isinstance(matching_profile_reuse, dict):
+        return False
+    if str(matching_profile_reuse.get("analysis_profile") or "").strip().lower() != "jump":
+        return False
+    match_count = int(_float_or_none(matching_profile_reuse.get("match_count")) or 0)
+    profile_ratio = _float_or_none(matching_profile_reuse.get("profile_ratio")) or 0.0
+    video_ai_backed_count = int(_float_or_none(matching_profile_reuse.get("video_ai_backed_count")) or 0)
+    return (
+        match_count >= MIXED_ACTION_PROFILE_REUSE_MIN_MATCHES
+        and profile_ratio >= MIXED_ACTION_PROFILE_REUSE_MIN_RATIO
+        and video_ai_backed_count >= MIXED_ACTION_PROFILE_REUSE_MIN_VIDEO_AI_BACKED
+    )
+
+
+def _mixed_action_skeleton_jump_should_downgrade_to_step(
+    *,
+    current_profile: str,
+    video_ai_profile: str | None,
+    video_ai_profile_flags: list[str],
+    bio_data: dict[str, Any] | None,
+    profile_evidence: dict[str, Any] | None,
+    video_temporal: dict[str, Any] | None = None,
+    matching_profile_reuse: dict[str, Any] | None = None,
+) -> bool:
+    if str(current_profile or "").strip().lower() != "jump" or video_ai_profile is not None:
+        return False
+    if not (set(video_ai_profile_flags) & MIXED_ACTION_WEAK_VIDEO_AI_JUMP_FLAGS):
+        return False
+    if _mixed_action_matching_jump_history_blocks_downgrade(
+        current_profile=current_profile,
+        video_ai_profile=video_ai_profile,
+        video_ai_profile_flags=video_ai_profile_flags,
+        video_temporal=video_temporal,
+        profile_evidence=profile_evidence,
+        matching_profile_reuse=matching_profile_reuse,
+    ):
+        return False
+    if not isinstance(bio_data, dict):
+        return True
+    candidates = bio_data.get("key_frame_candidates")
+    if not isinstance(candidates, dict):
+        return True
+    candidate_items = [
+        candidates.get(key) if isinstance(candidates.get(key), dict) else None
+        for key in ("T", "A", "L")
+    ]
+    if not all(candidate and candidate.get("frame_id") for candidate in candidate_items):
+        return True
+
+    average_confidence = sum(_candidate_confidence(candidate) for candidate in candidate_items) / 3.0
+    candidate_flags = {
+        str(flag)
+        for flag in candidates.get("quality_flags", [])
+        if isinstance(flag, str)
+    }
+    if candidate_flags & MIXED_ACTION_SKELETON_JUMP_WEAK_CANDIDATE_FLAGS:
+        return True
+    if average_confidence < MIXED_ACTION_SKELETON_JUMP_HARD_MIN_AVG_CANDIDATE_CONFIDENCE:
+        return True
+    rotation_signal = (
+        _float_or_none((profile_evidence or {}).get("hip_rotation_signal"))
+        if isinstance(profile_evidence, dict)
+        else None
+    ) or 0.0
+    if rotation_signal > MIXED_ACTION_SKELETON_JUMP_MAX_ROTATION_SIGNAL_WHEN_VIDEO_WEAK:
+        return True
+    has_subtype_support = _mixed_action_jump_subtype_supports_skeleton_jump(profile_evidence)
+    if average_confidence < MIXED_ACTION_SKELETON_JUMP_KEEP_MIN_AVG_CANDIDATE_CONFIDENCE and not has_subtype_support:
+        return True
+    if "mixed_action_video_ai_jump_profile_rejected_low_quality" in video_ai_profile_flags and not has_subtype_support:
+        return True
+    return False
+
+
+def _build_bio_data_for_profile(
+    *,
+    pose_data: dict[str, Any],
+    motion_scores: dict[str, object],
+    action_type: str,
+    analysis_profile: str,
+    sampling_metadata: VideoSamplingMetadata,
+    profile_evidence: dict[str, Any],
+    target_lock: dict[str, Any],
+) -> dict[str, Any]:
+    bio_data = analyze_biomechanics(
+        pose_data,
+        action_type,
+        analysis_profile,
+        effective_fps=sampling_metadata.effective_fps,
+        source_fps=sampling_metadata.source_fps,
+        window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
+    )
+    bio_data = attach_key_frame_candidates(
+        bio_data,
+        pose_data,
+        motion_scores,
+        analysis_profile,
+        sampling_metadata.effective_fps,
+    )
+    if isinstance(bio_data, dict):
+        if analysis_profile == "jump":
+            profile_evidence["jump_subtype_evidence"] = infer_jump_subtype_evidence(
+                pose_data,
+                bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {},
+                sampling_metadata.effective_fps,
+            )
+        merged_quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
+        merged_quality_flags.extend(
+            flag for flag in profile_evidence.get("quality_flags", []) if flag not in merged_quality_flags
+        )
+        target_flags = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
+        merged_quality_flags.extend(flag for flag in target_flags if flag not in merged_quality_flags)
+        bio_data["quality_flags"] = merged_quality_flags
+        bio_data["profile_evidence"] = profile_evidence
+    return bio_data
+
+
+def _apply_resolved_video_ai_profile_override_to_bio_data(
+    *,
+    action_type: str,
+    action_subtype: str | None,
+    current_profile: str,
+    video_temporal: dict[str, Any] | None,
+    resolved_keyframes: dict[str, Any] | None,
+    bio_data: dict[str, Any],
+    pose_data: dict[str, Any],
+    motion_scores: dict[str, object],
+    sampling_metadata: VideoSamplingMetadata,
+    profile_evidence: dict[str, Any],
+    target_lock: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    resolved_profile, resolved_profile_flags = _profile_from_resolved_video_ai_for_mixed_action(
+        action_type,
+        action_subtype,
+        current_profile=current_profile,
+        video_temporal=video_temporal,
+        resolved_keyframes=resolved_keyframes,
+        bio_data=bio_data,
+    )
+    if resolved_profile is None:
+        return current_profile, bio_data, profile_evidence
+
+    next_evidence = dict(profile_evidence) if isinstance(profile_evidence, dict) else {}
+    if current_profile:
+        next_evidence.setdefault("skeleton_inferred_profile", current_profile)
+        next_evidence["resolver_requested_profile"] = current_profile
+    next_evidence["video_ai_action_family"] = resolved_profile
+    next_evidence["video_ai_action_confidence"] = round(_video_ai_action_confidence(video_temporal), 4)
+    next_evidence["quality_flags"] = _merge_quality_flags(next_evidence, resolved_profile_flags)
+    rebuilt_bio_data = _build_bio_data_for_profile(
+        pose_data=pose_data,
+        motion_scores=motion_scores,
+        action_type=action_type,
+        analysis_profile=resolved_profile,
+        sampling_metadata=sampling_metadata,
+        profile_evidence=next_evidence,
+        target_lock=target_lock,
+    )
+    return resolved_profile, rebuilt_bio_data, next_evidence
+
+
+def _mixed_action_profile_reuse_allowed_by_video_ai(
+    video_temporal: dict[str, Any] | None,
+    video_ai_profile_flags: list[str] | None,
+) -> bool:
+    selected_video_temporal, _selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    if family is None:
+        return True
+    confidence = _video_ai_action_confidence_from_payload(selected_video_temporal)
+    if confidence < MIXED_ACTION_PROFILE_REUSE_LOW_VIDEO_AI_CONFIDENCE:
+        return True
+    weak_or_rejected_flags = {
+        "mixed_action_video_ai_profile_low_confidence",
+        "mixed_action_video_ai_jump_profile_low_confidence",
+        "mixed_action_video_ai_jump_profile_rejected_low_quality",
+        "mixed_action_video_ai_jump_profile_rejected_rotation_conflict",
+        "mixed_action_video_ai_non_jump_profile_rejected_strong_skeleton_jump",
+    }
+    return bool(set(video_ai_profile_flags or []) & weak_or_rejected_flags)
+
+
+def _mixed_action_profile_reuse_video_ai_min_confidence(profile: str) -> float:
+    return (
+        MIXED_ACTION_VIDEO_AI_JUMP_OVERRIDE_MIN_CONFIDENCE
+        if profile == "jump"
+        else MIXED_ACTION_PROFILE_REUSE_LOW_VIDEO_AI_CONFIDENCE
+    )
+
+
+def _mixed_action_profile_reuse_video_ai_backed(
+    analysis: Analysis,
+    profile: str,
+) -> tuple[bool, float | None, str | None]:
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
+    resolved = motion_scores.get("resolved_keyframes") if isinstance(motion_scores.get("resolved_keyframes"), dict) else {}
+    payloads = [
+        motion_scores.get("video_temporal") if isinstance(motion_scores.get("video_temporal"), dict) else None,
+        resolved.get("video_ai") if isinstance(resolved.get("video_ai"), dict) else None,
+    ]
+    min_confidence = _mixed_action_profile_reuse_video_ai_min_confidence(profile)
+    best_confidence: float | None = None
+    for payload in payloads:
+        selected, source = _select_mixed_action_video_ai_profile_payload(payload)
+        family = _video_ai_action_family(selected)
+        if family != profile:
+            continue
+        confidence = _video_ai_action_confidence_from_payload(selected)
+        best_confidence = max(best_confidence or 0.0, confidence)
+        if confidence >= min_confidence:
+            return True, confidence, source or "video_temporal"
+
+    bio_data = analysis.bio_data if isinstance(getattr(analysis, "bio_data", None), dict) else {}
+    profile_evidence = bio_data.get("profile_evidence") if isinstance(bio_data.get("profile_evidence"), dict) else {}
+    evidence_family = str(profile_evidence.get("video_ai_action_family") or "").strip().lower()
+    evidence_confidence = _float_or_none(profile_evidence.get("video_ai_action_confidence"))
+    evidence_flags = set(_merge_quality_flags(profile_evidence))
+    if (
+        evidence_family == profile
+        and evidence_confidence is not None
+        and evidence_confidence >= min_confidence
+        and (
+            "mixed_action_profile_overridden_by_video_ai" in evidence_flags
+            or "mixed_action_profile_overridden_by_video_ai_after_resolver" in evidence_flags
+        )
+    ):
+        return True, evidence_confidence, "profile_evidence"
+
+    return False, best_confidence, None
+
+
+def _mixed_action_candidate_video_ai_backed_for_profile(
+    candidate: dict[str, Any],
+    profile: str,
+) -> bool:
+    if str(candidate.get("analysis_profile") or "").strip().lower() != profile:
+        return False
+    return bool(candidate.get("video_ai_backed"))
+
+
+def _mixed_action_profile_reuse_candidate_from_analysis(
+    analysis: Analysis,
+    *,
+    current_analysis_id: str,
+    video_sha256: str,
+    action_type: str | None,
+    action_subtype: str | None,
+    current_motion_scores: dict[str, object] | None,
+) -> dict[str, Any] | None:
+    if analysis.id == current_analysis_id or analysis.status != "completed":
+        return None
+    if not _pipeline_version_at_least(analysis.pipeline_version, MIXED_ACTION_PROFILE_REUSE_MIN_PIPELINE_VERSION):
+        return None
+    if action_type and analysis.action_type != action_type:
+        return None
+    if (analysis.action_subtype or None) != (action_subtype or None):
+        return None
+    profile = str(analysis.analysis_profile or "").strip().lower()
+    if profile not in SUPPORTED_VIDEO_AI_PROFILES:
+        return None
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    identity = _video_identity_from_motion(motion_scores)
+    if not identity or identity.get("sha256") != video_sha256:
+        return None
+    if not _input_windows_compatible(current_motion_scores, motion_scores):
+        return None
+    video_ai_backed, video_ai_confidence, video_ai_source = _mixed_action_profile_reuse_video_ai_backed(
+        analysis,
+        profile,
+    )
+    created_at = getattr(analysis, "created_at", None)
+    return {
+        "analysis_id": analysis.id,
+        "analysis_profile": profile,
+        "pipeline_version": analysis.pipeline_version,
+        "created_at": created_at.isoformat() if created_at is not None else "",
+        "created_at_timestamp": created_at.timestamp() if created_at is not None else 0.0,
+        "video_ai_backed": video_ai_backed,
+        "video_ai_confidence": video_ai_confidence,
+        "video_ai_source": video_ai_source,
+    }
+
+
+async def _find_matching_mixed_action_profile(
+    *,
+    session: AsyncSession,
+    current_analysis_id: str,
+    video_sha256: str | None,
+    action_type: str | None,
+    action_subtype: str | None,
+    current_motion_scores: dict[str, object] | None,
+) -> dict[str, Any] | None:
+    if not video_sha256:
+        return None
+    result = await session.execute(
+        select(Analysis)
+        .options(
+            load_only(
+                Analysis.id,
+                Analysis.status,
+                Analysis.action_type,
+                Analysis.action_subtype,
+                Analysis.analysis_profile,
+                Analysis.pipeline_version,
+                Analysis.frame_motion_scores,
+                Analysis.bio_data,
+                Analysis.created_at,
+            )
+        )
+        .where(Analysis.status == "completed")
+        .where(Analysis.id != current_analysis_id)
+        .where(Analysis.action_type == action_type)
+        .where(Analysis.frame_motion_scores.contains(video_sha256))
+        .order_by(Analysis.created_at.desc(), Analysis.id.desc())
+        .limit(100)
+    )
+    candidates = [
+        candidate
+        for analysis in result.scalars().all()
+        if (
+            candidate := _mixed_action_profile_reuse_candidate_from_analysis(
+                analysis,
+                current_analysis_id=current_analysis_id,
+                video_sha256=video_sha256,
+                action_type=action_type,
+                action_subtype=action_subtype,
+                current_motion_scores=current_motion_scores,
+            )
+        )
+        is not None
+    ]
+    if not candidates:
+        return None
+    counts = Counter(str(candidate.get("analysis_profile") or "") for candidate in candidates)
+    total = len(candidates)
+    for profile, count in counts.most_common():
+        profile_candidates = [
+            candidate for candidate in candidates if candidate.get("analysis_profile") == profile
+        ]
+        video_ai_backed_count = sum(1 for candidate in profile_candidates if candidate.get("video_ai_backed"))
+        ratio = count / total if total else 0.0
+        if (
+            count < MIXED_ACTION_PROFILE_REUSE_MIN_MATCHES
+            or ratio < MIXED_ACTION_PROFILE_REUSE_MIN_RATIO
+            or video_ai_backed_count < MIXED_ACTION_PROFILE_REUSE_MIN_VIDEO_AI_BACKED
+        ):
+            continue
+        latest = max(profile_candidates, key=lambda item: float(item.get("created_at_timestamp") or 0.0))
+        return {
+            "analysis_profile": profile,
+            "source_analysis_id": latest.get("analysis_id"),
+            "source_pipeline_version": latest.get("pipeline_version"),
+            "source_created_at": latest.get("created_at"),
+            "match_count": count,
+            "candidate_count": total,
+            "profile_ratio": round(ratio, 3),
+            "video_ai_backed_count": video_ai_backed_count,
+            "video_ai_confidence": latest.get("video_ai_confidence"),
+            "video_ai_source": latest.get("video_ai_source"),
+        }
+    return None
+
+
+async def _find_matching_mixed_action_prior_non_jump_profile(
+    *,
+    session: AsyncSession,
+    current_analysis_id: str,
+    video_sha256: str | None,
+    action_type: str | None,
+    action_subtype: str | None,
+    current_motion_scores: dict[str, object] | None,
+) -> dict[str, Any] | None:
+    if not video_sha256:
+        return None
+    result = await session.execute(
+        select(Analysis)
+        .options(
+            load_only(
+                Analysis.id,
+                Analysis.status,
+                Analysis.action_type,
+                Analysis.action_subtype,
+                Analysis.analysis_profile,
+                Analysis.pipeline_version,
+                Analysis.frame_motion_scores,
+                Analysis.bio_data,
+                Analysis.created_at,
+            )
+        )
+        .where(Analysis.status == "completed")
+        .where(Analysis.id != current_analysis_id)
+        .where(Analysis.action_type == action_type)
+        .where(Analysis.frame_motion_scores.contains(video_sha256))
+        .order_by(Analysis.created_at.desc(), Analysis.id.desc())
+        .limit(100)
+    )
+    candidates = [
+        candidate
+        for analysis in result.scalars().all()
+        if (
+            candidate := _mixed_action_profile_reuse_candidate_from_analysis(
+                analysis,
+                current_analysis_id=current_analysis_id,
+                video_sha256=video_sha256,
+                action_type=action_type,
+                action_subtype=action_subtype,
+                current_motion_scores=current_motion_scores,
+            )
+        )
+        is not None
+    ]
+    if not candidates:
+        return None
+
+    counts = Counter(str(candidate.get("analysis_profile") or "") for candidate in candidates)
+    jump_count = counts.get("jump", 0)
+    total = len(candidates)
+    non_jump_profiles = [profile for profile in ("step", "spin", "spiral") if counts.get(profile, 0) > 0]
+    if not non_jump_profiles:
+        return None
+
+    def _profile_rank(profile: str) -> tuple[int, float]:
+        latest_timestamp = max(
+            float(candidate.get("created_at_timestamp") or 0.0)
+            for candidate in candidates
+            if candidate.get("analysis_profile") == profile
+        )
+        return counts.get(profile, 0), latest_timestamp
+
+    profile = max(non_jump_profiles, key=_profile_rank)
+    count = counts.get(profile, 0)
+    ratio = count / total if total else 0.0
+    if count < jump_count or ratio < MIXED_ACTION_PRIOR_NON_JUMP_GUARD_MIN_RATIO:
+        return None
+
+    profile_candidates = [
+        candidate for candidate in candidates if candidate.get("analysis_profile") == profile
+    ]
+    latest = max(profile_candidates, key=lambda item: float(item.get("created_at_timestamp") or 0.0))
+    video_ai_backed_count = sum(1 for candidate in profile_candidates if candidate.get("video_ai_backed"))
+    if video_ai_backed_count < MIXED_ACTION_PROFILE_REUSE_MIN_VIDEO_AI_BACKED:
+        return None
+    return {
+        "analysis_profile": profile,
+        "source_analysis_id": latest.get("analysis_id"),
+        "source_pipeline_version": latest.get("pipeline_version"),
+        "source_created_at": latest.get("created_at"),
+        "match_count": count,
+        "candidate_count": total,
+        "profile_ratio": round(ratio, 3),
+        "jump_match_count": jump_count,
+        "video_ai_backed_count": video_ai_backed_count,
+        "video_ai_confidence": latest.get("video_ai_confidence"),
+        "video_ai_source": latest.get("video_ai_source"),
+    }
+
+
+async def _find_matching_mixed_action_non_jump_profile_stability(
+    *,
+    session: AsyncSession,
+    current_analysis_id: str,
+    video_sha256: str | None,
+    action_type: str | None,
+    action_subtype: str | None,
+    current_motion_scores: dict[str, object] | None,
+    current_profile: str | None,
+    current_video_ai_confidence: float,
+) -> dict[str, Any] | None:
+    normalized_current = str(current_profile or "").strip().lower()
+    if normalized_current not in {"jump", "step", "spin", "spiral"} or not video_sha256:
+        return None
+    if current_video_ai_confidence < MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_CURRENT_CONFIDENCE:
+        return None
+
+    result = await session.execute(
+        select(Analysis)
+        .options(
+            load_only(
+                Analysis.id,
+                Analysis.status,
+                Analysis.action_type,
+                Analysis.action_subtype,
+                Analysis.analysis_profile,
+                Analysis.pipeline_version,
+                Analysis.frame_motion_scores,
+                Analysis.bio_data,
+                Analysis.created_at,
+            )
+        )
+        .where(Analysis.status == "completed")
+        .where(Analysis.id != current_analysis_id)
+        .where(Analysis.action_type == action_type)
+        .where(Analysis.frame_motion_scores.contains(video_sha256))
+        .order_by(Analysis.created_at.desc(), Analysis.id.desc())
+        .limit(100)
+    )
+    candidates = [
+        candidate
+        for analysis in result.scalars().all()
+        if (
+            candidate := _mixed_action_profile_reuse_candidate_from_analysis(
+                analysis,
+                current_analysis_id=current_analysis_id,
+                video_sha256=video_sha256,
+                action_type=action_type,
+                action_subtype=action_subtype,
+                current_motion_scores=current_motion_scores,
+            )
+        )
+        is not None
+    ]
+    if not candidates:
+        return None
+
+    profiles = {"step", "spin", "spiral"}
+    if normalized_current in profiles:
+        profiles -= {normalized_current}
+    best_candidate: dict[str, Any] | None = None
+    for profile in profiles:
+        profile_candidates = [
+            candidate
+            for candidate in candidates
+            if _mixed_action_candidate_video_ai_backed_for_profile(candidate, profile)
+        ]
+        if len(profile_candidates) < MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_BACKED_COUNT:
+            continue
+        best_confidence = max(
+            (_float_or_none(candidate.get("video_ai_confidence")) or 0.0)
+            for candidate in profile_candidates
+        )
+        if best_confidence < MIXED_ACTION_NON_JUMP_PROFILE_STABILITY_MIN_BEST_CONFIDENCE:
+            continue
+        if best_confidence < current_video_ai_confidence:
+            continue
+        latest = max(profile_candidates, key=lambda item: float(item.get("created_at_timestamp") or 0.0))
+        candidate_payload = {
+            "analysis_profile": profile,
+            "source_analysis_id": latest.get("analysis_id"),
+            "source_pipeline_version": latest.get("pipeline_version"),
+            "source_created_at": latest.get("created_at"),
+            "match_count": len(profile_candidates),
+            "candidate_count": len(candidates),
+            "profile_ratio": round(len(profile_candidates) / len(candidates), 3),
+            "video_ai_backed_count": len(profile_candidates),
+            "video_ai_confidence": best_confidence,
+            "video_ai_source": latest.get("video_ai_source"),
+            "current_video_ai_confidence": round(current_video_ai_confidence, 4),
+        }
+        if best_candidate is None or (
+            float(candidate_payload["video_ai_confidence"]),
+            int(candidate_payload["video_ai_backed_count"]),
+            float(latest.get("created_at_timestamp") or 0.0),
+        ) > (
+            float(best_candidate.get("video_ai_confidence") or 0.0),
+            int(best_candidate.get("video_ai_backed_count") or 0),
+            float(best_candidate.get("source_created_at_timestamp") or 0.0),
+        ):
+            candidate_payload["source_created_at_timestamp"] = latest.get("created_at_timestamp")
+            best_candidate = candidate_payload
+
+    if best_candidate is not None:
+        best_candidate.pop("source_created_at_timestamp", None)
+    return best_candidate
+
+
+def _mixed_action_matching_profile_reuse_should_override(
+    *,
+    current_profile: str,
+    reused_profile: str,
+    bio_data: dict[str, Any] | None,
+) -> bool:
+    normalized_current = str(current_profile or "").strip().lower()
+    normalized_reused = str(reused_profile or "").strip().lower()
+    if normalized_reused not in SUPPORTED_VIDEO_AI_PROFILES or normalized_reused == normalized_current:
+        return False
+    if normalized_reused == "jump":
+        return False
+    if (
+        normalized_current == "jump"
+        and normalized_reused != "jump"
+        and not _mixed_action_current_jump_profile_is_weak(normalized_current, bio_data)
+    ):
+        return False
+    return True
+
+
+def _mixed_action_prior_non_jump_profile_should_override_weak_jump(
+    *,
+    current_profile: str,
+    prior_profile_reuse: dict[str, Any] | None,
+    video_ai_profile: str | None,
+    bio_data: dict[str, Any] | None,
+    profile_evidence: dict[str, Any] | None,
+) -> bool:
+    if str(current_profile or "").strip().lower() != "jump" or video_ai_profile is not None:
+        return False
+    if not isinstance(prior_profile_reuse, dict):
+        return False
+    reused_profile = str(prior_profile_reuse.get("analysis_profile") or "").strip().lower()
+    if reused_profile not in {"step", "spin", "spiral"}:
+        return False
+    if not _mixed_action_current_jump_profile_is_weak("jump", bio_data):
+        return False
+    return True
+
+
+def _candidate_timestamp(candidate: dict[str, Any] | None) -> float | None:
+    if not isinstance(candidate, dict):
+        return None
+    return _float_or_none(candidate.get("timestamp"))
+
+
+def _candidate_confidence(candidate: dict[str, Any] | None) -> float:
+    if not isinstance(candidate, dict):
+        return 0.0
+    return max(0.0, min(1.0, _float_or_none(candidate.get("confidence")) or 0.0))
+
+
+def _mixed_action_jump_candidates_are_recoverable(candidates: dict[str, Any] | None) -> bool:
+    if not isinstance(candidates, dict):
+        return False
+    t_candidate = candidates.get("T") if isinstance(candidates.get("T"), dict) else None
+    a_candidate = candidates.get("A") if isinstance(candidates.get("A"), dict) else None
+    l_candidate = candidates.get("L") if isinstance(candidates.get("L"), dict) else None
+    if not all(candidate and candidate.get("frame_id") for candidate in (t_candidate, a_candidate, l_candidate)):
+        return False
+    t_ts = _candidate_timestamp(t_candidate)
+    a_ts = _candidate_timestamp(a_candidate)
+    l_ts = _candidate_timestamp(l_candidate)
+    if t_ts is None or a_ts is None or l_ts is None:
+        return False
+    if not (t_ts + MIXED_ACTION_JUMP_RECOVERY_MIN_CORE_GAP_SECONDS < a_ts < l_ts - MIXED_ACTION_JUMP_RECOVERY_MIN_CORE_GAP_SECONDS):
+        return False
+    if l_ts - t_ts > MIXED_ACTION_JUMP_RECOVERY_MAX_TAL_SPAN_SECONDS:
+        return False
+    avg_confidence = (
+        _candidate_confidence(t_candidate)
+        + _candidate_confidence(a_candidate)
+        + _candidate_confidence(l_candidate)
+    ) / 3.0
+    if avg_confidence < MIXED_ACTION_JUMP_RECOVERY_MIN_AVG_CANDIDATE_CONFIDENCE:
+        return False
+    flags = {str(flag) for flag in candidates.get("quality_flags", []) if isinstance(flag, str)}
+    return not bool(flags & MIXED_ACTION_JUMP_RECOVERY_REJECT_CANDIDATE_FLAGS)
+
+
+def _mixed_action_should_recover_jump_from_skeleton(
+    action_type: str,
+    action_subtype: str | None,
+    *,
+    current_profile: str,
+    video_ai_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+    profile_evidence: dict[str, Any],
+    jump_candidates: dict[str, Any] | None,
+) -> bool:
+    if not is_mixed_action_input(action_type, action_subtype):
+        return False
+    if current_profile == "jump" or video_ai_profile in {"spin", "spiral", "step"}:
+        return False
+    family = _video_ai_action_family(video_temporal)
+    if family in {"spin", "spiral", "step"}:
+        return False
+    if _video_ai_action_confidence(video_temporal) >= 0.60 and family != "jump":
+        return False
+    if bool(profile_evidence.get("mixed_jump_gate_passed")):
+        return False
+    if not bool(profile_evidence.get("jump_gate_passed")):
+        return False
+    relative_vertical = _float_or_none(profile_evidence.get("relative_vertical_range")) or 0.0
+    rotation_signal = _float_or_none(profile_evidence.get("hip_rotation_signal")) or 0.0
+    if relative_vertical < MIXED_ACTION_JUMP_RECOVERY_MIN_RELATIVE_VERTICAL:
+        return False
+    if rotation_signal > MIXED_ACTION_JUMP_RECOVERY_MAX_ROTATION_SIGNAL:
+        return False
+    return _mixed_action_jump_candidates_are_recoverable(jump_candidates)
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _append_quality_flags(payload: dict[str, Any], *flags: str) -> dict[str, Any]:
+    payload["quality_flags"] = _merge_quality_flags(payload, [flag for flag in flags if flag])
+    return payload
+
+
+def _parse_pipeline_version_tuple(value: object) -> tuple[int, int, int] | None:
+    text = str(value or "").strip()
+    if not text.startswith("v"):
+        return None
+    parts = text[1:].split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(int(part) for part in parts)  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def _pipeline_version_at_least(value: object, minimum: str) -> bool:
+    parsed = _parse_pipeline_version_tuple(value)
+    minimum_parsed = _parse_pipeline_version_tuple(minimum)
+    if parsed is None or minimum_parsed is None:
+        return False
+    return parsed >= minimum_parsed
+
+
+def _video_identity_payload(video_path: Path, sha256: str) -> dict[str, Any]:
+    stat = video_path.stat()
+    return {
+        "schema_version": VIDEO_IDENTITY_VERSION,
+        "sha256": sha256,
+        "size_bytes": stat.st_size,
+        "filename": video_path.name,
+    }
+
+
+def _attach_video_identity(motion_scores: dict[str, object] | None, video_identity: dict[str, Any] | None) -> dict[str, object] | None:
+    if not isinstance(video_identity, dict):
+        return motion_scores
+    merged: dict[str, object] = dict(motion_scores or {})
+    merged["video_identity"] = dict(video_identity)
+    return merged
+
+
+def _video_identity_from_motion(motion_scores: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(motion_scores, dict):
+        return None
+    identity = motion_scores.get("video_identity")
+    return identity if isinstance(identity, dict) else None
+
+
+def _video_sha256_for_analysis(analysis: Analysis) -> str | None:
+    identity = _video_identity_from_motion(
+        analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    )
+    value = str((identity or {}).get("sha256") or "").strip()
+    return value or None
+
+
+def _input_windows_compatible(current_motion: dict[str, object] | None, candidate_motion: dict[str, Any] | None) -> bool:
+    current = _input_window_payload_from_motion(current_motion if isinstance(current_motion, dict) else None)
+    candidate = _input_window_payload_from_motion(candidate_motion)
+    if not current or not candidate:
+        return True
+    current_mode = str(current.get("input_window_mode") or "")
+    candidate_mode = str(candidate.get("input_window_mode") or "")
+    if current_mode and candidate_mode and current_mode != candidate_mode:
+        return False
+    for key in ("input_window_start_sec", "input_window_end_sec"):
+        current_value = current.get(key)
+        candidate_value = candidate.get(key)
+        if not isinstance(current_value, (int, float)) or not isinstance(candidate_value, (int, float)):
+            continue
+        if abs(float(current_value) - float(candidate_value)) > 0.05:
+            return False
+    return True
+
+
+def _semantic_reuse_profile(analysis_profile: str | None) -> str:
+    return str(analysis_profile or "").strip().lower()
+
+
+def _semantic_reuse_profile_phases(analysis_profile: str | None) -> tuple[str, ...]:
+    return SEMANTIC_REUSE_PROFILE_PHASES.get(_semantic_reuse_profile(analysis_profile), ("T", "A", "L"))
+
+
+def _semantic_reuse_required_phases(analysis_profile: str | None) -> tuple[str, ...]:
+    return SEMANTIC_REUSE_PROFILE_REQUIRED_PHASES.get(_semantic_reuse_profile(analysis_profile), ("T", "A", "L"))
+
+
+def _semantic_reuse_key(record: dict[str, Any], analysis_profile: str | None = None) -> str | None:
+    key_moment = str(record.get("key_moment") or "")
+    if key_moment.startswith("T_"):
+        return "T"
+    if key_moment.startswith("A_"):
+        return "A"
+    if key_moment.startswith("L_"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "").strip().lower()
+    profile_phases = _semantic_reuse_profile_phases(analysis_profile)
+    if phase_code in profile_phases and phase_code not in {"T", "A", "L"}:
+        return phase_code
+    if phase_code == "takeoff":
+        return "T"
+    if phase_code == "air":
+        return "A"
+    if phase_code == "landing":
+        return "L"
+    return None
+
+
+def _semantic_reuse_non_jump_selected(records: list[object], analysis_profile: str) -> list[dict[str, Any]]:
+    allowed = set(_semantic_reuse_profile_phases(analysis_profile))
+    required = set(_semantic_reuse_required_phases(analysis_profile))
+    if not allowed or not required:
+        return []
+
+    phase_order = {phase: index for index, phase in enumerate(_semantic_reuse_profile_phases(analysis_profile))}
+    selected: list[dict[str, Any]] = []
+    present: set[str] = set()
+    first_timestamp_by_phase: dict[str, float] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = _semantic_reuse_key(record, analysis_profile)
+        if key not in allowed:
+            continue
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < 0:
+            continue
+        item = dict(record)
+        item["timestamp"] = round(timestamp, 3)
+        item["reused_from_matching_video"] = True
+        selected.append(item)
+        present.add(key)
+        first_timestamp_by_phase.setdefault(key, item["timestamp"])
+
+    if not required.issubset(present):
+        return []
+
+    ordered_phases = [phase for phase in _semantic_reuse_profile_phases(analysis_profile) if phase in first_timestamp_by_phase]
+    previous_timestamp: float | None = None
+    for phase in ordered_phases:
+        timestamp = first_timestamp_by_phase[phase]
+        if previous_timestamp is not None and timestamp <= previous_timestamp:
+            return []
+        previous_timestamp = timestamp
+
+    if _semantic_reuse_profile(analysis_profile) == "step":
+        return sorted(selected, key=lambda item: float(item.get("timestamp") or 0.0))
+    return sorted(
+        selected,
+        key=lambda item: (
+            phase_order.get(str(item.get("phase_code") or "").strip().lower(), len(phase_order)),
+            float(item.get("timestamp") or 0.0),
+        ),
+    )
+
+
+def _semantic_reuse_selected(records: object, analysis_profile: str | None = None) -> list[dict[str, Any]]:
+    if not isinstance(records, list):
+        return []
+    profile = _semantic_reuse_profile(analysis_profile)
+    if profile in SEMANTIC_REUSE_PROFILE_PHASES:
+        return _semantic_reuse_non_jump_selected(records, profile)
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = _semantic_reuse_key(record, analysis_profile)
+        if key not in {"T", "A", "L"}:
+            continue
+        try:
+            timestamp = float(record.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < 0:
+            continue
+        item = dict(record)
+        item["timestamp"] = round(timestamp, 3)
+        item["reused_from_matching_video"] = True
+        by_key[key] = item
+    if not {"T", "A", "L"}.issubset(by_key):
+        return []
+    selected = [by_key[key] for key in ("T", "A", "L")]
+    if not (selected[0]["timestamp"] < selected[1]["timestamp"] < selected[2]["timestamp"]):
+        return []
+    return selected
+
+
+def _semantic_reuse_source_is_stable(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    *,
+    allowed_unstable_flags: set[str] | None = None,
+) -> bool:
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    unstable_flags = set(SEMANTIC_REUSE_UNSTABLE_SOURCE_FLAGS)
+    if allowed_unstable_flags:
+        unstable_flags -= allowed_unstable_flags
+    return not bool(flags & unstable_flags)
+
+
+def _semantic_reuse_phase_range_weak_geometry_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    if not SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_REQUIRED_SOURCE_FLAGS.issubset(flags):
+        return False
+    if "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates" in flags:
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None and isinstance(video_temporal, dict):
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if (
+        confidence is None
+        or confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_SOURCE_CONFIDENCE
+    ):
+        return False
+
+    if isinstance(video_temporal, dict):
+        action_confirmation = video_temporal.get("action_confirmation")
+        if isinstance(action_confirmation, dict):
+            action_family = str(action_confirmation.get("action_family") or "").strip().lower().replace(" ", "_")
+            if action_family and action_family not in {"jump", "jumps"}:
+                return False
+            action_confidence = _float_or_none(action_confirmation.get("confidence"))
+            if (
+                action_confidence is not None
+                and action_confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_ACTION_CONFIDENCE
+            ):
+                return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    ):
+        return False
+    for record in selected:
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _float_or_none(record.get("confidence"))
+        if (
+            phase_confidence is None
+            or phase_confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_PHASE_CONFIDENCE
+        ):
+            return False
+    return True
+
+
+def _semantic_reuse_phase_range_late_reanchor_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    if not SEMANTIC_REUSE_PHASE_RANGE_LATE_REANCHOR_SOURCE_FLAGS.issubset(flags):
+        return False
+    if "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates" in flags:
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None and isinstance(video_temporal, dict):
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if (
+        confidence is None
+        or confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_SOURCE_CONFIDENCE
+    ):
+        return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    ):
+        return False
+    for record in selected:
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _float_or_none(record.get("confidence"))
+        if (
+            phase_confidence is None
+            or phase_confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_PHASE_CONFIDENCE
+        ):
+            return False
+        if record.get("late_phase_range_reanchor") is not True:
+            return False
+        if _float_or_none(record.get("pre_late_phase_reanchor_timestamp")) is None:
+            return False
+    return True
+
+
+def _semantic_reuse_foreground_occlusion_repaired_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    if "semantic_keyframe_core_foreground_occlusion_repaired" not in flags:
+        return False
+    if "semantic_keyframe_core_foreground_occlusion" in flags:
+        return False
+    if "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates" in flags:
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None and isinstance(video_temporal, dict):
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if (
+        confidence is None
+        or confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_SOURCE_CONFIDENCE
+    ):
+        return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    ):
+        return False
+    for record in selected:
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _float_or_none(record.get("confidence"))
+        if (
+            phase_confidence is None
+            or phase_confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_PHASE_CONFIDENCE
+        ):
+            return False
+
+    delta_summary = _semantic_reuse_current_candidate_delta_summary(selected, current_bio_data)
+    if int(delta_summary.get("supported_key_count") or 0) < SEMANTIC_REUSE_CURRENT_CANDIDATE_MIN_SUPPORTED_KEYS:
+        return False
+    supported_mean = _float_or_none(delta_summary.get("supported_mean_abs_delta_sec"))
+    supported_max = _float_or_none(delta_summary.get("supported_max_abs_delta_sec"))
+    return (
+        supported_mean is not None
+        and supported_max is not None
+        and supported_mean <= SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_MAX_SUPPORTED_MEAN_DELTA_SEC
+        and supported_max <= SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_MAX_SUPPORTED_DELTA_SEC
+    )
+
+
+def _semantic_reuse_insufficient_pose_low_visibility_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    if not resolved_keyframes_accept_insufficient_pose_low_visibility_fallback(resolved_keyframes):
+        return False
+    if not bool(
+        set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+        & SEMANTIC_REUSE_RANKING_UNRELIABLE_CANDIDATE_FLAGS
+    ):
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None and isinstance(video_temporal, dict):
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if (
+        confidence is None
+        or confidence < SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_SOURCE_CONFIDENCE
+    ):
+        return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    tal_span = timestamps["L"] - timestamps["T"]
+    return (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    )
+
+
+def _semantic_reuse_degraded_semantic_low_visibility_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    source_bio_data: dict[str, Any] | None,
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(source_bio_data, dict):
+        return False
+    source_flags = {
+        str(flag).strip()
+        for flag in (source_bio_data.get("quality_flags") or [])
+        if str(flag).strip()
+    }
+    if "bio_key_frames_synced_from_degraded_semantic_keyframes" not in source_flags:
+        return False
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    if not (flags & SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_ACCEPTED_FLAGS):
+        return False
+    if not bool(
+        set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+        & SEMANTIC_REUSE_RANKING_UNRELIABLE_CANDIDATE_FLAGS
+    ):
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None and isinstance(video_temporal, dict):
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if (
+        confidence is None
+        or confidence < SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_MIN_SOURCE_CONFIDENCE
+    ):
+        return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    bio_timestamps = source_bio_data.get("key_frame_timestamps")
+    if not isinstance(bio_timestamps, dict) or not {"T", "A", "L"}.issubset(timestamps):
+        return False
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    ):
+        return False
+    for key, semantic_timestamp in timestamps.items():
+        bio_timestamp = _float_or_none(bio_timestamps.get(key))
+        if bio_timestamp is None or abs(bio_timestamp - semantic_timestamp) > COMPARE_SAME_VIDEO_KEYFRAME_STABILITY_SECONDS:
+            return False
+    for record in selected:
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _float_or_none(record.get("confidence"))
+        if (
+            phase_confidence is None
+            or phase_confidence < SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_MIN_PHASE_CONFIDENCE
+        ):
+            return False
+    return True
+
+
+def _semantic_reuse_clean_video_tal_over_late_weak_candidate_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    if not isinstance(video_temporal, dict):
+        return False
+    if video_temporal.get("valid") is not True:
+        return False
+    if str(video_temporal.get("fallback_recommendation") or "").strip() != "use_video_timestamps":
+        return False
+
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    if "semantic_keyframes_resolved_selected_fallback_to_keyframe_candidates" in flags:
+        return False
+    if flags & {
+        "video_temporal_fallback_recommended",
+        "video_temporal_resolver_video_validation_not_clean",
+        "semantic_keyframe_core_foreground_occlusion",
+        "semantic_keyframes_unreliable_tracker_final_loss_motion_fallback",
+        "semantic_keyframes_unreliable_tracker_final_loss_outside_reliable_pose",
+        "semantic_keyframes_unreliable_low_visibility_bounded_motion_fallback_drift",
+    }:
+        return False
+
+    confidence = _float_or_none(resolved_keyframes.get("confidence"))
+    if confidence is None:
+        confidence = _float_or_none(video_temporal.get("confidence"))
+    if confidence is None or confidence < SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_SOURCE_CONFIDENCE:
+        return False
+
+    action_confirmation = video_temporal.get("action_confirmation")
+    if isinstance(action_confirmation, dict):
+        action_family = str(action_confirmation.get("action_family") or "").strip().lower().replace(" ", "_")
+        if action_family and action_family not in {"jump", "jumps"}:
+            return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    if not {"T", "A", "L"}.issubset(timestamps):
+        return False
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MAX_TAL_SPAN_SEC
+    ):
+        return False
+    for record in selected:
+        reason = str(record.get("selection_reason") or "")
+        if not reason.startswith("video_phase_range_"):
+            return False
+        phase_confidence = _float_or_none(record.get("confidence"))
+        if (
+            phase_confidence is None
+            or phase_confidence < SEMANTIC_REUSE_CLEAN_VIDEO_TAL_MIN_PHASE_CONFIDENCE
+        ):
+            return False
+
+    candidate_flags = set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+    if "keyframe_candidates_late_pose_core_reselected" not in candidate_flags:
+        return False
+    if not (candidate_flags & SEMANTIC_REUSE_RANKING_UNRELIABLE_CANDIDATE_FLAGS):
+        return False
+    candidate_timestamps, candidate_confidences, _pose_supported = _semantic_reuse_current_candidate_timestamp_map(
+        current_bio_data
+    )
+    shifted_keys = []
+    for key in ("T", "A", "L"):
+        candidate_timestamp = candidate_timestamps.get(key)
+        candidate_confidence = candidate_confidences.get(key)
+        if candidate_timestamp is None or candidate_confidence is None:
+            continue
+        if candidate_confidence > SEMANTIC_REUSE_CLEAN_VIDEO_TAL_LATE_CANDIDATE_MAX_CONFIDENCE:
+            continue
+        if candidate_timestamp - timestamps[key] >= SEMANTIC_REUSE_CLEAN_VIDEO_TAL_LATE_CANDIDATE_MIN_SHIFT_SEC:
+            shifted_keys.append(key)
+    return len(shifted_keys) >= 2
+
+
+def _semantic_reuse_current_candidate_is_sparse_track_stitched(
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    flags = set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+    return bool(flags & SEMANTIC_REUSE_SPARSE_TRACK_STITCHED_REQUIRED_CANDIDATE_FLAGS)
+
+
+def _semantic_reuse_sparse_track_stitched_candidate_source(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    if str(resolved_keyframes.get("source") or "") not in {"video_ai_refined", "blended"}:
+        return False
+    if not semantic_keyframes_are_reliable(resolved_keyframes):
+        return False
+    if not _semantic_reuse_current_candidate_is_sparse_track_stitched(current_bio_data):
+        return False
+
+    selected = _semantic_reuse_selected(resolved_keyframes.get("selected"))
+    if not selected:
+        return False
+    timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    tal_span = timestamps["L"] - timestamps["T"]
+    if not (
+        SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MIN_TAL_SPAN_SEC
+        <= tal_span
+        <= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_MAX_TAL_SPAN_SEC
+    ):
+        return False
+
+    delta_summary = _semantic_reuse_current_candidate_delta_summary(selected, current_bio_data)
+    return int(delta_summary.get("supported_key_count") or 0) < SEMANTIC_REUSE_CURRENT_CANDIDATE_MIN_SUPPORTED_KEYS
+
+
+def _semantic_reuse_allowed_unstable_source_flags(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+    *,
+    long_unresolved_motion_fallback: bool,
+    current_bio_data: dict[str, Any] | None = None,
+    source_bio_data: dict[str, Any] | None = None,
+) -> set[str]:
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    allowed: set[str] = set()
+    if long_unresolved_motion_fallback:
+        allowed |= SEMANTIC_REUSE_LONG_UNRESOLVED_ALLOWED_SOURCE_FLAGS
+    if flags & {
+        "semantic_keyframes_phase_range_visual_tal_promoted",
+        "semantic_keyframes_distant_full_context_visual_tal_promoted",
+    }:
+        allowed |= SEMANTIC_REUSE_VISUAL_PROMOTION_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_phase_range_weak_geometry_source(resolved_keyframes, video_temporal):
+        allowed |= SEMANTIC_REUSE_PHASE_RANGE_WEAK_GEOMETRY_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_foreground_occlusion_repaired_source(
+        resolved_keyframes,
+        video_temporal,
+        current_bio_data,
+    ):
+        allowed |= SEMANTIC_REUSE_FOREGROUND_OCCLUSION_REPAIRED_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_insufficient_pose_low_visibility_source(
+        resolved_keyframes,
+        video_temporal,
+        current_bio_data,
+    ):
+        allowed |= SEMANTIC_REUSE_INSUFFICIENT_POSE_LOW_VISIBILITY_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_sparse_track_stitched_candidate_source(
+        resolved_keyframes,
+        video_temporal,
+        current_bio_data,
+    ):
+        allowed |= SEMANTIC_REUSE_INSUFFICIENT_POSE_LOW_VISIBILITY_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_degraded_semantic_low_visibility_source(
+        resolved_keyframes,
+        video_temporal,
+        source_bio_data,
+        current_bio_data,
+    ):
+        allowed |= SEMANTIC_REUSE_DEGRADED_SEMANTIC_LOW_VISIBILITY_ALLOWED_SOURCE_FLAGS
+    if _semantic_reuse_clean_video_tal_over_late_weak_candidate_source(
+        resolved_keyframes,
+        video_temporal,
+        current_bio_data,
+    ):
+        allowed |= {
+            "semantic_keyframe_refinement_delta_rejected",
+            "semantic_keyframe_refinement_phase_rejected",
+            "semantic_keyframes_partial_core_frames_available",
+            "semantic_keyframes_post_vision_partial_phase_frames_available",
+            "semantic_keyframes_unreliable_after_refinement",
+            "semantic_keyframes_unreliable_candidate_tal_conflict",
+            "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+            "video_temporal_quality_retry_rejected",
+        }
+    return allowed
+
+
+def _semantic_reuse_source_penalty_flags(
+    resolved_keyframes: dict[str, Any],
+    video_temporal: dict[str, Any] | None,
+) -> list[str]:
+    flags = set(_merge_quality_flags(resolved_keyframes, video_temporal))
+    return sorted(flags & SEMANTIC_REUSE_SOURCE_PENALTY_FLAGS)
+
+
+def _attach_semantic_reuse_source_candidate_conflict_context(
+    resolved_keyframes: dict[str, Any],
+    *,
+    source_quality_flags: Sequence[str],
+    source_semantic_candidate_tal_conflict: object,
+) -> dict[str, Any]:
+    accepted_flags = [
+        flag
+        for flag in source_quality_flags
+        if flag in SEMANTIC_REUSE_ACCEPTED_SOURCE_CANDIDATE_CONFLICT_FLAGS
+    ]
+    if not accepted_flags:
+        return resolved_keyframes
+    _append_quality_flags(resolved_keyframes, *accepted_flags)
+    if isinstance(source_semantic_candidate_tal_conflict, dict):
+        resolved_keyframes["semantic_candidate_tal_conflict"] = dict(source_semantic_candidate_tal_conflict)
+        resolved_keyframes["semantic_candidate_tal_conflict"]["reused_from_source_analysis"] = True
+    return resolved_keyframes
+
+
+def _semantic_reuse_selected_timestamp_map(
+    selected: list[dict[str, Any]],
+    analysis_profile: str | None = None,
+) -> dict[str, float]:
+    timestamps: dict[str, float] = {}
+    accepted_keys = set(_semantic_reuse_profile_phases(analysis_profile))
+    for record in selected:
+        key = _semantic_reuse_key(record, analysis_profile)
+        timestamp = _float_or_none(record.get("timestamp"))
+        if key in accepted_keys and timestamp is not None and key not in timestamps:
+            timestamps[key] = timestamp
+    return timestamps
+
+
+def _semantic_reuse_candidate_source_keyframes(current_bio_data: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    candidates = current_bio_data.get("key_frame_candidates") if isinstance(current_bio_data, dict) else None
+    return candidates if isinstance(candidates, dict) else {}
+
+
+def _keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data: dict[str, Any] | None) -> list[str]:
+    candidates = _semantic_reuse_candidate_source_keyframes(current_bio_data)
+    flags: list[str] = []
+    for raw in candidates.get("quality_flags", []):
+        value = str(raw).strip()
+        if value and value not in flags:
+            flags.append(value)
+    for key in ("T", "A", "L"):
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        warnings = candidate.get("warnings")
+        if not isinstance(warnings, list):
+            continue
+        for raw in warnings:
+            value = str(raw).strip()
+            if value and value not in flags:
+                flags.append(value)
+    return flags
+
+
+def _semantic_reuse_current_candidate_tal_span_sec(current_bio_data: dict[str, Any] | None) -> float | None:
+    candidates = _semantic_reuse_candidate_source_keyframes(current_bio_data)
+    timestamps: list[float] = []
+    for key in ("T", "A", "L"):
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            return None
+        timestamp = _float_or_none(candidate.get("timestamp"))
+        if timestamp is None:
+            return None
+        timestamps.append(timestamp)
+    return round(max(timestamps) - min(timestamps), 3)
+
+
+def _semantic_reuse_current_candidate_is_long_unresolved_motion_fallback(
+    current_bio_data: dict[str, Any] | None,
+) -> bool:
+    flags = set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+    if not (
+        "keyframe_candidates_motion_fallback" in flags
+        and "tal_candidate_motion_fallback_low_precision" in flags
+        and bool(flags & {"tal_candidate_incomplete", "tal_order_unresolved"})
+    ):
+        return False
+    span = _semantic_reuse_current_candidate_tal_span_sec(current_bio_data)
+    return (
+        span is not None
+        and span > SEMANTIC_REUSE_LONG_UNRESOLVED_MOTION_FALLBACK_MIN_TAL_SPAN_SEC
+    )
+
+
+def _semantic_reuse_current_candidate_has_pose_support(candidate: dict[str, Any]) -> bool:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+    pose_visibility = _float_or_none(evidence.get("visibility_score"))
+    if pose_visibility is None:
+        score_components = evidence.get("score_components") if isinstance(evidence.get("score_components"), dict) else {}
+        pose_visibility = _float_or_none(score_components.get("pose_visibility"))
+    if pose_visibility is not None and pose_visibility >= SEMANTIC_REUSE_POSE_SUPPORT_MIN_VISIBILITY:
+        return True
+
+    score_components = evidence.get("score_components") if isinstance(evidence.get("score_components"), dict) else {}
+    if any(_float_or_none(score_components.get(key_name)) is not None for key_name in SEMANTIC_REUSE_POSE_SIGNAL_COMPONENTS):
+        return True
+
+    warnings = candidate.get("warnings") if isinstance(candidate.get("warnings"), list) else []
+    warning_set = {str(item).strip() for item in warnings if str(item).strip()}
+    motion_fallback = evidence.get("motion_fallback") is True or "keyframe_candidates_motion_fallback" in warning_set
+    if motion_fallback and pose_visibility is not None and pose_visibility <= SEMANTIC_REUSE_LOW_VISIBILITY_MAX_POSE_VISIBILITY:
+        return False
+    return False
+
+
+def _semantic_reuse_current_candidate_timestamp_map(
+    current_bio_data: dict[str, Any] | None,
+) -> tuple[dict[str, float], dict[str, float], set[str]]:
+    candidates = _semantic_reuse_candidate_source_keyframes(current_bio_data)
+    unreliable_ranking_candidates = bool(
+        set(_keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data))
+        & SEMANTIC_REUSE_RANKING_UNRELIABLE_CANDIDATE_FLAGS
+    )
+    timestamps: dict[str, float] = {}
+    confidences: dict[str, float] = {}
+    pose_supported: set[str] = set()
+    for key in ("T", "A", "L"):
+        candidate = candidates.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        timestamp = _float_or_none(candidate.get("timestamp"))
+        if timestamp is None:
+            continue
+        timestamps[key] = timestamp
+        confidence = _float_or_none(candidate.get("confidence"))
+        if confidence is not None:
+            confidences[key] = confidence
+        if not unreliable_ranking_candidates and _semantic_reuse_current_candidate_has_pose_support(candidate):
+            pose_supported.add(key)
+    return timestamps, confidences, pose_supported
+
+
+def _semantic_reuse_current_candidate_delta_summary(
+    selected: list[dict[str, Any]],
+    current_bio_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selected_timestamps = _semantic_reuse_selected_timestamp_map(selected)
+    current_timestamps, current_confidences, pose_supported_keys = _semantic_reuse_current_candidate_timestamp_map(
+        current_bio_data
+    )
+    deltas: dict[str, float] = {}
+    supported_deltas: dict[str, float] = {}
+    for key, semantic_timestamp in selected_timestamps.items():
+        candidate_timestamp = current_timestamps.get(key)
+        if candidate_timestamp is None:
+            continue
+        delta = abs(semantic_timestamp - candidate_timestamp)
+        deltas[key] = round(delta, 3)
+        if key in pose_supported_keys:
+            supported_deltas[key] = round(delta, 3)
+
+    values = list(deltas.values())
+    supported_values = list(supported_deltas.values())
+    return {
+        "candidate_timestamps": {key: round(value, 3) for key, value in current_timestamps.items()},
+        "candidate_confidences": {key: round(value, 3) for key, value in current_confidences.items()},
+        "pose_supported_keys": sorted(pose_supported_keys),
+        "deltas_sec": deltas,
+        "supported_deltas_sec": supported_deltas,
+        "mean_abs_delta_sec": round(mean(values), 3) if values else None,
+        "max_abs_delta_sec": round(max(values), 3) if values else None,
+        "supported_mean_abs_delta_sec": round(mean(supported_values), 3) if supported_values else None,
+        "supported_max_abs_delta_sec": round(max(supported_values), 3) if supported_values else None,
+        "supported_key_count": len(supported_values),
+    }
+
+
+def _semantic_reuse_pairwise_stability_summary(
+    selected: list[dict[str, Any]],
+    peer_candidates: list[dict[str, Any]],
+    *,
+    analysis_profile: str | None = None,
+) -> dict[str, Any]:
+    selected_timestamps = _semantic_reuse_selected_timestamp_map(selected, analysis_profile)
+    expected_keys = set(_semantic_reuse_required_phases(analysis_profile))
+    peer_means: list[float] = []
+    peer_maxes: list[float] = []
+    peer_count = 0
+    for peer in peer_candidates:
+        peer_timestamps = _semantic_reuse_selected_timestamp_map(
+            peer.get("selected") if isinstance(peer.get("selected"), list) else [],
+            analysis_profile,
+        )
+        shared_keys = sorted(expected_keys & set(selected_timestamps) & set(peer_timestamps))
+        deltas = [
+            abs(selected_timestamps[key] - peer_timestamps[key])
+            for key in shared_keys
+        ]
+        if not deltas:
+            continue
+        peer_count += 1
+        peer_means.append(mean(deltas))
+        peer_maxes.append(max(deltas))
+    return {
+        "peer_count": peer_count,
+        "peer_mean_abs_delta_sec": round(mean(peer_means), 3) if peer_means else None,
+        "peer_max_abs_delta_sec": round(max(peer_maxes), 3) if peer_maxes else None,
+    }
+
+
+def _semantic_reuse_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    supported_count = int(candidate.get("candidate_supported_key_count") or 0)
+    confidence = _float_or_none(candidate.get("confidence")) or 0.0
+    created_at_timestamp = _float_or_none(candidate.get("created_at_timestamp")) or 0.0
+    if supported_count >= SEMANTIC_REUSE_CURRENT_CANDIDATE_MIN_SUPPORTED_KEYS:
+        mean_delta = _float_or_none(candidate.get("candidate_supported_mean_abs_delta_sec"))
+        max_delta = _float_or_none(candidate.get("candidate_supported_max_abs_delta_sec"))
+        source_penalty_count = float(candidate.get("source_penalty_count") or 0)
+        if mean_delta is None:
+            mean_delta = _float_or_none(candidate.get("candidate_mean_abs_delta_sec"))
+        if max_delta is None:
+            max_delta = _float_or_none(candidate.get("candidate_max_abs_delta_sec"))
+        return (
+            0.0,
+            mean_delta if mean_delta is not None else SEMANTIC_REUSE_MISSING_DELTA_SECONDS,
+            max_delta if max_delta is not None else SEMANTIC_REUSE_MISSING_DELTA_SECONDS,
+            source_penalty_count,
+            -confidence,
+            -created_at_timestamp,
+        )
+
+    peer_mean = _float_or_none(candidate.get("peer_mean_abs_delta_sec"))
+    peer_max = _float_or_none(candidate.get("peer_max_abs_delta_sec"))
+    source_penalty_count = float(candidate.get("source_penalty_count") or 0)
+    created_at_rank = (
+        created_at_timestamp
+        if candidate.get("insufficient_pose_low_visibility_source_override")
+        or candidate.get("sparse_track_stitched_candidate_override")
+        else -created_at_timestamp
+    )
+    return (
+        1.0,
+        peer_mean if peer_mean is not None else SEMANTIC_REUSE_MISSING_DELTA_SECONDS,
+        peer_max if peer_max is not None else SEMANTIC_REUSE_MISSING_DELTA_SECONDS,
+        source_penalty_count,
+        -confidence,
+        created_at_rank,
+    )
+
+
+def _semantic_reuse_candidate_from_analysis(
+    analysis: Analysis,
+    *,
+    current_analysis_id: str,
+    video_sha256: str,
+    action_type: str | None,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    current_motion_scores: dict[str, object] | None,
+    current_bio_data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if analysis.id == current_analysis_id or analysis.status != "completed":
+        return None
+    if not _pipeline_version_at_least(analysis.pipeline_version, SEMANTIC_REUSE_MIN_PIPELINE_VERSION):
+        return None
+    if action_type and analysis.action_type != action_type:
+        return None
+    if (analysis.action_subtype or None) != (action_subtype or None):
+        return None
+    if (analysis.analysis_profile or None) != (analysis_profile or None):
+        return None
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+    identity = _video_identity_from_motion(motion_scores)
+    if not identity or identity.get("sha256") != video_sha256:
+        return None
+    if not _input_windows_compatible(current_motion_scores, motion_scores):
+        return None
+    resolved = motion_scores.get("resolved_keyframes") if isinstance(motion_scores, dict) else None
+    if not isinstance(resolved, dict):
+        return None
+    video_temporal = resolved.get("video_ai") if isinstance(resolved.get("video_ai"), dict) else motion_scores.get("video_temporal")
+    source_bio_data = analysis.bio_data if isinstance(getattr(analysis, "bio_data", None), dict) else None
+    reusable_phase_range_weak_geometry_source = _semantic_reuse_phase_range_weak_geometry_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+    )
+    reusable_phase_range_late_reanchor_source = _semantic_reuse_phase_range_late_reanchor_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+    )
+    reusable_foreground_occlusion_repaired_source = _semantic_reuse_foreground_occlusion_repaired_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        current_bio_data,
+    )
+    reusable_insufficient_pose_low_visibility_source = _semantic_reuse_insufficient_pose_low_visibility_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        current_bio_data,
+    )
+    reusable_degraded_semantic_low_visibility_source = _semantic_reuse_degraded_semantic_low_visibility_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        source_bio_data,
+        current_bio_data,
+    )
+    reusable_clean_video_tal_late_weak_candidate_source = _semantic_reuse_clean_video_tal_over_late_weak_candidate_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        current_bio_data,
+    )
+    reusable_sparse_track_stitched_candidate_source = _semantic_reuse_sparse_track_stitched_candidate_source(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        current_bio_data,
+    )
+    if (
+        not semantic_keyframes_are_reliable(resolved)
+        and not reusable_phase_range_weak_geometry_source
+        and not reusable_foreground_occlusion_repaired_source
+        and not reusable_insufficient_pose_low_visibility_source
+        and not reusable_degraded_semantic_low_visibility_source
+        and not reusable_clean_video_tal_late_weak_candidate_source
+        and not reusable_sparse_track_stitched_candidate_source
+    ):
+        return None
+    source = str(resolved.get("source") or "")
+    if source not in {"video_ai_refined", "blended"}:
+        return None
+    long_unresolved_motion_fallback = _semantic_reuse_current_candidate_is_long_unresolved_motion_fallback(
+        current_bio_data
+    )
+    if not _semantic_reuse_source_is_stable(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+        allowed_unstable_flags=_semantic_reuse_allowed_unstable_source_flags(
+            resolved,
+            video_temporal if isinstance(video_temporal, dict) else None,
+            long_unresolved_motion_fallback=long_unresolved_motion_fallback,
+            current_bio_data=current_bio_data,
+            source_bio_data=source_bio_data,
+        ),
+    ):
+        return None
+    selected = _semantic_reuse_selected(resolved.get("selected"), analysis_profile)
+    if not selected:
+        return None
+    current_resolved = {
+        "source": resolved.get("source") or "video_ai_refined",
+        "confidence": resolved.get("confidence"),
+        "selected": selected,
+        "video_ai": video_temporal if isinstance(video_temporal, dict) else None,
+        "quality_flags": ["semantic_keyframes_reused_from_matching_video"],
+    }
+    source_quality_flags = _merge_quality_flags(resolved, video_temporal if isinstance(video_temporal, dict) else None)
+    _attach_semantic_reuse_source_candidate_conflict_context(
+        current_resolved,
+        source_quality_flags=source_quality_flags,
+        source_semantic_candidate_tal_conflict=resolved.get("semantic_candidate_tal_conflict"),
+    )
+    if reusable_phase_range_weak_geometry_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_phase_range_weak_geometry_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_phase_range_tal_over_historical_weak_temporal_geometry",
+            "source_quality_flags": _merge_quality_flags(
+                resolved,
+                video_temporal if isinstance(video_temporal, dict) else None,
+            ),
+        }
+    if reusable_phase_range_late_reanchor_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_phase_range_late_reanchor_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_phase_range_late_reanchored_tal_over_current_early_motion_peak",
+            "source_quality_flags": _merge_quality_flags(
+                resolved,
+                video_temporal if isinstance(video_temporal, dict) else None,
+            ),
+        }
+    if reusable_foreground_occlusion_repaired_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_foreground_occlusion_repaired_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_foreground_occlusion_repaired_tal_with_current_pose_support",
+            "source_quality_flags": _merge_quality_flags(
+                resolved,
+                video_temporal if isinstance(video_temporal, dict) else None,
+            ),
+        }
+    if reusable_insufficient_pose_low_visibility_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_insufficient_pose_low_visibility_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_low_visibility_semantic_tal_over_untrusted_motion_fallback",
+            "source_quality_flags": _merge_quality_flags(
+                resolved,
+                video_temporal if isinstance(video_temporal, dict) else None,
+            ),
+        }
+    if reusable_degraded_semantic_low_visibility_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_degraded_semantic_low_visibility_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_degraded_semantic_tal_over_untrusted_motion_fallback",
+            "source_quality_flags": _merge_quality_flags(
+                resolved,
+                video_temporal if isinstance(video_temporal, dict) else None,
+            ),
+        }
+    if reusable_clean_video_tal_late_weak_candidate_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_from_clean_video_tal_late_weak_candidate_source",
+        )
+        current_resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_clean_video_tal_over_late_weak_candidate",
+            "source_quality_flags": source_quality_flags,
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data),
+        }
+    if reusable_sparse_track_stitched_candidate_source:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_over_sparse_track_stitched_candidate",
+        )
+        current_resolved["semantic_reuse_sparse_track_stitched_candidate"] = {
+            "decision": "reused_matching_video_over_sparse_track_stitched_candidate",
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data),
+        }
+    if long_unresolved_motion_fallback:
+        _append_quality_flags(
+            current_resolved,
+            "semantic_keyframes_reused_over_long_unresolved_motion_fallback",
+        )
+        current_resolved["semantic_reuse_long_unresolved_motion_fallback"] = {
+            "decision": "reused_matching_video_over_long_unresolved_motion_fallback",
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(current_bio_data),
+            "candidate_tal_span_sec": _semantic_reuse_current_candidate_tal_span_sec(current_bio_data),
+        }
+    current_resolved = validate_semantic_keyframes_against_current_evidence(
+        current_resolved,
+        bio_data=current_bio_data,
+        motion_scores=current_motion_scores,
+        analysis_profile=analysis_profile,
+    )
+    if not semantic_keyframes_are_reliable(current_resolved):
+        return None
+    created_at = getattr(analysis, "created_at", None)
+    source_penalty_flags = _semantic_reuse_source_penalty_flags(
+        resolved,
+        video_temporal if isinstance(video_temporal, dict) else None,
+    )
+    return {
+        "analysis_id": analysis.id,
+        "pipeline_version": analysis.pipeline_version,
+        "selected": selected,
+        "source": resolved.get("source") or "video_ai_refined",
+        "confidence": resolved.get("confidence"),
+        "source_quality_flags": source_quality_flags,
+        "source_penalty_flags": source_penalty_flags,
+        "source_penalty_count": len(source_penalty_flags),
+        "source_semantic_candidate_tal_conflict": resolved.get("semantic_candidate_tal_conflict"),
+        "created_at": created_at.isoformat() if created_at is not None else "",
+        "created_at_timestamp": created_at.timestamp() if created_at is not None else 0.0,
+        "phase_range_weak_geometry_source_override": reusable_phase_range_weak_geometry_source,
+        "phase_range_late_reanchor_source_override": reusable_phase_range_late_reanchor_source,
+        "foreground_occlusion_repaired_source_override": reusable_foreground_occlusion_repaired_source,
+        "insufficient_pose_low_visibility_source_override": reusable_insufficient_pose_low_visibility_source,
+        "degraded_semantic_low_visibility_source_override": reusable_degraded_semantic_low_visibility_source,
+        "clean_video_tal_late_weak_candidate_source_override": reusable_clean_video_tal_late_weak_candidate_source,
+        "sparse_track_stitched_candidate_override": reusable_sparse_track_stitched_candidate_source,
+        "long_unresolved_motion_fallback_override": long_unresolved_motion_fallback,
+        **{
+            f"candidate_{key}": value
+            for key, value in _semantic_reuse_current_candidate_delta_summary(selected, current_bio_data).items()
+        },
+    }
+
+
+async def _find_matching_semantic_keyframes(
+    *,
+    session: AsyncSession,
+    current_analysis_id: str,
+    video_sha256: str | None,
+    action_type: str | None,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    current_motion_scores: dict[str, object] | None,
+    current_bio_data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not video_sha256:
+        return None
+    result = await session.execute(
+        select(Analysis)
+        .where(Analysis.status == "completed")
+        .where(Analysis.id != current_analysis_id)
+        .where(Analysis.action_type == action_type)
+        .where(Analysis.frame_motion_scores.contains(video_sha256))
+        .order_by(Analysis.created_at.desc(), Analysis.id.desc())
+        .limit(100)
+    )
+    reuse_candidates: list[dict[str, Any]] = []
+    for candidate in result.scalars().all():
+        reuse = _semantic_reuse_candidate_from_analysis(
+            candidate,
+            current_analysis_id=current_analysis_id,
+            video_sha256=video_sha256,
+            action_type=action_type,
+            action_subtype=action_subtype,
+            analysis_profile=analysis_profile,
+            current_motion_scores=current_motion_scores,
+            current_bio_data=current_bio_data,
+        )
+        if reuse is not None:
+            reuse_candidates.append(reuse)
+    if not reuse_candidates:
+        return None
+
+    for reuse in reuse_candidates:
+        peers = [
+            peer
+            for peer in reuse_candidates
+            if peer.get("analysis_id") != reuse.get("analysis_id")
+        ]
+        reuse.update(
+            _semantic_reuse_pairwise_stability_summary(
+                reuse.get("selected") if isinstance(reuse.get("selected"), list) else [],
+                peers,
+                analysis_profile=analysis_profile,
+            )
+        )
+        reuse["ranking_mode"] = (
+            "current_pose_supported_candidate_delta"
+            if int(reuse.get("candidate_supported_key_count") or 0) >= SEMANTIC_REUSE_CURRENT_CANDIDATE_MIN_SUPPORTED_KEYS
+            else "historical_semantic_stability"
+        )
+
+    return sorted(reuse_candidates, key=_semantic_reuse_sort_key)[0]
+
+
+async def _reuse_matching_semantic_keyframes(
+    *,
+    analysis_id: str,
+    video_path: Path,
+    processing_frames_dir: Path,
+    video_identity: dict[str, Any] | None,
+    action_type: str | None,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    motion_scores: dict[str, object],
+    bio_data: dict[str, Any] | None = None,
+    video_temporal_result: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[Path], list[dict[str, Any]], dict[str, Any] | None]:
+    sha256 = str((video_identity or {}).get("sha256") or "")
+    if not sha256:
+        return None, [], [], video_temporal_result
+    async with AsyncSessionLocal() as session:
+        reuse = await _find_matching_semantic_keyframes(
+            session=session,
+            current_analysis_id=analysis_id,
+            video_sha256=sha256,
+            action_type=action_type,
+            action_subtype=action_subtype,
+            analysis_profile=analysis_profile,
+            current_motion_scores=motion_scores,
+            current_bio_data=bio_data,
+        )
+    if reuse is None:
+        return None, [], [], video_temporal_result
+
+    selected = [dict(item) for item in reuse["selected"]]
+    semantic_frames, semantic_records = await extract_precise_frames_at_timestamps(
+        video_path,
+        processing_frames_dir.parent / "semantic_frames",
+        selected,
+        prefix="semantic",
+    )
+    reused_selected: list[dict[str, Any]] = []
+    for record in semantic_records:
+        item = dict(record)
+        original_selection_reason = str(item.get("selection_reason") or "")
+        if original_selection_reason:
+            item["semantic_reuse_original_selection_reason"] = original_selection_reason
+        item["selection_reason"] = "semantic_reused_from_matching_video"
+        item["reused_from_analysis_id"] = reuse["analysis_id"]
+        item["reused_from_pipeline_version"] = reuse["pipeline_version"]
+        item["reused_video_sha256"] = sha256
+        if reuse.get("ranking_mode"):
+            item["semantic_reuse_ranking_mode"] = reuse.get("ranking_mode")
+        reused_selected.append(item)
+
+    source = str(reuse.get("source") or "video_ai_refined")
+    confidence = reuse.get("confidence")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 0.90
+    resolved = {
+        "source": source if source in {"video_ai_refined", "blended"} else "video_ai_refined",
+        "confidence": round(max(0.0, min(confidence_value, 1.0)), 3),
+        "selected": reused_selected,
+        "video_ai": video_temporal_result,
+        "reused_from_analysis_id": reuse["analysis_id"],
+        "reused_from_pipeline_version": reuse["pipeline_version"],
+        "reused_video_sha256": sha256,
+        "semantic_reuse_ranking": {
+            "mode": reuse.get("ranking_mode"),
+            "candidate_mean_abs_delta_sec": reuse.get("candidate_mean_abs_delta_sec"),
+            "candidate_max_abs_delta_sec": reuse.get("candidate_max_abs_delta_sec"),
+            "candidate_supported_mean_abs_delta_sec": reuse.get("candidate_supported_mean_abs_delta_sec"),
+            "candidate_supported_max_abs_delta_sec": reuse.get("candidate_supported_max_abs_delta_sec"),
+            "candidate_supported_key_count": reuse.get("candidate_supported_key_count"),
+            "candidate_pose_supported_keys": reuse.get("candidate_pose_supported_keys"),
+            "source_penalty_flags": reuse.get("source_penalty_flags"),
+            "source_penalty_count": reuse.get("source_penalty_count"),
+            "phase_range_weak_geometry_source_override": reuse.get("phase_range_weak_geometry_source_override"),
+            "phase_range_late_reanchor_source_override": reuse.get("phase_range_late_reanchor_source_override"),
+            "foreground_occlusion_repaired_source_override": reuse.get("foreground_occlusion_repaired_source_override"),
+            "insufficient_pose_low_visibility_source_override": reuse.get("insufficient_pose_low_visibility_source_override"),
+            "degraded_semantic_low_visibility_source_override": reuse.get("degraded_semantic_low_visibility_source_override"),
+            "clean_video_tal_late_weak_candidate_source_override": reuse.get("clean_video_tal_late_weak_candidate_source_override"),
+            "sparse_track_stitched_candidate_override": reuse.get("sparse_track_stitched_candidate_override"),
+            "long_unresolved_motion_fallback_override": reuse.get("long_unresolved_motion_fallback_override"),
+            "peer_count": reuse.get("peer_count"),
+            "peer_mean_abs_delta_sec": reuse.get("peer_mean_abs_delta_sec"),
+            "peer_max_abs_delta_sec": reuse.get("peer_max_abs_delta_sec"),
+        },
+        "quality_flags": ["semantic_keyframes_reused_from_matching_video"],
+    }
+    source_quality_flags = [str(flag) for flag in reuse.get("source_quality_flags") or [] if str(flag).strip()]
+    _attach_semantic_reuse_source_candidate_conflict_context(
+        resolved,
+        source_quality_flags=source_quality_flags,
+        source_semantic_candidate_tal_conflict=reuse.get("source_semantic_candidate_tal_conflict"),
+    )
+    if reuse.get("phase_range_weak_geometry_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_phase_range_weak_geometry_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_phase_range_tal_over_historical_weak_temporal_geometry",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+        }
+    if reuse.get("phase_range_late_reanchor_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_phase_range_late_reanchor_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_phase_range_late_reanchored_tal_over_current_early_motion_peak",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+        }
+    if reuse.get("foreground_occlusion_repaired_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_foreground_occlusion_repaired_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_foreground_occlusion_repaired_tal_with_current_pose_support",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+        }
+    if reuse.get("insufficient_pose_low_visibility_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_insufficient_pose_low_visibility_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_low_visibility_semantic_tal_over_untrusted_motion_fallback",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+        }
+    if reuse.get("degraded_semantic_low_visibility_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_degraded_semantic_low_visibility_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_degraded_semantic_tal_over_untrusted_motion_fallback",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+        }
+    if reuse.get("clean_video_tal_late_weak_candidate_source_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_from_clean_video_tal_late_weak_candidate_source",
+        )
+        resolved["semantic_reuse_source_context"] = {
+            "decision": "reused_clean_video_tal_over_late_weak_candidate",
+            "source_quality_flags": reuse.get("source_quality_flags"),
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(bio_data),
+        }
+    if reuse.get("sparse_track_stitched_candidate_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_over_sparse_track_stitched_candidate",
+        )
+        resolved["semantic_reuse_sparse_track_stitched_candidate"] = {
+            "decision": "reused_matching_video_over_sparse_track_stitched_candidate",
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(bio_data),
+        }
+    if reuse.get("long_unresolved_motion_fallback_override"):
+        _append_quality_flags(
+            resolved,
+            "semantic_keyframes_reused_over_long_unresolved_motion_fallback",
+        )
+        resolved["semantic_reuse_long_unresolved_motion_fallback"] = {
+            "decision": "reused_matching_video_over_long_unresolved_motion_fallback",
+            "candidate_quality_flags": _keyframe_candidate_quality_flags_for_semantic_reuse(bio_data),
+            "candidate_tal_span_sec": _semantic_reuse_current_candidate_tal_span_sec(bio_data),
+        }
+    if isinstance(video_temporal_result, dict):
+        video_temporal_result = dict(video_temporal_result)
+        video_temporal_result["reused_semantic_keyframes_from_analysis_id"] = reuse["analysis_id"]
+        video_temporal_result["quality_flags"] = _merge_quality_flags(
+            video_temporal_result,
+            ["semantic_keyframes_reused_from_matching_video"],
+        )
+    else:
+        video_temporal_result = {
+            "valid": True,
+            "confidence": resolved["confidence"],
+            "quality_flags": ["semantic_keyframes_reused_from_matching_video"],
+            "fallback_recommendation": "use_reused_matching_video_timestamps",
+            "reused_semantic_keyframes_from_analysis_id": reuse["analysis_id"],
+        }
+    resolved["video_ai"] = video_temporal_result
+    resolved = validate_semantic_keyframes_against_current_evidence(
+        resolved,
+        bio_data=bio_data,
+        motion_scores=motion_scores,
+        analysis_profile=analysis_profile,
+    )
+    if not semantic_keyframes_are_reliable(resolved):
+        return None, [], [], video_temporal_result
+    return resolved, semantic_frames, reused_selected, video_temporal_result
 
 
 def _merge_video_temporal_cross_validation(
@@ -854,7 +3613,7 @@ async def _append_analysis_log(
     log_method = getattr(logger, level.lower(), logger.info)
     log_method("Analysis %s [%s] %s", analysis_id, stage, message)
 
-    try:
+    async def _write() -> None:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
@@ -867,6 +3626,9 @@ async def _append_analysis_log(
             if timings is not None:
                 analysis.processing_timings = dict(timings)
             await session.commit()
+
+    try:
+        await run_db_write_with_retry(_write, context=f"append_analysis_log:{analysis_id}:{stage}")
     except Exception:  # noqa: BLE001
         logger.exception("Analysis %s failed to append processing log", analysis_id)
 
@@ -881,13 +3643,16 @@ def _log_analysis_timings(
 
 
 async def _persist_processing_timings(analysis_id: str, timings: dict[str, float]) -> None:
-    try:
+    async def _write() -> None:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
                 return
             analysis.processing_timings = dict(timings)
             await session.commit()
+
+    try:
+        await run_db_write_with_retry(_write, context=f"persist_processing_timings:{analysis_id}")
     except Exception:  # noqa: BLE001
         logger.exception("Analysis %s failed to persist processing timings", analysis_id)
 
@@ -967,28 +3732,37 @@ async def _regenerate_report_from_saved_analysis(
             timings=timings,
         )
 
-        async with AsyncSessionLocal() as session:
-            analysis = await session.get(Analysis, analysis_id)
-            if analysis is None:
-                return
-            analysis.report = report
-            analysis.force_score = force_score
-            analysis.processing_timings = dict(timings)
-            analysis.pipeline_version = CURRENT_PIPELINE_VERSION
-            analysis.status = "completed"
-            analysis.error_code = None
-            analysis.error_detail = None
-            analysis.error_message = None
-            analysis.retry_from_stage = None
-            await auto_update_skill_progress(analysis_id, session)
-            if analysis.skater_id:
-                await sync_skater_progress(session, analysis.skater_id)
-            await session.commit()
-            if analysis.skater_id:
+        async def _save_regenerated_report() -> None:
+            saved_skater_id: str | None = None
+            async with AsyncSessionLocal() as session:
+                analysis = await session.get(Analysis, analysis_id)
+                if analysis is None:
+                    return
+                should_update_skill_progress = analysis.status != "completed"
+                analysis.report = report
+                analysis.force_score = force_score
+                analysis.processing_timings = dict(timings)
+                analysis.pipeline_version = CURRENT_PIPELINE_VERSION
+                analysis.status = "completed"
+                analysis.error_code = None
+                analysis.error_detail = None
+                analysis.error_message = None
+                analysis.retry_from_stage = None
+                if should_update_skill_progress:
+                    await auto_update_skill_progress(analysis_id, session)
+                if analysis.skater_id:
+                    saved_skater_id = analysis.skater_id
+                    await sync_skater_progress(session, analysis.skater_id)
+                await session.commit()
+
+            if saved_skater_id:
                 try:
-                    await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                    async with AsyncSessionLocal() as memory_session:
+                        await suggest_memory_updates(analysis_id, saved_skater_id, memory_session)
                 except Exception:  # noqa: BLE001
                     logger.exception("Analysis %s memory suggestion generation failed", analysis_id)
+
+        await run_db_write_with_retry(_save_regenerated_report, context=f"save_regenerated_report:{analysis_id}")
 
         _log_analysis_timings(analysis_id, timings, context="report_only_retry")
         await _append_analysis_log(
@@ -1031,6 +3805,7 @@ async def _start_video_temporal_task_if_missing(
     sampling_metadata: VideoSamplingMetadata,
     action_type: str,
     action_subtype: str | None,
+    user_note: str | None,
     motion_scores: dict[str, object],
     current_task: asyncio.Task | None,
     input_window: VideoInputWindow | None,
@@ -1043,6 +3818,7 @@ async def _start_video_temporal_task_if_missing(
         sampling_metadata=sampling_metadata,
         action_type=action_type,
         action_subtype=action_subtype,
+        user_note=user_note,
         analyzed_video_kind="action_window_ai",
         input_window=input_window,
         precheck=False,
@@ -1082,6 +3858,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
     video_temporal_ai_clip: dict[str, Any] | None = None
     resolved_keyframes: dict[str, Any] | None = None
     video_temporal_duration_sec: float | None = None
+    video_identity: dict[str, Any] | None = None
     retry_from_stage: str | None = retry_from if _is_retry_stage(retry_from) else None
     try:
         async with AsyncSessionLocal() as session:
@@ -1105,7 +3882,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
 
             action_type = analysis.action_type
             action_subtype = normalize_action_subtype(analysis.action_type, analysis.action_subtype)
-            analysis_profile_hint = analysis.analysis_profile or infer_profile_hint(action_type, action_subtype)
+            analysis_profile_hint = _analysis_profile_hint_for_sampling(action_type, action_subtype, analysis.analysis_profile)
             skater_id = analysis.skater_id
             skill_category = analysis.skill_category
             video_path = _video_path_for_analysis(analysis)
@@ -1125,6 +3902,16 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 manual_start_sec=analysis.manual_action_window_start,
                 manual_end_sec=analysis.manual_action_window_end,
             )
+            video_identity = _video_identity_from_motion(saved_motion_scores)
+
+        if video_identity is None:
+            try:
+                video_identity = _video_identity_payload(
+                    video_path,
+                    await asyncio.to_thread(compute_video_sha256, video_path),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Analysis %s failed to compute video hash: %s", analysis_id, exc)
 
         if retry_from_stage == "report":
             await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
@@ -1164,6 +3951,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
                 motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
+                motion_scores = _attach_video_identity(motion_scores, video_identity) or motion_scores
                 sampling_metadata = _sampling_metadata_from_saved(
                     action_window_start=saved_action_window_start,
                     action_window_end=saved_action_window_end,
@@ -1179,6 +3967,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         sampling_metadata=sampling_metadata,
                         action_type=action_type,
                         action_subtype=action_subtype,
+                        user_note=analysis.note,
                         motion_scores=motion_scores,
                         current_task=video_temporal_task,
                         input_window=input_window,
@@ -1221,6 +4010,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         input_window=input_window,
                     )
                     motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
+                    motion_scores = _attach_video_identity(motion_scores, video_identity) or motion_scores
                     video_temporal_task, started_duration, started_ai_clip = await _start_video_temporal_task_if_missing(
                         analysis_id=analysis_id,
                         video_path=video_path,
@@ -1228,6 +4018,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         sampling_metadata=sampling_metadata,
                         action_type=action_type,
                         action_subtype=action_subtype,
+                        user_note=analysis.note,
                         motion_scores=motion_scores,
                         current_task=video_temporal_task,
                         input_window=input_window,
@@ -1268,20 +4059,23 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             )
             target_lock = existing_target_lock if existing_target_lock_confirmed else build_target_lock_payload(preview)
 
-            async with AsyncSessionLocal() as session:
-                analysis = await session.get(Analysis, analysis_id)
-                if analysis is None:
-                    return
-                analysis.frame_motion_scores = motion_scores
-                analysis.processing_timings = dict(timings)
-                analysis.action_window_start = sampling_metadata.action_window_start
-                analysis.action_window_end = sampling_metadata.action_window_end
-                analysis.source_fps = sampling_metadata.source_fps
-                analysis.is_slow_motion = sampling_metadata.is_slow_motion
-                analysis.target_lock = target_lock
-                analysis.target_lock_status = target_lock['status']
-                analysis.retry_from_stage = 'pose'
-                await session.commit()
+            saved = await _save_analysis_fields_with_retry(
+                analysis_id,
+                {
+                    "frame_motion_scores": motion_scores,
+                    "processing_timings": dict(timings),
+                    "action_window_start": sampling_metadata.action_window_start,
+                    "action_window_end": sampling_metadata.action_window_end,
+                    "source_fps": sampling_metadata.source_fps,
+                    "is_slow_motion": sampling_metadata.is_slow_motion,
+                    "target_lock": target_lock,
+                    "target_lock_status": target_lock["status"],
+                    "retry_from_stage": "pose",
+                },
+                context=f"save_extract_frames:{analysis_id}",
+            )
+            if not saved:
+                return
 
             if not existing_target_lock_confirmed and preview.target_lock_status != "auto_locked":
                 if video_temporal_task is not None and not video_temporal_task.done():
@@ -1306,6 +4100,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
             motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
             motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
+            motion_scores = _attach_video_identity(motion_scores, video_identity) or motion_scores
             sampling_metadata = _sampling_metadata_from_saved(
                 action_window_start=saved_action_window_start,
                 action_window_end=saved_action_window_end,
@@ -1321,6 +4116,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     sampling_metadata=sampling_metadata,
                     action_type=action_type,
                     action_subtype=action_subtype,
+                    user_note=analysis.note,
                     motion_scores=motion_scores,
                     current_task=video_temporal_task,
                     input_window=input_window,
@@ -1366,20 +4162,23 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 retry_from_stage=retry_from_stage,
             )
             if not _is_confirmed_target_lock(existing_target_lock) and preview.target_lock_status != "auto_locked":
-                async with AsyncSessionLocal() as session:
-                    analysis = await session.get(Analysis, analysis_id)
-                    if analysis is None:
-                        return
-                    analysis.frame_motion_scores = motion_scores
-                    analysis.processing_timings = dict(timings)
-                    analysis.action_window_start = sampling_metadata.action_window_start
-                    analysis.action_window_end = sampling_metadata.action_window_end
-                    analysis.source_fps = sampling_metadata.source_fps
-                    analysis.is_slow_motion = sampling_metadata.is_slow_motion
-                    analysis.target_lock = target_lock
-                    analysis.target_lock_status = target_lock["status"]
-                    analysis.retry_from_stage = "pose"
-                    await session.commit()
+                saved = await _save_analysis_fields_with_retry(
+                    analysis_id,
+                    {
+                        "frame_motion_scores": motion_scores,
+                        "processing_timings": dict(timings),
+                        "action_window_start": sampling_metadata.action_window_start,
+                        "action_window_end": sampling_metadata.action_window_end,
+                        "source_fps": sampling_metadata.source_fps,
+                        "is_slow_motion": sampling_metadata.is_slow_motion,
+                        "target_lock": target_lock,
+                        "target_lock_status": target_lock["status"],
+                        "retry_from_stage": "pose",
+                    },
+                    context=f"save_retry_extract_frames:{analysis_id}",
+                )
+                if not saved:
+                    return
                 timings["total_s"] = _elapsed_seconds(total_start)
                 await _persist_processing_timings(analysis_id, timings)
                 _log_analysis_timings(analysis_id, timings, context="awaiting_target_selection_retry_cache")
@@ -1431,6 +4230,16 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     sampling_metadata.effective_fps,
                 )
                 timings['pose_s'] = _elapsed_seconds(pose_start)
+                tiny_target_risk_flags = _tiny_target_pose_tracking_risk_flags(target_lock, pose_data)
+                if tiny_target_risk_flags:
+                    _append_target_lock_flags(target_lock, tiny_target_risk_flags)
+                    if isinstance(pose_data, dict):
+                        pose_data["quality_flags"] = _merge_quality_flags(pose_data, tiny_target_risk_flags)
+                multiperson_relock_risk_flags = _multiperson_relock_instability_risk_flags(target_lock, pose_data)
+                if multiperson_relock_risk_flags:
+                    _append_target_lock_flags(target_lock, multiperson_relock_risk_flags)
+                    if isinstance(pose_data, dict):
+                        pose_data["quality_flags"] = _merge_quality_flags(pose_data, multiperson_relock_risk_flags)
                 pose_summary = _pose_debug_summary(pose_data)
                 await _append_analysis_log(
                     analysis_id,
@@ -1449,15 +4258,18 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         }
                     ),
                 )
-                async with AsyncSessionLocal() as session:
-                    analysis = await session.get(Analysis, analysis_id)
-                    if analysis is None:
-                        return
-                    analysis.pose_data = pose_data
-                    analysis.target_lock = target_lock
-                    analysis.processing_timings = dict(timings)
-                    analysis.retry_from_stage = 'biomechanics'
-                    await session.commit()
+                saved = await _save_analysis_fields_with_retry(
+                    analysis_id,
+                    {
+                        "pose_data": pose_data,
+                        "target_lock": target_lock,
+                        "processing_timings": dict(timings),
+                        "retry_from_stage": "biomechanics",
+                    },
+                    context=f"save_pose:{analysis_id}",
+                )
+                if not saved:
+                    return
                 await _append_analysis_log(
                     analysis_id,
                     stage='pose',
@@ -1509,7 +4321,30 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     message='开始计算生物力学指标。',
                 )
                 biomechanics_start = time.monotonic()
+                if is_mixed_action_input(action_type, action_subtype):
+                    if video_temporal_task is not None:
+                        video_temporal_result = await _await_video_temporal_result(video_temporal_task, analysis_id=analysis_id)
+                        video_temporal_task = None
+                    elif isinstance(motion_scores, dict) and isinstance(motion_scores.get("video_temporal"), dict):
+                        video_temporal_result = motion_scores.get("video_temporal")  # type: ignore[assignment]
                 analysis_profile, profile_evidence = infer_analysis_profile(action_type, action_subtype, pose_data, motion_scores)
+                video_ai_profile, video_ai_profile_flags = _profile_from_video_ai_for_mixed_action(
+                    action_type,
+                    action_subtype,
+                    video_temporal_result,
+                    profile_evidence,
+                )
+                if video_ai_profile:
+                    profile_evidence["skeleton_inferred_profile"] = analysis_profile
+                    profile_evidence["video_ai_action_family"] = video_ai_profile
+                    profile_evidence["video_ai_action_confidence"] = round(_video_ai_action_confidence(video_temporal_result), 4)
+                    profile_evidence["quality_flags"] = _merge_quality_flags(
+                        profile_evidence,
+                        video_ai_profile_flags,
+                    )
+                    analysis_profile = video_ai_profile
+                elif video_ai_profile_flags:
+                    profile_evidence["quality_flags"] = _merge_quality_flags(profile_evidence, video_ai_profile_flags)
                 bio_data = analyze_biomechanics(
                     pose_data,
                     action_type,
@@ -1525,6 +4360,255 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis_profile,
                     sampling_metadata.effective_fps,
                 )
+                if analysis_profile == "jump":
+                    profile_evidence["jump_subtype_evidence"] = infer_jump_subtype_evidence(
+                        pose_data,
+                        bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {},
+                        sampling_metadata.effective_fps,
+                    )
+                stable_non_jump_profile_reuse: dict[str, Any] | None = None
+                stable_non_jump_profile_allowed = (
+                    video_ai_profile in {"step", "spin", "spiral"}
+                    and analysis_profile in {"step", "spin", "spiral"}
+                ) or _mixed_action_weak_jump_can_yield_to_stable_non_jump_history(
+                    current_profile=analysis_profile,
+                    video_ai_profile=video_ai_profile,
+                    video_ai_profile_flags=video_ai_profile_flags,
+                    video_temporal=video_temporal_result,
+                    bio_data=bio_data,
+                )
+                if (
+                    is_mixed_action_input(action_type, action_subtype)
+                    and stable_non_jump_profile_allowed
+                    and video_identity
+                ):
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            stable_non_jump_profile_reuse = (
+                                await _find_matching_mixed_action_non_jump_profile_stability(
+                                    session=session,
+                                    current_analysis_id=analysis_id,
+                                    video_sha256=str(video_identity.get("sha256") or ""),
+                                    action_type=action_type,
+                                    action_subtype=action_subtype,
+                                    current_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                                    current_profile=analysis_profile,
+                                    current_video_ai_confidence=_video_ai_action_confidence(video_temporal_result),
+                                )
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Analysis %s failed to inspect non-jump profile stability: %s", analysis_id, exc)
+                        stable_non_jump_profile_reuse = None
+                    if isinstance(stable_non_jump_profile_reuse, dict):
+                        reused_profile = str(stable_non_jump_profile_reuse.get("analysis_profile") or "").strip().lower()
+                        if reused_profile in {"step", "spin", "spiral"} and reused_profile != analysis_profile:
+                            next_evidence = dict(profile_evidence) if isinstance(profile_evidence, dict) else {}
+                            if analysis_profile == "jump":
+                                next_evidence["skeleton_inferred_profile"] = analysis_profile
+                            next_evidence["video_ai_requested_profile"] = analysis_profile
+                            next_evidence["matching_video_non_jump_profile_stability"] = stable_non_jump_profile_reuse
+                            next_evidence["matching_video_reused_profile"] = reused_profile
+                            stability_flags = [
+                                "mixed_action_profile_reused_from_matching_video",
+                                "mixed_action_profile_overridden_by_non_jump_history_stability",
+                            ]
+                            if analysis_profile == "jump":
+                                stability_flags.append(
+                                    "mixed_action_profile_overridden_by_stable_non_jump_history_weak_jump"
+                                )
+                            next_evidence["quality_flags"] = _merge_quality_flags(
+                                next_evidence,
+                                stability_flags,
+                            )
+                            analysis_profile = reused_profile
+                            profile_evidence = next_evidence
+                            bio_data = _build_bio_data_for_profile(
+                                pose_data=pose_data,
+                                motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                                action_type=action_type,
+                                analysis_profile=analysis_profile,
+                                sampling_metadata=sampling_metadata,
+                                profile_evidence=profile_evidence,
+                                target_lock=target_lock,
+                            )
+                matching_profile_reuse: dict[str, Any] | None = None
+                prior_non_jump_profile_reuse: dict[str, Any] | None = None
+                if (
+                    is_mixed_action_input(action_type, action_subtype)
+                    and video_ai_profile is None
+                    and _mixed_action_profile_reuse_allowed_by_video_ai(video_temporal_result, video_ai_profile_flags)
+                    and video_identity
+                ):
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            matching_profile_reuse = await _find_matching_mixed_action_profile(
+                                session=session,
+                                current_analysis_id=analysis_id,
+                                video_sha256=str(video_identity.get("sha256") or ""),
+                                action_type=action_type,
+                                action_subtype=action_subtype,
+                                current_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                            )
+                            if analysis_profile == "jump":
+                                prior_non_jump_profile_reuse = await _find_matching_mixed_action_prior_non_jump_profile(
+                                    session=session,
+                                    current_analysis_id=analysis_id,
+                                    video_sha256=str(video_identity.get("sha256") or ""),
+                                    action_type=action_type,
+                                    action_subtype=action_subtype,
+                                    current_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Analysis %s failed to inspect matching profile reuse: %s", analysis_id, exc)
+                        matching_profile_reuse = None
+                        prior_non_jump_profile_reuse = None
+                    if isinstance(matching_profile_reuse, dict):
+                        reused_profile = str(matching_profile_reuse.get("analysis_profile") or "").strip().lower()
+                        profile_evidence["matching_video_profile_reuse"] = matching_profile_reuse
+                        if _mixed_action_matching_profile_reuse_should_override(
+                            current_profile=analysis_profile,
+                            reused_profile=reused_profile,
+                            bio_data=bio_data,
+                        ):
+                            next_evidence = dict(profile_evidence) if isinstance(profile_evidence, dict) else {}
+                            next_evidence["skeleton_inferred_profile"] = analysis_profile
+                            next_evidence["matching_video_reused_profile"] = reused_profile
+                            next_evidence["quality_flags"] = _merge_quality_flags(
+                                next_evidence,
+                                [
+                                    "mixed_action_profile_reused_from_matching_video",
+                                    "mixed_action_profile_overridden_by_matching_video_history",
+                                ],
+                            )
+                            analysis_profile = reused_profile
+                            profile_evidence = next_evidence
+                            bio_data = _build_bio_data_for_profile(
+                                pose_data=pose_data,
+                                motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                                action_type=action_type,
+                                analysis_profile=analysis_profile,
+                                sampling_metadata=sampling_metadata,
+                                profile_evidence=profile_evidence,
+                                target_lock=target_lock,
+                            )
+                    if _mixed_action_prior_non_jump_profile_should_override_weak_jump(
+                        current_profile=analysis_profile,
+                        prior_profile_reuse=prior_non_jump_profile_reuse,
+                        video_ai_profile=video_ai_profile,
+                        bio_data=bio_data,
+                        profile_evidence=profile_evidence,
+                    ):
+                        reused_profile = str(prior_non_jump_profile_reuse.get("analysis_profile") or "").strip().lower()
+                        next_evidence = dict(profile_evidence) if isinstance(profile_evidence, dict) else {}
+                        next_evidence["skeleton_inferred_profile"] = analysis_profile
+                        next_evidence["matching_video_prior_non_jump_profile_reuse"] = prior_non_jump_profile_reuse
+                        next_evidence["matching_video_reused_profile"] = reused_profile
+                        next_evidence["quality_flags"] = _merge_quality_flags(
+                            next_evidence,
+                            [
+                                "mixed_action_profile_reused_from_matching_video",
+                                "mixed_action_profile_overridden_by_prior_same_video_non_jump_history",
+                            ],
+                        )
+                        analysis_profile = reused_profile
+                        profile_evidence = next_evidence
+                        bio_data = _build_bio_data_for_profile(
+                            pose_data=pose_data,
+                            motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                            action_type=action_type,
+                            analysis_profile=analysis_profile,
+                            sampling_metadata=sampling_metadata,
+                            profile_evidence=profile_evidence,
+                            target_lock=target_lock,
+                        )
+                jump_downgraded_by_weak_video_ai = False
+                if (
+                    is_mixed_action_input(action_type, action_subtype)
+                    and _mixed_action_skeleton_jump_should_downgrade_to_step(
+                        current_profile=analysis_profile,
+                        video_ai_profile=video_ai_profile,
+                        video_ai_profile_flags=video_ai_profile_flags,
+                        bio_data=bio_data,
+                        profile_evidence=profile_evidence,
+                        video_temporal=video_temporal_result,
+                        matching_profile_reuse=matching_profile_reuse,
+                    )
+                ):
+                    next_evidence = dict(profile_evidence) if isinstance(profile_evidence, dict) else {}
+                    next_evidence["skeleton_inferred_profile"] = "jump"
+                    next_evidence["quality_flags"] = _merge_quality_flags(
+                        next_evidence,
+                        [
+                            "mixed_action_profile_downgraded_to_step_weak_jump_evidence",
+                            *video_ai_profile_flags,
+                        ],
+                    )
+                    analysis_profile = "step"
+                    profile_evidence = next_evidence
+                    bio_data = _build_bio_data_for_profile(
+                        pose_data=pose_data,
+                        motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                        action_type=action_type,
+                        analysis_profile=analysis_profile,
+                        sampling_metadata=sampling_metadata,
+                        profile_evidence=profile_evidence,
+                        target_lock=target_lock,
+                    )
+                    jump_downgraded_by_weak_video_ai = True
+                elif _mixed_action_matching_jump_history_blocks_downgrade(
+                    current_profile=analysis_profile,
+                    video_ai_profile=video_ai_profile,
+                    video_ai_profile_flags=video_ai_profile_flags,
+                    video_temporal=video_temporal_result,
+                    profile_evidence=profile_evidence,
+                    matching_profile_reuse=matching_profile_reuse,
+                ):
+                    profile_evidence["quality_flags"] = _merge_quality_flags(
+                        profile_evidence,
+                        ["mixed_action_profile_downgrade_blocked_by_matching_jump_history"],
+                    )
+                if (
+                    is_mixed_action_input(action_type, action_subtype)
+                    and analysis_profile != "jump"
+                    and video_ai_profile is None
+                    and not jump_downgraded_by_weak_video_ai
+                ):
+                    jump_bio_data = analyze_biomechanics(
+                        pose_data,
+                        action_type,
+                        "jump",
+                        effective_fps=sampling_metadata.effective_fps,
+                        source_fps=sampling_metadata.source_fps,
+                        window_seconds=sampling_metadata.window_end_sec - sampling_metadata.window_start_sec,
+                    )
+                    jump_bio_data = attach_key_frame_candidates(
+                        jump_bio_data,
+                        pose_data,
+                        motion_scores,
+                        "jump",
+                        sampling_metadata.effective_fps,
+                    )
+                    jump_candidates = (
+                        jump_bio_data.get("key_frame_candidates")
+                        if isinstance(jump_bio_data.get("key_frame_candidates"), dict)
+                        else None
+                    )
+                    if _mixed_action_should_recover_jump_from_skeleton(
+                        action_type,
+                        action_subtype,
+                        current_profile=analysis_profile,
+                        video_ai_profile=video_ai_profile,
+                        video_temporal=video_temporal_result,
+                        profile_evidence=profile_evidence,
+                        jump_candidates=jump_candidates,
+                    ):
+                        profile_evidence["skeleton_inferred_profile"] = analysis_profile
+                        profile_evidence["quality_flags"] = _merge_quality_flags(
+                            profile_evidence,
+                            ["mixed_action_profile_recovered_jump_from_skeleton_candidates"],
+                        )
+                        analysis_profile = "jump"
+                        bio_data = jump_bio_data
                 if isinstance(bio_data, dict):
                     if analysis_profile == 'jump':
                         profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
@@ -1561,15 +4645,18 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                         )
                         bio_data['profile_warning'] = profile_warning
                 timings['biomechanics_s'] = _elapsed_seconds(biomechanics_start)
-                async with AsyncSessionLocal() as session:
-                    analysis = await session.get(Analysis, analysis_id)
-                    if analysis is None:
-                        return
-                    analysis.bio_data = bio_data
-                    analysis.analysis_profile = analysis_profile
-                    analysis.processing_timings = dict(timings)
-                    analysis.retry_from_stage = 'vision'
-                    await session.commit()
+                saved = await _save_analysis_fields_with_retry(
+                    analysis_id,
+                    {
+                        "bio_data": bio_data,
+                        "analysis_profile": analysis_profile,
+                        "processing_timings": dict(timings),
+                        "retry_from_stage": "vision",
+                    },
+                    context=f"save_biomechanics:{analysis_id}",
+                )
+                if not saved:
+                    return
                 await _append_analysis_log(
                     analysis_id,
                     stage='biomechanics',
@@ -1605,36 +4692,84 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             )
 
         if run_vision:
-            if video_temporal_task is not None:
-                video_temporal_result = await _await_video_temporal_result(video_temporal_task, analysis_id=analysis_id)
-            elif isinstance(motion_scores, dict) and isinstance(motion_scores.get("video_temporal"), dict):
-                video_temporal_result = motion_scores.get("video_temporal")  # type: ignore[assignment]
-
-            semantic_pipeline = await resolve_semantic_keyframe_pipeline(
+            reused_resolved, reused_frames, reused_records, reused_video_temporal = await _reuse_matching_semantic_keyframes(
+                analysis_id=analysis_id,
                 video_path=video_path,
-                work_dir=processing_frames_dir.parent,
-                semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
-                video_temporal=video_temporal_result,
-                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
-                sampling_metadata=sampling_metadata,
-                analysis_profile=analysis_profile,
-                bio_data=bio_data,
-                video_duration_sec=video_temporal_duration_sec,
-            )
-            semantic_pipeline = await retry_video_temporal_if_needed(
-                result=semantic_pipeline,
-                video_path=video_path,
-                work_dir=processing_frames_dir.parent,
-                semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
-                sampling_metadata=sampling_metadata,
+                processing_frames_dir=processing_frames_dir,
+                video_identity=video_identity,
                 action_type=action_type,
                 action_subtype=action_subtype,
-                motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
                 analysis_profile=analysis_profile,
+                motion_scores=motion_scores,
                 bio_data=bio_data,
-                analyzed_video_kind="action_window_ai",
-                input_window=input_window,
+                video_temporal_result=video_temporal_result,
             )
+            if reused_resolved is not None:
+                if video_temporal_task is not None and not video_temporal_task.done():
+                    video_temporal_task.cancel()
+                    try:
+                        await video_temporal_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:  # noqa: BLE001
+                        logger.debug("Analysis %s video temporal task ended after semantic reuse", analysis_id, exc_info=True)
+                video_temporal_task = None
+                semantic_pipeline = SemanticKeyframePipelineResult(
+                    ai_clip=video_temporal_ai_clip,
+                    video_temporal=reused_video_temporal,
+                    resolved_keyframes=reused_resolved,
+                    effective_source=effective_timestamp_source(reused_resolved, True),
+                    semantic_frames=reused_frames,
+                    semantic_records=reused_records,
+                    quality_flags=_merge_quality_flags(reused_video_temporal, reused_resolved),
+                    used_semantic_frames=True,
+                    has_semantic_moments=True,
+                )
+                await _append_analysis_log(
+                    analysis_id,
+                    stage="vision",
+                    level="info",
+                    message="å‘½ä¸­åŒè§†é¢‘å·²é€šè¿‡çš„è¯­ä¹‰ T/A/Lï¼Œå·²é‡æŠ½å½“å‰åˆ†æžçš„ç²¾ç¡®å…³é”®å¸§ã€‚",
+                    detail=_compact_json_detail(
+                        {
+                            "reused_from_analysis_id": reused_resolved.get("reused_from_analysis_id"),
+                            "selected": reused_resolved.get("selected"),
+                            "video_sha256": (video_identity or {}).get("sha256"),
+                        }
+                    ),
+                )
+            else:
+                if video_temporal_task is not None:
+                    video_temporal_result = await _await_video_temporal_result(video_temporal_task, analysis_id=analysis_id)
+                elif isinstance(motion_scores, dict) and isinstance(motion_scores.get("video_temporal"), dict):
+                    video_temporal_result = motion_scores.get("video_temporal")  # type: ignore[assignment]
+
+                semantic_pipeline = await resolve_semantic_keyframe_pipeline(
+                    video_path=video_path,
+                    work_dir=processing_frames_dir.parent,
+                    semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+                    video_temporal=video_temporal_result,
+                    motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                    sampling_metadata=sampling_metadata,
+                    analysis_profile=analysis_profile,
+                    bio_data=bio_data,
+                    video_duration_sec=video_temporal_duration_sec,
+                )
+                semantic_pipeline = await retry_video_temporal_if_needed(
+                    result=semantic_pipeline,
+                    video_path=video_path,
+                    work_dir=processing_frames_dir.parent,
+                    semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+                    sampling_metadata=sampling_metadata,
+                    action_type=action_type,
+                    action_subtype=action_subtype,
+                    motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                    analysis_profile=analysis_profile,
+                    bio_data=bio_data,
+                    user_note=analysis.note,
+                    analyzed_video_kind="action_window_ai",
+                    input_window=input_window,
+                )
             video_temporal_result = semantic_pipeline.video_temporal
             resolved_keyframes = semantic_pipeline.resolved_keyframes
             motion_scores = _merge_frame_motion_payload(
@@ -1642,12 +4777,35 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 video_temporal=video_temporal_result,
                 resolved_keyframes=resolved_keyframes,
             )
-            async with AsyncSessionLocal() as session:
-                analysis = await session.get(Analysis, analysis_id)
-                if analysis is None:
-                    return
-                analysis.frame_motion_scores = motion_scores
-                await session.commit()
+            analysis_profile, bio_data, profile_evidence = _apply_resolved_video_ai_profile_override_to_bio_data(
+                action_type=action_type,
+                action_subtype=action_subtype,
+                current_profile=analysis_profile,
+                video_temporal=video_temporal_result,
+                resolved_keyframes=resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
+                bio_data=bio_data,
+                pose_data=pose_data,
+                motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                sampling_metadata=sampling_metadata,
+                profile_evidence=profile_evidence,
+                target_lock=target_lock,
+            )
+            bio_data = sync_key_frames_from_resolved_keyframes(
+                bio_data,
+                resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
+                analysis_profile=analysis_profile,
+            )
+            saved = await _save_analysis_fields_with_retry(
+                analysis_id,
+                {
+                    "frame_motion_scores": motion_scores,
+                    "bio_data": bio_data,
+                    "analysis_profile": analysis_profile,
+                },
+                context=f"save_pre_vision_keyframes:{analysis_id}",
+            )
+            if not saved:
+                return
 
             await _append_analysis_log(
                 analysis_id,
@@ -1732,6 +4890,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     prompt_context=prompt_context,
                     video_temporal=video_temporal_result,
                     resolved_keyframes=resolved_keyframes,
+                    target_lock=target_lock,
                 )
                 vision_structured = dual.path_a
                 vision_path_a = dual.path_a
@@ -1768,6 +4927,11 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     video_temporal=video_temporal_result,
                     resolved_keyframes=resolved_keyframes,
                 )
+                bio_data = sync_key_frames_from_resolved_keyframes(
+                    bio_data,
+                    resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
+                    analysis_profile=analysis_profile,
+                )
                 cross_validation = _attach_auto_eval(
                     cross_validation,
                     bio_data=bio_data,
@@ -1785,18 +4949,21 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 dual_path_meta = cross_validation
                 vision_raw = json.dumps(vision_structured, ensure_ascii=False)
                 timings['vision_s'] = _elapsed_seconds(vision_start)
-                async with AsyncSessionLocal() as session:
-                    analysis = await session.get(Analysis, analysis_id)
-                    if analysis is None:
-                        return
-                    analysis.vision_raw = vision_raw
-                    analysis.vision_structured = vision_structured
-                    analysis.vision_path_a = vision_path_a
-                    analysis.vision_path_b = vision_path_b
-                    analysis.cross_validation = cross_validation
-                    analysis.processing_timings = dict(timings)
-                    analysis.retry_from_stage = 'report'
-                    await session.commit()
+                saved = await _save_analysis_fields_with_retry(
+                    analysis_id,
+                    {
+                        "vision_raw": vision_raw,
+                        "vision_structured": vision_structured,
+                        "vision_path_a": vision_path_a,
+                        "vision_path_b": vision_path_b,
+                        "cross_validation": cross_validation,
+                        "processing_timings": dict(timings),
+                        "retry_from_stage": "report",
+                    },
+                    context=f"save_vision:{analysis_id}",
+                )
+                if not saved:
+                    return
             except Exception as exc:  # noqa: BLE001
                 failure = classify_ai_failure(exc)
                 timings['total_s'] = _elapsed_seconds(total_start)
@@ -1842,6 +5009,34 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 cross_validation = _merge_video_temporal_cross_validation(
                     cross_validation,
                     frame_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
+                )
+                resolved_keyframes = (
+                    motion_scores.get("resolved_keyframes")
+                    if isinstance(motion_scores, dict) and isinstance(motion_scores.get("resolved_keyframes"), dict)
+                    else None
+                )
+                video_temporal_result = (
+                    motion_scores.get("video_temporal")
+                    if isinstance(motion_scores, dict) and isinstance(motion_scores.get("video_temporal"), dict)
+                    else None
+                )
+                analysis_profile, bio_data, profile_evidence = _apply_resolved_video_ai_profile_override_to_bio_data(
+                    action_type=action_type,
+                    action_subtype=action_subtype,
+                    current_profile=analysis_profile,
+                    video_temporal=video_temporal_result,
+                    resolved_keyframes=resolved_keyframes,
+                    bio_data=bio_data,
+                    pose_data=pose_data,
+                    motion_scores=motion_scores if isinstance(motion_scores, dict) else {},
+                    sampling_metadata=sampling_metadata,
+                    profile_evidence=profile_evidence,
+                    target_lock=target_lock,
+                )
+                bio_data = sync_key_frames_from_resolved_keyframes(
+                    bio_data,
+                    resolved_keyframes,
+                    analysis_profile=analysis_profile,
                 )
                 cross_validation = _attach_path_b_report_evidence(cross_validation, vision_path_b)
                 dual_path_meta = cross_validation
@@ -1912,54 +5107,64 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 persist_frames(semantic_artifacts, video_path.parent / "semantic_frames")
 
         try:
-            async with AsyncSessionLocal() as session:
-                analysis = await session.get(Analysis, analysis_id)
-                if analysis is None:
-                    return
+            async def _save_completed_analysis() -> None:
+                saved_skater_id: str | None = None
+                should_update_skill_progress = True
+                async with AsyncSessionLocal() as session:
+                    analysis = await session.get(Analysis, analysis_id)
+                    if analysis is None:
+                        return
 
-                analysis.vision_raw = vision_raw
-                analysis.vision_structured = vision_structured
-                analysis.vision_path_a = vision_path_a
-                analysis.vision_path_b = vision_path_b
-                analysis.cross_validation = cross_validation
-                analysis.report = report
-                analysis.pose_data = pose_data
-                analysis.bio_data = bio_data
-                analysis.frame_motion_scores = motion_scores
-                analysis.processing_timings = dict(timings)
-                analysis.analysis_profile = analysis_profile
-                analysis.pipeline_version = CURRENT_PIPELINE_VERSION
-                analysis.target_lock = target_lock
-                analysis.target_lock_status = str(target_lock.get('status') or 'auto_locked')
-                analysis.action_window_start = sampling_metadata.action_window_start
-                analysis.action_window_end = sampling_metadata.action_window_end
-                analysis.source_fps = sampling_metadata.source_fps
-                analysis.is_slow_motion = sampling_metadata.is_slow_motion
-                analysis.force_score = force_score
-                analysis.status = 'completed'
-                analysis.error_code = None
-                analysis.error_detail = None
-                analysis.error_message = None
-                analysis.retry_from_stage = None
-                await auto_update_skill_progress(analysis_id, session)
-                if analysis.skater_id:
-                    await sync_skater_progress(session, analysis.skater_id)
-                await session.commit()
-                if analysis.skater_id:
+                    should_update_skill_progress = analysis.status != 'completed'
+                    analysis.vision_raw = vision_raw
+                    analysis.vision_structured = vision_structured
+                    analysis.vision_path_a = vision_path_a
+                    analysis.vision_path_b = vision_path_b
+                    analysis.cross_validation = cross_validation
+                    analysis.report = report
+                    analysis.pose_data = pose_data
+                    analysis.bio_data = bio_data
+                    analysis.frame_motion_scores = motion_scores
+                    analysis.processing_timings = dict(timings)
+                    analysis.analysis_profile = analysis_profile
+                    analysis.pipeline_version = CURRENT_PIPELINE_VERSION
+                    analysis.target_lock = target_lock
+                    analysis.target_lock_status = str(target_lock.get('status') or 'auto_locked')
+                    analysis.action_window_start = sampling_metadata.action_window_start
+                    analysis.action_window_end = sampling_metadata.action_window_end
+                    analysis.source_fps = sampling_metadata.source_fps
+                    analysis.is_slow_motion = sampling_metadata.is_slow_motion
+                    analysis.force_score = force_score
+                    analysis.status = 'completed'
+                    analysis.error_code = None
+                    analysis.error_detail = None
+                    analysis.error_message = None
+                    analysis.retry_from_stage = None
+                    if should_update_skill_progress:
+                        await auto_update_skill_progress(analysis_id, session)
+                    if analysis.skater_id:
+                        saved_skater_id = analysis.skater_id
+                        await sync_skater_progress(session, analysis.skater_id)
+                    await session.commit()
+
+                if saved_skater_id:
                     try:
-                        await suggest_memory_updates(analysis_id, analysis.skater_id, session)
+                        async with AsyncSessionLocal() as memory_session:
+                            await suggest_memory_updates(analysis_id, saved_skater_id, memory_session)
                     except Exception:  # noqa: BLE001
                         logger.exception('Analysis %s memory suggestion generation failed', analysis_id)
-                _log_analysis_timings(analysis_id, timings)
-                logger.info('Analysis %s completed', analysis_id)
-                await _append_analysis_log(
-                    analysis_id,
-                    stage='pipeline',
-                    level='info',
-                    message='分析流程已完成。',
-                    elapsed_s=timings['total_s'],
-                    timings=timings,
-                )
+
+            await run_db_write_with_retry(_save_completed_analysis, context=f"save_completed_analysis:{analysis_id}")
+            _log_analysis_timings(analysis_id, timings)
+            logger.info('Analysis %s completed', analysis_id)
+            await _append_analysis_log(
+                analysis_id,
+                stage='pipeline',
+                level='info',
+                message='åˆ†æžæµç¨‹å·²å®Œæˆã€‚',
+                elapsed_s=timings['total_s'],
+                timings=timings,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception('Analysis %s failed while saving report', analysis_id)
             timings['total_s'] = _elapsed_seconds(total_start)
@@ -2007,10 +5212,28 @@ async def _mark_analysis_failed(
     stage: str = "pipeline",
     timings: dict[str, float] | None = None,
 ) -> None:
-    try:
+    async def _write() -> None:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
+                return
+            if code == AnalysisErrorCode.REPORT_SAVE_FAILED and analysis.status == "completed" and isinstance(analysis.report, dict):
+                logs = _normalize_processing_logs(analysis.processing_logs)
+                logs.append(
+                    {
+                        "timestamp": _utc_now_iso(),
+                        "stage": stage,
+                        "level": "warning",
+                        "message": friendly_error_title(code),
+                        "error_code": code.value,
+                        "detail": detail,
+                        "preserved_completed_state": True,
+                    }
+                )
+                analysis.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
+                if timings is not None:
+                    analysis.processing_timings = dict(timings)
+                await session.commit()
                 return
             logs = _normalize_processing_logs(analysis.processing_logs)
             logs.append(
@@ -2031,24 +5254,33 @@ async def _mark_analysis_failed(
             if timings is not None:
                 analysis.processing_timings = dict(timings)
             await session.commit()
+
+    try:
+        await run_db_write_with_retry(_write, context=f"mark_analysis_failed:{analysis_id}:{code.value}")
     except Exception:  # noqa: BLE001
         logger.exception("Analysis %s failed to persist error state", analysis_id)
 
 
 async def _set_analysis_status(analysis_id: str, status_value: str) -> None:
-    try:
+    async def _write() -> None:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
                 return
             analysis.status = status_value
             await session.commit()
+
+    try:
+        await run_db_write_with_retry(_write, context=f"set_analysis_status:{analysis_id}:{status_value}")
     except Exception:  # noqa: BLE001
         logger.exception("Analysis %s failed to persist status %s", analysis_id, status_value)
 
 
 async def _get_default_skater(session: AsyncSession) -> Skater | None:
-    result = await session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc()).limit(1))
+    result = await run_db_read_with_retry(
+        lambda: session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc()).limit(1)),
+        context="get_default_skater",
+    )
     return result.scalar_one_or_none()
 
 
@@ -2065,7 +5297,10 @@ async def _resolve_skater(session: AsyncSession, skater_id: str | None) -> Skate
 async def _get_skater_map(session: AsyncSession, skater_ids: set[str]) -> dict[str, Skater]:
     if not skater_ids:
         return {}
-    result = await session.execute(select(Skater).where(Skater.id.in_(skater_ids)))
+    result = await run_db_read_with_retry(
+        lambda: session.execute(select(Skater).where(Skater.id.in_(skater_ids))),
+        context="get_skater_map",
+    )
     return {skater.id: skater for skater in result.scalars().all()}
 
 
@@ -2410,8 +5645,7 @@ async def _resume_auto_target_lock_if_available(analysis: Analysis, session: Asy
         if isinstance(target_lock, dict):
             analysis.target_lock = target_lock
             analysis.target_lock_status = str(target_lock.get("status") or preview.target_lock_status)
-            await session.commit()
-            await session.refresh(analysis)
+            await _commit_analysis_session(session, context=f"resume_auto_target_lock_preview_refresh:{analysis.id}", refresh=analysis)
         return False
 
     target_lock = build_target_lock_payload(preview)
@@ -2423,8 +5657,7 @@ async def _resume_auto_target_lock_if_available(analysis: Analysis, session: Asy
     analysis.error_code = None
     analysis.error_detail = None
     analysis.error_message = None
-    await session.commit()
-    await session.refresh(analysis)
+    await _commit_analysis_session(session, context=f"resume_auto_target_lock:{analysis.id}", refresh=analysis)
     return True
 
 
@@ -2456,6 +5689,15 @@ def _count_diagnostic_states(diagnostics: Any) -> dict[str, int]:
     return counts
 
 
+def _diagnostic_final_state(diagnostics: Any) -> str | None:
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return None
+    for item in reversed(diagnostics):
+        if isinstance(item, dict):
+            return str(item.get("state") or "unknown")
+    return None
+
+
 def _tracker_debug_summary(target_lock: dict[str, Any], frame_count: int) -> dict[str, Any]:
     flags = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
     diagnostics = target_lock.get("person_tracker_diagnostics") if isinstance(target_lock.get("person_tracker_diagnostics"), list) else []
@@ -2465,8 +5707,15 @@ def _tracker_debug_summary(target_lock: dict[str, Any], frame_count: int) -> dic
         "tracker_type": tracker_type,
         "frame_count": frame_count,
         "diagnostic_frames": len(diagnostics),
-        "tracked": state_counts.get("tracked", 0) + state_counts.get("relocked", 0),
+        "tracked": (
+            state_counts.get("tracked", 0)
+            + state_counts.get("relocked", 0)
+            + state_counts.get("detector_relocked", 0)
+            + state_counts.get("support_anchor_recovered", 0)
+            + state_counts.get("support_anchor_handoff_reused", 0)
+        ),
         "lost_reused": state_counts.get("lost_reused", 0),
+        "support_anchor_handoff_reused": state_counts.get("support_anchor_handoff_reused", 0),
         "relock_pending": state_counts.get("relock_pending", 0),
         "relocked": state_counts.get("relocked", 0),
         "continuity_rejected": state_counts.get("continuity_rejected", 0),
@@ -2522,6 +5771,301 @@ def _pose_debug_summary(pose_data: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _selected_target_bbox(target_lock: dict[str, Any]) -> dict[str, Any] | None:
+    selected_bbox = target_lock.get("selected_bbox")
+    if isinstance(selected_bbox, dict):
+        return selected_bbox
+
+    selected_id = str(target_lock.get("selected_candidate_id") or "").strip()
+    candidates = target_lock.get("candidates") if isinstance(target_lock.get("candidates"), list) else []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if selected_id and str(candidate.get("id") or "").strip() != selected_id:
+            continue
+        bbox = candidate.get("bbox")
+        if isinstance(bbox, dict):
+            return bbox
+    return None
+
+
+def _selected_target_candidate(target_lock: dict[str, Any]) -> dict[str, Any] | None:
+    selected_id = str(target_lock.get("selected_candidate_id") or "").strip()
+    candidates = target_lock.get("candidates") if isinstance(target_lock.get("candidates"), list) else []
+    if selected_id:
+        for candidate in candidates:
+            if isinstance(candidate, dict) and str(candidate.get("id") or "").strip() == selected_id:
+                return candidate
+    return None
+
+
+def _target_support_anchor_bboxes_by_frame(
+    sampled_frames: list[Path],
+    target_lock: dict[str, Any],
+) -> dict[int, dict[str, Any]]:
+    selected = _selected_target_candidate(target_lock)
+    if not isinstance(selected, dict) or not isinstance(selected.get("bbox"), dict):
+        return {}
+    candidates = target_lock.get("candidates") if isinstance(target_lock.get("candidates"), list) else []
+    frame_name_to_index = {frame.name: index for index, frame in enumerate(sampled_frames)}
+    selected_anchor_index = selected.get("anchor_index")
+    try:
+        selected_frame_index = int(selected_anchor_index) if selected_anchor_index is not None else None
+    except (TypeError, ValueError):
+        selected_frame_index = None
+    support_frames = {
+        str(frame)
+        for frame in selected.get("support_anchor_frames", [])
+        if isinstance(frame, str) and frame
+    }
+    by_frame: dict[int, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("bbox"), dict):
+            continue
+        anchor_frame = str(candidate.get("anchor_frame") or "").strip()
+        try:
+            anchor_index = int(candidate.get("anchor_index"))
+        except (TypeError, ValueError):
+            anchor_index = frame_name_to_index.get(anchor_frame, -1)
+        if anchor_frame not in support_frames and anchor_index != selected_frame_index:
+            continue
+        if not candidate_matches_target_anchor(candidate, selected):
+            continue
+        frame_index = frame_name_to_index.get(anchor_frame, anchor_index)
+        if frame_index < 0 or frame_index >= len(sampled_frames):
+            continue
+        existing = by_frame.get(frame_index)
+        if existing is None:
+            by_frame[frame_index] = candidate
+            continue
+        try:
+            existing_confidence = float(existing.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            existing_confidence = 0.0
+        try:
+            candidate_confidence = float(candidate.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            candidate_confidence = 0.0
+        if candidate_confidence > existing_confidence:
+            by_frame[frame_index] = candidate
+    return by_frame
+
+
+def _manual_lock_static_lost_bbox_per_frame(
+    sampled_frames: list[Path],
+    selected_bbox: dict[str, Any],
+    target_lock: dict[str, Any],
+    *,
+    fallback_reason: str,
+) -> list[dict[str, float]]:
+    bbox = {
+        "x": float(selected_bbox.get("x", 0.0) or 0.0),
+        "y": float(selected_bbox.get("y", 0.0) or 0.0),
+        "width": float(selected_bbox.get("width", 0.0) or 0.0),
+        "height": float(selected_bbox.get("height", 0.0) or 0.0),
+    }
+    bbox_per_frame = [dict(bbox) for _ in sampled_frames]
+    diagnostics = [
+        {
+            "frame": frame.name,
+            "frame_index": frame_index,
+            "state": "lost_reused",
+            "bbox": dict(bbox),
+            "tracker_id": None,
+            "lost_frames": frame_index + 1,
+            "rejected_reasons": [
+                "manual_lock_fallback_blocked",
+                fallback_reason,
+            ],
+            "relock_source": "manual_lock",
+        }
+        for frame_index, frame in enumerate(sampled_frames)
+    ]
+    if diagnostics:
+        diagnostics[-1]["sequence_summary"] = {
+            "state_counts": {"lost_reused": len(diagnostics)},
+            "loss_frames": len(diagnostics),
+            "recovered_frames": 0,
+            "tracked_frames": 0,
+            "total_frames": len(diagnostics),
+            "final_state": "lost_reused",
+            "terminal_loss_frames": len(diagnostics),
+            "terminal_loss_graced": False,
+            "final_unrecovered": True,
+            "transient_loss_recovered": False,
+        }
+    _append_target_lock_flags(
+        target_lock,
+        [
+            PERSON_TRACKER_MANUAL_LOCK_FALLBACK_BLOCKED_FLAG,
+            PERSON_TRACKER_TARGET_LOST_FLAG,
+            PERSON_TRACKER_FINAL_UNRECOVERED_FLAG,
+        ],
+    )
+    target_lock["bbox_per_frame"] = bbox_per_frame
+    target_lock["person_tracker_diagnostics"] = diagnostics
+    target_lock["tracker_type"] = "manual_lock_static_lost"
+    return bbox_per_frame
+
+
+def _bbox_metric(bbox: dict[str, Any] | None, field: str) -> float | None:
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        value = float(bbox.get(field))
+    except (TypeError, ValueError):
+        return None
+    return value if value == value else None
+
+
+def _pose_tracked_ratio(pose_data: dict[str, Any] | None) -> float | None:
+    if not isinstance(pose_data, dict):
+        return None
+    diagnostics = pose_data.get("pose_diagnostics")
+    if isinstance(diagnostics, dict):
+        try:
+            total = float(diagnostics.get("total_frames") or 0.0)
+            tracked = float(diagnostics.get("tracked_frames") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return tracked / total if total > 0 else None
+
+    frames = pose_data.get("frames") if isinstance(pose_data.get("frames"), list) else []
+    if not frames:
+        return None
+    tracked = sum(1 for frame in frames if isinstance(frame, dict) and str(frame.get("tracking_state") or "") == "tracked")
+    return tracked / max(len(frames), 1)
+
+
+def _tracker_loss_ratio(target_lock: dict[str, Any]) -> float | None:
+    diagnostics = target_lock.get("person_tracker_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return None
+    state_counts = _count_diagnostic_states(diagnostics)
+    loss_states = {
+        "lost_reused",
+        "relock_rejected",
+        "continuity_rejected",
+        "relock_pending",
+        "full_frame_yolo_relock_pending",
+        "local_zoom_yolo_relock_pending",
+    }
+    loss_frames = sum(count for state, count in state_counts.items() if state in loss_states or state.endswith("_relock_pending"))
+    return loss_frames / max(len(diagnostics), 1)
+
+
+def _tracker_instability_state_counts(target_lock: dict[str, Any]) -> dict[str, int]:
+    diagnostics = target_lock.get("person_tracker_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return {}
+    return _count_diagnostic_states(diagnostics)
+
+
+def _tracker_final_state(target_lock: dict[str, Any]) -> str | None:
+    return _diagnostic_final_state(target_lock.get("person_tracker_diagnostics"))
+
+
+def _target_lock_multiperson_risk_context(target_lock: dict[str, Any]) -> bool:
+    flags = {
+        str(flag)
+        for flag in target_lock.get("quality_flags", [])
+        if str(flag).strip()
+    } if isinstance(target_lock.get("quality_flags"), list) else set()
+    if flags & {
+        "target_lock_zoomed_multiperson_manual_review",
+        "target_lock_zoomed_multiperson_scale_competitor_manual_review",
+    }:
+        return True
+    if any(str(flag).startswith("target_lock_zoomed_multiperson_review_") for flag in flags):
+        return True
+
+    candidates = target_lock.get("candidates") if isinstance(target_lock.get("candidates"), list) else []
+    selected_id = str(target_lock.get("selected_candidate_id") or "")
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if selected_id and str(candidate.get("id") or "") != selected_id:
+            continue
+        try:
+            ambiguous_frames = int(candidate.get("multiperson_ambiguous_frame_count") or 0)
+            competitor_count = int(candidate.get("multiperson_competitor_count") or 0)
+            other_ambiguous = int(candidate.get("multiperson_other_frame_ambiguous_count") or 0)
+        except (TypeError, ValueError):
+            return False
+        if ambiguous_frames >= 3 and competitor_count >= 6:
+            return True
+        if other_ambiguous >= 2 and competitor_count >= 4:
+            return True
+        return False
+    return False
+
+
+def _multiperson_relock_instability_risk_flags(
+    target_lock: dict[str, Any],
+    pose_data: dict[str, Any] | None,
+) -> list[str]:
+    if not _target_lock_multiperson_risk_context(target_lock):
+        return []
+
+    diagnostics = target_lock.get("person_tracker_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return []
+
+    state_counts = _count_diagnostic_states(diagnostics)
+    relock_events = sum(
+        state_counts.get(state, 0)
+        for state in (
+            "relocked",
+            "detector_relocked",
+            "relock_pending",
+            "full_frame_yolo_relock_pending",
+            "local_zoom_yolo_relock_pending",
+        )
+    )
+    rejected_events = state_counts.get("relock_rejected", 0) + state_counts.get("lost_reused", 0)
+    loss_ratio = _tracker_loss_ratio(target_lock)
+    pose_ratio = _pose_tracked_ratio(pose_data)
+    high_loss = loss_ratio is not None and loss_ratio >= 0.25
+    low_pose_tracking = pose_ratio is not None and pose_ratio < 0.70
+    repeated_relock = relock_events >= 3 and (state_counts.get("detector_relocked", 0) + state_counts.get("relocked", 0)) >= 1
+    unstable_rejections = rejected_events >= 2 and relock_events >= 2
+    if (high_loss or low_pose_tracking) and (repeated_relock or unstable_rejections):
+        return [PERSON_TRACKER_MULTIPERSON_RELOCK_INSTABILITY_RISK_FLAG]
+    return []
+
+
+def _tiny_target_pose_tracking_risk_flags(
+    target_lock: dict[str, Any],
+    pose_data: dict[str, Any] | None,
+) -> list[str]:
+    bbox = _selected_target_bbox(target_lock)
+    width = _bbox_metric(bbox, "width")
+    height = _bbox_metric(bbox, "height")
+    if width is None or height is None:
+        return []
+    bbox_area = max(0.0, width) * max(0.0, height)
+    tiny_target = bbox_area <= 0.0035 or height <= 0.10
+    if not tiny_target:
+        return []
+
+    pose_ratio = _pose_tracked_ratio(pose_data)
+    loss_ratio = _tracker_loss_ratio(target_lock)
+    state_counts = _tracker_instability_state_counts(target_lock)
+    confirmed_relocks = int(state_counts.get("relocked", 0) or 0) + int(state_counts.get("detector_relocked", 0) or 0)
+    hard_rejections = int(state_counts.get("relock_rejected", 0) or 0) + int(state_counts.get("continuity_rejected", 0) or 0)
+    terminal_lost = _tracker_final_state(target_lock) in {"lost_reused", "relock_rejected", "continuity_rejected"}
+    tracker_unstable = (
+        confirmed_relocks > 0
+        or hard_rejections > 0
+        or terminal_lost
+    )
+    low_pose_tracking = pose_ratio is not None and pose_ratio < 0.65
+    high_tracker_loss = loss_ratio is not None and loss_ratio >= 0.35
+    if low_pose_tracking or high_tracker_loss or tracker_unstable:
+        return [PERSON_TRACKER_TINY_TARGET_LOW_POSE_TRACKING_RISK_FLAG]
+    return []
+
+
 def _compact_json_detail(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 
@@ -2551,13 +6095,20 @@ def _build_bbox_per_frame(
         anchor_index = int(preview_frame_index) if preview_frame_index is not None else 0
     except (TypeError, ValueError):
         anchor_index = 0
+    manual_lock_mode = bool(target_lock.get("manual_override"))
     _clear_person_tracker_flags(target_lock)
     try:
+        support_anchor_bboxes_by_frame = _target_support_anchor_bboxes_by_frame(sampled_frames, target_lock)
+        if manual_lock_mode and support_anchor_bboxes_by_frame:
+            _append_target_lock_flags(target_lock, [PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG])
+            support_anchor_bboxes_by_frame = {}
         bbox_per_frame, flags, diagnostics = track_person_bbox_detailed(
             sampled_frames,
             selected_bbox,
             initial_frame_index=anchor_index,
             effective_fps=effective_fps,
+            support_anchor_bboxes_by_frame=support_anchor_bboxes_by_frame,
+            manual_lock_mode=manual_lock_mode,
         )
         _append_target_lock_flags(target_lock, flags)
         target_lock["bbox_per_frame"] = bbox_per_frame
@@ -2565,11 +6116,25 @@ def _build_bbox_per_frame(
         target_lock["tracker_type"] = "yolo_bytetrack"
         return bbox_per_frame
     except PersonTrackerUnavailable:
-        logger.info("person tracker unavailable; falling back to CSRT bbox tracker", exc_info=True)
+        logger.info("person tracker unavailable during bbox tracking", exc_info=True)
         _append_target_lock_flags(target_lock, [PERSON_TRACKER_UNAVAILABLE_FLAG])
+        if manual_lock_mode:
+            return _manual_lock_static_lost_bbox_per_frame(
+                sampled_frames,
+                selected_bbox,
+                target_lock,
+                fallback_reason=PERSON_TRACKER_UNAVAILABLE_FLAG,
+            )
     except Exception:  # noqa: BLE001
-        logger.warning("person tracker failed; falling back to CSRT bbox tracker", exc_info=True)
+        logger.warning("person tracker failed during bbox tracking", exc_info=True)
         _append_target_lock_flags(target_lock, [PERSON_TRACKER_FAILED_FLAG])
+        if manual_lock_mode:
+            return _manual_lock_static_lost_bbox_per_frame(
+                sampled_frames,
+                selected_bbox,
+                target_lock,
+                fallback_reason=PERSON_TRACKER_FAILED_FLAG,
+            )
 
     try:
         bbox_per_frame, flags = track_bbox(sampled_frames, selected_bbox, initial_frame_index=anchor_index)
@@ -2655,6 +6220,65 @@ def _can_backfill_artifacts(status_value: str | None) -> bool:
     return status_value in {"completed", "failed"}
 
 
+def _has_complete_saved_analysis_outputs(analysis: Analysis) -> bool:
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+    key_frames = bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {}
+    return (
+        isinstance(analysis.report, dict)
+        and analysis.force_score is not None
+        and isinstance(analysis.vision_structured, dict)
+        and isinstance(analysis.pose_data, dict)
+        and isinstance(analysis.frame_motion_scores, dict)
+        and all(key_frames.get(label) for label in ("T", "A", "L"))
+    )
+
+
+def _bio_key_frames_intentionally_unsynced(bio_data: dict[str, Any] | None) -> bool:
+    if not isinstance(bio_data, dict):
+        return False
+    flags = bio_data.get("quality_flags")
+    if not isinstance(flags, list):
+        return False
+    return any(
+        isinstance(flag, str)
+        and (
+            flag.startswith("bio_key_frames_not_synced_")
+            or flag == "bio_key_frames_not_restored_unreliable_candidates"
+        )
+        for flag in flags
+    )
+
+
+async def _restore_completed_report_save_failure(session: AsyncSession, analysis: Analysis) -> Analysis:
+    if (
+        analysis.status != "failed"
+        or analysis.error_code != AnalysisErrorCode.REPORT_SAVE_FAILED.value
+        or not _has_complete_saved_analysis_outputs(analysis)
+    ):
+        return analysis
+
+    logs = _normalize_processing_logs(analysis.processing_logs)
+    logs.append(
+        {
+            "timestamp": _utc_now_iso(),
+            "stage": "report",
+            "level": "warning",
+            "message": friendly_error_title(AnalysisErrorCode.REPORT_SAVE_FAILED),
+            "error_code": AnalysisErrorCode.REPORT_SAVE_FAILED.value,
+            "detail": "Recovered completed analysis from persisted report outputs after transient save failure.",
+            "restored_completed_state": True,
+        }
+    )
+    analysis.status = "completed"
+    analysis.error_code = None
+    analysis.error_detail = None
+    analysis.error_message = None
+    analysis.retry_from_stage = None
+    analysis.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
+    await _commit_analysis_session(session, context=f"restore_completed_report_save_failure:{analysis.id}", refresh=analysis)
+    return analysis
+
+
 async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Analysis) -> tuple[Analysis, Path]:
     frames_dir = _frames_dir_for_analysis(analysis)
     existing_frame_paths = sorted(frames_dir.glob("frame_*.jpg")) if frames_dir.exists() else []
@@ -2696,8 +6320,7 @@ async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Anal
             analysis.action_window_end = sampling_metadata.action_window_end
             analysis.source_fps = sampling_metadata.source_fps
             analysis.is_slow_motion = sampling_metadata.is_slow_motion
-            await session.commit()
-            await session.refresh(analysis)
+            await _commit_analysis_session(session, context=f"restore_missing_analysis_frames:{analysis.id}", refresh=analysis)
         finally:
             cleanup_processing_dir(analysis.id)
     else:
@@ -2710,6 +6333,7 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
     if not _can_backfill_artifacts(analysis.status):
         return analysis
 
+    analysis = await _restore_completed_report_save_failure(session, analysis)
     analysis, frames_dir = await _restore_missing_analysis_frames(session, analysis)
     if analysis.status != "completed" or not frames_dir.exists():
         return analysis
@@ -2752,7 +6376,11 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
         changed = True
 
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
-    if bio_data is None or not bio_data.get("key_frames"):
+    should_backfill_bio = bio_data is None or (
+        not bio_data.get("key_frames")
+        and not _bio_key_frames_intentionally_unsynced(bio_data)
+    )
+    if should_backfill_bio:
         logger.info("Analysis %s is missing biomechanics data, backfilling from pose payload", analysis.id)
         sampling_metadata = _sampling_metadata_from_saved(
             action_window_start=float(analysis.action_window_start or 0.0),
@@ -2804,8 +6432,7 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             changed = True
 
     if changed:
-        await session.commit()
-        await session.refresh(analysis)
+        await _commit_analysis_session(session, context=f"ensure_phase3_artifacts:{analysis.id}", refresh=analysis)
 
     return analysis
 
@@ -3010,6 +6637,16 @@ def _build_metric_deltas(analysis_a: Analysis, analysis_b: Analysis) -> list[Com
     return [item for item in metric_deltas if item.available]
 
 
+def _deltas_within_threshold(deltas: list[CompareDelta], threshold: float) -> bool:
+    for delta in deltas:
+        if not delta.available or delta.delta is None:
+            continue
+        value = _to_number(delta.delta)
+        if value is not None and abs(value) > threshold:
+            return False
+    return True
+
+
 def _frame_timestamp_map(analysis: Analysis) -> dict[str, float]:
     return build_timestamp_map(analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None)
 
@@ -3033,6 +6670,12 @@ def _legacy_keyframes(analysis: Analysis) -> dict[str, Any]:
     return keyframes if isinstance(keyframes, dict) else {}
 
 
+def _legacy_keyframe_timestamps(analysis: Analysis) -> dict[str, Any]:
+    bio_data = _bio_dict(analysis)
+    timestamps = bio_data.get("key_frame_timestamps")
+    return timestamps if isinstance(timestamps, dict) else {}
+
+
 def _frame_exists_for_analysis(analysis: Analysis, frame_id: str) -> bool:
     frames_dir = _frames_dir_for_analysis(analysis)
     return (frames_dir / f"{frame_id}.jpg").exists()
@@ -3054,15 +6697,22 @@ def _semantic_key_for_record(record: dict[str, Any]) -> str | None:
     if key_moment.startswith("L_"):
         return "L"
     phase_code = str(record.get("phase_code") or "").strip()
+    profile_phase_labels = {
+        "spin_entry": "旋转入",
+        "spin_main": "旋转中",
+        "spin_exit": "旋转出",
+        "spiral_hold": "峰值",
+        "step_sequence": "步法序列",
+    }
+    for code in (phase_code, key_moment):
+        if code in profile_phase_labels:
+            return profile_phase_labels[code]
     if phase_code == "takeoff":
         return "T"
     if phase_code == "air":
         return "A"
     if phase_code == "landing":
         return "L"
-    if phase_code in {"spin_entry", "spin_main", "spin_exit"}:
-        default_label = {"spin_entry": "旋转入", "spin_main": "旋转中", "spin_exit": "旋转出"}[phase_code]
-        return str(record.get("phase_label") or default_label)
     return None
 
 
@@ -3071,6 +6721,16 @@ def _semantic_keyframe_record(analysis: Analysis, key: str) -> dict[str, Any] | 
         if _semantic_key_for_record(record) == key:
             return record
     return None
+
+
+def _semantic_keyframe_record_for_frame(analysis: Analysis, key: str, frame_id: str | None) -> dict[str, Any] | None:
+    if frame_id is None:
+        return None
+    semantic = _semantic_keyframe_record(analysis, key)
+    if semantic is None:
+        return None
+    semantic_frame_id = _normalize_frame_stem(semantic.get("frame_id"))
+    return semantic if semantic_frame_id == frame_id else None
 
 
 def _frame_exists_and_url(analysis: Analysis, frame_id: str) -> tuple[bool, str | None]:
@@ -3085,6 +6745,57 @@ def _frame_exists_and_url(analysis: Analysis, frame_id: str) -> tuple[bool, str 
 
 
 def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
+    candidates = _keyframe_candidate_map(analysis)
+    candidate = candidates.get(key) if isinstance(candidates.get(key), dict) else None
+    legacy = _legacy_keyframes(analysis)
+    legacy_frame_id = _normalize_frame_stem(legacy.get(key))
+    if legacy_frame_id is not None:
+        semantic = _semantic_keyframe_record_for_frame(analysis, key, legacy_frame_id)
+        timestamp = _to_number(_legacy_keyframe_timestamps(analysis).get(key))
+        if timestamp is None and semantic is not None:
+            timestamp = _to_number(semantic.get("timestamp"))
+        if timestamp is None and candidate:
+            timestamp = _to_number(candidate.get("timestamp"))
+        if timestamp is None:
+            timestamp = _frame_timestamp_map(analysis).get(legacy_frame_id)
+        confidence = _to_number(semantic.get("confidence")) if semantic is not None else None
+        if confidence is None and candidate:
+            confidence = _to_number(candidate.get("confidence"))
+        if semantic is not None:
+            raw_flags = semantic.get("quality_flags")
+            quality_flags = [str(value) for value in raw_flags if value] if isinstance(raw_flags, list) else []
+        else:
+            candidate_flags = candidate.get("warnings") if candidate else None
+            quality_flags = [str(value) for value in candidate_flags if value] if isinstance(candidate_flags, list) else []
+        frame_exists, frame_url = _frame_exists_and_url(analysis, legacy_frame_id)
+        return CompareKeyframeSide(
+            frame_id=legacy_frame_id,
+            frame_url=frame_url,
+            timestamp=_round_delta_value(timestamp, 3),
+            confidence=_round_delta_value(confidence, 3),
+            source="bio_key_frames",
+            phase_label=str(semantic.get("phase_label") or "") if semantic is not None else None,
+            selection_reason=(
+                str(semantic.get("selection_reason") or "")
+                if semantic is not None
+                else str(candidate.get("detection_method") or "") if candidate else None
+            ),
+            pre_refine_timestamp=(
+                _round_delta_value(_to_number(semantic.get("pre_refine_timestamp")), 3)
+                if semantic is not None
+                else None
+            ),
+            refinement_method=(str(semantic.get("refinement_method") or "") or None) if semantic is not None else None,
+            refinement_delta_sec=(
+                _round_delta_value(_to_number(semantic.get("refinement_delta_sec")), 3)
+                if semantic is not None
+                else None
+            ),
+            quality_flags=quality_flags,
+            available=frame_exists,
+            missing_reason=None if frame_exists else "keyframe image unavailable",
+        )
+
     semantic = _semantic_keyframe_record(analysis, key)
     if semantic is not None:
         frame_id = _normalize_frame_stem(semantic.get("frame_id"))
@@ -3110,9 +6821,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
                 missing_reason=None if frame_exists else "语义关键帧图片不可用",
             )
 
-    candidates = _keyframe_candidate_map(analysis)
     candidate = candidates.get(key) if isinstance(candidates.get(key), dict) else None
-    legacy = _legacy_keyframes(analysis)
     frame_id = _normalize_frame_stem(candidate.get("frame_id")) if candidate else None
     if frame_id is None:
         frame_id = _normalize_frame_stem(legacy.get(key))
@@ -3140,24 +6849,105 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
 
 
 def _keyframe_labels_for_profile(profile: str | None) -> list[tuple[str, str]]:
-    if profile == "spin":
+    normalized_profile = str(profile or "").strip().lower()
+    if normalized_profile == "spin":
         return [("旋转入", "旋转入"), ("旋转中", "旋转中"), ("旋转出", "旋转出")]
-    if profile == "spiral":
+    if normalized_profile == "spiral":
         return [("峰值", "姿态峰值")]
+    if normalized_profile in {"step", "step_sequence"}:
+        return [("步法序列", "步法序列")]
     return [("T", "起跳"), ("A", "腾空"), ("L", "落冰")]
+
+
+def _keyframe_keys_for_profile(profile: str | None) -> list[str]:
+    return [key for key, _ in _keyframe_labels_for_profile(profile)]
 
 
 def _build_keyframe_compare(analysis_a: Analysis, analysis_b: Analysis) -> list[CompareKeyframePair]:
     profile = analysis_b.analysis_profile or analysis_a.analysis_profile
-    return [
-        CompareKeyframePair(
-            key=key,
-            label=label,
-            before=_build_keyframe_side(analysis_a, key),
-            after=_build_keyframe_side(analysis_b, key),
+    pairs: list[CompareKeyframePair] = []
+    before_anchor: float | None = None
+    after_anchor: float | None = None
+    anchor_key = next(iter(_keyframe_keys_for_profile(profile)), "T")
+    for key, label in _keyframe_labels_for_profile(profile):
+        before = _build_keyframe_side(analysis_a, key)
+        after = _build_keyframe_side(analysis_b, key)
+        if key == anchor_key:
+            before_anchor = before.timestamp
+            after_anchor = after.timestamp
+        delta_seconds = (
+            _round_delta_value(after.timestamp - before.timestamp, 3)
+            if before.timestamp is not None and after.timestamp is not None
+            else None
         )
-        for key, label in _keyframe_labels_for_profile(profile)
-    ]
+        before_offset_seconds = (
+            _round_delta_value(before.timestamp - before_anchor, 3)
+            if before.timestamp is not None and before_anchor is not None
+            else None
+        )
+        after_offset_seconds = (
+            _round_delta_value(after.timestamp - after_anchor, 3)
+            if after.timestamp is not None and after_anchor is not None
+            else None
+        )
+        relative_delta_seconds = (
+            _round_delta_value(after_offset_seconds - before_offset_seconds, 3)
+            if before_offset_seconds is not None and after_offset_seconds is not None
+            else None
+        )
+        pairs.append(
+            CompareKeyframePair(
+                key=key,
+                label=label,
+                before=before,
+                after=after,
+                delta_seconds=delta_seconds,
+                before_offset_seconds=before_offset_seconds,
+                after_offset_seconds=after_offset_seconds,
+                relative_delta_seconds=relative_delta_seconds,
+            )
+        )
+    return pairs
+
+
+def _keyframe_compare_within_threshold(keyframes: list[CompareKeyframePair], threshold: float) -> bool:
+    compared = False
+    for pair in keyframes:
+        before = pair.before.timestamp
+        after = pair.after.timestamp
+        if before is None or after is None:
+            continue
+        compared = True
+        if abs(after - before) > threshold:
+            return False
+    return compared
+
+
+def _same_video_core_compare_stable(
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    *,
+    score_delta: int,
+    subscore_deltas: list[CompareDelta],
+    metric_deltas: list[CompareDelta],
+    keyframe_compare: list[CompareKeyframePair],
+) -> bool:
+    sha_a = _video_sha256_for_analysis(analysis_a)
+    sha_b = _video_sha256_for_analysis(analysis_b)
+    if not sha_a or sha_a != sha_b:
+        return False
+    if abs(score_delta) > COMPARE_SAME_VIDEO_SCORE_STABILITY_DELTA:
+        return False
+    if not _deltas_within_threshold(subscore_deltas, COMPARE_SAME_VIDEO_SUBSCORE_STABILITY_DELTA):
+        return False
+    if not _deltas_within_threshold(metric_deltas, COMPARE_SAME_VIDEO_METRIC_STABILITY_DELTA):
+        return False
+    return _keyframe_compare_within_threshold(keyframe_compare, COMPARE_SAME_VIDEO_KEYFRAME_STABILITY_SECONDS)
+
+
+def _stabilize_same_video_compare_summary(summary: CompareSummary) -> CompareSummary:
+    unchanged = [*summary.unchanged, *summary.improved, *summary.added]
+    return CompareSummary(improved=[], added=[], unchanged=unchanged)
 
 
 def _video_path_if_available(analysis: Analysis) -> Path | None:
@@ -3198,11 +6988,39 @@ def _semantic_timestamp_for_key(analysis: Analysis, key: str) -> float | None:
     return _to_number(record.get("timestamp")) if isinstance(record, dict) else None
 
 
-def _semantic_sync_duration(analysis: Analysis) -> float | None:
-    takeoff = _semantic_timestamp_for_key(analysis, "T")
-    landing = _semantic_timestamp_for_key(analysis, "L")
-    if takeoff is not None and landing is not None and landing > takeoff:
-        return max(landing - takeoff + 0.70, 0.70)
+def _bio_timestamp_for_key(analysis: Analysis, key: str) -> float | None:
+    timestamp = _to_number(_legacy_keyframe_timestamps(analysis).get(key))
+    if timestamp is not None:
+        return timestamp
+    legacy_frame_id = _normalize_frame_stem(_legacy_keyframes(analysis).get(key))
+    if legacy_frame_id is None:
+        return None
+    candidate = _keyframe_candidate_map(analysis).get(key)
+    if isinstance(candidate, dict) and _normalize_frame_stem(candidate.get("frame_id")) == legacy_frame_id:
+        timestamp = _to_number(candidate.get("timestamp"))
+        if timestamp is not None:
+            return timestamp
+    return _frame_timestamp_map(analysis).get(legacy_frame_id)
+
+
+def _keyframe_timestamp_for_key(analysis: Analysis, key: str) -> float | None:
+    timestamp = _bio_timestamp_for_key(analysis, key)
+    if timestamp is not None:
+        return timestamp
+    return _semantic_timestamp_for_key(analysis, key)
+
+
+def _keyframe_sync_duration(analysis: Analysis) -> float | None:
+    timestamps = [
+        timestamp
+        for key in _keyframe_keys_for_profile(analysis.analysis_profile)
+        if (timestamp := _keyframe_timestamp_for_key(analysis, key)) is not None
+    ]
+    if len(timestamps) >= 2:
+        start = min(timestamps)
+        end = max(timestamps)
+        if end > start:
+            return max(end - start + 0.70, 0.70)
     start = _to_number(analysis.action_window_start)
     end = _to_number(analysis.action_window_end)
     if start is not None and end is not None and end > start:
@@ -3213,14 +7031,16 @@ def _semantic_sync_duration(analysis: Analysis) -> float | None:
 def _build_video_compare(analysis_a: Analysis, analysis_b: Analysis) -> CompareVideoPayload:
     before = _build_video_side(analysis_a)
     after = _build_video_side(analysis_b)
-    before_t = _semantic_timestamp_for_key(analysis_a, "T")
-    after_t = _semantic_timestamp_for_key(analysis_b, "T")
-    if before_t is not None and after_t is not None:
-        before.sync_start = _round_delta_value(max(0.0, before_t - 0.35), 3)
-        after.sync_start = _round_delta_value(max(0.0, after_t - 0.35), 3)
-        before.sync_duration = _round_delta_value(_semantic_sync_duration(analysis_a), 3)
-        after.sync_duration = _round_delta_value(_semantic_sync_duration(analysis_b), 3)
-        return CompareVideoPayload(before=before, after=after, sync_mode="semantic_keyframe", sync_anchor_key="T")
+    profile = analysis_b.analysis_profile or analysis_a.analysis_profile
+    anchor_key = next(iter(_keyframe_keys_for_profile(profile)), "T")
+    before_anchor = _keyframe_timestamp_for_key(analysis_a, anchor_key)
+    after_anchor = _keyframe_timestamp_for_key(analysis_b, anchor_key)
+    if before_anchor is not None and after_anchor is not None:
+        before.sync_start = _round_delta_value(max(0.0, before_anchor - 0.35), 3)
+        after.sync_start = _round_delta_value(max(0.0, after_anchor - 0.35), 3)
+        before.sync_duration = _round_delta_value(_keyframe_sync_duration(analysis_a), 3)
+        after.sync_duration = _round_delta_value(_keyframe_sync_duration(analysis_b), 3)
+        return CompareVideoPayload(before=before, after=after, sync_mode="bio_keyframe", sync_anchor_key=anchor_key)
     return CompareVideoPayload(before=before, after=after, sync_mode="action_window_start")
 
 
@@ -3306,6 +7126,7 @@ async def _build_ai_compare_narrative(
     metric_deltas: list[CompareDelta],
     summary: CompareSummary,
     quality: CompareQualityPayload,
+    local_only: bool = False,
 ) -> str:
     fallback = _fallback_compare_narrative(
         analysis_a=analysis_a,
@@ -3315,6 +7136,8 @@ async def _build_ai_compare_narrative(
         metric_deltas=metric_deltas,
         summary=summary,
     )
+    if local_only:
+        return fallback
     try:
         provider = await get_active_provider("report")
         payload = {
@@ -3446,6 +7269,7 @@ async def upload_analysis(
     try:
         await save_upload_file(file, video_path)
         await precheck_video(video_path)
+        video_identity = _video_identity_payload(video_path, await asyncio.to_thread(compute_video_sha256, video_path))
         manual_window = build_video_input_window(
             video_path,
             manual_start_sec=manual_action_window_start_sec,
@@ -3458,7 +7282,7 @@ async def upload_analysis(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     normalized_action_subtype = normalize_action_subtype(action_type, action_subtype)
-    inferred_input_profile = infer_profile_from_input(action_type, action_subtype)
+    inferred_input_profile = _initial_analysis_profile(action_type, normalized_action_subtype)
 
     analysis = Analysis(
         id=analysis_id,
@@ -3471,6 +7295,7 @@ async def upload_analysis(
         analysis_profile=inferred_input_profile,
         pipeline_version=CURRENT_PIPELINE_VERSION,
         video_path=str(video_path),
+        frame_motion_scores={"video_identity": video_identity},
         manual_action_window_start=manual_window.input_window_start_sec if manual_window.input_window_mode == "manual_window" else None,
         manual_action_window_end=manual_window.input_window_end_sec if manual_window.input_window_mode == "manual_window" else None,
         note=_normalize_optional_text(note),
@@ -3521,6 +7346,8 @@ async def update_analysis_session(
 async def list_analyses(
     action_type: str | None = Query(default=None),
     skater_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnalysisListItem]:
     query = (
@@ -3545,13 +7372,18 @@ async def list_analyses(
             )
         )
         .order_by(Analysis.created_at.desc())
+        .offset(offset)
+        .limit(limit)
     )
     if action_type:
         query = query.where(Analysis.action_type == action_type)
     if skater_id:
         query = query.where(Analysis.skater_id == skater_id)
 
-    result = await session.execute(query)
+    result = await run_db_read_with_retry(
+        lambda: session.execute(query),
+        context="list_analyses",
+    )
     analyses = await _recover_stale_analyses(session, list(result.scalars().all()))
     skater_map = await _get_skater_map(session, {analysis.skater_id for analysis in analyses if analysis.skater_id})
     return [
@@ -3589,16 +7421,27 @@ async def compare_analyses(
         session,
         {analysis.skater_id for analysis in (analysis_a, analysis_b) if analysis.skater_id},
     )
-    summary = _compare_reports(
-        analysis_a.report if isinstance(analysis_a.report, dict) else None,
-        analysis_b.report if isinstance(analysis_b.report, dict) else None,
-    )
     score_delta = (analysis_b.force_score or 0) - (analysis_a.force_score or 0)
     subscore_deltas = _build_subscore_deltas(analysis_a, analysis_b)
     metric_deltas = _build_metric_deltas(analysis_a, analysis_b)
     keyframe_compare = _build_keyframe_compare(analysis_a, analysis_b)
     video_compare = _build_video_compare(analysis_a, analysis_b)
     quality = _build_compare_quality(analysis_a, analysis_b)
+    summary = _compare_reports(
+        analysis_a.report if isinstance(analysis_a.report, dict) else None,
+        analysis_b.report if isinstance(analysis_b.report, dict) else None,
+    )
+    same_video_core_stable = _same_video_core_compare_stable(
+        analysis_a,
+        analysis_b,
+        score_delta=score_delta,
+        subscore_deltas=subscore_deltas,
+        metric_deltas=metric_deltas,
+        keyframe_compare=keyframe_compare,
+    )
+    if same_video_core_stable:
+        summary = _stabilize_same_video_compare_summary(summary)
+        quality.warnings.append("同一原视频重复分析的关键帧和评分稳定；报告问题分类差异已按重复分析噪声处理。")
     ai_narrative = await _build_ai_compare_narrative(
         analysis_a=analysis_a,
         analysis_b=analysis_b,
@@ -3607,6 +7450,7 @@ async def compare_analyses(
         metric_deltas=metric_deltas,
         summary=summary,
         quality=quality,
+        local_only=same_video_core_stable,
     )
 
     return AnalysisCompareResponse(

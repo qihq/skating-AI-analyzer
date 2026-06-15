@@ -261,7 +261,7 @@ export default function ReviewPage() {
           if (draftSkillId) {
             return draftSkillId;
           }
-          return filtered[0]?.id ?? "";
+          return "";
         });
       } catch {
         if (!cancelled) {
@@ -347,15 +347,15 @@ export default function ReviewPage() {
   );
   const groupedSkills = useMemo(() => groupSkills(filteredSkills), [filteredSkills]);
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
-  const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0];
+  const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? null;
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const processingStage = getAnalysisProcessingStage(processingStatus);
   const previewItems = useMemo(
     () => [
       { label: "练习档案", value: selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..." },
       { label: "动作大类", value: selectedActionType },
-      { label: "动作子类", value: selectedActionSubtype },
-      { label: "技能分类", value: selectedSkill?.name ?? "尚未选择" },
+      { label: "动作细项", value: selectedActionSubtype === "未指定" ? "不确定" : selectedActionSubtype },
+      { label: "技能分类", value: selectedSkill?.name ?? "不确定，交给 AI 判断" },
       { label: "关联课次", value: selectedSession ? sessionLabel(selectedSession) : "不关联" },
       { label: "视频文件", value: selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传" },
     ],
@@ -386,7 +386,7 @@ export default function ReviewPage() {
       if (current && filteredSkills.some((skill) => skill.id === current)) {
         return current;
       }
-      return filteredSkills[0]?.id ?? "";
+      return "";
     });
   }, [filteredSkills, selectedActionType]);
 
@@ -491,11 +491,6 @@ export default function ReviewPage() {
       setError("请先选择训练视频。");
       return;
     }
-    if (!selectedSkill) {
-      setError("请先选择技能分类。");
-      return;
-    }
-
     const windowError = validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec);
     if (windowError) {
       setError(windowError);
@@ -505,9 +500,13 @@ export default function ReviewPage() {
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("action_type", selectedActionType);
-    formData.append("action_subtype", selectedActionSubtype);
-    formData.append("skill_node_id", selectedSkill.id);
-    formData.append("skill_category", selectedSkill.name);
+    if (selectedActionSubtype !== "未指定") {
+      formData.append("action_subtype", selectedActionSubtype);
+    }
+    if (selectedSkill) {
+      formData.append("skill_node_id", selectedSkill.id);
+      formData.append("skill_category", selectedSkill.name);
+    }
     if (selectedSkaterId) {
       formData.append("skater_id", selectedSkaterId);
     }
@@ -816,7 +815,7 @@ export default function ReviewPage() {
                 </label>
 
                 <label className="space-y-2">
-                  <span className="text-sm font-medium text-slate-700">动作子类</span>
+                  <span className="text-sm font-medium text-slate-700">动作细项（可不确定）</span>
                   <select
                     value={selectedActionSubtype}
                     onChange={(event) => setSelectedActionSubtype(event.target.value)}
@@ -824,7 +823,7 @@ export default function ReviewPage() {
                   >
                     {ACTION_SUBTYPE_OPTIONS[selectedActionType].map((option) => (
                       <option key={option} value={option}>
-                        {option}
+                        {option === "未指定" ? "不确定 / 只知道大类" : option}
                       </option>
                     ))}
                   </select>
@@ -832,8 +831,9 @@ export default function ReviewPage() {
               </div>
 
               <label className="space-y-2">
-                <span className="text-sm font-medium text-slate-700">技能分类</span>
+                <span className="text-sm font-medium text-slate-700">技能分类（可选）</span>
                 <select value={selectedSkill?.id ?? ""} onChange={(event) => setSelectedSkillId(event.target.value)} className="app-select">
+                  <option value="">不确定，交给 AI 判断</option>
                   {groupedSkills.length ? (
                     groupedSkills.map(([groupLabel, items]) => (
                       <optgroup key={groupLabel} label={groupLabel}>
