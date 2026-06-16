@@ -2,7 +2,7 @@ import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
-import { extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSession } from "../api/client";
+import { createPlan, extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSession } from "../api/client";
 
 const LOCATION_MODE_STORAGE_KEY = "plan_location_mode";
 
@@ -32,6 +32,7 @@ export default function PlanPage() {
   });
   const [notice, setNotice] = useState<string | null>(null);
   const [isExtending, setIsExtending] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
   const [hasAppliedFocusTarget, setHasAppliedFocusTarget] = useState(false);
@@ -137,6 +138,7 @@ export default function PlanPage() {
   }, [plan]);
 
   const canExtendPlan = completedDays.length >= 3;
+  const isFallbackPlan = plan?.plan_json.generation_source === "fallback";
 
   const toggleDay = (day: number) => {
     setExpandedDays((current) => (current.includes(day) ? current.filter((item) => item !== day) : [...current, day]));
@@ -216,6 +218,34 @@ export default function PlanPage() {
     }
   };
 
+  const handleRegeneratePlan = async () => {
+    if (!plan) {
+      return;
+    }
+
+    const shouldRegenerate = window.confirm("重新生成会覆盖当前训练内容和已勾选进度，确定继续吗？");
+    if (!shouldRegenerate) {
+      return;
+    }
+
+    setIsRegenerating(true);
+    setError(null);
+    try {
+      const updated = await createPlan(plan.analysis_id, { force: true });
+      setPlan(updated);
+      setExpandedDays([1]);
+      showNotice("已根据这次诊断重新生成训练计划。");
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "训练计划重新生成失败，请稍后重试。"));
+      } else {
+        setError("训练计划重新生成失败，请稍后重试。");
+      }
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
   return (
     <main className="app-shell page-scroll-container page-content min-h-screen">
       <section className="page-content safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
@@ -224,8 +254,20 @@ export default function PlanPage() {
             <Link to={plan ? `/report/${plan.analysis_id}` : "/review"} className="app-pill">
               ← 返回诊断详情
             </Link>
-            <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm">
-              整体进度 {progress.completed}/{progress.total}
+            <div className="flex flex-wrap items-center gap-3">
+              {plan ? (
+                <button
+                  type="button"
+                  onClick={handleRegeneratePlan}
+                  disabled={isRegenerating || isExtending}
+                  className="min-h-[44px] rounded-full border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-600 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isRegenerating ? "重新生成中..." : "重新生成"}
+                </button>
+              ) : null}
+              <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm">
+                整体进度 {progress.completed}/{progress.total}
+              </div>
             </div>
           </div>
 
@@ -234,10 +276,26 @@ export default function PlanPage() {
 
           {plan ? (
             <>
+              {isFallbackPlan ? (
+                <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-800">
+                  <p className="font-semibold text-amber-900">当前显示的是安全兜底训练计划</p>
+                  <p className="mt-1">{plan.plan_json.generation_note ?? "AI 训练计划暂不可用，系统已按本次报告问题生成低冲击、安全优先的临时安排。"}</p>
+                </div>
+              ) : null}
+
               <header className="app-card overflow-hidden p-6 tablet:p-8">
                 <div className="grid gap-6 web:grid-cols-[1.1fr_0.9fr] web:items-end">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">7-Day Plan</p>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">7-Day Plan</p>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          isFallbackPlan ? "bg-amber-100 text-amber-700" : "bg-emerald-50 text-emerald-600"
+                        }`}
+                      >
+                        {isFallbackPlan ? "兜底计划" : "AI 生成"}
+                      </span>
+                    </div>
                     <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">{plan.plan_json.title}</h1>
                     <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">训练聚焦：{plan.plan_json.focus_skill}</p>
                   </div>
@@ -362,6 +420,12 @@ export default function PlanPage() {
                                     </div>
 
                                     <p className="mt-3 leading-7 text-slate-600">{session.description}</p>
+                                    {session.related_issue || session.parent_tip ? (
+                                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                                        {session.related_issue ? <span className="rounded-full bg-white px-3 py-1">对应：{session.related_issue}</span> : null}
+                                        {session.parent_tip ? <span className="rounded-full bg-white px-3 py-1">观察：{session.parent_tip}</span> : null}
+                                      </div>
+                                    ) : null}
                                   </div>
                                 </label>
                               );

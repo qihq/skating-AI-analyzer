@@ -1490,6 +1490,13 @@ def build_video_temporal_prompts(
     action_subtype_text = _string(action_subtype, "unknown")
     user_note_text = _string(user_note)
     user_note_section = f"- 上传备注/额外 comments: {user_note_text}\n" if user_note_text else ""
+    uncertainty_section = (
+        "\n动作不确定性规则：\n"
+        "- action_type_hint/action_subtype_hint 是用户输入的线索，不是最终标签；用户可能只知道动作大类。\n"
+        "- action_subtype_hint=unknown/未指定 时，只能在画面证据清楚时输出 confirmed_action 或 jump_type 的具体名称。\n"
+        "- 如果只能确认大类，请保留 confirmed_action 为通用名称或“不可分析”，jump_type 留空，并降低 action_confirmation.confidence。\n"
+        "- 上传备注/comments 只能作为观察线索，不能替代可见视频证据。\n"
+    )
     mixed_action_mode = action_type_text == "自由滑" and action_subtype_text in {"unknown", "节目片段"}
     mixed_action_section = (
         "\n混合动作自动识别要求：\n"
@@ -1513,7 +1520,8 @@ def build_video_temporal_prompts(
         "6. 对高速跳跃动作，给出阶段区间，不要假装能锁定单个绝对精确帧。\n"
         "7. 时间保留两位小数，尽量精确到 0.1 秒以内；T/A/L 关键时刻误差应尽量控制在 0.2 秒以内。\n"
         "8. T = 最后一只脚离冰的瞬间，A = 身体重心达到最高点的瞬间，L = 冰刀首次接触冰面的瞬间。\n"
-        "9. 始终跟踪主滑行者；忽略旁人、前景遮挡、镜头前经过的人和背景滑行者。遮挡后主滑行者重新可见时，不要把重新可见、滑出或后续摆臂误判为 T/A/L。"
+        "9. 始终跟踪主滑行者；忽略旁人、前景遮挡、镜头前经过的人和背景滑行者。遮挡后主滑行者重新可见时，不要把重新可见、滑出或后续摆臂误判为 T/A/L。\n"
+        "10. 动作细项不确定时要保持不确定，不要为了输出完整字段而编造具体跳种、刃型或周数。"
     )
 
     schema_hint = {
@@ -1595,6 +1603,7 @@ def build_video_temporal_prompts(
         "需要覆盖的动作类型：\n"
         "- 跳跃：Lutz, Flip, Loop, Salchow, Toe Loop, Axel\n"
         "- 非跳跃：旋转、步法、螺旋线\n\n"
+        f"{uncertainty_section}\n"
         "请完成：\n"
         "1. 确认实际动作类型和子类型。\n"
         "2. 输出每个动作阶段的 time_start/time_end。\n"

@@ -19,6 +19,7 @@ const RANGE_OPTIONS = [
   { value: "all", label: "全部", days: null },
 ] as const;
 const ALL_SKATERS_VIEW = "__all__";
+const ARCHIVE_PAGE_SIZE = 80;
 
 type ParentRange = (typeof RANGE_OPTIONS)[number]["value"];
 type ArchiveStats = ArchiveResponse["stats"];
@@ -220,6 +221,7 @@ export default function ArchivePage() {
   const [confirmRetryAnalysisId, setConfirmRetryAnalysisId] = useState<string | null>(null);
   const [pinRetryAnalysisId, setPinRetryAnalysisId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadingMoreSkaterIds, setLoadingMoreSkaterIds] = useState<string[]>([]);
 
   useEffect(() => {
     const message = (location.state as { notice?: string } | null)?.notice;
@@ -292,7 +294,9 @@ export default function ArchivePage() {
 
     const loadArchives = async () => {
       setIsLoading(true);
-      const results = await Promise.allSettled(targetSkaterIds.map(async (skaterId) => [skaterId, await fetchArchive(skaterId)] as const));
+      const results = await Promise.allSettled(
+        targetSkaterIds.map(async (skaterId) => [skaterId, await fetchArchive(skaterId, { limit: ARCHIVE_PAGE_SIZE, offset: 0 })] as const),
+      );
 
       if (cancelled) {
         return;
@@ -375,13 +379,95 @@ export default function ArchivePage() {
 
   const activeStats = useMemo<ArchiveStats>(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
-      return computeAggregateStats(allTimelineEntries);
+      return skaters.reduce<ArchiveStats>(
+        (stats, skater) => {
+          const archive = archiveBySkaterId[skater.id];
+          if (!archive) {
+            return stats;
+          }
+          return {
+            total_records: stats.total_records + archive.stats.total_records,
+            recent_7days: stats.recent_7days + archive.stats.recent_7days,
+            current_streak: Math.max(stats.current_streak, archive.stats.current_streak),
+            monthly_sessions: stats.monthly_sessions + archive.stats.monthly_sessions,
+          };
+        },
+        { total_records: 0, recent_7days: 0, current_streak: 0, monthly_sessions: 0 },
+      );
     }
     if (selectedSkater) {
       return archiveBySkaterId[selectedSkater.id]?.stats ?? computeAggregateStats(activeTimeline);
     }
     return computeAggregateStats(activeTimeline);
-  }, [activeScope, activeTimeline, allTimelineEntries, archiveBySkaterId, isParentMode, selectedSkater]);
+  }, [activeScope, activeTimeline, archiveBySkaterId, isParentMode, selectedSkater, skaters]);
+
+  const skaterIdsNeedingMore = useMemo(() => {
+    if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
+      return skaters
+        .map((skater) => skater.id)
+        .filter((skaterId) => Boolean(archiveBySkaterId[skaterId]?.has_more));
+    }
+    if (selectedSkater && archiveBySkaterId[selectedSkater.id]?.has_more) {
+      return [selectedSkater.id];
+    }
+    return [];
+  }, [activeScope, archiveBySkaterId, isParentMode, selectedSkater, skaters]);
+
+  const isLoadingMore = skaterIdsNeedingMore.some((skaterId) => loadingMoreSkaterIds.includes(skaterId));
+
+  const mergeArchivePage = (currentArchive: ArchiveResponse | undefined, nextArchive: ArchiveResponse): ArchiveResponse => {
+    if (!currentArchive || (nextArchive.offset ?? 0) === 0) {
+      return nextArchive;
+    }
+
+    const existingIds = new Set(currentArchive.timeline.map((entry) => entry.id));
+    const appended = nextArchive.timeline.filter((entry) => !existingIds.has(entry.id));
+    return {
+      ...nextArchive,
+      timeline: [...currentArchive.timeline, ...appended],
+    };
+  };
+
+  const handleLoadMore = async () => {
+    if (!skaterIdsNeedingMore.length || isLoadingMore) {
+      return;
+    }
+
+    const requestedSkaterIds = [...skaterIdsNeedingMore];
+    setLoadingMoreSkaterIds((current) => [...new Set([...current, ...requestedSkaterIds])]);
+    setError(null);
+
+    const results = await Promise.allSettled(
+      requestedSkaterIds.map(async (skaterId) => {
+        const currentArchive = archiveBySkaterId[skaterId];
+        const offset = currentArchive?.timeline.length ?? 0;
+        return [skaterId, await fetchArchive(skaterId, { limit: ARCHIVE_PAGE_SIZE, offset })] as const;
+      }),
+    );
+
+    const nextArchives: Record<string, ArchiveResponse> = {};
+    let failedCount = 0;
+    results.forEach((result) => {
+      if (result.status === "fulfilled") {
+        const [skaterId, archive] = result.value;
+        nextArchives[skaterId] = archive;
+      } else {
+        failedCount += 1;
+      }
+    });
+
+    setArchiveBySkaterId((current) => {
+      const merged = { ...current };
+      Object.entries(nextArchives).forEach(([skaterId, archive]) => {
+        merged[skaterId] = mergeArchivePage(current[skaterId], archive);
+      });
+      return merged;
+    });
+    setLoadingMoreSkaterIds((current) => current.filter((skaterId) => !requestedSkaterIds.includes(skaterId)));
+    if (failedCount) {
+      setError("æ›´å¤šç»ƒä¹ æ¡£æ¡ˆåŠ è½½å¤±è´¥ï¼Œè¯·ç¨åŽé‡è¯•ã€‚");
+    }
+  };
 
   const markAnalysisAsProcessing = (analysisId: string, skaterId: string) => {
     setArchiveBySkaterId((current) => {
@@ -676,7 +762,9 @@ export default function ArchivePage() {
                 </p>
               ) : null}
             </div>
-            <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">{filteredTimeline.length} 条</span>
+            <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
+              {filteredTimeline.length}/{activeStats.total_records} 条
+            </span>
           </div>
 
           {isLoading ? (
@@ -803,6 +891,17 @@ export default function ArchivePage() {
                   </div>
                 </section>
               ))}
+
+              {skaterIdsNeedingMore.length ? (
+                <button
+                  type="button"
+                  onClick={() => void handleLoadMore()}
+                  disabled={isLoadingMore}
+                  className="min-h-[44px] w-full rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isLoadingMore ? "正在加载更多..." : `加载更多（已显示 ${filteredTimeline.length}/${activeStats.total_records} 条）`}
+                </button>
+              ) : null}
             </div>
           ) : (
             <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">当前筛选下还没有复盘记录，先去上传一段训练视频吧。</div>

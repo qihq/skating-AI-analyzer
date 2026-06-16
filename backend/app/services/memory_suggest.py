@@ -15,6 +15,9 @@ from app.services.snowball import is_memory_expired, utcnow
 
 MEMORY_SUGGEST_SYSTEM_PROMPT = (
     "你是冰宝（IceBuddy），请分析训练报告并与现有长期记忆对比，提出记忆更新建议。"
+    "长期记忆只保存稳定偏好、长期目标、反复出现的卡点、重要安全注意事项或已明确完成的目标。"
+    "不要因为单次表现波动、一次性失败、画质问题或模型不确定结论就新增长期记忆。"
+    "用户备注可以作为线索，但不能单独作为事实写入记忆。"
     "只输出 JSON 数组，不含任何 markdown 包裹。"
 )
 
@@ -130,7 +133,8 @@ async def suggest_memory_updates(
                     '  {"action": "expire", "memory_id": "uuid", "reason": "目标似乎已完成，建议设为过期"}\n'
                     "]\n"
                     "若无建议则返回空数组 []。\n"
-                    "最多输出 3 条建议，避免过度打扰。"
+                    "最多输出 3 条建议，避免过度打扰。\n"
+                    "如果本次报告只是普通一次复盘、没有稳定偏好/长期目标/反复卡点，请返回 []。"
                 ),
             },
         ],

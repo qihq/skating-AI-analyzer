@@ -13,6 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_normalize_processing_logs_repairs_known_mojibake(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        logs = analysis_router._normalize_processing_logs(
+            [
+                {
+                    "timestamp": "2026-06-15T12:44:23+00:00",
+                    "stage": "pipeline",
+                    "level": "info",
+                    "message": "åˆ†æžæµç¨‹å·²å®Œæˆã€‚",
+                }
+            ]
+        )
+
+        self.assertEqual(logs[0]["message"], "分析流程已完成。")
+
     async def test_report_save_failed_does_not_downgrade_completed_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir

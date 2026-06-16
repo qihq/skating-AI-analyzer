@@ -26,6 +26,8 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("只输出一个合法 JSON 对象", combined)
         self.assertIn("只输出 JSON", combined)
         self.assertIn("所有时间戳单位为秒", combined)
+        self.assertIn("动作细项不确定时要保持不确定", combined)
+        self.assertIn("不要为了输出完整字段而编造具体跳种", combined)
         self.assertIn("5-8 岁儿童", combined)
         self.assertIn("儿童训练标准", combined)
         self.assertIn("Lutz, Flip, Loop, Salchow, Toe Loop, Axel", combined)
@@ -80,6 +82,8 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("上传备注/额外 comments", user_prompt)
         self.assertIn("我不确定具体动作名", user_prompt)
         self.assertIn("重点看落冰为什么飘", user_prompt)
+        self.assertIn("用户输入的线索，不是最终标签", user_prompt)
+        self.assertIn("不能替代可见视频证据", user_prompt)
 
     def test_retry_context_is_included_when_quality_gate_retries(self) -> None:
         _, user_prompt = build_video_temporal_prompts(

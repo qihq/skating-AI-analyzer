@@ -202,9 +202,10 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
+        completion_mock = AsyncMock(return_value="孩子这次动作更稳定。")
         with (
             patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=object())),
-            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="孩子这次动作更稳定。")),
+            patch("app.routers.analysis.request_text_completion", completion_mock),
         ):
             async with self.database.AsyncSessionLocal() as session:
                 result = await self.analysis_router.compare_analyses(newer_id, older_id, session=session)
@@ -228,6 +229,10 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         assert result.video_compare is not None
         self.assertTrue(result.video_compare.before.available)
         self.assertEqual(result.video_compare.sync_mode, "bio_keyframe")
+        messages = completion_mock.await_args.kwargs["messages"]
+        self.assertIn("不要夸大进步", messages[0]["content"])
+        self.assertIn("动作子类型未知", messages[0]["content"])
+        self.assertIn("谨慎观察", messages[1]["content"])
         self.assertEqual(result.video_compare.sync_anchor_key, "T")
         self.assertEqual(result.video_compare.before.sync_start, 0.0)
         self.assertEqual(result.video_compare.before.sync_duration, 0.9)

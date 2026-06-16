@@ -18,6 +18,8 @@ SPECIALIZED_VISION_SYSTEM_PROMPT = (
     "- 视频可能是侧面、斜角、远距离或低清晰度。\n"
     "- 如果脚踝、冰刀或入跳弧线不可见，不要强行判断刃型。\n"
     "- 如果证据不足，请输出'不可判断'并降低 confidence。\n"
+    "- 用户可能只知道动作大类，不知道具体动作名；如果 action_subtype 未指定或证据不足，不要强行猜成 Axel/Lutz/Flip 等细项。\n"
+    "- 后端候选关键帧、动作 profile 和规则证据都是辅助线索，不是最终结论；与画面冲突时以可见证据为准并降低置信度。\n"
     "- 必须只输出 JSON。"
 )
 
@@ -101,10 +103,15 @@ def build_specialized_vision_prompt(
         "【分析步骤】\n"
         "1. 判断画面质量：good / partial / poor。\n"
         "2. 判断拍摄角度：front / side / diagonal_front / diagonal_back / unknown。\n"
-        "3. 对每帧判断阶段。\n"
-        "4. 对 T/A/L 候选帧给出 agree / shifted / disagree / unavailable。\n"
-        "5. 对儿童训练水平做保守判断，不使用成人竞技标准。\n"
-        "6. 输出低置信度原因，不要编造不可见细节。\n\n"
+        "3. 先确认实际动作大类；若只看到自由滑、滑行、步法或螺旋线，不要为了满足跳跃 schema 编造起跳/腾空/落冰。\n"
+        "4. 对每帧判断阶段。\n"
+        "5. 对 T/A/L 候选帧给出 agree / shifted / disagree / unavailable；非跳跃动作必须使用 unavailable 或 none。\n"
+        "6. 对儿童训练水平做保守判断，不使用成人竞技标准。\n"
+        "7. 输出低置信度原因，不要编造不可见细节。\n\n"
+        "【不确定性规则】\n"
+        "- action_subtype=未指定 表示用户不知道细项；仅在画面证据清楚时才给具体子类型。\n"
+        "- 如果画面只支持动作大类，请把具体刃型、周数或跳跃细项写为不可判断，并把 confidence 降低。\n"
+        "- issues 和 positives 必须来自可见画面、候选帧或骨架数据，不要把用户备注当作事实。\n\n"
         "【jump profile 补充规则】\n"
         "- 当 analysis_profile=jump 时，T/A/L 候选帧是后端自动证据，不是最终结论；请结合画面保守确认。\n"
         '- 如果脚踝、冰刀或入跳弧线不可见，必须令 observations.blade_edge="不可判断"。\n'

@@ -596,6 +596,8 @@ export interface TrainingPlanSession {
   description: string;
   is_office_trainable: boolean;
   completed: boolean;
+  related_issue?: string | null;
+  parent_tip?: string | null;
 }
 
 export interface TrainingDay {
@@ -608,6 +610,8 @@ export interface TrainingPlanPayload {
   title: string;
   focus_skill: string;
   days: TrainingDay[];
+  generation_source?: "ai" | "fallback" | string | null;
+  generation_note?: string | null;
 }
 
 export interface TrainingPlanDetail {
@@ -641,6 +645,9 @@ export interface ArchiveResponse {
     session_type: string | null;
     session_duration_minutes: number | null;
   }>;
+  limit?: number | null;
+  offset?: number;
+  has_more?: boolean;
 }
 
 export interface SessionPayload {
@@ -903,8 +910,10 @@ export async function fetchProgress(params?: { action_type?: string; skater_id?:
   return response.data;
 }
 
-export async function createPlan(analysisId: string) {
-  const response = await apiClient.post<TrainingPlanDetail>(`/analysis/${analysisId}/plan`);
+export async function createPlan(analysisId: string, options?: { force?: boolean }) {
+  const response = await apiClient.post<TrainingPlanDetail>(`/analysis/${analysisId}/plan`, null, {
+    params: options?.force ? { force: true } : undefined,
+  });
   return response.data;
 }
 
@@ -942,8 +951,8 @@ export async function fetchSkaters() {
   return response.data;
 }
 
-export async function fetchArchive(skaterId: string) {
-  const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`);
+export async function fetchArchive(skaterId: string, params?: { limit?: number; offset?: number }) {
+  const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`, { params });
   return response.data;
 }
 

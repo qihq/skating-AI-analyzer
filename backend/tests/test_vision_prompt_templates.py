@@ -28,9 +28,11 @@ class VisionPromptTemplateTests(unittest.TestCase):
 
         self.assertIn("专业花样滑冰技术分析师", system_prompt)
         self.assertIn("必须只输出 JSON", system_prompt)
+        self.assertIn("不要强行猜成 Axel/Lutz/Flip", system_prompt)
         self.assertIn("candidate_key_frames", user_prompt)
         self.assertIn("Free Skate 1", user_prompt)
         self.assertIn("不可判断", user_prompt)
+        self.assertIn("用户备注当作事实", user_prompt)
         self.assertIn("JSON schema:", user_prompt)
         self.assertIn('"data_quality_hint": "good|partial|poor"', user_prompt)
         self.assertIn('"camera_view": "front|side|diagonal_front|diagonal_back|unknown"', user_prompt)
@@ -67,6 +69,7 @@ class VisionPromptTemplateTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertIn("action_subtype: 未指定", first[1])
+        self.assertIn("action_subtype=未指定", first[1])
         self.assertIn(json.dumps(args["motion_features"], ensure_ascii=False, indent=2, sort_keys=True), first[1])
 
 

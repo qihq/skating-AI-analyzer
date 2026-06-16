@@ -258,7 +258,36 @@ class ReportDualPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("action_subtype: Axel", prompt)
         self.assertIn("skill_category: Axel 入门", prompt)
         self.assertIn("上传备注/额外 comments: 今天状态不错", prompt)
+        self.assertIn("用户备注/comments 要体现在关注点", prompt)
+        self.assertIn("不能替代证据", request_mock.await_args.kwargs["messages"][0]["content"])
         self.assertIn("长期训练目标：稳定落冰", prompt)
+
+    async def test_generate_report_prompt_keeps_uncertain_subtype_and_child_safe_advice_policy(self) -> None:
+        request_mock = AsyncMock(return_value=_report_json())
+        context = AnalysisPromptContext(
+            action_type="跳跃",
+            action_subtype=None,
+            skill_category=None,
+            analysis_profile="jump",
+            profile_evidence={},
+            motion_features={},
+            bio_data={},
+            user_note="我只知道是跳跃，落冰声音很大。",
+            memory_context="",
+        )
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.request_text_completion", request_mock),
+        ):
+            await generate_report("跳跃", {"frame_analysis": []}, bio_data=None, prompt_context=context)
+
+        prompt = request_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertIn("action_subtype: 未指定", prompt)
+        self.assertIn("不能强行猜成具体动作名", prompt)
+        self.assertIn("不要编造具体细项", prompt)
+        self.assertIn("用户备注/comments", prompt)
+        self.assertIn("不要安排负重、Bosu、旋转椅或痛苦拉伸", prompt)
 
     async def test_generate_report_refines_generic_items_with_path_b_evidence(self) -> None:
         request_mock = AsyncMock(

@@ -15,7 +15,8 @@ from app.services.llm_context import AnalysisPromptContext, render_prompt_contex
 logger = logging.getLogger(__name__)
 
 REPORT_SYSTEM_PROMPT = (
-    "你是花样滑冰训练报告生成助手。"
+    "你是花样滑冰训练报告生成助手，面向儿童/青少年学员和家长输出可执行复盘。"
+    "你必须基于结构化视觉、视频时序和骨架证据生成结论；用户备注只能作为线索，不能替代证据。"
     "你必须严格输出 JSON 对象，不要输出 Markdown，不要解释，不要使用 ```json 包裹。"
 )
 
@@ -1134,9 +1135,15 @@ async def generate_report(
         "质量限制只作为补充说明。只有 apply_low_confidence_notice 为 true 时，才在 summary 末尾加入“低置信度帧较多，结果仅供参考”。\n"
         "当 data_quality_hint 为 partial/poor 或 camera_view 受限时，请区分“可确认的动作问题”和“不可确认的细节”；"
         "不可确认的刃型、周数或完成质量可以写入 issues，但不能替代训练建议。\n\n"
+        "动作不确定性要求：如果 action_subtype 未指定、用户只知道动作大类，或 evidence 不足以确认具体跳种/旋转/步法名称，"
+        "请使用动作大类和阶段来描述问题，不要编造具体细项。"
+        "只有在视觉摘要、视频时序或 profile_evidence 明确支持时，才把 Lutz/Flip/Axel 等具体名称写进 summary/issues。\n"
+        "用户备注/comments 要体现在关注点和训练建议中，但必须标注为“家长/学员备注提到...”或只作为训练重点线索，"
+        "不要把备注里的感受写成已验证技术事实。\n\n"
         "问题与建议质量要求：issues 必须至少 2 条可执行技术问题，优先引用 Path B top_issues 或帧级 issues；"
         "不要只写“数据质量有限”。improvements 必须逐条对应具体问题，写成可以当天训练的动作或分段练习；"
-        "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段和次数。\n\n"
+        "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段、次数和儿童安全边界。"
+        "所有训练建议必须低冲击、短时长、可由家长或教练安全监督；不要安排负重、Bosu、旋转椅或痛苦拉伸。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
         + context_block

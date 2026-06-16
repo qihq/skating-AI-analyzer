@@ -315,6 +315,8 @@ class TrainingPlanSession(BaseModel):
     description: str
     is_office_trainable: bool
     completed: bool = False
+    related_issue: str | None = None
+    parent_tip: str | None = None
 
 
 class TrainingDay(BaseModel):
@@ -327,6 +329,8 @@ class TrainingPlanPayload(BaseModel):
     title: str
     focus_skill: str
     days: list[TrainingDay]
+    generation_source: str | None = None
+    generation_note: str | None = None
 
 
 class TrainingPlanDetail(BaseModel):
@@ -374,6 +378,9 @@ class ArchiveTimelineEntry(BaseModel):
 class ArchiveResponse(BaseModel):
     stats: ArchiveStats
     timeline: list[ArchiveTimelineEntry]
+    limit: int | None = None
+    offset: int = 0
+    has_more: bool = False
 
 
 class TrainingSessionBase(BaseModel):

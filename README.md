@@ -12,6 +12,15 @@ The current pipeline version is `v5.2.303`.
 
 ## Recent Updates
 
+Current branch updates improve the parent review workflow and local all-in-one responsiveness:
+
+- Review uploads now allow broad action categories when the exact action name is unknown, and pre-submit comments are included in the earliest action-recognition prompt.
+- Training plan generation now records whether a plan came from AI or from a safe fallback, and fallback plans are clearly labeled in the UI.
+- Parent report sharing now generates a visual share card with the most important report information instead of only copying text.
+- Pose Replay playback no longer stops after one frame when the report page mirrors the active frame back into the viewer.
+- Archive timelines load the first page quickly with `limit`/`offset` pagination and a "load more" affordance while preserving total-count stats.
+- Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
+
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
 
 - `v5.2.303`: review uploads no longer require a precise action subtype or skill node; "unknown / broad category only" is accepted, and user comments are passed into video-temporal action recognition before keyframe and report generation.

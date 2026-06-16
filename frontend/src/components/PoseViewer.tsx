@@ -186,6 +186,7 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
   const imageRef = useRef<HTMLImageElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const lastTickRef = useRef<number>(0);
+  const selfSyncedFrameIdRef = useRef<string | null>(null);
   const [frameIndex, setFrameIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [frameImageError, setFrameImageError] = useState(false);
@@ -202,11 +203,15 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
       return;
     }
     const nextIndex = frames.findIndex((frame) => frameIdFromName(frame.frame) === activeFrameId);
-    if (nextIndex >= 0) {
+    if (nextIndex >= 0 && nextIndex !== frameIndex) {
+      if (selfSyncedFrameIdRef.current === activeFrameId) {
+        selfSyncedFrameIdRef.current = null;
+        return;
+      }
       setFrameIndex(nextIndex);
       setIsPlaying(false);
     }
-  }, [activeFrameId, frames]);
+  }, [activeFrameId, frameIndex, frames]);
 
   useEffect(() => {
     if (!currentFrame) {
@@ -227,7 +232,9 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
       }
     };
 
-    onFrameChange?.(frameIdFromName(currentFrame.frame));
+    const nextFrameId = frameIdFromName(currentFrame.frame);
+    selfSyncedFrameIdRef.current = nextFrameId;
+    onFrameChange?.(nextFrameId);
     redraw();
     window.addEventListener("resize", redraw);
     return () => {
