@@ -10,6 +10,7 @@ import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkaterIdForChildView } from "../utils/childView";
+import { parseApiDate } from "../utils/datetime";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 
@@ -19,7 +20,7 @@ function formatDate(dateString: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function scoreColor(score: number | null) {

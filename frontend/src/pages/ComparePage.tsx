@@ -24,6 +24,7 @@ import {
   fetchAnalysisCompare,
 } from "../api/client";
 import ReportCard from "../components/ReportCard";
+import { parseApiDate } from "../utils/datetime";
 
 const ISSUE_STYLES: Record<string, string> = {
   high: "border-rose-400/45 bg-rose-500/10",
@@ -38,7 +39,7 @@ function formatDate(dateString: string) {
     year: "numeric",
     month: "short",
     day: "numeric",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 function formatValue(value: number | null | undefined, unit?: string | null) {
@@ -353,7 +354,19 @@ function KeyframeCompareSection({ data }: { data: AnalysisCompareResponse }) {
           <section key={item.key} className="rounded-[28px] border border-slate-200 bg-slate-50 p-4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-xl font-semibold text-slate-900">{item.label}</h3>
-              <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs uppercase tracking-[0.2em] text-cyan-700">{item.key}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {item.delta_seconds != null ? (
+                  <span className={`rounded-full bg-white px-3 py-1 text-xs font-semibold ${trendClass(item.delta_seconds)}`}>
+                    Video {signedValue(item.delta_seconds, "s")}
+                  </span>
+                ) : null}
+                {item.relative_delta_seconds != null ? (
+                  <span className={`rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold ${trendClass(item.relative_delta_seconds)}`}>
+                    Rhythm {signedValue(item.relative_delta_seconds, "s")}
+                  </span>
+                ) : null}
+                <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs uppercase tracking-[0.2em] text-cyan-700">{item.key}</span>
+              </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <KeyframeImage side={item.before} title="之前" />

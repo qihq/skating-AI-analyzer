@@ -19,6 +19,8 @@ import ZodiacAvatar from "../components/ZodiacAvatar";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
+import { localDateKey } from "../utils/datetime";
+import { appendManualWindow, readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -113,7 +115,7 @@ function normalizeSubtype(actionType: ActionType, subtype?: string | null) {
 }
 
 function todayString() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateKey();
 }
 
 function createDefaultSessionForm(): SessionFormState {
@@ -195,10 +197,24 @@ function UploadWorkspaceHeader({
 type UploadCardProps = {
   inputRef: RefObject<HTMLInputElement>;
   selectedFile: File | null;
+  videoDurationSec: number | null;
+  manualWindowStart: string;
+  manualWindowEnd: string;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onManualWindowStartChange: (value: string) => void;
+  onManualWindowEndChange: (value: string) => void;
 };
 
-function UploadCard({ inputRef, selectedFile, onFileChange }: UploadCardProps) {
+function UploadCard({
+  inputRef,
+  selectedFile,
+  videoDurationSec,
+  manualWindowStart,
+  manualWindowEnd,
+  onFileChange,
+  onManualWindowStartChange,
+  onManualWindowEndChange,
+}: UploadCardProps) {
   return (
     <section className="app-card overflow-hidden p-5 phone:p-6 tablet:p-7">
       <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
@@ -231,12 +247,44 @@ function UploadCard({ inputRef, selectedFile, onFileChange }: UploadCardProps) {
             <p className="mt-1 text-sm text-slate-500">
               {selectedFile ? formatFileSize(selectedFile.size) : "点击按钮选择视频后，再填写下方复盘上下文。"}
             </p>
+            {videoDurationSec != null ? <p className="mt-2 text-xs text-slate-500">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
           </div>
           <span className="w-fit rounded-full bg-white px-3 py-1 text-sm font-medium text-slate-500">
             {selectedFile ? "已就绪" : "等待上传"}
           </span>
         </div>
       </div>
+
+      {shouldShowManualWindow(videoDurationSec) ? (
+        <div className="mt-4 rounded-[24px] border border-amber-100 bg-amber-50/70 p-4">
+          <p className="text-sm font-semibold text-slate-900">AI 输入片段</p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">视频较长时可以指定模型重点看的起止秒数；留空则默认使用全量上下文。</p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-xs font-semibold text-slate-500">开始秒数</span>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={manualWindowStart}
+                onChange={(event) => onManualWindowStartChange(event.target.value)}
+                className="app-input rounded-[18px] text-sm"
+              />
+            </label>
+            <label className="space-y-2">
+              <span className="text-xs font-semibold text-slate-500">结束秒数</span>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={manualWindowEnd}
+                onChange={(event) => onManualWindowEndChange(event.target.value)}
+                className="app-input rounded-[18px] text-sm"
+              />
+            </label>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -389,7 +437,7 @@ function SessionPanel({
 type ContextCardProps = {
   selectedActionType: ActionType;
   selectedActionSubtype: string;
-  selectedSkill: SkillNode | undefined;
+  selectedSkill: SkillNode | null | undefined;
   groupedSkills: Array<[string, SkillNode[]]>;
   note: string;
   sessions: TrainingSessionRecord[];
@@ -453,11 +501,11 @@ function ContextCard({
           </label>
 
           <label className="space-y-2">
-            <span className="text-sm font-medium text-slate-700">动作子类</span>
+            <span className="text-sm font-medium text-slate-700">动作细项（可不确定）</span>
             <select value={selectedActionSubtype} onChange={(event) => onActionSubtypeChange(event.target.value)} className="app-select">
               {ACTION_SUBTYPE_OPTIONS[selectedActionType].map((option) => (
                 <option key={option} value={option}>
-                  {option}
+                  {option === "未指定" ? "不确定 / 只知道大类" : option}
                 </option>
               ))}
             </select>
@@ -465,8 +513,9 @@ function ContextCard({
         </div>
 
         <label className="space-y-2">
-          <span className="text-sm font-medium text-slate-700">技能分类</span>
+          <span className="text-sm font-medium text-slate-700">技能分类（可选）</span>
           <select value={selectedSkill?.id ?? ""} onChange={(event) => onSkillChange(event.target.value)} className="app-select">
+            <option value="">不确定，交给 AI 判断</option>
             {groupedSkills.length ? (
               groupedSkills.map(([groupLabel, items]) => (
                 <optgroup key={groupLabel} label={groupLabel}>
@@ -566,7 +615,7 @@ type ReviewSummaryProps = {
   selectedSkater: Skater | null;
   selectedActionType: ActionType;
   selectedActionSubtype: string;
-  selectedSkill: SkillNode | undefined;
+  selectedSkill: SkillNode | null | undefined;
   selectedSession: TrainingSessionRecord | null;
   selectedFile: File | null;
   note: string;
@@ -599,8 +648,8 @@ function ReviewSummary({
 }: ReviewSummaryProps) {
   const summaryItems = [
     { label: "练习档案", value: selectedSkater ? selectedSkater.display_name || selectedSkater.name : "加载中..." },
-    { label: "动作范围", value: `${selectedActionType} · ${selectedActionSubtype}` },
-    { label: "技能分类", value: selectedSkill?.name ?? "尚未选择" },
+    { label: "动作范围", value: `${selectedActionType} · ${selectedActionSubtype === "未指定" ? "不确定" : selectedActionSubtype}` },
+    { label: "技能分类", value: selectedSkill?.name ?? "不确定，交给 AI 判断" },
     { label: "关联课次", value: selectedSession ? sessionLabel(selectedSession) : "不关联" },
     { label: "视频文件", value: selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : "尚未上传" },
   ];
@@ -688,6 +737,9 @@ export default function ReviewPage() {
   const [uploadProgress, setUploadProgress] = useState({ loaded: 0, total: 0, percent: 0 });
   const [pendingAnalysisId, setPendingAnalysisId] = useState<string | null>(null);
   const [processingStatus, setProcessingStatus] = useState<AnalysisStatus>("pending");
+  const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
+  const [manualWindowStart, setManualWindowStart] = useState("");
+  const [manualWindowEnd, setManualWindowEnd] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -780,7 +832,7 @@ export default function ReviewPage() {
           if (draftSkillId) {
             return draftSkillId;
           }
-          return filtered[0]?.id ?? "";
+          return "";
         });
       } catch {
         if (!cancelled) {
@@ -816,14 +868,14 @@ export default function ReviewPage() {
           setProcessingStatus(data.status);
         });
 
-        if (data.status === "completed") {
+        if (data.status === "completed" && data.target_lock_status !== "awaiting_manual") {
           window.localStorage.removeItem(DRAFT_STORAGE_KEY);
           setIsSubmitting(false);
           navigate(`/report/${data.id}`);
           return;
         }
 
-        if (data.status === "awaiting_target_selection") {
+        if (data.status === "awaiting_target_selection" || data.target_lock_status === "awaiting_manual") {
           setIsSubmitting(false);
           navigate(`/report/${data.id}/target`);
           return;
@@ -866,7 +918,7 @@ export default function ReviewPage() {
   );
   const groupedSkills = useMemo(() => groupSkills(filteredSkills), [filteredSkills]);
   const selectedSkater = skaters.find((skater) => skater.id === selectedSkaterId) ?? null;
-  const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0];
+  const selectedSkill = filteredSkills.find((skill) => skill.id === selectedSkillId) ?? null;
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const processingStage = getAnalysisProcessingStage(processingStatus);
   const analysisSteps = useMemo<AnalysisStep[]>(
@@ -894,7 +946,7 @@ export default function ReviewPage() {
       if (current && filteredSkills.some((skill) => skill.id === current)) {
         return current;
       }
-      return filteredSkills[0]?.id ?? "";
+      return "";
     });
   }, [filteredSkills, selectedActionType]);
 
@@ -924,7 +976,15 @@ export default function ReviewPage() {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
     setSelectedFile(file);
+    setVideoDurationSec(null);
+    setManualWindowStart("");
+    setManualWindowEnd("");
     setError(null);
+    if (file) {
+      void readVideoDuration(file)
+        .then((duration) => setVideoDurationSec(duration))
+        .catch(() => setVideoDurationSec(null));
+    }
   };
 
   const handleActionTypeChange = (nextType: ActionType) => {
@@ -991,17 +1051,22 @@ export default function ReviewPage() {
       setError("请先选择训练视频。");
       return;
     }
-    if (!selectedSkill) {
-      setError("请先选择技能分类。");
+    const windowError = validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec);
+    if (windowError) {
+      setError(windowError);
       return;
     }
 
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("action_type", selectedActionType);
-    formData.append("action_subtype", selectedActionSubtype);
-    formData.append("skill_node_id", selectedSkill.id);
-    formData.append("skill_category", selectedSkill.name);
+    if (selectedActionSubtype !== "未指定") {
+      formData.append("action_subtype", selectedActionSubtype);
+    }
+    if (selectedSkill) {
+      formData.append("skill_node_id", selectedSkill.id);
+      formData.append("skill_category", selectedSkill.name);
+    }
     if (selectedSkaterId) {
       formData.append("skater_id", selectedSkaterId);
     }
@@ -1011,6 +1076,7 @@ export default function ReviewPage() {
     if (selectedSessionId) {
       formData.append("session_id", selectedSessionId);
     }
+    appendManualWindow(formData, manualWindowStart, manualWindowEnd);
 
     setIsSubmitting(true);
     setError(null);
@@ -1060,7 +1126,16 @@ export default function ReviewPage() {
 
       <div className="grid min-w-0 gap-6 web:grid-cols-[minmax(0,1fr)_390px] web:items-start">
         <main className="min-w-0 space-y-6">
-          <UploadCard inputRef={inputRef} selectedFile={selectedFile} onFileChange={handleFileChange} />
+          <UploadCard
+            inputRef={inputRef}
+            selectedFile={selectedFile}
+            videoDurationSec={videoDurationSec}
+            manualWindowStart={manualWindowStart}
+            manualWindowEnd={manualWindowEnd}
+            onFileChange={handleFileChange}
+            onManualWindowStartChange={setManualWindowStart}
+            onManualWindowEndChange={setManualWindowEnd}
+          />
 
           <ContextCard
             selectedActionType={selectedActionType}

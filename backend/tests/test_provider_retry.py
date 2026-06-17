@@ -28,9 +28,9 @@ def _provider() -> SimpleNamespace:
     )
 
 
-def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
+def _http_status_error(status_code: int, headers: dict[str, str] | None = None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://example.com/v1/chat/completions")
-    response = httpx.Response(status_code, request=request, text="provider error")
+    response = httpx.Response(status_code, request=request, text="provider error", headers=headers)
     return httpx.HTTPStatusError("provider error", request=request, response=response)
 
 
@@ -73,8 +73,29 @@ class ProviderRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(context.exception.code, AnalysisErrorCode.AI_API_QUOTA_EXCEEDED)
-        self.assertEqual(create_mock.await_count, 4)
-        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [1.0, 2.0, 4.0])
+        self.assertEqual(create_mock.await_count, 5)
+        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [8.0, 20.0, 45.0, 90.0])
+
+    async def test_retries_429_with_retry_after_header(self) -> None:
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+        with (
+            patch("app.services.providers.asyncio.sleep", AsyncMock()) as sleep_mock,
+            patch("app.services.providers.AsyncOpenAI") as client_cls,
+        ):
+            create_mock = AsyncMock(side_effect=[_http_status_error(429, {"retry-after": "30"}), response])
+            client_cls.return_value.chat.completions.create = create_mock
+
+            result = await request_text_completion(
+                _provider(),
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0,
+                max_tokens=16,
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(create_mock.await_count, 2)
+        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [30.0])
 
     async def test_auth_error_is_not_retried(self) -> None:
         with (

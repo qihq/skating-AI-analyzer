@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.keyframe_candidates import calculate_key_frame_confidence
+from app.services.keyframe_candidates import CONFIDENCE_WEIGHTS, calculate_key_frame_confidence
 
 
 class KeyframeConfidenceTests(unittest.TestCase):
@@ -19,7 +19,14 @@ class KeyframeConfidenceTests(unittest.TestCase):
             phase_order_score=0.2,
         )
 
-        self.assertAlmostEqual(confidence, 0.68, places=3)
+        expected = (
+            CONFIDENCE_WEIGHTS["motion_peak_score"] * 1.0
+            + CONFIDENCE_WEIGHTS["com_velocity_score"] * 0.8
+            + CONFIDENCE_WEIGHTS["pose_visibility_score"] * 0.5
+            + CONFIDENCE_WEIGHTS["knee_angle_change_score"] * 0.4
+            + CONFIDENCE_WEIGHTS["phase_order_score"] * 0.2
+        )
+        self.assertAlmostEqual(confidence, expected, places=3)
 
     def test_inputs_are_clamped_to_zero_one(self) -> None:
         high = calculate_key_frame_confidence(
@@ -52,7 +59,12 @@ class KeyframeConfidenceTests(unittest.TestCase):
             warnings=warnings,
         )
 
-        self.assertAlmostEqual(confidence, 0.55, places=3)
+        expected = (
+            CONFIDENCE_WEIGHTS["com_velocity_score"]
+            + CONFIDENCE_WEIGHTS["pose_visibility_score"]
+            + CONFIDENCE_WEIGHTS["phase_order_score"]
+        )
+        self.assertAlmostEqual(confidence, expected, places=3)
         self.assertIn("confidence_missing_motion_peak", warnings)
         self.assertIn("confidence_missing_knee_angle_change", warnings)
 

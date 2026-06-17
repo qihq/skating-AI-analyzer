@@ -25,6 +25,7 @@ import {
 import { useAppMode } from "../components/AppModeContext";
 import PinInput from "../components/PinInput";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
+import { parseApiDate } from "../utils/datetime";
 
 type PinLengthOption = 4 | 5 | 6;
 
@@ -49,7 +50,7 @@ function formatDate(dateString: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 export default function SettingsPage() {
@@ -575,7 +576,7 @@ export default function SettingsPage() {
               <Link to="/review" className="app-pill text-sm font-semibold">
                 去上传页验证
               </Link>
-              <Link to="/settings/api" className="app-pill text-sm font-semibold">
+              <Link to="/settings/api#provider-section-report" className="app-pill text-sm font-semibold">
                 检查 API 配置
               </Link>
             </div>
@@ -608,11 +609,14 @@ export default function SettingsPage() {
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">API</p>
                 <h2 className="mt-2 text-2xl font-semibold text-slate-900">API 配置</h2>
-                <p className="mt-3 text-sm leading-7 text-slate-500">检查当前激活的视觉模型和文本模型是否连接正常，也可以进入 API 页面切换供应商。</p>
+                <p className="mt-3 text-sm leading-7 text-slate-500">检查当前激活的视觉模型和报告模型是否连接正常，也可以进入 API 页面切换报告、Path A 和 Path B 的供应商。</p>
               </div>
               <div className="flex flex-wrap gap-3">
+                <Link to="/settings/api#provider-section-report" className="app-pill text-sm font-semibold">
+                  报告模型设置
+                </Link>
                 <Link to="/settings/api" className="app-pill text-sm font-semibold">
-                  打开 API 设置
+                  全部模型设置
                 </Link>
                 <button
                   type="button"

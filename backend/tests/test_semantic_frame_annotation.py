@@ -84,6 +84,41 @@ class SemanticFrameAnnotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.dual_path_meta["path_b_preserve_all_frames"])
         self.assertEqual(main_pose["frames"][0]["frame"], "frame_0001.jpg")
 
+    async def test_manual_lock_semantic_frames_blank_pose_when_bbox_is_not_aligned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_path = root / "semantic_0001.jpg"
+            frame_path.write_bytes(b"frame")
+            main_pose = {"frames": [{"frame": "frame_0001.jpg", "keypoints": [{"source": "main"}]}], "connections": []}
+            mock_b = AsyncMock(return_value=_path_b())
+
+            with (
+                patch("app.services.vision_dual.extract_pose", side_effect=AssertionError("full-frame semantic pose should not run")),
+                patch("app.services.vision_dual.annotate_frames_batch", return_value=[frame_path]) as annotate_mock,
+                patch("app.services.vision_dual.encode_frames", AsyncMock(return_value=_semantic_payload())),
+                patch("app.services.vision_dual.analyze_path_a", AsyncMock(return_value=_path_a())),
+                patch("app.services.vision_dual.analyze_path_b", mock_b),
+            ):
+                result = await analyze_frames_dual(
+                    "è·³è·ƒ",
+                    [frame_path],
+                    _semantic_payload(),
+                    main_pose,
+                    {"quality_flags": []},
+                    _provider(),
+                    _provider(),
+                    annotated_dir=root / "annotated",
+                    resolved_keyframes=_resolved(),
+                    target_lock={
+                        "manual_override": True,
+                        "selected_bbox": {"x": 0.4, "y": 0.2, "width": 0.1, "height": 0.3},
+                    },
+                )
+
+        self.assertEqual(annotate_mock.call_args.args[1], {})
+        self.assertTrue(mock_b.await_args.kwargs["preserve_all_frames"])
+        self.assertEqual(result.dual_path_meta["path_b_annotation_source"], "semantic_manual_lock_blank_pose")
+
     async def test_semantic_light_pose_failure_keeps_path_b_running_with_original_frames(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -76,6 +76,7 @@ class VisionPathBTests(unittest.IsolatedAsyncioTestCase):
         create_kwargs = request_mock.await_args.kwargs
         self.assertEqual(create_kwargs["temperature"], 0.25)
         self.assertEqual(create_kwargs["max_tokens"], 2900)
+        self.assertEqual(create_kwargs["response_format"], {"type": "json_object"})
 
         messages = create_kwargs["messages"]
         self.assertIn("长期训练目标", messages[0]["content"])
@@ -103,6 +104,29 @@ class VisionPathBTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["top_issues"], [])
         self.assertEqual(result["top_positives"], [])
+
+    async def test_mimo_path_b_uses_low_temperature_and_recovers_json_from_markdown(self) -> None:
+        provider = SimpleNamespace(
+            provider="mimo",
+            api_key="test-key",
+            base_url="https://token-plan-cn.xiaomimimo.com/v1",
+            model_id="mimo-v2.5",
+        )
+        response_payload = {
+            "frame_analysis": [{"frame_id": "frame_0001", "phase": "起跳", "confidence": 0.8}],
+            "subscores": {"takeoff_power": 0.7},
+        }
+
+        with patch("app.services.vision_path_b.request_text_completion") as request_mock:
+            request_mock.return_value = f"```json\n{json.dumps(response_payload, ensure_ascii=False)}\n```"
+
+            result = await analyze_path_b("跳跃", _frames(1), provider)
+
+        create_kwargs = request_mock.await_args.kwargs
+        self.assertEqual(create_kwargs["temperature"], 0.0)
+        self.assertEqual(create_kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(result["path"], "B")
+        self.assertEqual(result["subscores"]["takeoff_power"], 0.7)
 
     async def test_invalid_json_returns_soft_error(self) -> None:
         provider = SimpleNamespace(api_key="test-key", base_url="https://example.com/v1", model_id="test-model")

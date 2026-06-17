@@ -34,6 +34,7 @@ class StructuredReport(BaseModel):
     subscores: dict[str, int] = Field(default_factory=dict)
     score_breakdown: dict[str, Any] | None = None
     data_quality: str = "partial"
+    user_note: str | None = None
 
 
 class AnalysisUploadResponse(BaseModel):
@@ -106,6 +107,15 @@ class AnalysisDetail(BaseModel):
     target_lock_status: str | None = None
     action_window_start: float | None = None
     action_window_end: float | None = None
+    manual_action_window_start: float | None = None
+    manual_action_window_end: float | None = None
+    source_duration_sec: float | None = None
+    input_window_start_sec: float | None = None
+    input_window_end_sec: float | None = None
+    input_window_duration_sec: float | None = None
+    input_window_mode: str | None = None
+    input_window_truncated: bool = False
+    input_window_reason: str | None = None
     source_fps: float | None = None
     is_slow_motion: bool = False
     force_score: int | None = None
@@ -130,6 +140,35 @@ class AnalysisAutoEvalSnapshot(BaseModel):
     auto_eval: dict[str, Any] | None = None
     key_frame_candidates: dict[str, Any] | None = None
     fusion_diagnostics: list[str] = Field(default_factory=list)
+
+
+class DebugRunCreateResponse(BaseModel):
+    id: str
+    status: str
+
+
+class DebugRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    mode: str
+    source_type: str
+    analysis_id: str | None = None
+    action_type: str
+    action_subtype: str | None = None
+    analysis_profile: str | None = None
+    note: str | None = None
+    status: str
+    summary: dict[str, Any] | None = None
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DebugRunDetail(DebugRunSummary):
+    video_path: str | None = None
+    result_json: dict[str, Any] | None = None
+    error_detail: str | None = None
 
 
 class NoteUpdateRequest(BaseModel):
@@ -222,6 +261,10 @@ class CompareKeyframePair(BaseModel):
     label: str
     before: CompareKeyframeSide
     after: CompareKeyframeSide
+    delta_seconds: float | None = None
+    before_offset_seconds: float | None = None
+    after_offset_seconds: float | None = None
+    relative_delta_seconds: float | None = None
 
 
 class CompareVideoSide(BaseModel):
@@ -273,6 +316,8 @@ class TrainingPlanSession(BaseModel):
     description: str
     is_office_trainable: bool
     completed: bool = False
+    related_issue: str | None = None
+    parent_tip: str | None = None
 
 
 class TrainingDay(BaseModel):
@@ -285,6 +330,8 @@ class TrainingPlanPayload(BaseModel):
     title: str
     focus_skill: str
     days: list[TrainingDay]
+    generation_source: str | None = None
+    generation_note: str | None = None
 
 
 class TrainingPlanDetail(BaseModel):
@@ -332,6 +379,9 @@ class ArchiveTimelineEntry(BaseModel):
 class ArchiveResponse(BaseModel):
     stats: ArchiveStats
     timeline: list[ArchiveTimelineEntry]
+    limit: int | None = None
+    offset: int = 0
+    has_more: bool = False
 
 
 class TrainingSessionBase(BaseModel):
@@ -394,6 +444,8 @@ class PoseFrame(BaseModel):
     target_bbox: TargetBBox | None = None
     tracking_confidence: float | None = None
     tracking_state: str | None = None
+    tracker_state: str | None = None
+    tracker_lost_frames: int | None = None
     pose_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -402,6 +454,25 @@ class TargetCandidate(BaseModel):
     bbox: TargetBBox
     confidence: float
     source: str
+    quality_flags: list[str] = Field(default_factory=list)
+    support_count: int | None = None
+    support_frame_count: int | None = None
+    support_confidence: float | None = None
+    anchor_frame: str | None = None
+    anchor_index: int | None = None
+    support_anchor_frames: list[str] = Field(default_factory=list)
+    support_center_span: float | None = None
+    support_avg_area: float | None = None
+    support_motion_anchor_hits: int | None = None
+    multiperson_ambiguous_frame_count: int | None = None
+    multiperson_competitor_count: int | None = None
+    multiperson_same_anchor_competitor_count: int | None = None
+    multiperson_selected_pair_frame_count: int | None = None
+    multiperson_selected_pair_competitor_count: int | None = None
+    multiperson_other_frame_ambiguous_count: int | None = None
+    multiperson_nearest_center_distance: float | None = None
+    multiperson_max_competitor_confidence: float | None = None
+    multiperson_ignored_fragment_count: int | None = None
 
 
 class TargetPreviewResponse(BaseModel):

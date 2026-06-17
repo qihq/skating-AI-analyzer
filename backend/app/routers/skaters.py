@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
-from app.database import DATA_DIR, UPLOADS_DIR, get_session
+from app.database import DATA_DIR, UPLOADS_DIR, get_session, run_db_read_with_retry
 from app.models import Analysis, Skater, TrainingSession
-from app.routers.analysis import _build_stale_analysis_snapshot
 from app.schemas import (
     ArchiveResponse,
     ArchiveStats,
@@ -75,10 +76,14 @@ def as_utc(value: datetime) -> datetime:
 
 
 def calculate_current_streak(records: list[Analysis]) -> int:
-    if not records:
+    return calculate_current_streak_from_datetimes([record.created_at for record in records])
+
+
+def calculate_current_streak_from_datetimes(values: list[datetime]) -> int:
+    if not values:
         return 0
 
-    dates = sorted({as_utc(record.created_at).date() for record in records}, reverse=True)
+    dates = sorted({as_utc(value).date() for value in values}, reverse=True)
     today = datetime.now(timezone.utc).date()
     if dates[0] < today - timedelta(days=1):
         return 0
@@ -133,7 +138,10 @@ async def build_session_detail(session: AsyncSession, training_session: Training
 
 @router.get("/", response_model=list[SkaterPublic])
 async def list_skaters(session: AsyncSession = Depends(get_session)) -> list[SkaterPublic]:
-    result = await session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc()))
+    result = await run_db_read_with_retry(
+        lambda: session.execute(select(Skater).order_by(Skater.is_default.desc(), Skater.created_at.asc())),
+        context="list_skaters",
+    )
     return list(result.scalars().all())
 
 
@@ -263,12 +271,17 @@ async def get_learning_path(skater_id: str, session: AsyncSession = Depends(get_
 
 
 @router.get("/{skater_id}/archive", response_model=ArchiveResponse)
-async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get_session)) -> ArchiveResponse:
+async def get_skater_archive(
+    skater_id: str,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    session: AsyncSession = Depends(get_session),
+) -> ArchiveResponse:
     skater = await session.get(Skater, skater_id)
     if skater is None:
         raise HTTPException(status_code=404, detail="未找到该练习档案对应的选手。")
 
-    result = await session.execute(
+    base_query = (
         select(Analysis, TrainingSession)
         .options(
             load_only(
@@ -285,21 +298,33 @@ async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get
                 Analysis.created_at,
                 Analysis.updated_at,
                 Analysis.retry_from_stage,
-                Analysis.processing_logs,
             )
         )
         .outerjoin(TrainingSession, Analysis.session_id == TrainingSession.id)
         .where(Analysis.skater_id == skater_id)
         .order_by(Analysis.created_at.desc())
     )
-    rows = [
-        (_build_stale_analysis_snapshot(analysis) or analysis, training_session)
-        for analysis, training_session in result.all()
-    ]
-    records = [analysis for analysis, _ in rows]
+
+    paged_query = base_query.offset(offset)
+    if limit is not None:
+        paged_query = paged_query.limit(limit)
+
+    result = await session.execute(paged_query)
+    rows = list(result.all())
+    total_records = int(
+        await session.scalar(select(func.count(Analysis.id)).where(Analysis.skater_id == skater_id))
+        or 0
+    )
+
+    stats_result = await session.execute(
+        select(Analysis.created_at)
+        .where(Analysis.skater_id == skater_id)
+        .order_by(Analysis.created_at.desc())
+    )
+    record_dates = list(stats_result.scalars().all())
 
     now = datetime.now(timezone.utc)
-    recent_7days = sum(1 for record in records if now - as_utc(record.created_at) <= timedelta(days=7))
+    recent_7days = sum(1 for created_at in record_dates if now - as_utc(created_at) <= timedelta(days=7))
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     monthly_sessions = await session.scalar(
         select(func.count(TrainingSession.id)).where(
@@ -309,9 +334,9 @@ async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get
     )
 
     stats = ArchiveStats(
-        total_records=len(records),
+        total_records=total_records,
         recent_7days=recent_7days,
-        current_streak=calculate_current_streak(records),
+        current_streak=calculate_current_streak_from_datetimes(record_dates),
         monthly_sessions=int(monthly_sessions or 0),
     )
 
@@ -335,7 +360,13 @@ async def get_skater_archive(skater_id: str, session: AsyncSession = Depends(get
         for analysis, training_session in rows
     ]
 
-    return ArchiveResponse(stats=stats, timeline=timeline)
+    return ArchiveResponse(
+        stats=stats,
+        timeline=timeline,
+        limit=limit,
+        offset=offset,
+        has_more=limit is not None and offset + len(timeline) < total_records,
+    )
 
 
 @session_router.get("/{session_id}", response_model=TrainingSessionDetail)
@@ -393,26 +424,30 @@ async def delete_training_session(session_id: str, session: AsyncSession = Depen
 @system_router.get("/info", response_model=SystemInfoResponse)
 async def get_system_info() -> SystemInfoResponse:
     database_path = DATA_DIR / "skating-analyzer.db"
+    db_size_bytes, uploads_size_bytes = await asyncio.gather(
+        asyncio.to_thread(directory_size_bytes, database_path),
+        asyncio.to_thread(directory_size_bytes, UPLOADS_DIR),
+    )
     return SystemInfoResponse(
         version=APP_VERSION,
-        db_size_bytes=directory_size_bytes(database_path),
-        uploads_size_bytes=directory_size_bytes(UPLOADS_DIR),
+        db_size_bytes=db_size_bytes,
+        uploads_size_bytes=uploads_size_bytes,
     )
 
 
 @admin_router.get("/storage-stats", response_model=StorageStatsResponse)
 async def get_storage_stats() -> StorageStatsResponse:
-    return StorageStatsResponse(**build_storage_stats())
+    return StorageStatsResponse(**await asyncio.to_thread(build_storage_stats))
 
 
 @admin_router.get("/backups", response_model=BackupListResponse)
 async def get_backups() -> BackupListResponse:
-    return BackupListResponse(items=list_backups())
+    return BackupListResponse(items=await asyncio.to_thread(list_backups))
 
 
 @admin_router.post("/backups", response_model=BackupActionResponse)
 async def create_backup(payload: BackupCreateRequest) -> BackupActionResponse:
-    backup_path = create_manual_backup(payload.label)
+    backup_path = await asyncio.to_thread(create_manual_backup, payload.label)
     return BackupActionResponse(
         detail="备份已创建。",
         filename=backup_path.name,
@@ -422,7 +457,7 @@ async def create_backup(payload: BackupCreateRequest) -> BackupActionResponse:
 @admin_router.post("/backups/restore", response_model=BackupActionResponse)
 async def restore_backup_route(payload: BackupRestoreRequest) -> BackupActionResponse:
     try:
-        backup_path = restore_backup(payload.filename)
+        backup_path = await asyncio.to_thread(restore_backup, payload.filename)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

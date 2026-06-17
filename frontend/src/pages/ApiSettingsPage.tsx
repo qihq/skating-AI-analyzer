@@ -1,6 +1,6 @@
 import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import {
   activateProvider,
@@ -42,6 +42,9 @@ type SlotSection = {
   activeLabel: string;
 };
 
+const MIMO_BASE_URL = "https://api.xiaomimimo.com/v1";
+const MIMO_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
+
 const PROVIDER_OPTIONS: ProviderOption[] = [
   {
     id: "qwen",
@@ -65,6 +68,14 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
     defaultModel: "doubao-seed-2-0-250615",
     modelPlaceholder: "例如：doubao-seed-2-0-250615 或 ep-xxxxxxxx",
+    supportsVision: true,
+  },
+  {
+    id: "mimo",
+    label: "MiMo",
+    baseUrl: MIMO_BASE_URL,
+    defaultModel: "mimo-v2.5-pro",
+    modelPlaceholder: "例如：mimo-v2.5（视觉）或 mimo-v2.5-pro（文本）",
     supportsVision: true,
   },
   {
@@ -154,6 +165,33 @@ function optionsForSlot(slot: ProviderSlot) {
   return slot === "report" ? PROVIDER_OPTIONS : PROVIDER_OPTIONS.filter((item) => item.supportsVision);
 }
 
+function defaultModelForSlot(provider: string, slot: ProviderSlot) {
+  if (provider === "qwen") {
+    if (slot === "vision" || slot === "vision_path_a") {
+      return "qwen3-omni-flash";
+    }
+    if (slot === "vision_path_b") {
+      return "qwen3.6-plus";
+    }
+  }
+  if (provider === "mimo") {
+    return slot === "report" ? "mimo-v2.5-pro" : "mimo-v2.5";
+  }
+  return providerOption(provider).defaultModel;
+}
+
+function baseUrlForProviderKey(provider: string, apiKey: string, currentBaseUrl: string) {
+  const trimmedKey = apiKey.trim();
+  const trimmedBaseUrl = currentBaseUrl.trim();
+  if (provider !== "mimo" || !trimmedKey.startsWith("tp-")) {
+    return currentBaseUrl;
+  }
+  if (!trimmedBaseUrl || trimmedBaseUrl === MIMO_BASE_URL) {
+    return MIMO_TOKEN_PLAN_BASE_URL;
+  }
+  return currentBaseUrl;
+}
+
 function slotTitle(slot: ProviderSlot) {
   return SLOT_SECTIONS.find((section) => section.slot === slot)?.title ?? slot;
 }
@@ -173,18 +211,12 @@ function providerNameForSave(slot: ProviderSlot, provider: string, modelId: stri
 }
 
 function defaultDraftForm(slot: ProviderSlot): ProviderFormState {
-  const defaultProvider = slot === "report" ? "deepseek" : "qwen";
+  const defaultProvider = slot === "report" ? "mimo" : "qwen";
   const option = providerOption(defaultProvider);
-  const defaultModelBySlot: Record<ProviderSlot, string> = {
-    report: option.defaultModel,
-    vision: "qwen3-omni-flash",
-    vision_path_a: "qwen3-omni-flash",
-    vision_path_b: "qwen3.6-plus",
-  };
   return {
     provider: defaultProvider,
     api_key: "",
-    model_id: defaultModelBySlot[slot],
+    model_id: defaultModelForSlot(defaultProvider, slot),
     vision_model: "",
     base_url: option.baseUrl,
   };
@@ -243,6 +275,7 @@ function isSlot(value: string): value is ProviderSlot {
 
 export default function ApiSettingsPage() {
   const { isParentMode, enterParentMode } = useAppMode();
+  const location = useLocation();
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
   const [forms, setForms] = useState<Record<string, ProviderFormState>>({});
   const [draftOpen, setDraftOpen] = useState<Record<ProviderSlot, boolean>>({
@@ -293,6 +326,19 @@ export default function ApiSettingsPage() {
     };
   }, [isParentMode]);
 
+  useEffect(() => {
+    if (!isParentMode || !location.hash) {
+      return;
+    }
+
+    const target = document.getElementById(location.hash.slice(1));
+    if (!target) {
+      return;
+    }
+
+    window.setTimeout(() => target.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }, [isParentMode, location.hash, providers.length]);
+
   const providersBySlot = useMemo(() => {
     const grouped = {} as Record<ProviderSlot, ProviderPublic[]>;
     for (const slot of ALL_SLOTS) {
@@ -304,10 +350,20 @@ export default function ApiSettingsPage() {
   const visionVoteProviders = providersBySlot.vision.filter((provider) => provider.api_key === "***");
   const primaryVoteProvider = visionVoteProviders.find((provider) => provider.id === visionVoteConfig.primary_provider_id) ?? null;
   const secondaryVoteProvider = visionVoteProviders.find((provider) => provider.id === visionVoteConfig.secondary_provider_id) ?? null;
+  const activeReportProvider = providersBySlot.report.find((provider) => provider.is_active) ?? null;
 
   const showNotice = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 2600);
+  };
+
+  const scrollToProviderSection = (slot: ProviderSlot) => {
+    window.setTimeout(() => document.getElementById(`provider-section-${slot}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  };
+
+  const openReportDraft = () => {
+    setDraftOpen((current) => ({ ...current, report: true }));
+    scrollToProviderSection("report");
   };
 
   const refreshProviders = (nextProviders: ProviderPublic[]) => {
@@ -318,10 +374,16 @@ export default function ApiSettingsPage() {
   const setFormField = (key: string, field: keyof ProviderFormState, value: string) => {
     setForms((current) => ({
       ...current,
-      [key]: {
-        ...(current[key] ?? defaultDraftForm("vision")),
-        [field]: value,
-      },
+      [key]: (() => {
+        const next = {
+          ...(current[key] ?? defaultDraftForm("vision")),
+          [field]: value,
+        };
+        if (field === "api_key") {
+          next.base_url = baseUrlForProviderKey(next.provider, value, next.base_url);
+        }
+        return next;
+      })(),
     }));
   };
 
@@ -333,7 +395,7 @@ export default function ApiSettingsPage() {
         ...(current[key] ?? defaultDraftForm(slot)),
         provider,
         base_url: option.baseUrl,
-        model_id: option.defaultModel,
+        model_id: defaultModelForSlot(provider, slot),
       },
     }));
   };
@@ -747,17 +809,53 @@ export default function ApiSettingsPage() {
       {error ? <div className="rounded-[24px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
 
       <section className="app-card p-6 tablet:p-8">
-        <p className="max-w-4xl text-base leading-8 text-slate-500">
-          这里按用途 slot 管理模型实例：文本报告、主视觉、Path A、Path B 和主视觉投票。卡片标题只显示模型公司，
-          具体版本通过“模型 ID”区分，所以同一个公司可以同时保存多个不同模型。
-        </p>
+        <div className="flex flex-col gap-5 tablet:flex-row tablet:items-start tablet:justify-between">
+          <div className="max-w-4xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Report Model</p>
+            <h2 className="mt-2 text-2xl font-semibold text-slate-900">
+              {activeReportProvider
+                ? `${providerLabel(activeReportProvider.provider)} / ${activeReportProvider.model_id}`
+                : "报告模型尚未配置"}
+            </h2>
+            <p className="mt-3 text-base leading-8 text-slate-500">
+              报告生成使用“文本报告”slot。这里按用途管理模型实例：文本报告、主视觉、Path A、Path B 和主视觉投票。
+            </p>
+          </div>
+          <div className="flex flex-col gap-3 rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-600 tablet:min-w-[260px]">
+            <p className="font-semibold text-slate-900">当前报告设置</p>
+            <p>{activeReportProvider ? `供应商：${providerLabel(activeReportProvider.provider)}` : "供应商：未选择"}</p>
+            <p>{activeReportProvider ? `模型：${activeReportProvider.model_id || "未填写"}` : "模型：未填写"}</p>
+            <p>API Key：{activeReportProvider?.api_key === "***" ? "已保存" : "未保存"}</p>
+          </div>
+        </div>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <a href="#provider-section-report" className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600">
+            报告模型设置
+          </a>
+          <button
+            type="button"
+            onClick={openReportDraft}
+            className="app-pill text-sm font-semibold"
+          >
+            新增报告模型
+          </button>
+          <a href="#provider-section-vision" className="app-pill text-sm font-semibold">
+            主视觉设置
+          </a>
+          <a href="#provider-section-vision_path_a" className="app-pill text-sm font-semibold">
+            Path A 设置
+          </a>
+          <a href="#provider-section-vision_path_b" className="app-pill text-sm font-semibold">
+            Path B 设置
+          </a>
+        </div>
       </section>
 
       <div className="space-y-6">
         {SLOT_SECTIONS.map((section) => {
           const sectionProviders = providersBySlot[section.slot];
           return (
-            <section key={section.slot} className="app-card p-6 tablet:p-8">
+            <section id={`provider-section-${section.slot}`} key={section.slot} className="app-card scroll-mt-24 p-6 tablet:p-8">
               <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
                 <div className="max-w-4xl">
                   <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">{section.eyebrow}</p>

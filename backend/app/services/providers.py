@@ -37,106 +37,24 @@ from app.services.vision_vote_config import load_vision_vote_config
 
 logger = logging.getLogger(__name__)
 AI_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+AI_RATE_LIMIT_RETRY_DELAYS_SECONDS = (8.0, 20.0, 45.0, 90.0)
+AI_RETRY_AFTER_MAX_SECONDS = 120.0
 DEFAULT_QWEN_VISION_MODEL = "qwen3.6-plus"
 DEPRECATED_QWEN_VISION_MODELS = {"qwen-vl-max-latest"}
 DEFAULT_DOUBAO_VISION_MODEL = "doubao-1.5-vision-pro-32k"
 DOUBAO_VISION_MAX_MB = 50
 DOUBAO_VISION_MAX_SECONDS = 60.0
+DEFAULT_MIMO_VISION_MODEL = "mimo-v2.5"
+DEFAULT_MIMO_REPORT_MODEL = "mimo-v2.5-pro"
+MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+MIMO_VIDEO_MAX_BASE64_MB = 50
+MIMO_VIDEO_FPS = 2
+MIMO_VIDEO_MEDIA_RESOLUTION = "default"
 QWEN_VIDEO_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 _VISION_VIDEO_COST_DAY: date | None = None
 _VISION_VIDEO_COST_CNY = 0.0
 
-
-PRESET_PROVIDERS = [
-    {
-        "slot": "vision",
-        "name": "Qwen 3.6 Plus（推荐）",
-        "provider": "qwen",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model_id": "qwen3.6-plus",
-        "is_active": True,
-    },
-    {
-        "slot": "vision",
-        "name": "Kimi K2.5",
-        "provider": "kimi",
-        "base_url": "https://api.moonshot.cn/v1",
-        "model_id": "kimi-k2.5",
-        "is_active": False,
-    },
-    {
-        "slot": "vision",
-        "name": "GLM-4.5V",
-        "provider": "glm",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model_id": "glm-4.5v",
-        "is_active": False,
-    },
-    {
-        "slot": "vision",
-        "name": "Doubao Seed 2.0（豆包/火山方舟）",
-        "provider": "doubao",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "model_id": "doubao-seed-2-0-250615",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "DeepSeek-V3（推荐）",
-        "provider": "deepseek",
-        "base_url": "https://api.deepseek.com/v1",
-        "model_id": "deepseek-chat",
-        "is_active": True,
-    },
-    {
-        "slot": "report",
-        "name": "Doubao Seed 2.0（豆包/火山方舟）",
-        "provider": "doubao",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "model_id": "ep-xxxxxxxx-xxxxx",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "MiniMax M2.7",
-        "provider": "minimax",
-        "base_url": "https://api.minimax.chat/v1",
-        "model_id": "MiniMax-Text-01",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "GLM-5",
-        "provider": "glm",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "model_id": "glm-5",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "Qwen-Max",
-        "provider": "qwen",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model_id": "qwen-max-latest",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "自定义 OpenAI 兼容",
-        "provider": "openai_compatible",
-        "base_url": "https://api.openai.com/v1",
-        "model_id": "custom-model",
-        "is_active": False,
-    },
-    {
-        "slot": "report",
-        "name": "自定义 Claude 兼容",
-        "provider": "claude_compatible",
-        "base_url": "https://api.anthropic.com/v1",
-        "model_id": "claude-custom-model",
-        "is_active": False,
-    },
-]
 
 ENV_KEYS_BY_PROVIDER = {
     "qwen": ["QWEN_API_KEY", "DASHSCOPE_API_KEY"],
@@ -145,6 +63,7 @@ ENV_KEYS_BY_PROVIDER = {
     "doubao": ["DOUBAO_API_KEY"],
     "minimax": ["MINIMAX_API_KEY"],
     "glm": ["GLM_API_KEY"],
+    "mimo": ["MIMO_API_KEY"],
 }
 
 TINY_PNG_DATA_URL = (
@@ -221,6 +140,10 @@ def _resolve_qwen_vision_model(provider: AIProvider) -> str:
         return provider.model_id
     if provider.provider == "qwen" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
         return DEFAULT_QWEN_VISION_MODEL
+    if provider.provider == "mimo" and provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
+        return DEFAULT_MIMO_VISION_MODEL
+    if provider.provider == "mimo" and provider.slot == "report":
+        return DEFAULT_MIMO_REPORT_MODEL
     return provider.model_id
 
 
@@ -236,6 +159,8 @@ def _resolve_env_vision_model(provider_name: str) -> str:
         return env_model or DEFAULT_QWEN_VISION_MODEL
     if normalized == "doubao":
         return os.getenv("DOUBAO_VISION_MODEL", "").strip() or DEFAULT_DOUBAO_VISION_MODEL
+    if normalized == "mimo":
+        return os.getenv("MIMO_VISION_MODEL", "").strip() or DEFAULT_MIMO_VISION_MODEL
     return os.getenv(f"{normalized.upper()}_VISION_MODEL", "").strip() or normalized
 
 
@@ -253,6 +178,7 @@ def _env_vision_provider_config(provider_name: str) -> ActiveProviderConfig | No
         "doubao": "https://ark.cn-beijing.volces.com/api/v3",
         "kimi": "https://api.moonshot.cn/v1",
         "glm": "https://open.bigmodel.cn/api/paas/v4",
+        "mimo": MIMO_BASE_URL,
     }
     return ActiveProviderConfig(
         id=f"env:vision:{normalized}",
@@ -264,6 +190,53 @@ def _env_vision_provider_config(provider_name: str) -> ActiveProviderConfig | No
         vision_model=None,
         api_key=api_key,
         notes="env VISION_PROVIDERS",
+    )
+
+
+def _env_report_provider_config() -> ActiveProviderConfig | None:
+    provider_name = os.getenv("REPORT_PROVIDER", "mimo").strip().lower() or "mimo"
+    api_key = _resolve_preset_api_key(provider_name)
+    if not api_key:
+        return None
+
+    default_base_urls = {
+        "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+        "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+        "glm": "https://open.bigmodel.cn/api/paas/v4",
+        "kimi": "https://api.moonshot.cn/v1",
+        "minimax": "https://api.minimax.chat/v1",
+        "mimo": MIMO_BASE_URL,
+    }
+    default_models = {
+        "mimo": DEFAULT_MIMO_REPORT_MODEL,
+        "qwen": "qwen3.6-plus",
+        "deepseek": "deepseek-chat",
+        "doubao": "doubao-seed-2-0-250615",
+        "glm": "glm-5",
+        "kimi": "kimi-k2.5",
+        "minimax": "MiniMax-Text-01",
+    }
+    base_url = (
+        os.getenv("REPORT_BASE_URL", "").strip()
+        or os.getenv(f"{provider_name.upper()}_REPORT_BASE_URL", "").strip()
+        or default_base_urls.get(provider_name, "")
+    )
+    model_id = (
+        os.getenv("REPORT_MODEL", "").strip()
+        or os.getenv(f"{provider_name.upper()}_REPORT_MODEL", "").strip()
+        or default_models.get(provider_name, provider_name)
+    )
+    return ActiveProviderConfig(
+        id=f"env:report:{provider_name}",
+        slot="report",
+        name=f"{provider_name} report",
+        provider=provider_name,
+        base_url=base_url,
+        model_id=model_id,
+        vision_model=None,
+        api_key=api_key,
+        notes="env REPORT_PROVIDER",
     )
 
 
@@ -423,6 +396,27 @@ def _claude_messages_url(base_url: str) -> str:
     return f"{normalized}/messages"
 
 
+def is_mimo_provider(provider_name: str) -> bool:
+    return provider_name.strip().lower() == "mimo"
+
+
+def _mimo_chat_completions_url(base_url: str) -> str:
+    normalized = (base_url or MIMO_BASE_URL).rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
+def _mimo_effective_base_url(provider: ActiveProviderConfig) -> str:
+    base_url = (provider.base_url or MIMO_BASE_URL).strip()
+    api_key = (provider.api_key or "").strip()
+    if api_key.startswith("tp-") and "api.xiaomimimo.com" in base_url:
+        return MIMO_TOKEN_PLAN_BASE_URL
+    return base_url
+
+
 def _extract_status_code(exc: Exception) -> int | None:
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
@@ -451,6 +445,37 @@ def _is_retryable_completion_error(exc: Exception) -> bool:
     )
 
 
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw_value = headers.get("retry-after") if hasattr(headers, "get") else None
+    if raw_value is None:
+        return None
+    try:
+        seconds = float(str(raw_value).strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, AI_RETRY_AFTER_MAX_SECONDS)
+
+
+def _completion_retry_delay_seconds(exc: Exception, attempt: int) -> float | None:
+    if not _is_retryable_completion_error(exc):
+        return None
+    status_code = _extract_status_code(exc)
+    delays = AI_RATE_LIMIT_RETRY_DELAYS_SECONDS if status_code == 429 else AI_RETRY_DELAYS_SECONDS
+    if attempt >= len(delays):
+        return None
+    delay = delays[attempt]
+    retry_after = _retry_after_seconds(exc)
+    if status_code == 429 and retry_after is not None:
+        return max(delay, retry_after)
+    return delay
+
+
 def _as_pipeline_completion_error(exc: Exception) -> Exception:
     failure = classify_ai_failure(exc)
     if failure.code in {
@@ -464,15 +489,18 @@ def _as_pipeline_completion_error(exc: Exception) -> Exception:
 
 async def _with_completion_retry(operation) -> str:
     last_exc: Exception | None = None
-    for attempt in range(len(AI_RETRY_DELAYS_SECONDS) + 1):
+    attempt = 0
+    while True:
         try:
             return await operation()
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if not _is_retryable_completion_error(exc) or attempt >= len(AI_RETRY_DELAYS_SECONDS):
+            delay = _completion_retry_delay_seconds(exc, attempt)
+            if delay is None:
                 raise _as_pipeline_completion_error(exc) from exc
             # 设计说明: 仅对瞬时网络/限流/服务端错误退避，避免认证类 4xx 被无意义重试。
-            await asyncio.sleep(AI_RETRY_DELAYS_SECONDS[attempt])
+            await asyncio.sleep(delay)
+            attempt += 1
 
     if last_exc is not None:
         raise _as_pipeline_completion_error(last_exc) from last_exc
@@ -525,6 +553,48 @@ async def _request_claude_compatible_completion(
     return "\n".join(text_parts).strip()
 
 
+async def _request_mimo_completion(
+    provider: ActiveProviderConfig,
+    *,
+    messages: list[dict[str, object]],
+    temperature: float,
+    max_tokens: int,
+    extra_body: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
+    timeout: float,
+) -> str:
+    payload: dict[str, Any] = {
+        "model": provider.model_id,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if extra_body:
+        payload.update(extra_body)
+    if response_format:
+        payload["response_format"] = response_format
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            _mimo_chat_completions_url(_mimo_effective_base_url(provider)),
+            headers={
+                "api-key": provider.api_key,
+                "Authorization": f"Bearer {provider.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    return extract_message_text(content).strip()
+
+
 async def request_text_completion(
     provider: ActiveProviderConfig,
     *,
@@ -562,6 +632,16 @@ async def request_text_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        if is_mimo_provider(provider.provider):
+            return await _request_mimo_completion(
+                provider,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra_body,
+                response_format=response_format,
                 timeout=timeout,
             )
 
@@ -773,10 +853,89 @@ async def request_doubao_vision_completion(
     return await _with_completion_retry(operation)
 
 
+def _base64_encoded_size_bytes(raw_size_bytes: int) -> int:
+    return ((max(0, raw_size_bytes) + 2) // 3) * 4
+
+
+def _mimo_video_limit_bytes() -> int:
+    return MIMO_VIDEO_MAX_BASE64_MB * 1024 * 1024
+
+
+async def request_mimo_video_completion(
+    provider: ActiveProviderConfig,
+    *,
+    video_path: Path,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: dict[str, Any] | None = None,
+    timeout: float = 180.0,
+) -> str:
+    """
+    Request MiMo video understanding through its OpenAI-compatible API.
+
+    Local action clips are sent as Base64 data URLs because this project does
+    not publish temporary video files to a public URL.
+    """
+    if not is_mimo_provider(provider.provider):
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.UNKNOWN_ERROR,
+            "MiMo video mode requires the mimo provider.",
+        )
+    if not video_path.exists():
+        raise AnalysisPipelineError(AnalysisErrorCode.FRAME_EXTRACT_FAILED, f"Video clip not found: {video_path}")
+
+    projected_encoded_size = _base64_encoded_size_bytes(video_path.stat().st_size)
+    if projected_encoded_size > _mimo_video_limit_bytes():
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"MiMo vision video base64 exceeds {MIMO_VIDEO_MAX_BASE64_MB}MB limit; skipping provider.",
+        )
+
+    with video_path.open("rb") as handle:
+        encoded_video = base64.b64encode(handle.read()).decode("ascii")
+
+    if len(encoded_video.encode("ascii")) > _mimo_video_limit_bytes():
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.AI_API_QUOTA_EXCEEDED,
+            f"MiMo vision video base64 exceeds {MIMO_VIDEO_MAX_BASE64_MB}MB limit; skipping provider.",
+        )
+
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": f"data:video/mp4;base64,{encoded_video}"},
+                    "fps": MIMO_VIDEO_FPS,
+                    "media_resolution": MIMO_VIDEO_MEDIA_RESOLUTION,
+                },
+                {"type": "text", "text": user_prompt},
+            ],
+        },
+    ]
+
+    async def operation() -> str:
+        return await _request_mimo_completion(
+            provider,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            timeout=timeout,
+        )
+
+    return await _with_completion_retry(operation)
+
+
 async def get_active_provider(slot: str, session: AsyncSession | None = None) -> ActiveProviderConfig:
     owns_session = session is None
     if owns_session:
         session = AsyncSessionLocal()
+    report_env_fallback = _env_report_provider_config() if slot == "report" else None
 
     try:
         result = await session.execute(
@@ -784,10 +943,19 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
         )
         provider = result.scalar_one_or_none()
         if provider is None:
+            if report_env_fallback is not None:
+                return report_env_fallback
             raise RuntimeError(f"未找到 slot={slot} 的激活供应商。")
 
         api_key = decrypt_api_key(provider.api_key)
         if not api_key:
+            if report_env_fallback is not None:
+                logger.warning(
+                    "Active report provider %s has no API key; falling back to env REPORT_PROVIDER=%s.",
+                    provider.provider,
+                    report_env_fallback.provider,
+                )
+                return report_env_fallback
             raise RuntimeError(f"{provider.name} 尚未配置 API Key。")
 
         return _active_provider_config_from_model(provider, api_key)
@@ -863,83 +1031,6 @@ async def get_vision_providers(session: AsyncSession | None = None) -> list[Acti
 
     return [await get_active_provider("vision", None if owns_session else session)]
 
-
-async def seed_preset_providers() -> None:
-    async with AsyncSessionLocal() as session:
-        legacy_qwen_result = await session.execute(
-            select(AIProvider).where(
-                AIProvider.slot == "vision",
-                AIProvider.provider == "qwen",
-                AIProvider.model_id == "qwen-vl-max-latest",
-                AIProvider.notes == "系统预置",
-            )
-        )
-        legacy_qwen_provider = legacy_qwen_result.scalar_one_or_none()
-
-        qwen36_result = await session.execute(
-            select(AIProvider).where(
-                AIProvider.slot == "vision",
-                AIProvider.provider == "qwen",
-                AIProvider.model_id == "qwen3.6-plus",
-            )
-        )
-        qwen36_provider = qwen36_result.scalar_one_or_none()
-
-        if legacy_qwen_provider is not None and qwen36_provider is None:
-            legacy_qwen_provider.name = "Qwen 3.6 Plus（推荐）"
-            legacy_qwen_provider.model_id = "qwen3.6-plus"
-
-        for preset in PRESET_PROVIDERS:
-            result = await session.execute(
-                select(AIProvider).where(
-                    AIProvider.slot == preset["slot"],
-                    AIProvider.provider == preset["provider"],
-                    AIProvider.model_id == preset["model_id"],
-                )
-            )
-            existing = result.scalar_one_or_none()
-            preset_key = _resolve_preset_api_key(preset["provider"])
-
-            if existing is None:
-                active_result = await session.execute(
-                    select(AIProvider.id).where(AIProvider.slot == preset["slot"], AIProvider.is_active.is_(True))
-                )
-                session.add(
-                    AIProvider(
-                        slot=preset["slot"],
-                        name=preset["name"],
-                        provider=preset["provider"],
-                        base_url=preset["base_url"],
-                        model_id=preset["model_id"],
-                        api_key=encrypt_api_key(preset_key),
-                        is_active=preset["is_active"] and active_result.first() is None,
-                        notes="系统预置",
-                    )
-                )
-                continue
-
-            if preset_key and not decrypt_api_key(existing.api_key):
-                existing.api_key = encrypt_api_key(preset_key)
-            if existing.name != preset["name"]:
-                existing.name = preset["name"]
-
-        await session.commit()
-
-        for slot in {"vision", "report"}:
-            result = await session.execute(
-                select(AIProvider).where(AIProvider.slot == slot, AIProvider.is_active.is_(True)).limit(1)
-            )
-            if result.scalar_one_or_none() is None:
-                candidate_result = await session.execute(
-                    select(AIProvider).where(AIProvider.slot == slot).order_by(AIProvider.created_at.asc()).limit(1)
-                )
-                candidate = candidate_result.scalar_one_or_none()
-                if candidate is not None:
-                    candidate.is_active = True
-
-        await session.commit()
-
-
 async def activate_provider(provider: AIProvider, session: AsyncSession) -> AIProvider:
     result = await session.execute(select(AIProvider).where(AIProvider.slot == provider.slot))
     for candidate in result.scalars():
@@ -968,17 +1059,27 @@ async def test_provider_connectivity(provider: AIProvider) -> tuple[bool, str]:
     )
 
     if provider.slot in {"vision", "vision_path_a", "vision_path_b"}:
-        client = AsyncOpenAI(api_key=api_key, base_url=provider.base_url, timeout=30.0, max_retries=0)
         messages: list[dict[str, object]] = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "请回复 ok。"},
+                    {"type": "text", "text": "Reply with ok."},
                     {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URL}},
                 ],
             }
         ]
         try:
+            if is_mimo_provider(provider.provider):
+                content = await request_text_completion(
+                    active_provider,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=16,
+                    timeout=30.0,
+                )
+                return True, content or "连通性测试通过。"
+
+            client = AsyncOpenAI(api_key=api_key, base_url=provider.base_url, timeout=30.0, max_retries=0)
             response = await client.chat.completions.create(
                 model=provider.model_id,
                 messages=messages,
@@ -994,7 +1095,7 @@ async def test_provider_connectivity(provider: AIProvider) -> tuple[bool, str]:
     try:
         content = await request_text_completion(
             active_provider,
-            messages=[{"role": "user", "content": "请回复 ok。"}],
+            messages=[{"role": "user", "content": "Reply with ok."}],
             temperature=0,
             max_tokens=16,
             timeout=30.0,

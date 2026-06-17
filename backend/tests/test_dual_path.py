@@ -145,8 +145,8 @@ def test_path_b_soft_failure_isolation(tmp_path: Path) -> None:
     assert result.dual_path_meta["path_b_failed"] is True
 
 
-def test_path_a_hard_failure_raises(tmp_path: Path) -> None:
-    """Path A parse failures are hard pipeline errors."""
+def test_path_a_parse_failure_uses_path_b(tmp_path: Path) -> None:
+    """Path A parse failures should not prevent a Path B-backed report."""
     frame_paths = _write_frames(tmp_path)
 
     with (
@@ -156,6 +156,39 @@ def test_path_a_hard_failure_raises(tmp_path: Path) -> None:
                 side_effect=AnalysisPipelineError(
                     AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL,
                     "invalid json",
+                )
+            ),
+        ),
+        patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b())),
+    ):
+        result = asyncio.run(
+            analyze_frames_dual(
+                "jump",
+                frame_paths,
+                _payloads(1),
+                None,
+                None,
+                _provider(),
+                _provider(),
+                annotated_dir=tmp_path / "annotated",
+            )
+        )
+
+    assert result.path_a["error"] == "path_a_parse_failed"
+    assert result.validation.recommended_path == "B"
+    assert result.dual_path_meta["path_a_failed"] is True
+
+
+def test_path_a_non_parse_failure_stays_hard(tmp_path: Path) -> None:
+    frame_paths = _write_frames(tmp_path)
+
+    with (
+        patch(
+            "app.services.vision_dual.analyze_path_a",
+            new=AsyncMock(
+                side_effect=AnalysisPipelineError(
+                    AnalysisErrorCode.UNKNOWN_ERROR,
+                    "provider down",
                 )
             ),
         ),
@@ -175,7 +208,7 @@ def test_path_a_hard_failure_raises(tmp_path: Path) -> None:
                 )
             )
 
-    assert caught.value.code == AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL
+    assert caught.value.code == AnalysisErrorCode.UNKNOWN_ERROR
 
 
 def test_objective_disagreement_triggers_likely_wrong() -> None:

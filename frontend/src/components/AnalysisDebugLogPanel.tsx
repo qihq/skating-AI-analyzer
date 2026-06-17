@@ -1,6 +1,7 @@
 import { useState } from "react";
 
-import { AnalysisLogEntry, PoseResponse, VideoTemporalDiagnostics } from "../api/client";
+import { AnalysisLogEntry, PoseResponse, SelectedSemanticFrame, VideoTemporalDiagnostics } from "../api/client";
+import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import ReportCard from "./ReportCard";
 
 type NormalizedBBox = {
@@ -171,13 +172,13 @@ function formatDuration(value?: number | null) {
 }
 
 function formatLogTimestamp(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return apiDateTimeFormatter({
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(value));
+  }).format(parseApiDate(value));
 }
 
 function formatConfidence(value?: number | null) {
@@ -224,6 +225,96 @@ function DebugFrameImage({ analysisId, frameName, alt }: { analysisId: string; f
       onError={() => setFailed(true)}
       className="h-full w-full object-contain"
     />
+  );
+}
+
+function SemanticFrameGallery({
+  frames,
+  analysisId,
+  title,
+  emptyLabel,
+  tone = "blue",
+}: {
+  frames: SelectedSemanticFrame[];
+  analysisId?: string | null;
+  title: string;
+  emptyLabel: string;
+  tone?: "blue" | "amber";
+}) {
+  const borderClass = tone === "amber" ? "border-amber-100" : "border-blue-100";
+  const badgeClass = tone === "amber" ? "text-amber-700" : "text-blue-700";
+
+  if (!frames.length) {
+    if (!emptyLabel) {
+      return null;
+    }
+    return <p className="mt-3 text-xs text-slate-500">{emptyLabel}</p>;
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className={`text-xs font-semibold ${badgeClass}`}>{title}</p>
+        <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">{frames.length}</span>
+      </div>
+      {analysisId ? (
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {frames.map((frame, index) => {
+            const frameId = frame.frame_id ?? null;
+            return (
+              <article key={`${frameId ?? title}-${index}`} className={`overflow-hidden rounded-[18px] border ${borderClass} bg-white`}>
+                <div className="aspect-video bg-slate-950">
+                  {frameId ? (
+                    <SemanticFrameImage analysisId={analysisId} frameId={frameId} alt={`${frame.phase_label ?? frame.phase_code ?? "key frame"} ${frameId}`} />
+                  ) : (
+                    <div className="flex h-full items-center justify-center px-3 text-center text-xs text-slate-400">No frame ID</div>
+                  )}
+                </div>
+                <div className="min-w-0 space-y-1 px-3 py-2 text-xs text-slate-500">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate font-mono text-slate-700">{frameId ?? "-"}</span>
+                    <span>{formatDuration(frame.timestamp) ?? "-"}</span>
+                  </div>
+                  <p className="font-semibold text-slate-700">{frame.phase_label ?? frame.phase_code ?? "-"}</p>
+                  <p className="line-clamp-2">{frame.selection_reason ?? frame.selection_status ?? "-"}</p>
+                  <p>
+                    {frame.refinement_method ?? "-"}
+                    {typeof frame.refinement_delta_sec === "number" ? ` (${frame.refinement_delta_sec.toFixed(3)}s)` : ""}
+                  </p>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
+      <div className="max-w-full overflow-x-auto">
+        <table className="min-w-[640px] text-left text-xs">
+          <thead className="text-slate-400">
+            <tr>
+              <th className="py-1 pr-3 font-medium">Frame</th>
+              <th className="py-1 pr-3 font-medium">Time</th>
+              <th className="py-1 pr-3 font-medium">Phase</th>
+              <th className="py-1 pr-3 font-medium">Reason</th>
+              <th className="py-1 pr-3 font-medium">Refine</th>
+            </tr>
+          </thead>
+          <tbody>
+            {frames.map((frame, index) => (
+              <tr key={`${frame.frame_id ?? title}-row-${index}`} className={`border-t ${borderClass}`}>
+                <td className="py-1.5 pr-3 font-mono text-slate-700">{frame.frame_id ?? "-"}</td>
+                <td className="py-1.5 pr-3">{formatDuration(frame.timestamp)}</td>
+                <td className="py-1.5 pr-3">{frame.phase_label ?? frame.phase_code ?? "-"}</td>
+                <td className="py-1.5 pr-3">{frame.selection_reason ?? frame.selection_status ?? "-"}</td>
+                <td className="py-1.5 pr-3">
+                  {frame.refinement_method ?? "-"}
+                  {typeof frame.refinement_delta_sec === "number" ? ` (${frame.refinement_delta_sec.toFixed(3)}s)` : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -390,13 +481,15 @@ export default function AnalysisDebugLogPanel({
 }) {
   const timingEntries = Object.entries(timings ?? {});
   const selectedSemanticFrames = videoTemporalDiagnostics?.selected_semantic_frames ?? [];
+  const partialSemanticFrames = videoTemporalDiagnostics?.partial_semantic_frames ?? [];
   const qualityFlags = videoTemporalDiagnostics?.quality_flags ?? [];
+  const retryRejectionFlags = videoTemporalDiagnostics?.retry_rejection_flags ?? [];
 
   return (
     <ReportCard title="分析日志" eyebrow="Debug Log">
       <div className="min-w-0 space-y-4">
         <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-          <p>Pipeline Version: {pipelineVersion ?? "v5.1.0"}</p>
+          <p>Pipeline Version: {pipelineVersion ?? "v5.2.1"}</p>
           <p className="mt-2 text-xs text-slate-500">
             日志为后端最新持久化处理日志，当前最多保留最近 {logs.length >= 200 ? "200" : logs.length || "0"} 条。
           </p>
@@ -433,6 +526,27 @@ export default function AnalysisDebugLogPanel({
               <p>时间戳来源：{videoTemporalDiagnostics.timestamp_source ?? "未提供"}</p>
               <p>Fallback：{videoTemporalDiagnostics.fallback_reason ?? "无"}</p>
             </div>
+            {videoTemporalDiagnostics.resolver_source && videoTemporalDiagnostics.resolver_source !== videoTemporalDiagnostics.timestamp_source ? (
+              <p className="mt-2 text-xs text-slate-500">Resolver source: {videoTemporalDiagnostics.resolver_source}</p>
+            ) : null}
+            {videoTemporalDiagnostics.parse_error_detail || videoTemporalDiagnostics.raw_response_excerpt ? (
+              <div className="mt-3 rounded-[18px] border border-blue-100 bg-white px-3 py-2 text-xs text-slate-600">
+                {videoTemporalDiagnostics.parse_error_detail ? (
+                  <p className="font-semibold text-slate-800">Parse: {videoTemporalDiagnostics.parse_error_detail}</p>
+                ) : null}
+                {videoTemporalDiagnostics.raw_response_excerpt ? (
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-[14px] bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+                    {videoTemporalDiagnostics.raw_response_excerpt}
+                  </pre>
+                ) : null}
+                {typeof videoTemporalDiagnostics.raw_response_length === "number" ? (
+                  <p className="mt-2 text-slate-400">
+                    raw length: {videoTemporalDiagnostics.raw_response_length}
+                    {videoTemporalDiagnostics.raw_response_truncated ? " (truncated)" : ""}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             {videoTemporalDiagnostics.video_ai_video_url ? (
               <div className="mt-3 overflow-hidden rounded-[18px] border border-blue-100 bg-slate-950">
                 <video
@@ -447,69 +561,20 @@ export default function AnalysisDebugLogPanel({
                   <span>{videoTemporalDiagnostics.video_ai_ran ? "ran" : "not run"}</span>
                 </div>
               </div>
-            ) : null}            {selectedSemanticFrames.length ? (
-              <div className="mt-3 space-y-3">
-                {analysisId ? (
-                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {selectedSemanticFrames.map((frame, index) => {
-                      const frameId = frame.frame_id ?? null;
-                      return (
-                        <article key={`${frameId ?? "semantic"}-${index}`} className="overflow-hidden rounded-[18px] border border-blue-100 bg-white">
-                          <div className="aspect-video bg-slate-950">
-                            {frameId ? (
-                              <SemanticFrameImage analysisId={analysisId} frameId={frameId} alt={`${frame.phase_label ?? frame.phase_code ?? "关键帧"} ${frameId}`} />
-                            ) : (
-                              <div className="flex h-full items-center justify-center px-3 text-center text-xs text-slate-400">无帧 ID</div>
-                            )}
-                          </div>
-                          <div className="min-w-0 space-y-1 px-3 py-2 text-xs text-slate-500">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="min-w-0 truncate font-mono text-slate-700">{frameId ?? "-"}</span>
-                              <span>{formatDuration(frame.timestamp) ?? "-"}</span>
-                            </div>
-                            <p className="font-semibold text-slate-700">{frame.phase_label ?? frame.phase_code ?? "-"}</p>
-                            <p className="line-clamp-2">{frame.selection_reason ?? "-"}</p>
-                            <p>
-                              {frame.refinement_method ?? "-"}
-                              {typeof frame.refinement_delta_sec === "number" ? ` (${frame.refinement_delta_sec.toFixed(3)}s)` : ""}
-                            </p>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                <div className="max-w-full overflow-x-auto">
-                  <table className="min-w-[640px] text-left text-xs">
-                    <thead className="text-slate-400">
-                      <tr>
-                        <th className="py-1 pr-3 font-medium">Frame</th>
-                        <th className="py-1 pr-3 font-medium">Time</th>
-                        <th className="py-1 pr-3 font-medium">Phase</th>
-                        <th className="py-1 pr-3 font-medium">Reason</th>
-                        <th className="py-1 pr-3 font-medium">Refine</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedSemanticFrames.map((frame, index) => (
-                        <tr key={`${frame.frame_id ?? "semantic"}-row-${index}`} className="border-t border-blue-100">
-                          <td className="py-1.5 pr-3 font-mono text-slate-700">{frame.frame_id ?? "-"}</td>
-                          <td className="py-1.5 pr-3">{formatDuration(frame.timestamp)}</td>
-                          <td className="py-1.5 pr-3">{frame.phase_label ?? frame.phase_code ?? "-"}</td>
-                          <td className="py-1.5 pr-3">{frame.selection_reason ?? "-"}</td>
-                          <td className="py-1.5 pr-3">
-                            {frame.refinement_method ?? "-"}
-                            {typeof frame.refinement_delta_sec === "number" ? ` (${frame.refinement_delta_sec.toFixed(3)}s)` : ""}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : (
-              <p className="mt-3 text-xs text-slate-500">没有可显示的语义关键帧。</p>
-            )}
+            ) : null}
+            <SemanticFrameGallery
+              frames={selectedSemanticFrames}
+              analysisId={analysisId}
+              title="Used semantic frames"
+              emptyLabel="No used semantic keyframes to display."
+            />
+            <SemanticFrameGallery
+              frames={partialSemanticFrames}
+              analysisId={analysisId}
+              title="Partial semantic candidates"
+              emptyLabel=""
+              tone="amber"
+            />
             {qualityFlags.length ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 {qualityFlags.map((flag) => (
@@ -517,6 +582,18 @@ export default function AnalysisDebugLogPanel({
                     {flag}
                   </span>
                 ))}
+              </div>
+            ) : null}
+            {retryRejectionFlags.length ? (
+              <div className="mt-3 rounded-[18px] border border-amber-100 bg-white px-3 py-2">
+                <p className="text-xs font-semibold text-amber-700">Retry rejected</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {retryRejectionFlags.map((flag) => (
+                    <span key={flag} className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-700">
+                      {flag}
+                    </span>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>

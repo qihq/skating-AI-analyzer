@@ -22,6 +22,7 @@ import {
 import { useAppMode } from "../components/AppModeContext";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
+import { parseApiDate } from "../utils/datetime";
 
 const WELCOME_MESSAGE = "嗨！我是冰宝（IceBuddy） ☃️ 今天想练什么？";
 const CATEGORY_OPTIONS = ["目标", "偏好", "总结", "卡点", "其他"] as const;
@@ -108,7 +109,7 @@ function getExpiryPreset(memory: SnowballMemory): MemoryExpiryPreset {
   if (!memory.expires_at) {
     return "never";
   }
-  const diffDays = Math.round((new Date(memory.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  const diffDays = Math.round((parseApiDate(memory.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
   if (diffDays <= 40) {
     return "1m";
   }
@@ -127,7 +128,7 @@ function formatExpireText(value: string | null) {
     year: "numeric",
     month: "numeric",
     day: "numeric",
-  }).format(new Date(value));
+  }).format(parseApiDate(value));
 }
 
 function flattenSuggestions(items: MemorySuggestion[]): SuggestionCard[] {

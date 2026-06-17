@@ -8,6 +8,7 @@ import { useAppMode } from "../components/AppModeContext";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import PoseViewer from "../components/PoseViewer";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
+import { parseApiDate } from "../utils/datetime";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
@@ -25,7 +26,7 @@ function formatDate(value: string) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(parseApiDate(value));
 }
 
 function formatConfidence(value: number | null | undefined) {
@@ -133,7 +134,7 @@ export default function PoseDebugPage() {
             <div className="mt-3 flex flex-wrap gap-2 text-sm text-slate-500">
               <span>{getAnalysisStatusLabel(analysis.status)}</span>
               <span>{formatDate(analysis.created_at)}</span>
-              <span>Pipeline {analysis.pipeline_version ?? "v5.1.0"}</span>
+              <span>Pipeline {analysis.pipeline_version ?? "v5.2.1"}</span>
               {analysis.analysis_profile ? <span>{analysis.analysis_profile}</span> : null}
             </div>
           ) : null}

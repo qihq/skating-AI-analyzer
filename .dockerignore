@@ -5,6 +5,8 @@
 !.env.example
 backups
 data
+deliverables
+tmp
 tmp-test
 frontend/node_modules
 frontend/dist

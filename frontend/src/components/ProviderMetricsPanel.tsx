@@ -7,6 +7,7 @@ import {
   ProviderMetricPublic,
 } from "../api/client";
 import ReportCard from "./ReportCard";
+import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
@@ -16,6 +17,15 @@ function formatPercent(value: number) {
 
 function formatRate(value: number) {
   return value.toFixed(2);
+}
+
+function formatSnapshotTime(value: string) {
+  return apiDateTimeFormatter({
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parseApiDate(value));
 }
 
 function MetricRow({ label, value }: { label: string; value: string }) {
@@ -41,7 +51,7 @@ function SnapshotRow({ item }: { item: AutoEvalSnapshotSummary }) {
             {item.pipeline_version ? ` · ${item.pipeline_version}` : ""}
           </p>
         </div>
-        <p className="text-xs text-slate-400">{new Date(item.created_at).toLocaleString()}</p>
+        <p className="text-xs text-slate-400">{formatSnapshotTime(item.created_at)}</p>
       </div>
 
       <div className="mt-3 grid gap-2 tablet:grid-cols-3">

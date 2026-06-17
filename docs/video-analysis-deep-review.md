@@ -1,362 +1,328 @@
-# 花样滑冰 AI 视频分析模块：深度复盘与迭代规划
+# 视频分析模块复盘与迭代方向
 
-本文档从计算机视觉、视频理解和训练产品工程视角复盘 Skating Analyzer 当前视频分析模块。它不是接口说明书；当前流水线细节见 [ai-analysis-flow.md](./ai-analysis-flow.md)。本文重点回答三个问题：
+本文是 Skating Analyzer 视频分析模块的工程复盘。流水线接口和阶段细节见 [ai-analysis-flow.md](./ai-analysis-flow.md)；本文关注当前能力边界、已沉淀的工程原则，以及后续优先级。
 
-- 当前实现真正依赖哪些信号，哪些信号只是辅助。
-- v5.0.0 已经解决了哪些历史问题。
-- 后续迭代应该优先补哪些能力，避免继续堆 prompt 和阈值。
+当前版本：`v5.2.303`
 
----
+## 1. 当前模块定位
 
-## 1. 当前实现概况
+Skating Analyzer 目前是训练复盘系统，不是 ISU 比赛判分器。它的目标是帮助家长、学员和教练更稳定地回答：
 
-当前系统是一个 **规则 + 姿态估计 + 视频多模态 AI + 图片多模态 AI + 报告 LLM** 的混合流水线。它没有本地端到端训练模型，也没有 ISU 官方评分引擎；现阶段定位是儿童/青少年训练复盘工具，而不是比赛打分器。
+- 视频里主要在练什么动作？
+- 哪个滑行者是目标对象？
+- 起跳、腾空、落冰或非跳跃阶段是否能被可靠定位？
+- 可见的技术问题和积极点是什么？
+- 下一周训练应优先练什么？
 
-核心架构：
+系统没有本地端到端专项模型，也没有完整 ISU 规则引擎。核心能力来自规则、运动密度、MediaPipe、YOLO/ByteTrack、云端多模态模型和报告 LLM 的组合。
+
+## 2. 当前架构
 
 ```text
-视频预检查
-  -> profile 化动作窗口检测
-  -> 运动加权抽帧
-  -> 目标学员锁定
-  -> MediaPipe 姿态与生物力学
-  -> Qwen 3.6 Plus 视频语义时序
-  -> 视频/骨架/运动峰值三方仲裁
-  -> semantic keyframes 或 sampled frames
-  -> Path A 纯视觉分析
-  -> Path B 骨架叠加 + 量化 grounding
-  -> cross-validation + auto-eval
-  -> 报告融合 + Force Score
+source video
+  -> precheck + input window
+  -> motion sampling
+  -> target lock / manual target selection
+  -> person tracking
+  -> pose extraction
+  -> biomechanics + keyframe candidates
+  -> video temporal AI
+  -> semantic keyframe pipeline
+  -> Path A / Path B vision
+  -> report + plan + debug output
 ```
 
-设计哲学：
+关键原则：
 
-- **不信任单一信号源**：视频 AI、图片 AI、骨架、运动密度互相校验。
-- **视频 AI 只做语义层**：它输出阶段区间、动作确认、宏观评价，不直接作为逐帧裁判。
-- **语义关键帧必须过门控**：T/A/L 顺序、阶段置信度、fallback recommendation、局部 refinement 都会影响是否采用 semantic frames。
-- **Path A 与 Path B 分工明确**：Path A 看画面，Path B 看骨架标注和数值；冲突时降低确定性。
-- **产品侧保守表达**：儿童训练场景下，报告要给可执行建议，不输出过度竞技化惩罚。
+- 单一信号不直接决定最终结论。
+- 视频 AI 是语义层，不是逐帧裁判。
+- 手动目标锁定比自动 relock 更权威。
+- 错人骨架比缺少骨架更危险。
+- semantic frames 必须能解释其来源、置信和降级原因。
+- 报告要围绕可见证据和可执行训练建议，避免“数据质量有限”式空话。
 
----
+## 3. 已经稳定下来的能力
 
-## 2. 当前数据流与模块职责
+### 3.1 输入范围透明化
 
-| 模块 | 输入 | 输出 | 主要职责 |
-|---|---|---|---|
-| `video.py` | 源视频 | 动作窗口、sampled frames、semantic frames、motion metadata | FFmpeg/OpenCV 预处理、慢动作折算、抽帧、局部运动 refinement |
-| `video_temporal.py` | 动作窗口 AI clip | `video_temporal_v1`、`resolved_keyframes` | 视频语义定位、payload 校验、时间戳仲裁 |
-| `target_lock.py` / `bbox_tracker.py` | sampled frames | target lock payload、跨帧 bbox | 多人场景目标选择与跟踪 |
-| `pose.py` / `smoothing.py` | frames + target lock | 33 点姿态序列 | MediaPipe 姿态、多人/单人 fallback、平滑 |
-| `biomechanics.py` | 姿态序列 | 几何指标、bio_subscores、keyframe candidates | 膝角、躯干、质心、跳跃和旋转估算 |
-| `action_profiles.py` | 用户输入 + 运动/姿态证据 | `jump/spin/step/spiral` | profile 推断和 sampling/prompt 路由 |
-| `vision_path_a.py` | 原始帧或 clip | 纯视觉帧分析、pure_vision_subscores | 从画面判断姿态、阶段、刃面和技术问题 |
-| `vision_path_b.py` | 骨架叠加帧 + bio context | 量化 grounding 分析、subscores | 骨架/角度辅助的稳定性判断 |
-| `cross_validator.py` | Path A + Path B | 一致率、推荐路径、冲突等级 | 发现骨架追踪或视觉判断分歧 |
-| `auto_eval.py` | bio + vision + motion | 关键帧顺序和阶段质量 flags | 自动回归评估与质量诊断 |
-| `report.py` | vision + bio + context | 结构化训练报告、Force Score | 报告融合、分数融合、儿童评分校准 |
+系统现在会记录 AI 实际看到的视频范围：
 
----
+- `manual_window`
+- `full_context`
+- `system_truncated`
 
-## 3. v5.0.0 已解决的关键问题
+报告页和 Debug 页会展示输入窗口。长视频可由用户在上传时手动指定起止秒数；未指定时默认尽量保留全量上下文。
 
-### 3.1 关键帧不再只依赖运动抽帧
+价值：
 
-旧问题：动作速度快时，运动加权 sampled frames 可能错过最后离冰、最高点或首次落冰的瞬间。即便抽到运动峰值，也未必语义正确。
+- 用户知道 AI 是否看到了完整动作。
+- Path A 和 video temporal 使用的 clip 有清晰 provenance。
+- 旧的“只看动作窗口但 UI 不提示”的问题被消除。
 
-当前解法：
+### 3.2 broad category 上传
 
-- Qwen 3.6 Plus 对动作窗口 clip 输出阶段区间和 T/A/L hint。
-- `resolve_semantic_keyframes()` 用视频区间、骨架候选和运动峰值仲裁。
-- T/L 使用 `±0.18s` 局部高 FPS 运动扫描 refine。
-- 语义帧不可靠时回退 sampled frames。
+Review 上传不再要求精确动作子类或技能节点。用户只知道“跳跃/旋转/步法/自由滑”时也可以提交。
 
-剩余风险：
+价值：
 
-- 视频模型对高速动作的绝对时间戳仍可能偏移。
-- 单机位、遮挡和低清晰度下，Apex 与落冰的可见性不稳定。
-- 语义帧可靠性目前是规则门控，不是学习得到的置信校准。
+- 符合真实家长使用场景。
+- 用户备注会进入最早的视频语义 prompt，让模型先理解“我想看什么”。
+- 后续 profile inference 可以从视频和骨架信号修正输入。
 
-### 3.2 抽帧策略从固定 20 帧升级为 profile 化
+### 3.3 manual target fail-closed
 
-旧问题：跳跃、旋转、螺旋线、步法的时长和信息密度不同，固定 5fps/20 帧会让跳跃时间分辨率不足，也会浪费慢动作帧预算。
+手动选人后，如果 tracker/pose 没有足够证据支持目标身份，系统会 fail closed 或 blank pose，而不是继续绘制疑似错误 skeleton。
 
-当前解法：
+价值：
 
-- `backend/app/configs/action_profiles.json` 配置每类 profile 的窗口、FPS、最大帧数。
-- jump 当前默认 3.5s / 16fps / 32 帧。
-- spin 当前默认 6s / 10fps / 28 帧。
-- step 当前默认 8s / 6fps / 24 帧。
-- spiral 当前默认 6s / 8fps / 20 帧。
-- 源视频 >=60fps 时按 30fps 正常速度折算时间轴。
+- 错人分析的危害被优先控制。
+- Path B 和 biomechanics 的污染减少。
+- Debug 中能看到 manual lock、support anchor、final loss、foreground growth 等诊断。
 
-剩余风险：
+### 3.4 语义关键帧管线
 
-- profile 推断错误会影响后续抽帧密度和 prompt。
-- 对连续组合动作或长节目片段，单窗口策略仍偏窄。
+`semantic_keyframe_pipeline.py` 已经把视频语义、骨架候选、运动峰值、可见性、重试和局部修复集中管理。
 
-### 3.3 双路径分析降低了单一路径误判
+它支持：
 
-旧问题：只看原图时，模型容易被视角、服装和动作模糊影响；只看骨架时，MediaPipe 追踪错误会产生错误数值。
+- full-context motion conflict 判断
+- skeleton T/A/L conflict 判断
+- low-visibility 和 foreground occlusion 检查
+- same-video semantic reuse
+- video temporal retry
+- partial merge
+- visual T/A/L promotion
+- sampled-frame fallback
 
-当前解法：
+价值：
 
-- Path A：纯视觉，不直接依赖骨架测量。
-- Path B：骨架叠加帧 + 每帧 bio context + jump metrics。
-- `cross_validate()` 比较阶段和五项评分，输出 `reliable/uncertain/likely_wrong`。
-- 当 Path B 失败，主流程仍可用 Path A 生成报告。
+- T/A/L 不再只靠单次 video AI 或稀疏 sampled frames。
+- 大量错误场景可以用 flags 定位。
+- Debug 和批量脚本能复用同一批诊断字段。
 
-剩余风险：
+### 3.5 双路径报告韧性
 
-- Path A 和 Path B 的融合目前主要用于诊断和报告上下文，最终 `vision_structured` 仍以 Path A 为主。
-- Path B 的骨架叠加质量受 MediaPipe 检测影响较大。
-- 两路都使用通用多模态模型，仍缺乏专项学习能力。
+Path A 和 Path B 都会存储：
 
-### 3.4 报告生成加入质量降级和儿童评分校准
+- `vision_path_a`
+- `vision_path_b`
+- `cross_validation`
 
-旧问题：模型容易在低质量视频中输出过度确定的技术结论，或按成人竞技标准给儿童动作过低评分。
+报告生成会用 Path B/top issues 修补过泛化或失败的 Path A/报告结果，并生成动作专项 drills。
 
-当前解法：
+价值：
 
-- `data_quality` 会根据视觉质量、双路径冲突、human review 需求下调。
-- 低置信帧比例高时，报告会提示“结果仅供参考”。
-- 报告模型失败时转为 biomechanics fallback。
-- Force Score 使用 `apply_child_score_floor()`，在无高危问题且数据质量不差时给儿童训练场景合理下限。
+- 报告更少输出模板化建议。
+- 骨架证据不再完全丢失在 prompt 里。
+- 视觉失败时仍可给出可执行 fallback。
 
-剩余风险：
+## 4. 当前主要限制
 
-- 儿童评分下限是产品策略，不是客观技术水平校准。
-- 对“安全风险”与“严重技术错误”的文本识别依赖 issue 描述，仍有漏判可能。
+### 限制 1：专项数据闭环还不完整
 
----
-
-## 4. 当前根本限制
-
-### 限制 1：没有花滑专项训练数据闭环
-
-系统目前没有可持续积累和标注的专项数据集。AI 能力主要来自通用云端多模态模型，规则阈值来自工程经验和少量回归测试。
+系统缺少稳定的人工标注集。很多阈值来自工程经验和 batch diagnostics，而不是统计校准。
 
 影响：
 
-- Flip/Lutz、Loop/Salchow 等相似跳跃区分不稳定。
-- 动作边界置信无法用真实标签校准。
-- 提升主要依赖 prompt、规则和人工测试，难以量化泛化能力。
+- 类似动作子类区分仍不稳定。
+- 语义时间戳置信度无法可靠映射到真实误差。
+- 每次修复都容易继续增加规则复杂度。
 
-### 限制 2：姿态估计不是运动专项模型
+### 限制 2：目标跟踪仍是最大风险源
 
-MediaPipe 适合通用人体姿态，但花滑存在高速旋转、冰面反光、长距离拍摄、服装遮挡、多人背景等困难场景。
-
-影响：
-
-- 旋转周数估算偏差大。
-- 膝角和躯干角在低分辨率/遮挡下不稳定。
-- 目标跟踪错误会污染 Path B 和生物力学。
-
-### 限制 3：动作边界仍是规则仲裁
-
-v5.0.0 引入视频语义定位后，边界质量明显改善，但最终仍由规则把视频 AI、骨架候选和运动峰值合并。
+远距离小目标、多人同框、前景遮挡、local zoom、成年人和儿童混杂时，检测器和 tracker 都可能产生诱人但错误的 bbox。
 
 影响：
 
-- 对连续步法、组合旋转、跳接跳等复杂片段支持有限。
-- 单一动作窗口假设限制了长视频里的多元素分析。
-- 规则门控难以表达模型置信度的真实分布。
+- Path B 的骨架叠加可能失真。
+- 生物力学数值可能被错误目标污染。
+- semantic frame 可见性检查只能补救一部分场景。
 
-### 限制 4：ISU 规则还未结构化落地
+### 限制 3：单 Analysis 仍偏向单动作
 
-当前 Force Score 是训练导向评分，不是 TES/PCS 或 GOE/Level。
-
-影响：
-
-- 无法给出官方语义的 GOE、Level、q、<、e、! 等标记。
-- 报告可解释，但不能作为比赛复盘的严格判分。
-- 不同动作类别之间的分数不可直接等价比较。
-
-### 限制 5：前端人工复核能力不足
-
-系统已有 target lock 和 debug 面板，但缺少面向教练/开发者的标注与复核闭环。
+虽然 full-context 和自由滑输入更稳，但数据结构仍主要围绕一次分析生成一个主动作报告。
 
 影响：
 
-- 错误案例难以沉淀为训练数据。
-- 无法快速修正 T/A/L、phase、动作类别和评分标签。
-- auto-eval 目前主要服务自动诊断，还没有形成数据集管理工作流。
+- 一个训练视频里多个跳跃/旋转/步法时，系统需要选择一个核心窗口。
+- 长节目片段更适合“片段复盘”，不适合严格 T/A/L 单元素分析。
 
----
+### 限制 4：ISU 规则未结构化
 
-## 5. 下一阶段迭代路线
+Force Score 是训练表现分，不等于 TES、PCS、GOE 或 Level。
 
-### P0：建立错误案例与标注闭环
+影响：
 
-目标：把每次失败都变成可复用样本，而不是只修单个 bug。
+- 不能宣称比赛判分。
+- 起跳刃、周数不足、等级特征等目前只能作为训练风险语言出现。
+- 家长和教练需要理解报告是训练建议，不是裁判表。
 
-建议实现：
+### 限制 5：前端标注和复核闭环不足
 
-- 在报告页或 Debug 页增加“标记为错误案例”入口。
-- 保存源视频、动作窗口、sampled frames、semantic frames、pose、bio、Path A/B、cross-validation、auto-eval。
-- 支持人工修正：
-  - 动作类别 / 子类型
-  - T/A/L 时间戳
-  - phase sequence
-  - target lock 是否正确
-  - Path A/B 哪一路更可信
-- 导出 JSONL 作为后续评估集。
+Target selection 和 Debug 已经存在，但还没有面向持续改进的数据标注工作台。
 
-预期收益：
+影响：
 
-- 建立稳定回归集。
-- 为后续专项模型或规则校准提供数据。
-- 快速定位“模型错、骨架错、抽帧错、报告错”的责任边界。
+- 错误案例难以沉淀为 JSONL/fixture。
+- 人工修正 T/A/L、target、profile、Path A/B 信任边界的流程不够顺。
+- 后续训练轻量模型缺少干净输入。
 
-### P0：加强目标跟踪和姿态质量门控
+## 5. 建议路线
 
-目标：减少错误骨架污染 Path B 和生物力学。
+### P0：错误案例导出与人工标签
 
-建议实现：
+目标：把失败分析变成可复用样本。
 
-- 为每帧姿态增加质量评分：可见关键点比例、bbox 连续性、人体尺度跳变、左右关键点异常交换。
-- 将 `skeleton_reliability_signal` 前移到 biomechanics 阶段，提前决定是否弱化 bio 权重。
-- 对 `likely_wrong` 场景主动提示用户重选目标，而不是只在报告里提示。
-- 对 semantic frames 的轻量 pose 单独记录质量，不与主 sampled pose 混淆。
+建议：
 
-预期收益：
+- 在 Report/Debug 增加“标记错误案例”。
+- 导出源视频 hash、input window、target lock、sampled frames、semantic frames、pose、bio、Path A/B、report、flags。
+- 支持人工填写：
+  - 正确 target
+  - 正确 action family/profile
+  - T/A/L 或非跳跃阶段
+  - 哪一路视觉更可信
+  - 错误类型
+- 输出 JSONL，供测试和离线评估使用。
 
-- 降低错误骨架导致的错误报告。
-- Path B 的信任边界更清楚。
-- target lock 手动复核触发更准确。
+验收：
 
-### P1：多动作窗口与长视频元素切分
+- 至少能从任意 completed/failed 分析导出完整诊断包。
+- 后端测试可加载 fixture 重放关键判定。
 
-目标：支持一个视频中出现多个动作元素，而不是只分析单个窗口。
+### P0：姿态质量评分前移
 
-建议实现：
+目标：在 report 之前判断 skeleton 是否值得信。
 
-- 将运动密度曲线切成多个候选片段。
-- 每个片段独立 profile 推断、视频 AI 语义定位和抽帧。
-- 前端允许用户选择要分析的动作片段。
-- 数据结构从单 `Analysis` 单元素，逐步扩展到 `analysis.elements[]`。
+建议：
 
-预期收益：
+- 给每帧姿态增加 `pose_quality_score`。
+- 指标包括可见点比例、bbox 连续性、人体尺度跳变、关键点左右异常、tracker state。
+- 在 biomechanics 阶段就输出 `skeleton_reliability_signal`。
+- 当 `likely_wrong` 时降低 bio 权重，必要时要求重新选人。
 
-- 更适合训练课视频。
-- 步法、组合旋转、跳跃串联分析更自然。
+验收：
 
-### P1：结构化 ISU 规则引擎雏形
+- 错人/前景 relock fixture 中 `data_quality` 下调。
+- Path B 不再把明显错误骨架作为强证据。
 
-目标：让报告能清晰区分训练评分与规则判定。
+### P1：多窗口候选
 
-建议实现：
+目标：更好支持训练课片段和自由滑。
 
-- 先覆盖跳跃常见规则标签：
-  - 起跳刃：`!` / `e` 仅输出置信等级，不做绝对判定。
-  - 周数：`q` / `<` / `<<` 基于旋转估算 + 视觉观察给低/中/高置信。
-  - 落冰质量：step out、two-foot、fall、hand down 等训练标签。
-- 单独输出 `rule_findings`，不要直接混入 Force Score。
-- 报告中明确：“训练建议”与“规则风险”分栏。
+建议：
 
-预期收益：
+- 从 motion curve 切出多个候选窗口。
+- 每个窗口独立 profile inference 和 video temporal。
+- 前端让用户选择要分析的窗口。
+- 数据结构逐步引入 `analysis.elements[]`。
 
-- 更接近教练复盘语言。
-- 避免用户误以为 Force Score 等同官方分数。
+验收：
 
-### P2：专项动作识别模型或轻量分类器
+- 长视频能显示多个候选片段。
+- 用户可明确选择“分析第 2 个跳跃”。
 
-目标：减少通用 LLM 对动作类别的猜测。
+### P1：结构化规则风险
 
-短期可选：
+目标：区分训练建议和规则风险。
 
-- 用现有错误案例训练轻量 tabular/sequence classifier：
-  - 输入 motion features、bio features、phase features、Path A/B 输出摘要。
-  - 输出 profile / jump subtype / confidence。
+建议先覆盖跳跃：
 
-中期可选：
+- 起跳刃风险：`edge_clear` / `edge_attention` / `edge_likely_wrong`
+- 周数风险：`clean` / `q_risk` / `under_risk`
+- 落冰风险：step out、two-foot、hand down、fall
 
-- 训练骨架序列分类器，例如 ST-GCN / Temporal Conv。
-- 使用 VideoMAE/TimeSformer 特征做动作分类，但需足够数据。
+输出字段建议：
 
-预期收益：
+```json
+{
+  "rule_findings": [
+    {
+      "type": "rotation_risk",
+      "label": "q_risk",
+      "confidence": "medium",
+      "evidence": ["estimated_rotations", "landing_frame"]
+    }
+  ]
+}
+```
 
-- 相似动作分类更稳定。
-- prompt 中的 `profile_evidence` 更可靠。
+验收：
 
-### P2：语义时间戳置信校准
+- 报告 UI 单独展示“规则风险”，不混入 Force Score。
+- 文案明确“训练参考，不等同裁判判分”。
 
-目标：把当前规则门控升级为可量化的可信度模型。
+### P2：轻量动作分类器
 
-建议实现：
+目标：减少通用多模态模型对动作类别的猜测。
 
-- 收集 video AI timestamp、skeleton candidate、motion peak 与人工标签的偏差。
-- 训练或拟合一个轻量校准器，输出 T/A/L 每个候选的 expected error。
-- 用校准结果替代固定的 0.55/0.80、0.60 阈值，或作为阈值补充。
+短期：
 
-预期收益：
+- 用现有 JSONL 训练 tabular classifier。
+- 输入 motion features、bio features、Path A/B 摘要、video temporal action family。
+- 输出 profile/subtype/confidence。
 
-- semantic frames 采用率更可控。
-- 降低“看似高置信但时间错位”的风险。
+中期：
 
----
+- 骨架序列分类器。
+- 视频特征分类器。
 
-## 6. 建议的近期工程任务清单
+验收：
 
-| 优先级 | 任务 | 影响面 | 验收标准 |
-|---|---|---|---|
-| P0 | 错误案例导出与人工标签 JSONL | 后端 + 前端 Debug | 可从任意 completed/failed 分析导出完整诊断包 |
-| P0 | 姿态质量评分与 target lock 复核触发 | pose / biomechanics / report | 骨架异常时 `data_quality` 下调，并提示重选目标 |
-| P0 | auto-eval 面板化 | 前端 Report/Debug | 关键帧顺序、阶段序列、冲突字段可视化 |
-| P1 | `rule_findings` 结构字段 | report / schemas / UI | 报告能单独展示规则风险，不混入训练评分 |
-| P1 | 多窗口候选预览 | video / UI | 长视频能显示多个候选动作片段供选择 |
-| P2 | 动作分类轻量评估集 | scripts / tests | 至少 100 条标注样本，可跑离线准确率 |
+- 离线评估集有准确率和混淆矩阵。
+- profile mismatch retry 次数下降。
 
----
+### P2：时间戳置信校准
 
-## 7. 当前测试覆盖与应补测试
+目标：把规则阈值转成可量化的误差估计。
 
-已有测试覆盖较完整，重点包括：
+建议：
 
-- 视频预检查、模糊过滤、精确抽帧。
-- profile 抽帧、动作窗口、慢动作 FPS 修正。
-- target lock、bbox tracking、pose smoothing。
-- biomechanics、rotation unwrap、jump feature。
-- video temporal prompt/resolver/provider。
-- semantic keyframes、dual-path、cross-validation、report。
-- provider retry、metrics、stage retry、pipeline version。
-- auto-eval 和 replay export script。
+- 收集 video AI、skeleton candidate、motion peak 与人工 T/A/L 的偏差。
+- 估计每类候选 expected error。
+- 用校准结果辅助替换固定 `0.55`、`0.80` 等阈值。
 
-建议补充：
+验收：
 
-- 真实错误案例 fixture：target 错、T/A/L 乱序、低清晰度、多人背景。
-- Path A 视频模式失败后 frame fallback 的端到端断言。
-- semantic frames refinement 后不可靠时回退 sampled frames 的报告质量断言。
-- `apply_child_score_floor()` 对安全风险文本的边界测试。
-- 多 slot provider fallback 的日志和 UI 展示测试。
+- semantic frames 采用率和错误率可用数据解释。
+- 不同视频质量下的 fallback 更稳定。
 
----
+## 6. 工程维护建议
 
-## 8. 关键代码索引
+- 新增规则必须写入 quality flag，方便 batch 汇总。
+- 不要只改 prompt；prompt 改动需要配套 fixture 或至少批量诊断对比。
+- target/pose 相关变更必须跑多人、tiny target、foreground occlusion、manual lock 相关测试。
+- 语义关键帧变更必须检查 retry、partial frames、sampled fallback 和 same-video reuse。
+- 报告文案变更要保证问题和建议绑定到证据，不回到“视频质量有限”占位句。
 
-| 文件 | 职责 |
-|---|---|
-| `backend/app/routers/analysis.py` | 主分析编排、阶段重试、状态流转、日志与存储 |
-| `backend/app/services/video.py` | 视频预处理、动作窗口、抽帧、慢动作折算、语义帧精确抽取 |
-| `backend/app/services/video_temporal.py` | 视频 AI 语义定位、payload 校验、时间戳仲裁 |
-| `backend/app/services/pose.py` | MediaPipe 姿态提取 |
-| `backend/app/services/smoothing.py` | 姿态平滑与短缺口插值 |
-| `backend/app/services/target_lock.py` | 目标学员候选、自动锁定、手动选择 |
-| `backend/app/services/bbox_tracker.py` | bbox 跨帧跟踪 |
-| `backend/app/services/action_profiles.py` | 动作 profile 推断 |
-| `backend/app/services/jump_features.py` | 跳跃子类型几何证据 |
-| `backend/app/services/biomechanics.py` | 生物力学计算与 bio_subscores |
-| `backend/app/services/keyframe_candidates.py` | T/A/L 等关键帧候选 |
-| `backend/app/services/vision_path_a.py` | 纯视觉路径 |
-| `backend/app/services/vision_path_b.py` | 骨架/数值 grounding 路径 |
-| `backend/app/services/vision_dual.py` | 双路径协调、骨架标注、并行执行 |
-| `backend/app/services/cross_validator.py` | 双路径一致性与冲突诊断 |
-| `backend/app/services/auto_eval.py` | 自动质量评估 |
-| `backend/app/services/report.py` | 报告生成、评分融合、儿童评分校准 |
-| `frontend/src/pages/ReportPage.tsx` | 报告、调试信息、重试入口 |
-| `frontend/src/components/AnalysisDebugLogPanel.tsx` | 分析阶段日志展示 |
+## 7. 关键测试方向
 
----
+已有测试重点覆盖：
 
-## 9. 结论
+- broad-category upload
+- user note prompt context
+- video precheck
+- target lock / manual selection
+- person tracker
+- pose smoothing
+- biomechanics
+- keyframe candidates
+- video temporal resolver/provider/prompt
+- semantic keyframe pipeline
+- Path A/B and report fusion
+- stage retry
+- debug runs
+- archive and training plan flows
 
-v5.0.0 已经把系统从“抽几张图给 LLM 看”推进到“视频语义时序 + 骨架几何 + 双路径交叉验证”的工程化流水线。当前最有价值的下一步不是继续增加 prompt 复杂度，而是建立错误案例闭环、姿态质量门控和结构化规则输出。只有先把可验证数据沉淀下来，后续专项模型、时间戳校准和 ISU 规则引擎才有稳定基础。
+建议继续补：
+
+- manual lock 缺 tracker 支持的端到端 fixture
+- foreground adult blocks small child target
+- full-context jump with multiple motion peaks
+- retry rejects worse semantic T/A/L
+- Path A clip unavailable but frame mode succeeds
+- report evidence repair when model emits generic issues
+
+## 8. 结论
+
+`v5.2.303` 的重点已经从“抽帧给 LLM 看”演进到“目标身份、视频语义、骨架几何、运动峰值和双路径证据共同约束”。下一阶段最重要的不是继续堆阈值，而是建立错误案例闭环、姿态质量评分和结构化规则风险。只要这些可验证数据沉淀下来，后续专项模型和时间戳校准才有可靠基础。

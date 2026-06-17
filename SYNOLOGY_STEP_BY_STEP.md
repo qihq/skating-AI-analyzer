@@ -8,7 +8,7 @@
 
 请准备下面两个东西：
 
-1. 镜像包：`dist/skating-analyzer-allinone-latest.tar`
+1. 镜像包：`deliverables/skating-analyzer-allinone-v5.2.10-时间戳.tar`
 2. 环境变量参考：`.env.example`
 
 如果你已经让我导出过镜像，直接把 `tar` 上传到群晖即可。
@@ -33,7 +33,7 @@
 2. 进入 `映像` 或 `镜像`
 3. 点击 `新增` / `导入`
 4. 选择 `从文件添加`
-5. 选中 `skating-analyzer-allinone-latest.tar`
+5. 选中最新的 `skating-analyzer-allinone-v5.2.10-时间戳.tar`
 6. 等待导入完成
 
 导入成功后，你会看到镜像名类似：
@@ -84,8 +84,8 @@
 
 ### 推荐填写
 
-- `QWEN_API_KEY=你的Qwen Key`
-- `DEEPSEEK_API_KEY=你的DeepSeek Key`
+- `QWEN_API_KEY=你的Qwen Key`（也可以启动后在 UI 里填写）
+- `DEEPSEEK_API_KEY=你的DeepSeek Key`（也可以启动后在 UI 里填写）
 
 ### 可选
 
@@ -96,8 +96,9 @@
 说明：
 
 - `SECRET_KEY` 必填，否则应用无法加解密保存的 API Key
-- `QWEN_API_KEY` 和 `DEEPSEEK_API_KEY` 现在都可以先不填，后续进系统后再在“API 设置”页面里分别配置文本模型和视觉模型
+- `QWEN_API_KEY` 和 `DEEPSEEK_API_KEY` 现在都可以先不填，后续进系统后再在“API 设置”页面里分别创建文本、主视觉、Path A 和 Path B 模型实例
 - `DATA_DIR` 和 `DATABASE_URL` 不填也通常可以跑，因为镜像默认就是按 `/data` 设计的
+- 从 `v5.2.10` 开始，后端启动不会再自动写入 AI 供应商配置；已有旧数据库中如果存在重复 provider 行，也不会再因为 seed 查询报错导致容器启动失败
 
 ## 8. 启动容器
 
@@ -136,28 +137,29 @@
 
 在 `/volume1/docker/skating-analyzer/backups` 下，只有你手动做备份后才会出现 zip 备份文件。
 
-## 10.1 首次进入系统后怎么配视觉模型
+## 10.1 首次进入系统后怎么配模型实例
 
-现在系统里已经有独立的视觉模型配置入口，不需要再把视觉 key 强行写进群晖环境变量。
+现在系统里已经有独立的模型实例管理入口，不需要再把 AI Key 强行写进群晖环境变量。
 
 操作顺序：
 
 1. 先用浏览器打开系统
 2. 进入 `家长设置`
 3. 打开 `API 设置`
-4. 在页面下半部分找到 `视觉模型配置`
-5. 选择你要用的视觉供应商，例如 `Qwen 3.6 Plus`
-6. 填入该视觉供应商的 `API Key`
-7. 填入视觉主模型 ID
-8. 点击 `保存配置`
-9. 再点一次 `测试连接`
-10. 如果需要，把它设为当前视觉供应商
+4. 分别检查 `文本报告`、`主视觉`、`Path A 纯视觉`、`Path B 骨架量化`
+5. 点击对应 slot 的 `新增模型实例`
+6. 选择模型公司，例如 `Qwen`、`MiMo`、`DeepSeek`
+7. 填入该模型实例的 `API Key` 和 `模型 ID`
+8. 点击 `保存实例`
+9. 保存后点 `测试`
+10. 如果需要，把它设为当前激活模型
 
 说明：
 
-- `文本模型配置` 和 `视觉模型配置` 现在是分开的
+- `文本报告`、`主视觉`、`Path A`、`Path B` 现在按 slot 分开管理
 - 报告、训练计划、聊天走文本模型
-- 视频抽帧识别和动作视觉分析走视觉模型
+- 视频抽帧识别、Path A 纯视觉和 Path B 骨架量化走视觉模型
+- 主视觉投票只会列出 `主视觉` slot 里已经保存 API Key 的模型实例
 - 所有后来在系统里保存的 key，都会由 `SECRET_KEY` 加密后再写入数据库
 
 ## 11. 后续更新镜像怎么做
@@ -185,10 +187,22 @@
 
 ### 页面能开，但 AI 不能分析
 
-先检查环境变量：
+先检查模型实例配置：
 
 1. `SECRET_KEY` 是否存在
-2. `QWEN_API_KEY` 或 `DEEPSEEK_API_KEY` 是否填了正确值
+2. `/settings/api` 里对应 slot 是否已经新增模型实例
+3. 模型实例是否已保存正确 API Key
+4. 需要使用的模型实例是否已激活
+
+### 容器日志里出现 `MultipleResultsFound`
+
+如果你导入的是 `v5.2.9` 或更早镜像，并复用了旧 `/data` 数据库，可能会因为重复 AI provider 行导致启动失败。
+
+处理方式：
+
+1. 换用 `v5.2.10` 或更新的 all-in-one 镜像
+2. 保持原来的 `/data` 和 `/backups` 卷映射不变
+3. 启动后进入 `/settings/api` 检查并手动整理重复的模型实例
 
 ### 重建容器后数据丢了
 
@@ -208,4 +222,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\export-allinone-image.ps1
 
 导出完成后，镜像包默认在：
 
-`dist/skating-analyzer-allinone-latest.tar`
+`deliverables/skating-analyzer-allinone-v版本号-时间戳.tar`

@@ -65,6 +65,8 @@ class Analysis(Base):
     target_lock_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     action_window_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     action_window_end: Mapped[float | None] = mapped_column(Float, nullable=True)
+    manual_action_window_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    manual_action_window_end: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_slow_motion: Mapped[bool] = mapped_column(Boolean, default=False)
     force_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -80,6 +82,31 @@ class Analysis(Base):
         onupdate=utcnow,
     )
     session: Mapped["TrainingSession | None"] = relationship("TrainingSession", back_populates="analyses")
+
+
+class DebugRun(Base):
+    __tablename__ = "debug_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    mode: Mapped[str] = mapped_column(String(40), index=True)
+    source_type: Mapped[str] = mapped_column(String(20), index=True)
+    analysis_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("analyses.id"), nullable=True, index=True)
+    video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_type: Mapped[str] = mapped_column(String(40))
+    action_subtype: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    analysis_profile: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
 
 
 class TrainingSession(Base):

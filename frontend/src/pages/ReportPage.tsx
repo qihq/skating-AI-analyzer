@@ -7,7 +7,6 @@ import {
   createPlan,
   deleteAnalysis,
   dismissMemorySuggestion,
-  exportAnalysis,
   fetchAnalysis,
   fetchAnalysisPlan,
   fetchAnalysisPose,
@@ -35,7 +34,14 @@ import UnlockCelebration from "../components/UnlockCelebration";
 import { useAppearance } from "../components/AppearanceContext";
 import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, getAnalysisStageDescription, getAnalysisStatusLabel, isAnalysisInProgress } from "../constants/analysisStatus";
+import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import ZodiacAvatar from "../components/ZodiacAvatar";
+
+declare global {
+  interface Window {
+    ClipboardItem?: typeof ClipboardItem;
+  }
+}
 
 const STATUS_TEXT: Record<string, string> = {
   pending: "冰宝（IceBuddy）已收到视频，正在准备分析环境…",
@@ -74,6 +80,13 @@ type SuggestionPreview = {
   title: string;
 };
 
+type ShareImagePreview = {
+  url: string;
+  blob: Blob;
+  filename: string;
+  copiedToClipboard: boolean;
+};
+
 const PROGRESS_STAGE_META = [
   { key: "extract_frames", label: "抽帧与锁定" },
   { key: "vision", label: "视觉分析" },
@@ -95,13 +108,41 @@ const modernToolbarWarning = `${modernToolbarButton} border-amber-300/24 bg-ambe
 const modernToolbarDanger = `${modernToolbarButton} border-rose-300/20 bg-rose-400/10 text-rose-100 hover:bg-rose-400/16`;
 
 function formatDate(dateString: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return apiDateTimeFormatter({
     year: "numeric",
     month: "long",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
+}
+
+function formatShortDate(dateString: string) {
+  return apiDateTimeFormatter({
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(parseApiDate(dateString));
+}
+
+function scoreLevelText(score: number | null | undefined) {
+  const normalized = Math.max(0, Math.min(Math.round(score ?? 0), 100));
+  if (normalized >= 85) {
+    return "状态很稳";
+  }
+  if (normalized >= 70) {
+    return "表现不错";
+  }
+  if (normalized >= 56) {
+    return "持续进步中";
+  }
+  return "继续找感觉";
+}
+
+function scoreStars(score: number | null | undefined) {
+  const normalized = Math.max(0, Math.min(Math.round(score ?? 0), 100));
+  const stars = normalized >= 85 ? 5 : normalized >= 70 ? 4 : normalized >= 56 ? 3 : normalized >= 40 ? 2 : 1;
+  return `${"★".repeat(stars)}${"☆".repeat(5 - stars)}`;
 }
 
 function buildSubscoreRadarData(subscores: Record<string, number>) {
@@ -153,6 +194,242 @@ function flattenSuggestionPreview(items: MemorySuggestion[]): SuggestionPreview[
   );
 }
 
+function normalizeShareText(value: string | null | undefined, fallback: string, maxLength = 92) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return fallback;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number) {
+  const chars = Array.from(text);
+  const lines: string[] = [];
+  let current = "";
+
+  for (const char of chars) {
+    const next = `${current}${char}`;
+    if (ctx.measureText(next).width <= maxWidth || !current) {
+      current = next;
+      continue;
+    }
+    lines.push(current);
+    current = char;
+    if (lines.length >= maxLines) {
+      break;
+    }
+  }
+
+  if (lines.length < maxLines && current) {
+    lines.push(current);
+  }
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+  }
+  if (lines.length === maxLines && chars.join("").length > lines.join("").length) {
+    const last = lines[maxLines - 1];
+    lines[maxLines - 1] = `${last.slice(0, Math.max(last.length - 1, 0))}…`;
+  }
+  return lines;
+}
+
+function drawRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const normalizedRadius = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + normalizedRadius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, normalizedRadius);
+  ctx.arcTo(x + width, y + height, x, y + height, normalizedRadius);
+  ctx.arcTo(x, y + height, x, y, normalizedRadius);
+  ctx.arcTo(x, y, x + width, y, normalizedRadius);
+  ctx.closePath();
+}
+
+function drawWrappedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number,
+) {
+  const lines = wrapCanvasText(ctx, text, maxWidth, maxLines);
+  lines.forEach((line, index) => {
+    ctx.fillText(line, x, y + index * lineHeight);
+  });
+  return lines.length * lineHeight;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+      reject(new Error("share_image_blob_failed"));
+    }, "image/png", 0.96);
+  });
+}
+
+async function copyImageBlobToClipboard(blob: Blob) {
+  const ClipboardItemConstructor = window.ClipboardItem;
+  if (!navigator.clipboard?.write || !ClipboardItemConstructor) {
+    return false;
+  }
+
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItemConstructor({
+        [blob.type]: blob,
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createReportShareImage(analysis: AnalysisDetail) {
+  const canvas = document.createElement("canvas");
+  const width = 1080;
+  const height = 1440;
+  const scale = window.devicePixelRatio > 1 ? 2 : 1;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("share_image_canvas_failed");
+  }
+  ctx.scale(scale, scale);
+
+  const report = analysis.report;
+  const score = analysis.force_score ?? 0;
+  const topIssue = report?.issues?.[0];
+  const secondIssue = report?.issues?.[1];
+  const topImprovement = report?.improvements?.[0];
+  const summary = normalizeShareText(report?.summary, "本次报告已生成，建议结合训练重点继续练习。", 108);
+  const focus = normalizeShareText(report?.training_focus, "先把动作做稳，再慢慢加速度。", 76);
+  const issueText = normalizeShareText(
+    topIssue ? `${topIssue.category}：${topIssue.description}` : null,
+    "本次没有识别到明显高风险问题。",
+    86,
+  );
+  const secondIssueText = secondIssue
+    ? normalizeShareText(`${secondIssue.category}：${secondIssue.description}`, "", 72)
+    : null;
+  const improvementText = normalizeShareText(
+    topImprovement ? `${topImprovement.target}：${topImprovement.action}` : null,
+    "保持低冲击、短时间、多鼓励的练习节奏。",
+    86,
+  );
+
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, "#F8FBFF");
+  gradient.addColorStop(0.5, "#EEF7F4");
+  gradient.addColorStop(1, "#FFF7ED");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.fillStyle = "rgba(255,255,255,0.86)";
+  drawRoundRect(ctx, 64, 64, width - 128, height - 128, 48);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(148,163,184,0.32)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = "#2563EB";
+  ctx.font = "700 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText("冰宝诊断分享", 112, 142);
+
+  ctx.fillStyle = "#0F172A";
+  ctx.font = "800 58px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  drawWrappedText(ctx, analysis.action_type, 112, 230, 520, 66, 2);
+
+  ctx.fillStyle = "#64748B";
+  ctx.font = "500 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const skaterLabel = analysis.skater_name ? `${analysis.skater_name} · ` : "";
+  ctx.fillText(`${skaterLabel}${formatShortDate(analysis.created_at)}`, 112, 336);
+
+  ctx.fillStyle = "#DBEAFE";
+  drawRoundRect(ctx, 710, 142, 220, 220, 110);
+  ctx.fill();
+  ctx.strokeStyle = "#93C5FD";
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.fillStyle = "#1D4ED8";
+  ctx.font = "800 72px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(String(score), 820, 248);
+  ctx.font = "700 26px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText("Force Score", 820, 292);
+  ctx.fillStyle = "#64748B";
+  ctx.font = "600 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText(scoreLevelText(score), 820, 326);
+  ctx.textAlign = "start";
+
+  ctx.fillStyle = "#F59E0B";
+  ctx.font = "700 34px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText(scoreStars(score), 112, 416);
+
+  ctx.fillStyle = "#334155";
+  ctx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  drawWrappedText(ctx, summary, 112, 486, 856, 46, 3);
+
+  const sections = [
+    { label: "核心问题", title: issueText, sub: secondIssueText, color: "#F97316", bg: "#FFF7ED" },
+    { label: "训练重点", title: focus, sub: null, color: "#2563EB", bg: "#EFF6FF" },
+    { label: "下一步建议", title: improvementText, sub: null, color: "#059669", bg: "#ECFDF5" },
+  ];
+
+  let y = 664;
+  sections.forEach((section) => {
+    ctx.fillStyle = section.bg;
+    drawRoundRect(ctx, 112, y, 856, section.sub ? 176 : 152, 28);
+    ctx.fill();
+    ctx.fillStyle = section.color;
+    ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.fillText(section.label, 152, y + 48);
+    ctx.fillStyle = "#0F172A";
+    ctx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    const usedHeight = drawWrappedText(ctx, section.title, 152, y + 94, 760, 40, section.sub ? 2 : 2);
+    if (section.sub) {
+      ctx.fillStyle = "#64748B";
+      ctx.font = "500 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      drawWrappedText(ctx, section.sub, 152, y + 104 + usedHeight, 760, 32, 1);
+    }
+    y += section.sub ? 208 : 184;
+  });
+
+  ctx.strokeStyle = "rgba(148,163,184,0.34)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(112, 1260);
+  ctx.lineTo(968, 1260);
+  ctx.stroke();
+
+  ctx.fillStyle = "#475569";
+  ctx.font = "600 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText("由冰宝（IceBuddy）生成", 112, 1320);
+  ctx.fillStyle = "#94A3B8";
+  ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.fillText("训练建议仅供复盘参考，冰上动作请在教练或家长陪同下完成", 112, 1360);
+
+  const blob = await canvasToBlob(canvas);
+  const filename = `icebuddy-report-${analysis.id.slice(0, 8)}.png`;
+  return { blob, filename };
+}
+
 function formatDuration(value?: number | null) {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return null;
@@ -160,14 +437,39 @@ function formatDuration(value?: number | null) {
   return `${value.toFixed(2)}s`;
 }
 
+function analysisInputWindowText(analysis: AnalysisDetail) {
+  if (analysis.input_window_start_sec == null || analysis.input_window_end_sec == null) {
+    return null;
+  }
+  const range = `${analysis.input_window_start_sec.toFixed(1)}s - ${analysis.input_window_end_sec.toFixed(1)}s`;
+  const source = analysis.source_duration_sec != null ? ` / 原视频 ${analysis.source_duration_sec.toFixed(1)}s` : "";
+  if (analysis.input_window_mode === "manual_window") {
+    return `手动片段：${range}${source}`;
+  }
+  if (analysis.input_window_mode === "full_context") {
+    return `全量上下文：${range}${source}`;
+  }
+  if (analysis.input_window_mode === "system_truncated") {
+    return `系统截断：${range}${source}`;
+  }
+  return `AI 输入范围：${range}${source}`;
+}
+
+function analysisWindowFallbackText(analysis: AnalysisDetail) {
+  if (analysis.action_window_start == null || analysis.action_window_end == null) {
+    return null;
+  }
+  return `分析窗口：${analysis.action_window_start.toFixed(1)}s - ${analysis.action_window_end.toFixed(1)}s`;
+}
+
 function formatLogTimestamp(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return apiDateTimeFormatter({
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(value));
+  }).format(parseApiDate(value));
 }
 
 function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
@@ -189,7 +491,7 @@ function AnalysisProgressCard({ analysis }: { analysis: AnalysisDetail }) {
           ) : null}
         </div>
         <div className="rounded-[22px] border border-cyan-100 bg-white/80 px-4 py-3 text-sm text-slate-600">
-          <p>Pipeline: {analysis.pipeline_version ?? "v5.1.0"}</p>
+          <p>Pipeline: {analysis.pipeline_version ?? "v5.2.1"}</p>
           {typeof timings.total_s === "number" ? <p className="mt-1">累计耗时：{formatDuration(timings.total_s)}</p> : null}
         </div>
       </div>
@@ -485,11 +787,7 @@ export default function ReportPage() {
   const [isRetryPinOpen, setIsRetryPinOpen] = useState(false);
   const [retryMode, setRetryMode] = useState<"analysis" | "report">("analysis");
   const [isSharing, setIsSharing] = useState(false);
-  const canUseNativeShare =
-    typeof window !== "undefined" &&
-    typeof navigator !== "undefined" &&
-    typeof navigator.share === "function" &&
-    window.matchMedia("(pointer: coarse)").matches;
+  const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview | null>(null);
   const deferredAnalysis = useDeferredValue(analysis);
   const subscores = deferredAnalysis?.report?.subscores ?? deferredAnalysis?.bio_data?.bio_subscores ?? null;
   const technicalScore =
@@ -568,6 +866,14 @@ export default function ReportPage() {
   }, [autoUnlockedSkill?.name, celebratedSkillId, deferredAnalysis?.auto_unlocked_skill, deferredAnalysis?.skill_category]);
 
   useEffect(() => {
+    return () => {
+      if (shareImagePreview?.url) {
+        URL.revokeObjectURL(shareImagePreview.url);
+      }
+    };
+  }, [shareImagePreview?.url]);
+
+  useEffect(() => {
     setHideRetryAfterMissingVideo(false);
     setIsRetryConfirmOpen(false);
     setIsRetryPinOpen(false);
@@ -588,7 +894,7 @@ export default function ReportPage() {
         if (cancelled) {
           return;
         }
-        if (data.status === "awaiting_target_selection") {
+        if (data.status === "awaiting_target_selection" || data.target_lock_status === "awaiting_manual") {
           navigate(`/report/${data.id}/target`, { replace: true });
           return;
         }
@@ -712,10 +1018,16 @@ export default function ReportPage() {
     if (!id) {
       return;
     }
+    if (planId) {
+      const shouldRegenerate = window.confirm("重新生成会覆盖当前训练内容和已勾选进度，确定继续吗？");
+      if (!shouldRegenerate) {
+        return;
+      }
+    }
     setIsCreatingPlan(true);
     setError(null);
     try {
-      const plan = await createPlan(id);
+      const plan = await createPlan(id, { force: true });
       setPlanId(plan.id);
       navigate(`/plan/${plan.id}`);
     } catch (requestError) {
@@ -859,38 +1171,33 @@ export default function ReportPage() {
     setIsSharing(true);
     setError(null);
     try {
-      const { text } = await exportAnalysis(id);
-      const shareTitle = `${deferredAnalysis.skater_name ?? "冰宝诊断"} · ${deferredAnalysis.action_type}`;
-
-      if (navigator.share) {
-        try {
-          await navigator.share({
-            title: shareTitle,
-            text,
-          });
-          showNotice("报告内容已复制");
-          return;
-        } catch (shareError) {
-          if (shareError instanceof DOMException && shareError.name === "AbortError") {
-            return;
-          }
-        }
-      }
-
-      if (!navigator.clipboard?.writeText) {
-        throw new Error("clipboard_unavailable");
-      }
-      await navigator.clipboard.writeText(text);
-      showNotice("报告内容已复制");
+      const { blob, filename } = await createReportShareImage(deferredAnalysis);
+      const copiedToClipboard = await copyImageBlobToClipboard(blob);
+      const url = URL.createObjectURL(blob);
+      setShareImagePreview({ url, blob, filename, copiedToClipboard });
+      showNotice(copiedToClipboard ? "分享图已生成并复制" : "分享图已生成");
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
-        setError(String(requestError.response?.data?.detail ?? "报告分享失败，请稍后重试。"));
+        setError(String(requestError.response?.data?.detail ?? "分享图生成失败，请稍后重试。"));
       } else {
-        setError("报告分享失败，请稍后重试。");
+        setError("分享图生成失败，请稍后重试。");
       }
     } finally {
       setIsSharing(false);
     }
+  };
+
+  const handleCopyShareImage = async () => {
+    if (!shareImagePreview) {
+      return;
+    }
+    const copied = await copyImageBlobToClipboard(shareImagePreview.blob);
+    if (!copied) {
+      setError("当前浏览器不能直接复制图片，请先下载后分享。");
+      return;
+    }
+    setShareImagePreview((current) => (current ? { ...current, copiedToClipboard: true } : current));
+    showNotice("分享图已复制");
   };
 
   const requestRetryAnalysis = (mode: "analysis" | "report" = "analysis") => {
@@ -937,7 +1244,7 @@ export default function ReportPage() {
           <div className="flex flex-wrap gap-2">
             {isParentMode && deferredAnalysis?.status === "completed" ? (
               <button type="button" onClick={() => void handleShareReport()} disabled={isSharing} className={isModern ? modernToolbarSecondary : reportToolbarSecondary}>
-                {isSharing ? (canUseNativeShare ? "分享中..." : "复制中...") : canUseNativeShare ? "分享" : "复制"}
+                {isSharing ? "生成中..." : "生成分享图"}
               </button>
             ) : null}
             {isParentMode ? (
@@ -962,9 +1269,14 @@ export default function ReportPage() {
               </>
             ) : null}
             {planId ? (
-              <Link to={`/plan/${planId}`} className={isModern ? modernToolbarPrimary : reportToolbarPrimary}>
-                查看 7 天训练计划
-              </Link>
+              <>
+                <Link to={`/plan/${planId}`} className={isModern ? modernToolbarPrimary : reportToolbarPrimary}>
+                  查看 7 天训练计划
+                </Link>
+                <button type="button" onClick={handleCreatePlan} disabled={isCreatingPlan} className={isModern ? modernToolbarSecondary : reportToolbarSecondary}>
+                  {isCreatingPlan ? "正在重新生成..." : "重新生成训练计划"}
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -1031,6 +1343,18 @@ export default function ReportPage() {
           {deferredAnalysis.report?.data_quality === "poor" ? (
             <div className="rounded-[28px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-700">
               当前视频可能存在人物过小、遮挡、模糊或关键帧不足，报告已尽量保守分析。建议用更近、更稳定的角度重新拍摄后复盘。
+            </div>
+          ) : null}
+
+          {isParentMode && deferredAnalysis.input_window_truncated ? (
+            <div
+              className={
+                isModern
+                  ? "rounded-lg border border-amber-300/20 bg-amber-400/10 px-5 py-4 text-sm leading-7 text-amber-100"
+                  : "rounded-[28px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-700"
+              }
+            >
+              本次 AI 没有看到完整视频：{analysisInputWindowText(deferredAnalysis)}
             </div>
           ) : null}
 
@@ -1189,11 +1513,12 @@ export default function ReportPage() {
                   {deferredAnalysis.skater_name ? <span>练习档案：{deferredAnalysis.skater_name}</span> : null}
                   {deferredAnalysis.skill_category ? <span>技能分类：{deferredAnalysis.skill_category}</span> : null}
                 </div>
-                {isParentMode && deferredAnalysis.action_window_start != null && deferredAnalysis.action_window_end != null ? (
+                {isParentMode && (analysisInputWindowText(deferredAnalysis) || (deferredAnalysis.action_window_start != null && deferredAnalysis.action_window_end != null)) ? (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                    <span>
-                      分析窗口：{deferredAnalysis.action_window_start.toFixed(1)}s - {deferredAnalysis.action_window_end.toFixed(1)}s
-                    </span>
+                    {analysisInputWindowText(deferredAnalysis) ? <span>{analysisInputWindowText(deferredAnalysis)}</span> : null}
+                    {!analysisInputWindowText(deferredAnalysis) && analysisWindowFallbackText(deferredAnalysis) ? (
+                      <span>{analysisWindowFallbackText(deferredAnalysis)}</span>
+                    ) : null}
                     {deferredAnalysis.is_slow_motion ? (
                       <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-bold text-orange-600">
                         慢动作 {Math.round(deferredAnalysis.source_fps ?? 0)}fps
@@ -1379,12 +1704,22 @@ export default function ReportPage() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">7-Day Plan</p>
               <h2 className="mt-2 text-2xl font-semibold text-slate-900">把这次诊断转成一周训练安排</h2>
-              <p className="mt-2 text-sm leading-7 text-slate-500">系统会基于当前报告生成固定 7 天主题的个性化训练计划。</p>
+              <p className="mt-2 text-sm leading-7 text-slate-500">系统会按这次报告、孩子档案和备注即时生成一周训练安排。</p>
             </div>
             {planId ? (
-              <Link to={`/plan/${planId}`} className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600">
-                查看训练计划
-              </Link>
+              <div className="flex flex-wrap gap-3">
+                <Link to={`/plan/${planId}`} className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600">
+                  查看训练计划
+                </Link>
+                <button
+                  type="button"
+                  onClick={handleCreatePlan}
+                  disabled={isCreatingPlan}
+                  className="min-h-[44px] rounded-full border border-blue-200 bg-white px-5 py-3 text-sm font-semibold text-blue-600 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isCreatingPlan ? "正在重新生成..." : "重新生成"}
+                </button>
+              </div>
             ) : (
               <button
                 type="button"
@@ -1392,7 +1727,7 @@ export default function ReportPage() {
                 disabled={isCreatingPlan}
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isCreatingPlan ? "正在生成训练计划..." : "生成训练计划"}
+                {isCreatingPlan ? "正在生成训练计划..." : "重新生成训练计划"}
               </button>
             )}
           </div>
@@ -1472,6 +1807,50 @@ export default function ReportPage() {
             })()
           }
         />
+      ) : null}
+
+      {shareImagePreview ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/36 px-4 py-6 backdrop-blur-sm">
+          <section className="app-card max-h-[92vh] w-full max-w-3xl overflow-y-auto p-5 tablet:p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Share Image</p>
+                <h2 className="mt-2 text-2xl font-semibold text-slate-900">报告分享图</h2>
+                <p className="mt-2 text-sm text-slate-500">
+                  {shareImagePreview.copiedToClipboard ? "已复制到剪贴板，可以直接粘贴分享。" : "当前浏览器未开放图片剪贴板，可下载后分享。"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShareImagePreview(null)}
+                className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="mt-5 overflow-hidden rounded-[28px] border border-slate-200 bg-slate-100">
+              <img src={shareImagePreview.url} alt="报告分享图预览" className="mx-auto block max-h-[62vh] w-auto max-w-full object-contain" />
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => void handleCopyShareImage()}
+                className="min-h-[44px] rounded-full border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+              >
+                复制图片
+              </button>
+              <a
+                href={shareImagePreview.url}
+                download={shareImagePreview.filename}
+                className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
+              >
+                下载 PNG
+              </a>
+            </div>
+          </section>
+        </div>
       ) : null}
 
       {celebrateSkillName ? <UnlockCelebration label={celebrateSkillName} /> : null}

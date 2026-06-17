@@ -15,7 +15,8 @@ from app.services.llm_context import AnalysisPromptContext, render_prompt_contex
 logger = logging.getLogger(__name__)
 
 REPORT_SYSTEM_PROMPT = (
-    "你是花样滑冰训练报告生成助手。"
+    "你是花样滑冰训练报告生成助手，面向儿童/青少年学员和家长输出可执行复盘。"
+    "你必须基于结构化视觉、视频时序和骨架证据生成结论；用户备注只能作为线索，不能替代证据。"
     "你必须严格输出 JSON 对象，不要输出 Markdown，不要解释，不要使用 ```json 包裹。"
 )
 
@@ -40,6 +41,37 @@ LOW_CONFIDENCE_NOTICE_THRESHOLD = 0.75
 LOW_CONFIDENCE_NOTICE = "低置信度帧较多，结果仅供参考。"
 REPORT_REQUEST_TIMEOUT_SECONDS = 120.0
 REPORT_JSON_MAX_ATTEMPTS = 3
+GENERIC_REPORT_TERMS = (
+    "数据质量",
+    "可分析信息有限",
+    "结合教练观察",
+    "轴心稳定",
+    "落冰缓冲",
+    "发力节奏",
+    "软膝盖",
+)
+ACTIONABLE_DRILLS = {
+    "jump": [
+        ("起跳发力", "做 3 组墙边压膝-蹬伸-收臂节奏练习，每组 6 次，先听到稳定节奏再上冰连贯完成。"),
+        ("空中轴心", "用半周小跳练习头肩髋叠直和双臂快速收到胸前，落地后保持 2 秒单脚滑出。"),
+        ("落冰控制", "做单脚软膝落冰停住练习，要求落冰膝盖弯曲、上身不前扑，再逐步接滑出弧线。"),
+    ],
+    "spin": [
+        ("旋转轴心", "先做两脚原地转体到单脚入转，要求头、肩、髋保持一条竖线，发现前倾就重新进入。"),
+        ("旋转速度", "练习入转后 1 秒内收臂和收自由腿，每次只追求更快收紧，不急着增加圈数。"),
+        ("旋转圈数", "用地面和冰上分段计数：进入、稳定旋转、退出分别拍手计时，先稳定 2 圈再冲 3 圈。"),
+    ],
+    "spiral": [
+        ("浮足伸展", "扶墙做燕式 8 秒保持，浮足向后上方伸直、脚尖延伸，支撑腿膝盖不要软塌。"),
+        ("速度保持", "进入前做 3 次渐进蹬冰，进入燕式后保持同一滑行弧线，不用抬腿高度换速度。"),
+        ("姿态稳定", "做短距离燕式进入-保持-滑出分段练习，每段只改一个目标：肩平、髋正、浮足直。"),
+    ],
+    "step": [
+        ("蹬冰力量", "用 6 步一组的前向有力蹬冰练习，要求每一步都能看到支撑腿压膝和完整推送。"),
+        ("节奏控制", "配合节拍器做慢-中-快 3 档步法，先保证每步重心转移清楚，再增加速度。"),
+        ("上身稳定", "做双臂固定的步法穿行练习，减少肩膀摆动，让转向主要来自膝盖和刃。"),
+    ],
+}
 
 
 def clean_json_text(raw_text: str) -> str:
@@ -145,22 +177,35 @@ def apply_child_score_floor(score: int, report: dict[str, Any], dual_path_meta: 
         return score
 
     issues = report.get("issues") if isinstance(report.get("issues"), list) else []
-    has_high_or_safety_risk = False
+    has_safety_or_incomplete_risk = False
     for issue in issues:
         if not isinstance(issue, dict):
             continue
-        severity = str(issue.get("severity", "")).strip().lower()
         text = f"{issue.get('category', '')} {issue.get('description', '')}".lower()
-        if severity == Severity.high.value or "安全" in text or "摔" in text or "risk" in text or "danger" in text:
-            has_high_or_safety_risk = True
+        if any(
+            marker in text
+            for marker in (
+                "安全",
+                "摔",
+                "跌倒",
+                "未完成",
+                "中断",
+                "risk",
+                "danger",
+                "fall",
+                "failed",
+                "incomplete",
+            )
+        ):
+            has_safety_or_incomplete_risk = True
             break
-    if has_high_or_safety_risk:
+    if has_safety_or_incomplete_risk:
         return score
 
     if data_quality == "good":
-        return max(score, 70)
+        return max(score, 80)
     if data_quality == "partial":
-        return max(score, 65)
+        return max(score, 70)
     return score
 
 
@@ -200,6 +245,10 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data.get("bio_subscores"), dict) else None
         quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
 
+    user_note = payload.get("user_note")
+    if user_note is None:
+        user_note = payload.get("note")
+
     normalized = {
         "summary": str(payload.get("summary", "")).strip(),
         "issues": normalized_issues,
@@ -211,8 +260,351 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
             quality_flags=quality_flags,
         ),
         "data_quality": str(payload.get("data_quality", "partial")).strip() or "partial",
+        "user_note": str(user_note).strip() if isinstance(user_note, str) and user_note.strip() else None,
     }
     return attach_score_breakdown(normalized)
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _norm_key(value: Any) -> str:
+    return re.sub(r"\s+", "", _text(value).lower())
+
+
+def _dedupe_strings(values: list[Any], *, limit: int = 6) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _text(value)
+        if not text:
+            continue
+        key = _norm_key(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(text)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _analysis_profile_from_context(
+    action_type: str,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None = None,
+) -> str:
+    if prompt_context is not None and prompt_context.analysis_profile:
+        profile = _text(prompt_context.analysis_profile).lower()
+        if profile:
+            return "step" if profile == "steps" else profile
+    meta_profile = _text((dual_path_meta or {}).get("analysis_profile")).lower()
+    if meta_profile:
+        return "step" if meta_profile == "steps" else meta_profile
+    action = _text(action_type)
+    if "旋" in action:
+        return "spin"
+    if "燕" in action or "螺旋" in action:
+        return "spiral"
+    if "步" in action or "蹬" in action:
+        return "step"
+    return "jump"
+
+
+def _phase_from_text(text: str, profile: str) -> str | None:
+    phase_tokens = [
+        "起跳",
+        "腾空",
+        "落冰",
+        "滑出",
+        "旋转入",
+        "旋转中",
+        "旋转出",
+        "旋转进入",
+        "旋转进行",
+        "旋转退出",
+        "燕式进入",
+        "燕式保持",
+        "燕式滑出",
+        "准备",
+        "步法",
+    ]
+    for token in phase_tokens:
+        if token in text:
+            return token
+    defaults = {
+        "spin": "旋转中",
+        "spiral": "燕式保持",
+        "step": "步法",
+        "jump": "起跳",
+    }
+    return defaults.get(profile)
+
+
+def _category_from_issue(text: str, profile: str) -> str:
+    if any(token in text for token in ("浮足", "自由腿", "抬腿", "伸直")):
+        return "浮足伸展"
+    if any(token in text for token in ("速度", "转速", "圈", "周数")):
+        return "旋转速度" if profile == "spin" else "速度保持"
+    if any(token in text for token in ("轴", "前倾", "后仰", "侧倾", "躯干")):
+        return "旋转轴心" if profile == "spin" else "轴心控制"
+    if any(token in text for token in ("起跳", "蹬伸", "蹬冰", "发力")):
+        return "起跳发力" if profile == "jump" else "蹬冰力量"
+    if any(token in text for token in ("手臂", "收臂")):
+        return "手臂协调"
+    if any(token in text for token in ("落冰", "缓冲", "滑出")):
+        return "落冰控制"
+    return {
+        "spin": "旋转质量",
+        "spiral": "燕式姿态",
+        "step": "步法质量",
+    }.get(profile, "技术问题")
+
+
+def _issue_from_text(text: str, profile: str, *, source: str = "结构化证据") -> dict[str, object]:
+    phase = _phase_from_text(text, profile)
+    return {
+        "category": _category_from_issue(text, profile),
+        "description": text,
+        "severity": Severity.medium.value,
+        "phase": phase,
+        "frames": [],
+        "source": source,
+    }
+
+
+def _path_b_evidence(dual_path_meta: dict[str, Any] | None) -> dict[str, Any]:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    path_b = meta.get("path_b_evidence")
+    return path_b if isinstance(path_b, dict) else {}
+
+
+def _video_temporal_evidence(dual_path_meta: dict[str, Any] | None) -> dict[str, Any]:
+    meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
+    temporal = meta.get("video_temporal")
+    return temporal if isinstance(temporal, dict) else {}
+
+
+def _collect_path_b_issue_texts(dual_path_meta: dict[str, Any] | None) -> list[str]:
+    path_b = _path_b_evidence(dual_path_meta)
+    values: list[Any] = []
+    if isinstance(path_b.get("top_issues"), list):
+        values.extend(path_b["top_issues"])
+    for frame in path_b.get("frame_analysis", []) if isinstance(path_b.get("frame_analysis"), list) else []:
+        if isinstance(frame, dict) and isinstance(frame.get("issues"), list):
+            values.extend(frame["issues"][:2])
+    return _dedupe_strings(values, limit=5)
+
+
+def _collect_temporal_issue_texts(dual_path_meta: dict[str, Any] | None) -> list[str]:
+    temporal = _video_temporal_evidence(dual_path_meta)
+    values: list[Any] = []
+    macro = temporal.get("macro_assessment")
+    if isinstance(macro, dict) and isinstance(macro.get("top_issues"), list):
+        values.extend(macro["top_issues"])
+    for segment in temporal.get("phase_segments", []) if isinstance(temporal.get("phase_segments"), list) else []:
+        if isinstance(segment, dict):
+            issues = segment.get("issues")
+            if isinstance(issues, list):
+                values.extend(issues[:1])
+    return _dedupe_strings(values, limit=4)
+
+
+def _collect_frame_issue_texts(vision_summary: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for frame in vision_summary.get("reliable_frames", []) if isinstance(vision_summary.get("reliable_frames"), list) else []:
+        if isinstance(frame, dict) and isinstance(frame.get("issues"), list):
+            values.extend(frame["issues"][:1])
+    return _dedupe_strings(values, limit=4)
+
+
+def _meaningful_report_issues(report: dict[str, Any]) -> list[dict[str, object]]:
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    output: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        description = _text(issue.get("description"))
+        category = _text(issue.get("category"))
+        if not description:
+            continue
+        generic_score = sum(1 for term in GENERIC_REPORT_TERMS if term in description or term in category)
+        if generic_score >= 2 and len(description) < 36:
+            continue
+        key = _norm_key(description)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(issue)
+    return output[:5]
+
+
+def _synthesize_issues_from_evidence(
+    action_type: str,
+    vision_summary: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None,
+    prompt_context: AnalysisPromptContext | None,
+) -> list[dict[str, object]]:
+    profile = _analysis_profile_from_context(action_type, prompt_context, dual_path_meta)
+    texts = (
+        _collect_path_b_issue_texts(dual_path_meta)
+        + _collect_temporal_issue_texts(dual_path_meta)
+        + _collect_frame_issue_texts(vision_summary)
+    )
+    issues: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for text in _dedupe_strings(texts, limit=5):
+        key = _norm_key(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(_issue_from_text(text, profile))
+        if len(issues) >= 3:
+            break
+    return issues
+
+
+def _is_generic_improvement(item: dict[str, Any]) -> bool:
+    target = _text(item.get("target"))
+    action = _text(item.get("action"))
+    if not target or not action:
+        return True
+    joined = f"{target} {action}"
+    hits = sum(1 for term in GENERIC_REPORT_TERMS if term in joined)
+    return hits >= 2 and len(action) < 40
+
+
+def _drills_for_issue(issue: dict[str, object], profile: str) -> list[tuple[str, str]]:
+    category = _text(issue.get("category"))
+    description = _text(issue.get("description"))
+    drills = ACTIONABLE_DRILLS.get(profile) or ACTIONABLE_DRILLS["jump"]
+    matched = [
+        drill
+        for drill in drills
+        if any(token in f"{category}{description}" for token in drill[0].split())
+        or drill[0] in f"{category}{description}"
+    ]
+    return matched or drills
+
+
+def _synthesize_improvements(
+    issues: list[dict[str, object]],
+    *,
+    action_type: str,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    profile = _analysis_profile_from_context(action_type, prompt_context, dual_path_meta)
+    improvements: list[dict[str, str]] = []
+    seen: set[str] = set()
+    source_issues = issues or [_issue_from_text("", profile)]
+    for issue in source_issues:
+        for target, action in _drills_for_issue(issue, profile):
+            key = _norm_key(f"{target}{action}")
+            if key in seen:
+                continue
+            seen.add(key)
+            improvements.append({"target": target, "action": action})
+            break
+        if len(improvements) >= 3:
+            break
+    for target, action in ACTIONABLE_DRILLS.get(profile, ACTIONABLE_DRILLS["jump"]):
+        if len(improvements) >= 3:
+            break
+        key = _norm_key(f"{target}{action}")
+        if key not in seen:
+            seen.add(key)
+            improvements.append({"target": target, "action": action})
+    return improvements
+
+
+def _summary_from_evidence(
+    action_type: str,
+    issues: list[dict[str, object]],
+    *,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None,
+) -> str:
+    profile = _analysis_profile_from_context(action_type, prompt_context, dual_path_meta)
+    labels = {
+        "jump": "跳跃",
+        "spin": "旋转",
+        "spiral": "燕式滑行",
+        "step": "步法",
+    }
+    if not issues:
+        return f"本次{labels.get(profile, action_type)}动作流程可继续复核，训练上先保留基础节奏和姿态控制。"
+    main = "；".join(_text(issue.get("description")) for issue in issues[:2] if _text(issue.get("description")))
+    focus = {
+        "jump": "起跳发力、空中轴心和落冰滑出",
+        "spin": "入转收紧、轴心直立和有效圈数",
+        "spiral": "浮足伸展、支撑腿稳定和滑行速度",
+        "step": "蹬冰力量、重心转移和节奏",
+    }.get(profile, "核心技术细节")
+    return f"本次{labels.get(profile, action_type)}可确认的主要问题是：{main}。后续训练重点放在{focus}。"
+
+
+def _refine_report_with_structured_evidence(
+    report: dict[str, Any],
+    *,
+    action_type: str,
+    vision_summary: dict[str, Any],
+    dual_path_meta: dict[str, Any] | None,
+    prompt_context: AnalysisPromptContext | None,
+) -> dict[str, Any]:
+    refined = dict(report)
+    existing_issues = _meaningful_report_issues(refined)
+    evidence_issues = _synthesize_issues_from_evidence(action_type, vision_summary, dual_path_meta, prompt_context)
+
+    merged_issues: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for issue in [*existing_issues, *evidence_issues]:
+        description = _text(issue.get("description")) if isinstance(issue, dict) else ""
+        if not description:
+            continue
+        key = _norm_key(description)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_issues.append(issue)
+        if len(merged_issues) >= 3:
+            break
+    if merged_issues:
+        refined["issues"] = merged_issues
+
+    improvements = [
+        item
+        for item in refined.get("improvements", [])
+        if isinstance(item, dict) and not _is_generic_improvement(item)
+    ][:3]
+    if len(improvements) < 2 or not merged_issues:
+        improvements = _synthesize_improvements(
+            merged_issues,
+            action_type=action_type,
+            prompt_context=prompt_context,
+            dual_path_meta=dual_path_meta,
+        )
+    refined["improvements"] = improvements
+
+    summary = _text(refined.get("summary"))
+    generic_summary = not summary or sum(1 for term in GENERIC_REPORT_TERMS if term in summary) >= 3
+    if generic_summary and merged_issues:
+        refined["summary"] = _summary_from_evidence(
+            action_type,
+            merged_issues,
+            prompt_context=prompt_context,
+            dual_path_meta=dual_path_meta,
+        )
+
+    focus = _text(refined.get("training_focus"))
+    if not focus or sum(1 for term in GENERIC_REPORT_TERMS if term in focus) >= 2:
+        target_names = "、".join(item["target"] for item in improvements[:2] if item.get("target"))
+        if target_names:
+            refined["training_focus"] = f"本阶段优先训练{target_names}，每次只挑一个目标复盘。"
+
+    return refined
 
 
 def _resolve_report_data_quality(
@@ -252,6 +644,30 @@ def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> st
     if not isinstance(conflict_fields, list):
         conflict_fields = []
 
+    path_b_evidence = _path_b_evidence(dual_path_meta)
+    path_b_context = ""
+    if path_b_evidence:
+        compact_path_b = {
+            "top_issues": path_b_evidence.get("top_issues") if isinstance(path_b_evidence.get("top_issues"), list) else [],
+            "top_positives": path_b_evidence.get("top_positives") if isinstance(path_b_evidence.get("top_positives"), list) else [],
+            "action_phase_summary": path_b_evidence.get("action_phase_summary") if isinstance(path_b_evidence.get("action_phase_summary"), dict) else {},
+            "frame_analysis": [
+                {
+                    "frame_id": frame.get("frame_id"),
+                    "phase": frame.get("phase"),
+                    "bio_observations": frame.get("bio_observations") if isinstance(frame.get("bio_observations"), dict) else {},
+                    "issues": frame.get("issues") if isinstance(frame.get("issues"), list) else [],
+                }
+                for frame in (path_b_evidence.get("frame_analysis") or [])
+                if isinstance(frame, dict)
+            ][:6],
+        }
+        path_b_context = (
+            "Path B 可直接用于报告的问题/优点证据：\n"
+            f"  {json.dumps(compact_path_b, ensure_ascii=False)}\n"
+            "当 Path A 失败或问题列表过泛时，必须优先使用 Path B top_issues 生成 issues 和 improvements。\n"
+        )
+
     return (
         "\n\n=== 双路交叉验证参考 ===\n"
         f"两路一致率：{_format_percent(dual_path_meta.get('overall_agreement_rate'))}\n"
@@ -262,6 +678,7 @@ def _build_dual_path_report_context(dual_path_meta: dict[str, Any] | None) -> st
         f"分歧描述：{dual_path_meta.get('conflict_summary', '')}\n"
         "Path B 量化分析子分参考：\n"
         f"  {json.dumps(dual_path_meta.get('path_b_subscores') or {}, ensure_ascii=False)}\n"
+        f"{path_b_context}"
         "\n注意：subscores 字段由后端融合计算，你不要自行加权。\n"
         "请根据骨架信号设置 data_quality：\n"
         "  reliable → good / uncertain → partial / likely_wrong → poor\n"
@@ -484,18 +901,33 @@ def _apply_low_confidence_notice(report: dict[str, Any], vision_summary: dict[st
     return report
 
 
-def _fallback_report(action_type: str, vision_structured: dict[str, Any], bio_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def _fallback_report(
+    action_type: str,
+    vision_structured: dict[str, Any],
+    bio_data: dict[str, Any] | None = None,
+    *,
+    dual_path_meta: dict[str, Any] | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
+) -> dict[str, Any]:
     vision_summary = summarize_vision_for_report(vision_structured)
     frame_analysis = vision_summary.get("reliable_frames", [])
-    issues: list[dict[str, object]] = []
+    issues: list[dict[str, object]] = _synthesize_issues_from_evidence(
+        action_type,
+        vision_summary,
+        dual_path_meta,
+        prompt_context,
+    )
     for frame in frame_analysis:
         if not isinstance(frame, dict):
             continue
         for issue in frame.get("issues", [])[:1]:
+            issue_text = str(issue)
+            if any(_norm_key(issue_text) == _norm_key(existing.get("description")) for existing in issues):
+                continue
             issues.append(
                 {
                     "category": f"{frame.get('phase', '动作')}阶段",
-                    "description": str(issue),
+                    "description": issue_text,
                     "severity": "medium",
                     "phase": str(frame.get("phase", "")),
                     "frames": [str(frame.get("frame_id", ""))],
@@ -515,14 +947,26 @@ def _fallback_report(action_type: str, vision_structured: dict[str, Any], bio_da
             }
         ]
 
+    synthesized_improvements = _synthesize_improvements(
+        issues,
+        action_type=action_type,
+        prompt_context=prompt_context,
+        dual_path_meta=dual_path_meta,
+    )
     payload = {
-        "summary": f"本次{action_type}复盘已结合结构化视觉和骨骼几何指标生成。整体动作可继续围绕轴心、发力节奏和落冰稳定性微调。",
+        "summary": _summary_from_evidence(
+            action_type,
+            issues,
+            prompt_context=prompt_context,
+            dual_path_meta=dual_path_meta,
+        ),
         "issues": issues,
-        "improvements": [
-            {"target": "轴心稳定", "action": "用短时、低冲击的分段练习保持头肩髋对齐。"},
-            {"target": "落冰缓冲", "action": "练习轻落地和软膝盖停住，优先保证安全稳定。"},
-        ],
-        "training_focus": "本阶段重点是稳定轴心和提高落冰控制。",
+        "improvements": synthesized_improvements,
+        "training_focus": (
+            f"本阶段优先训练{'、'.join(item['target'] for item in synthesized_improvements[:2])}，每次只挑一个目标复盘。"
+            if synthesized_improvements
+            else "本阶段重点是先稳定动作流程，再逐项修正技术细节。"
+        ),
         "subscores": _fallback_subscores(),
         "data_quality": "partial",
     }
@@ -534,8 +978,17 @@ def _fallback_report_after_parse_failure(
     vision_structured: dict[str, Any],
     bio_data: dict[str, Any] | None,
     detail: str,
+    *,
+    dual_path_meta: dict[str, Any] | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
 ) -> dict[str, Any]:
-    report = _fallback_report(action_type, vision_structured, bio_data)
+    report = _fallback_report(
+        action_type,
+        vision_structured,
+        bio_data,
+        dual_path_meta=dual_path_meta,
+        prompt_context=prompt_context,
+    )
     report["fallback_reason"] = AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value
     report["fallback_detail"] = detail[:500]
     if report.get("data_quality") == "good":
@@ -566,7 +1019,31 @@ def _fallback_report_after_ai_failure(
     bio_data: dict[str, Any] | None,
     detail: str,
     reason: str = AnalysisErrorCode.AI_API_TIMEOUT.value,
+    *,
+    vision_structured: dict[str, Any] | None = None,
+    dual_path_meta: dict[str, Any] | None = None,
+    prompt_context: AnalysisPromptContext | None = None,
 ) -> dict[str, Any]:
+    has_structured_evidence = bool(
+        _collect_path_b_issue_texts(dual_path_meta)
+        or _collect_temporal_issue_texts(dual_path_meta)
+        or _collect_frame_issue_texts(summarize_vision_for_report(vision_structured))
+        if isinstance(vision_structured, dict)
+        else False
+    )
+    if isinstance(vision_structured, dict) and has_structured_evidence:
+        report = _fallback_report(
+            action_type,
+            vision_structured,
+            bio_data,
+            dual_path_meta=dual_path_meta,
+            prompt_context=prompt_context,
+        )
+        report["fallback_used"] = True
+        report["fallback_reason"] = reason
+        report["fallback_detail"] = detail[:500]
+        return report
+
     bio_subscores = bio_data.get("bio_subscores") if isinstance(bio_data, dict) else None
     subscores = {
         key: _clamp_score((bio_subscores or {}).get(key), _fallback_subscores()[key])
@@ -632,7 +1109,15 @@ async def generate_report(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
         failure = classify_ai_failure(exc)
-        return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
+        return _fallback_report_after_ai_failure(
+            action_type,
+            bio_data,
+            failure.detail,
+            failure.code.value,
+            vision_structured=vision_structured,
+            dual_path_meta=dual_path_meta,
+            prompt_context=prompt_context,
+        )
 
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
     context_block = (
@@ -673,6 +1158,15 @@ async def generate_report(
         "质量限制只作为补充说明。只有 apply_low_confidence_notice 为 true 时，才在 summary 末尾加入“低置信度帧较多，结果仅供参考”。\n"
         "当 data_quality_hint 为 partial/poor 或 camera_view 受限时，请区分“可确认的动作问题”和“不可确认的细节”；"
         "不可确认的刃型、周数或完成质量可以写入 issues，但不能替代训练建议。\n\n"
+        "动作不确定性要求：如果 action_subtype 未指定、用户只知道动作大类，或 evidence 不足以确认具体跳种/旋转/步法名称，"
+        "请使用动作大类和阶段来描述问题，不要编造具体细项。"
+        "只有在视觉摘要、视频时序或 profile_evidence 明确支持时，才把 Lutz/Flip/Axel 等具体名称写进 summary/issues。\n"
+        "用户备注/comments 要体现在关注点和训练建议中，但必须标注为“家长/学员备注提到...”或只作为训练重点线索，"
+        "不要把备注里的感受写成已验证技术事实。\n\n"
+        "问题与建议质量要求：issues 必须至少 2 条可执行技术问题，优先引用 Path B top_issues 或帧级 issues；"
+        "不要只写“数据质量有限”。improvements 必须逐条对应具体问题，写成可以当天训练的动作或分段练习；"
+        "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段、次数和儿童安全边界。"
+        "所有训练建议必须低冲击、短时长、可由家长或教练安全监督；不要安排负重、Bosu、旋转椅或痛苦拉伸。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
         f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
         + context_block
@@ -705,7 +1199,15 @@ async def generate_report(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Report AI request failed after retries, using biomechanics fallback: %s", exc)
             failure = classify_ai_failure(exc)
-            return _fallback_report_after_ai_failure(action_type, bio_data, failure.detail, failure.code.value)
+            return _fallback_report_after_ai_failure(
+                action_type,
+                bio_data,
+                failure.detail,
+                failure.code.value,
+                vision_structured=vision_structured,
+                dual_path_meta=dual_path_meta,
+                prompt_context=prompt_context,
+            )
 
         cleaned = clean_json_text(raw_content)
         try:
@@ -719,7 +1221,17 @@ async def generate_report(
 
         parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
 
+        if prompt_context is not None and prompt_context.user_note:
+            parsed["user_note"] = prompt_context.user_note
+
         report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
+        report = _refine_report_with_structured_evidence(
+            report,
+            action_type=action_type,
+            vision_summary=vision_summary,
+            dual_path_meta=dual_path_meta,
+            prompt_context=prompt_context,
+        )
         if report["summary"] and report["training_focus"]:
             if attempt > 1:
                 report["report_retry_count"] = attempt - 1
@@ -734,4 +1246,6 @@ async def generate_report(
         vision_structured,
         bio_data,
         last_failure_detail,
+        dual_path_meta=dual_path_meta,
+        prompt_context=prompt_context,
     )

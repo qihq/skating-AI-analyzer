@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
-from app.services.video_temporal import analyze_video_temporal
+from app.services.video_temporal import VIDEO_TEMPORAL_MAX_TOKENS, analyze_video_temporal
 
 
 def _qwen_provider(model_id: str = "qwen-vl-max-latest") -> SimpleNamespace:
@@ -20,6 +20,20 @@ def _qwen_provider(model_id: str = "qwen-vl-max-latest") -> SimpleNamespace:
         name="qwen",
         provider="qwen",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model_id=model_id,
+        vision_model=None,
+        api_key="test-key",
+        notes=None,
+    )
+
+
+def _mimo_provider(model_id: str = "mimo-v2.5") -> SimpleNamespace:
+    return SimpleNamespace(
+        id="mimo-provider",
+        slot="vision",
+        name="mimo",
+        provider="mimo",
+        base_url="https://api.xiaomimimo.com/v1",
         model_id=model_id,
         vision_model=None,
         api_key="test-key",
@@ -82,6 +96,8 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         kwargs = request_mock.await_args.kwargs
         self.assertEqual(request_mock.await_args.args[0].model_id, "qwen3.6-plus")
         self.assertEqual(kwargs["temperature"], 0.0)
+        self.assertEqual(kwargs["max_tokens"], VIDEO_TEMPORAL_MAX_TOKENS)
+        self.assertGreaterEqual(kwargs["max_tokens"], 3200)
         self.assertIn("video_temporal_v1", kwargs["user_prompt"])
         self.assertIn("qwen3.6-plus", kwargs["user_prompt"])
         self.assertIn("只输出一个合法 JSON 对象", kwargs["system_prompt"])
@@ -103,6 +119,51 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["valid"])
         provider_mock.assert_awaited_once()
         request_mock.assert_awaited_once()
+
+    async def test_analyze_video_temporal_dispatches_to_mimo_provider(self) -> None:
+        request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
+
+        with patch("app.services.video_temporal.request_mimo_video_completion", request_mock):
+            result = await analyze_video_temporal(
+                Path("clip.mp4"),
+                action_type="jump",
+                action_subtype="Axel",
+                video_duration_sec=3.0,
+                source_fps=30.0,
+                provider=_mimo_provider(),
+            )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["provider"], "mimo")
+        self.assertEqual(result["model"], "mimo-v2.5")
+        kwargs = request_mock.await_args.kwargs
+        self.assertEqual(kwargs["temperature"], 0.0)
+        self.assertEqual(kwargs["max_tokens"], VIDEO_TEMPORAL_MAX_TOKENS)
+        self.assertGreaterEqual(kwargs["max_tokens"], 3200)
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        self.assertIn("video_temporal_v1", kwargs["user_prompt"])
+        self.assertIn("mimo-v2.5", kwargs["user_prompt"])
+
+    async def test_analyze_video_temporal_passes_retry_context_to_prompt(self) -> None:
+        request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
+
+        with patch("app.services.video_temporal.request_mimo_video_completion", request_mock):
+            result = await analyze_video_temporal(
+                Path("clip.mp4"),
+                action_type="jump",
+                action_subtype="Axel",
+                video_duration_sec=3.0,
+                source_fps=30.0,
+                provider=_mimo_provider(),
+                retry_context={
+                    "retry_reason_flags": ["video_temporal_resolver_coherent_tal_motion_conflict_rejected"],
+                    "rejected_key_moments": {"T_takeoff_sec": 1.0, "A_air_sec": 1.2, "L_landing_sec": 1.4},
+                },
+            )
+
+        self.assertTrue(result["valid"])
+        self.assertIn("QUALITY_GATE_RETRY_CONTEXT", request_mock.await_args.kwargs["user_prompt"])
+        self.assertIn("rejected_key_moments", request_mock.await_args.kwargs["user_prompt"])
 
     async def test_analyze_video_temporal_offsets_action_window_clip_timestamps(self) -> None:
         request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
@@ -166,8 +227,12 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["fallback_reason"], "video_temporal_parse_failed")
         self.assertIn("video_temporal_invalid_json", result["quality_flags"])
         self.assertIn("video_temporal_parse_failed", result["quality_flags"])
+        self.assertEqual(result["raw_response_excerpt"], "{not json")
+        self.assertEqual(result["raw_response_length"], len("{not json"))
+        self.assertFalse(result["raw_response_truncated"])
+        self.assertIsInstance(result["parse_error_detail"], str)
 
-    async def test_non_qwen_provider_is_soft_fallback_and_does_not_call_video_api(self) -> None:
+    async def test_unsupported_provider_is_soft_fallback_and_does_not_call_video_api(self) -> None:
         provider = SimpleNamespace(
             id="doubao-provider",
             slot="vision",
@@ -181,7 +246,10 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         request_mock = AsyncMock()
 
-        with patch("app.services.video_temporal.request_dashscope_video_completion", request_mock):
+        with (
+            patch("app.services.video_temporal.request_dashscope_video_completion", request_mock),
+            patch("app.services.video_temporal.request_mimo_video_completion", AsyncMock()) as mimo_mock,
+        ):
             result = await analyze_video_temporal(
                 Path("clip.mp4"),
                 action_type="jump",
@@ -194,6 +262,7 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["fallback_reason"], "video_temporal_provider_not_qwen")
         self.assertIn("video_temporal_provider_not_qwen", result["quality_flags"])
         request_mock.assert_not_awaited()
+        mimo_mock.assert_not_awaited()
 
     async def test_budget_error_returns_budget_fallback_flag(self) -> None:
         request_mock = AsyncMock(

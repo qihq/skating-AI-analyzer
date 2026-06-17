@@ -12,7 +12,9 @@ models/*.pt
 *.zip
 
 # Temporary files
+tmp/
 tmp-test/
+.codegraph/
 *.tmp
 *.log
 .claude/*

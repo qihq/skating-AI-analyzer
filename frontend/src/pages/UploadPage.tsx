@@ -6,6 +6,7 @@ import { fetchSkaters, Skater, uploadAnalysis } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import TopNav from "../components/TopNav";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
+import { appendManualWindow, readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
 
 const ACTION_OPTIONS = ["跳跃", "旋转", "步法", "自由滑"];
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
@@ -31,6 +32,9 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
+  const [manualWindowStart, setManualWindowStart] = useState("");
+  const [manualWindowEnd, setManualWindowEnd] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +96,12 @@ export default function UploadPage() {
     }
     if (validateFile(file)) {
       setSelectedFile(file);
+      setVideoDurationSec(null);
+      setManualWindowStart("");
+      setManualWindowEnd("");
+      void readVideoDuration(file)
+        .then((duration) => setVideoDurationSec(duration))
+        .catch(() => setVideoDurationSec(null));
     }
   };
 
@@ -128,6 +138,12 @@ export default function UploadPage() {
       return;
     }
 
+    const windowError = validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec);
+    if (windowError) {
+      setError(windowError);
+      return;
+    }
+
     const formData = new FormData();
     formData.append("file", selectedFile);
     formData.append("action_type", actionType);
@@ -140,6 +156,7 @@ export default function UploadPage() {
     if (note.trim()) {
       formData.append("note", note.trim());
     }
+    appendManualWindow(formData, manualWindowStart, manualWindowEnd);
 
     setIsSubmitting(true);
     setError(null);
@@ -260,6 +277,38 @@ export default function UploadPage() {
                 </div>
               </div>
             </button>
+
+            {videoDurationSec != null ? <p className="mt-3 text-xs text-slate-300">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
+
+            {shouldShowManualWindow(videoDurationSec) ? (
+              <div className="mt-4 rounded-[1.4rem] border border-amber-200/30 bg-amber-100/10 p-4">
+                <p className="text-sm font-semibold text-white">AI 输入片段</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="text-xs font-semibold text-slate-300">开始秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowStart}
+                      onChange={(event) => setManualWindowStart(event.target.value)}
+                      className="input-shell"
+                    />
+                  </label>
+                  <label className="space-y-2">
+                    <span className="text-xs font-semibold text-slate-300">结束秒数</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={manualWindowEnd}
+                      onChange={(event) => setManualWindowEnd(event.target.value)}
+                      className="input-shell"
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-6 grid gap-5">
               <label className="space-y-2">

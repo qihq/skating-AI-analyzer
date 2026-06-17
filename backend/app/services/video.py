@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import shutil
+import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -36,11 +39,14 @@ ACTION_CLIP_MAX_MB = int(os.getenv("ACTION_CLIP_MAX_MB", "100"))
 ACTION_AI_CLIP_SIZE = os.getenv("ACTION_AI_CLIP_SIZE", "640x360")
 ACTION_AI_CLIP_FPS = float(os.getenv("ACTION_AI_CLIP_FPS", "15"))
 ACTION_AI_CLIP_CRF = int(os.getenv("ACTION_AI_CLIP_CRF", "30"))
+ACTION_AI_CLIP_MAX_SECONDS = float(os.getenv("ACTION_AI_CLIP_MAX_SECONDS", str(max(ACTION_CLIP_MAX_SECONDS, 15.0))))
 ACTION_AI_CLIP_MAX_MB = int(os.getenv("ACTION_AI_CLIP_MAX_MB", "40"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
+VIDEO_HASH_CHUNK_BYTES = 1024 * 1024
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".avi"}
 SLOW_MOTION_THRESHOLD_FPS = 60.0
 ACTION_WINDOW_DETECTION_FPS = 2
+JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS = float(os.getenv("JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS", "15"))
 BLUR_THRESHOLD = float(os.getenv("FRAME_BLUR_THRESHOLD", "80.0"))
 MIN_VIDEO_DURATION_SECONDS = 0.5
 MIN_VIDEO_WIDTH = 320
@@ -81,6 +87,10 @@ FFMPEG_RETRYABLE_ERRORS = (
     "could not open encoder before eof",
     "error while opening encoder",
 )
+_LAST_ACTION_WINDOW_DIAGNOSTICS: ContextVar[dict[str, object] | None] = ContextVar(
+    "last_action_window_diagnostics",
+    default=None,
+)
 
 
 @dataclass(slots=True)
@@ -99,6 +109,35 @@ class VideoSamplingMetadata:
     effective_fps: float
     source_fps: float
     is_slow_motion: bool
+
+
+@dataclass(slots=True)
+class VideoInputWindow:
+    source_duration_sec: float | None
+    input_window_start_sec: float
+    input_window_end_sec: float
+    input_window_duration_sec: float
+    input_window_mode: str
+    input_window_truncated: bool
+    input_window_reason: str
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "source_duration_sec": round(self.source_duration_sec, 3) if isinstance(self.source_duration_sec, (int, float)) else None,
+            "input_window_start_sec": round(self.input_window_start_sec, 3),
+            "input_window_end_sec": round(self.input_window_end_sec, 3),
+            "input_window_duration_sec": round(self.input_window_duration_sec, 3),
+            "input_window_mode": self.input_window_mode,
+            "input_window_truncated": self.input_window_truncated,
+            "input_window_reason": self.input_window_reason,
+        }
+
+
+@dataclass(slots=True)
+class ActionWindowSelection:
+    start_frame: int
+    end_frame: int
+    diagnostics: dict[str, object]
 
 
 def get_frame_rate_for_profile(profile: str | None) -> int:
@@ -173,6 +212,113 @@ def _effective_sampling_context(
     # 设计说明: N 个采样帧只有 N-1 个时间间隔；慢动作源视频先折算回动作真实时间轴。
     effective_fps = (max(sample_count, 2) - 1) / effective_duration
     return window_start_sec, window_end_sec, round(effective_fps, 3)
+
+
+def _normalize_manual_input_window(
+    manual_start_sec: float | None,
+    manual_end_sec: float | None,
+    *,
+    source_duration_sec: float | None,
+) -> tuple[float, float] | None:
+    if manual_start_sec is None and manual_end_sec is None:
+        return None
+    if manual_start_sec is None or manual_end_sec is None:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window requires both start and end seconds.",
+        )
+    try:
+        start = float(manual_start_sec)
+        end = float(manual_end_sec)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window start/end must be valid numbers.",
+        ) from exc
+    if start < 0:
+        raise AnalysisPipelineError(AnalysisErrorCode.VIDEO_FORMAT_INVALID, "Manual action window start must be >= 0.")
+    if end <= start:
+        raise AnalysisPipelineError(AnalysisErrorCode.VIDEO_FORMAT_INVALID, "Manual action window end must be greater than start.")
+    if source_duration_sec is not None and source_duration_sec > 0:
+        if start >= source_duration_sec:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+                "Manual action window start is outside the source video duration.",
+            )
+        if end > source_duration_sec + 0.01:
+            raise AnalysisPipelineError(
+                AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+                "Manual action window end is outside the source video duration.",
+            )
+        end = min(end, source_duration_sec)
+    if end - start < MIN_VIDEO_DURATION_SECONDS:
+        raise AnalysisPipelineError(
+            AnalysisErrorCode.VIDEO_FORMAT_INVALID,
+            "Manual action window is too short for analysis.",
+        )
+    return round(start, 3), round(end, 3)
+
+
+def build_video_input_window(
+    video_path: Path,
+    *,
+    manual_start_sec: float | None = None,
+    manual_end_sec: float | None = None,
+) -> VideoInputWindow:
+    duration = detect_video_duration(video_path)
+    source_duration = float(duration) if duration and duration > 0 else None
+    manual_window = _normalize_manual_input_window(
+        manual_start_sec,
+        manual_end_sec,
+        source_duration_sec=source_duration,
+    )
+    if manual_window is not None:
+        start, end = manual_window
+        full_source_range = (
+            source_duration is not None
+            and abs(start) <= 0.01
+            and abs(end - source_duration) <= 0.01
+        )
+        return VideoInputWindow(
+            source_duration_sec=source_duration,
+            input_window_start_sec=start,
+            input_window_end_sec=end,
+            input_window_duration_sec=round(end - start, 3),
+            input_window_mode="manual_window",
+            input_window_truncated=not full_source_range,
+            input_window_reason="manual window selected by user",
+        )
+
+    end = source_duration if source_duration is not None else float(MAX_SECONDS)
+    mode = "full_context"
+    truncated = False
+    reason = "full_context"
+    if source_duration is None:
+        end = float(MAX_SECONDS)
+        mode = "system_truncated"
+        truncated = True
+        reason = "source duration unavailable; used system fallback window"
+    return VideoInputWindow(
+        source_duration_sec=source_duration,
+        input_window_start_sec=0.0,
+        input_window_end_sec=round(end, 3),
+        input_window_duration_sec=round(end, 3),
+        input_window_mode=mode,
+        input_window_truncated=truncated,
+        input_window_reason=reason,
+    )
+
+
+def attach_input_window_payload(
+    motion_payload: dict[str, object],
+    input_window: VideoInputWindow | None,
+) -> dict[str, object]:
+    if input_window is None:
+        return motion_payload
+    payload = input_window.to_payload()
+    motion_payload["input_window"] = payload
+    motion_payload.update(payload)
+    return motion_payload
 
 
 def _frame_dimensions() -> tuple[str, str]:
@@ -383,8 +529,18 @@ async def save_upload_file(upload_file: UploadFile, target_path: Path) -> Path:
         raise
     finally:
         await upload_file.close()
-
     return target_path
+
+
+def compute_video_sha256(video_path: Path) -> str:
+    hasher = hashlib.sha256()
+    with video_path.open("rb") as handle:
+        while True:
+            chunk = handle.read(VIDEO_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 async def extract_frames(video_path: Path, frames_dir: Path, frame_rate: int = FRAME_RATE) -> list[Path]:
@@ -481,7 +637,7 @@ def detect_video_duration(video_path: Path) -> float | None:
 
 
 def _fallback_action_window(action_type: str) -> tuple[float, float]:
-    window_size = ACTION_WINDOW_SIZES.get(action_type)
+    window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if window_size is None:
         return 0.0, float(MAX_SECONDS)
     return 0.0, min(float(MAX_SECONDS), float(window_size) + 2.0)
@@ -493,6 +649,26 @@ def _fallback_profile_window(action_type: str, analysis_profile: str | None, sou
         return 0.0, float(MAX_SECONDS)
     source_window_size = get_source_window_duration(float(window_size), source_fps)
     return 0.0, min(float(MAX_SECONDS), source_window_size + 2.0)
+
+
+def _short_jump_full_context_duration(video_path: Path, analysis_profile: str | None, source_fps: float) -> float | None:
+    profile = (analysis_profile or "").strip().lower()
+    if profile != "jump" or source_fps >= SLOW_MOTION_THRESHOLD_FPS:
+        return None
+    max_duration = min(float(MAX_SECONDS), max(0.0, JUMP_SHORT_VIDEO_FULL_CONTEXT_MAX_SECONDS))
+    if max_duration <= 0.0:
+        return None
+    duration = detect_video_duration(video_path)
+    if duration is None or duration <= 0.0 or duration > max_duration:
+        return None
+    return min(float(duration), float(MAX_SECONDS))
+
+
+def _action_window_padding(analysis_profile: str | None) -> tuple[float, float]:
+    profile = (analysis_profile or "").strip().lower()
+    if profile == "jump":
+        return 0.35, 0.75
+    return 1.0, 1.0
 
 
 async def _extract_action_thumbnails(video_path: Path, thumbs_dir: Path) -> list[Path]:
@@ -517,9 +693,27 @@ def _pick_window_by_profile(
     analysis_profile: str | None,
     source_fps: float,
 ) -> tuple[int, int]:
+    selection = _select_action_window_by_profile(motion_scores, action_type, analysis_profile, source_fps)
+    return selection.start_frame, selection.end_frame
+
+
+def _select_action_window_by_profile(
+    motion_scores: Sequence[float],
+    action_type: str,
+    analysis_profile: str | None,
+    source_fps: float,
+) -> ActionWindowSelection:
     window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if window_size is None:
-        return 0, len(motion_scores)
+        return ActionWindowSelection(
+            start_frame=0,
+            end_frame=len(motion_scores),
+            diagnostics={
+                "selection_reason": "full_video_profile",
+                "candidate_windows": [],
+                "late_window_override": False,
+            },
+        )
 
     source_window_size = get_source_window_duration(float(window_size), source_fps)
     window_frames = max(1, round(source_window_size * ACTION_WINDOW_DETECTION_FPS))
@@ -538,22 +732,133 @@ def _pick_window_by_profile(
             if current_score > best_score:
                 best_score = current_score
                 best_start = index
-        return best_start, best_start + window_frames
+        return ActionWindowSelection(
+            start_frame=best_start,
+            end_frame=best_start + window_frames,
+            diagnostics={
+                "selection_reason": "spiral_low_motion_stability",
+                "window_frames": window_frames,
+                "candidate_windows": [
+                    {
+                        "start_frame": best_start,
+                        "end_frame": best_start + window_frames,
+                        "start_sec": round(best_start / ACTION_WINDOW_DETECTION_FPS, 3),
+                        "end_sec": round((best_start + window_frames) / ACTION_WINDOW_DETECTION_FPS, 3),
+                        "score": round(best_score, 4),
+                    }
+                ],
+                "late_window_override": False,
+            },
+        )
 
-    best_start = 0
-    best_score = float("-inf")
+    candidates: list[dict[str, object]] = []
     for index in range(max_start):
         window = motion_scores[index : index + window_frames]
         if not window:
             continue
+        raw_score = sum(window)
         if analysis_profile == "spin":
-            current_score = sum(window) - abs(window[0] - window[-1])
+            current_score = raw_score - abs(window[0] - window[-1])
+            late_bonus = 0.0
         else:
-            current_score = sum(window)
-        if current_score > best_score:
-            best_score = current_score
-            best_start = index
-    return best_start, best_start + window_frames
+            progress = index / max(max_start - 1, 1)
+            late_bonus = 0.0
+            if analysis_profile == "jump":
+                # Bias away from very early full-frame motion spikes caused by blockers or unrelated skaters.
+                late_bonus = raw_score * 0.30 * progress
+            current_score = raw_score + late_bonus
+        candidates.append(
+            {
+                "start_frame": index,
+                "end_frame": index + window_frames,
+                "start_sec": round(index / ACTION_WINDOW_DETECTION_FPS, 3),
+                "end_sec": round((index + window_frames) / ACTION_WINDOW_DETECTION_FPS, 3),
+                "raw_score": round(raw_score, 4),
+                "score": round(current_score, 4),
+                "late_bonus": round(late_bonus, 4),
+            }
+        )
+
+    if not candidates:
+        return ActionWindowSelection(
+            start_frame=0,
+            end_frame=window_frames,
+            diagnostics={
+                "selection_reason": "no_motion_candidates",
+                "window_frames": window_frames,
+                "candidate_windows": [],
+                "late_window_override": False,
+            },
+        )
+
+    raw_best = max(candidates, key=lambda item: float(item["raw_score"]))
+    scored_best = max(candidates, key=lambda item: float(item["score"]))
+    chosen = scored_best if analysis_profile != "jump" else raw_best
+    late_override = False
+    selection_reason = "max_motion_score"
+    if analysis_profile == "jump":
+        early_threshold = max_start * 0.25
+        late_threshold = max_start * 0.35
+        raw_best_score = float(raw_best["raw_score"])
+        eligible_late = [
+            item
+            for item in candidates
+            if int(raw_best["start_frame"]) <= early_threshold
+            and int(item["start_frame"]) >= late_threshold
+            and float(item["raw_score"]) >= raw_best_score * 0.80
+        ]
+        if eligible_late:
+            late_best = max(eligible_late, key=lambda item: float(item["score"]))
+            if float(late_best["score"]) >= float(raw_best["score"]) * 0.985:
+                chosen = late_best
+                late_override = True
+                selection_reason = "jump_late_window_guard"
+
+    top_candidates = sorted(candidates, key=lambda item: float(item["score"]), reverse=True)[:6]
+    return ActionWindowSelection(
+        start_frame=int(chosen["start_frame"]),
+        end_frame=int(chosen["end_frame"]),
+        diagnostics={
+            "selection_reason": selection_reason,
+            "window_frames": window_frames,
+            "raw_best_start_frame": raw_best["start_frame"],
+            "raw_best_score": raw_best["raw_score"],
+            "selected_start_frame": chosen["start_frame"],
+            "selected_score": chosen["score"],
+            "late_window_override": late_override,
+            "candidate_windows": top_candidates,
+        },
+    )
+
+
+def _action_window_seconds_from_selection(
+    selection: ActionWindowSelection,
+    *,
+    action_type: str,
+    analysis_profile: str | None,
+    source_fps: float,
+) -> tuple[float, float]:
+    selected_window_size = get_window_seconds_for_profile(analysis_profile, action_type)
+    if selected_window_size is None:
+        return 0.0, float(MAX_SECONDS)
+    source_window_size = get_source_window_duration(float(selected_window_size), source_fps)
+    pre_padding_sec, post_padding_sec = _action_window_padding(analysis_profile)
+    start_sec = max(0.0, selection.start_frame / ACTION_WINDOW_DETECTION_FPS - pre_padding_sec)
+    end_sec = max(start_sec + 1.0, (selection.end_frame / ACTION_WINDOW_DETECTION_FPS) + post_padding_sec)
+    end_sec = min(end_sec, start_sec + source_window_size + pre_padding_sec + post_padding_sec)
+    return start_sec, end_sec
+
+
+def _action_window_diagnostics_for_seconds(
+    selection: ActionWindowSelection,
+    *,
+    start_sec: float,
+    end_sec: float,
+) -> dict[str, object]:
+    diagnostics = dict(selection.diagnostics)
+    diagnostics["selected_start_sec"] = round(start_sec, 3)
+    diagnostics["selected_end_sec"] = round(end_sec, 3)
+    return diagnostics
 
 
 async def detect_action_window(
@@ -566,11 +871,31 @@ async def detect_action_window(
     用运动密度曲线找到峰值区间，返回 (start_sec, end_sec)。
     无法定位时退化为分析前 N 秒；自由滑维持前 60 秒。
     """
-    window_size = ACTION_WINDOW_SIZES.get(action_type)
+    _LAST_ACTION_WINDOW_DIAGNOSTICS.set(None)
+    window_size = get_window_seconds_for_profile(analysis_profile, action_type)
     if window_size is None:
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "full_video_profile",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": 0.0,
+            "selected_end_sec": float(MAX_SECONDS),
+        })
         return 0.0, float(MAX_SECONDS)
 
-    thumbs_dir = video_path.parent / f"{video_path.stem}_action_thumbs"
+    short_jump_duration = _short_jump_full_context_duration(video_path, analysis_profile, source_fps)
+    if short_jump_duration is not None:
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "jump_short_video_full_context",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "source_duration_sec": round(short_jump_duration, 3),
+            "selected_start_sec": 0.0,
+            "selected_end_sec": round(short_jump_duration, 3),
+        })
+        return 0.0, short_jump_duration
+
+    thumbs_dir = PROCESSING_ROOT / "_action_windows" / f"{video_path.stem}_{uuid.uuid4().hex}"
     try:
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir)
@@ -578,25 +903,54 @@ async def detect_action_window(
         motion_scores = _motion_scores_from_thumbs(thumbs)
     except Exception:  # noqa: BLE001
         logger.warning("Action window detection failed for %s, using fallback window", video_path, exc_info=True)
-        return _fallback_profile_window(action_type, analysis_profile, source_fps)
+        start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "fallback_detection_failed",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+        })
+        return start_sec, end_sec
     finally:
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
 
     if len(motion_scores) <= 1:
-        return _fallback_profile_window(action_type, analysis_profile, source_fps)
+        start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "fallback_insufficient_motion_scores",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+        })
+        return start_sec, end_sec
 
-    best_start_frame, best_end_frame = _pick_window_by_profile(motion_scores, action_type, analysis_profile, source_fps)
-    selected_window_size = get_window_seconds_for_profile(analysis_profile, action_type)
-    if selected_window_size is None:
-        return 0.0, float(MAX_SECONDS)
-    source_window_size = get_source_window_duration(float(selected_window_size), source_fps)
-
-    start_sec = max(0.0, best_start_frame / ACTION_WINDOW_DETECTION_FPS - 1.0)
-    end_sec = max(start_sec + 1.0, (best_end_frame / ACTION_WINDOW_DETECTION_FPS) + 1.0)
-    end_sec = min(end_sec, start_sec + source_window_size + 2.0)
+    selection = _select_action_window_by_profile(motion_scores, action_type, analysis_profile, source_fps)
+    start_sec, end_sec = _action_window_seconds_from_selection(
+        selection,
+        action_type=action_type,
+        analysis_profile=analysis_profile,
+        source_fps=source_fps,
+    )
     if end_sec <= start_sec:
-        return _fallback_profile_window(action_type, analysis_profile, source_fps)
+        start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        _LAST_ACTION_WINDOW_DIAGNOSTICS.set({
+            "selection_reason": "fallback_invalid_selected_window",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+        })
+        return start_sec, end_sec
+    _LAST_ACTION_WINDOW_DIAGNOSTICS.set(
+        _action_window_diagnostics_for_seconds(
+            selection,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    )
     return start_sec, end_sec
 
 
@@ -629,15 +983,19 @@ async def _run_ffmpeg(args: list[str]) -> None:
     attempts = 2
     last_message = "未知错误"
     for attempt in range(1, attempts + 1):
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
+        cmd = ["ffmpeg", *args]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            returncode = process.returncode
+        except NotImplementedError:
+            returncode, stderr = await asyncio.to_thread(_run_ffmpeg_sync, cmd)
         message = stderr.decode("utf-8", errors="ignore").strip()
-        if process.returncode == 0:
+        if returncode == 0:
             return
 
         last_message = message or "未知错误"
@@ -649,6 +1007,13 @@ async def _run_ffmpeg(args: list[str]) -> None:
         break
 
     raise RuntimeError(f"FFmpeg 处理失败：{last_message}")
+
+
+def _run_ffmpeg_sync(cmd: list[str]) -> tuple[int, bytes]:
+    import subprocess
+
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.returncode, result.stderr
 
 
 async def cut_action_window_clip(
@@ -738,6 +1103,8 @@ async def cut_action_window_ai_clip(
     window_start_sec: float,
     window_end_sec: float,
     out_path: Path,
+    *,
+    max_duration_sec: float | None = None,
 ) -> Path:
     """
     Create the compact action-window clip used only for AI video inputs.
@@ -747,8 +1114,8 @@ async def cut_action_window_ai_clip(
     """
     start = max(0.0, float(window_start_sec))
     end = max(start + 0.5, float(window_end_sec))
-    if end - start > ACTION_CLIP_MAX_SECONDS:
-        end = start + ACTION_CLIP_MAX_SECONDS
+    if max_duration_sec is not None and end - start > max_duration_sec:
+        end = start + max_duration_sec
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.unlink(missing_ok=True)
@@ -917,7 +1284,56 @@ def _peak_neighborhood_indices(scores: Sequence[float], radius: int = 1, limit: 
     return selected
 
 
-def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) -> list[int]:
+def _motion_peak_records(scores: Sequence[float], frame_rate: float, limit: int = 6) -> list[dict[str, object]]:
+    smoothed = _smooth_motion_scores(scores, window=3)
+    return [
+        {
+            "thumb_index": index,
+            "timestamp_offset": round(index / max(frame_rate, 1e-6), 3),
+            "score": round(float(scores[index]) if index < len(scores) else 0.0, 4),
+            "smoothed_score": round(float(smoothed[index]) if index < len(smoothed) else 0.0, 4),
+        }
+        for index in _top_local_peak_indices(smoothed, limit=limit)
+    ]
+
+
+def _coverage_gap_records(selected_indices: Sequence[int], frame_rate: float) -> list[dict[str, object]]:
+    ordered = sorted(set(selected_indices))
+    gaps: list[dict[str, object]] = []
+    for left, right in zip(ordered, ordered[1:]):
+        gap_frames = right - left
+        if gap_frames <= 1:
+            continue
+        gaps.append(
+            {
+                "from_thumb_index": left,
+                "to_thumb_index": right,
+                "gap_frames": gap_frames,
+                "gap_seconds": round(gap_frames / max(frame_rate, 1e-6), 3),
+            }
+        )
+    gaps.sort(key=lambda item: float(item["gap_seconds"]), reverse=True)
+    return gaps[:8]
+
+
+def _dense_peak_burst_indices(scores: Sequence[float], sample_count: int, *, radius: int = 8, peak_limit: int = 2) -> set[int]:
+    if not scores or sample_count <= 0:
+        return set()
+    smoothed = _smooth_motion_scores(scores, window=3)
+    selected: set[int] = set()
+    budget = min(max(sample_count // 2, 12), sample_count)
+    peaks = _top_local_peak_indices(smoothed, limit=peak_limit)
+    for peak in peaks:
+        ordered = list(range(max(0, peak - radius), min(len(scores), peak + radius + 1)))
+        ordered.sort(key=lambda index: (abs(index - peak), -smoothed[index]))
+        for index in ordered:
+            selected.add(index)
+            if len(selected) >= budget:
+                return selected
+    return selected
+
+
+def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int, *, dense_peak_bursts: bool = False) -> list[int]:
     total_frames = len(scores)
     if total_frames <= sample_count:
         return list(range(total_frames))
@@ -925,7 +1341,11 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int) 
     smoothed = _smooth_motion_scores(scores, window=3)
     # 设计说明: top-3 局部运动峰值通常覆盖准备/起跳/落冰瞬间；
     # 先锁定 ±2 帧的邻域保护区，剩余配额再按运动密度分配。
-    selected: set[int] = _peak_neighborhood_indices(smoothed, radius=2, limit=3)
+    selected: set[int] = (
+        _dense_peak_burst_indices(scores, sample_count, radius=8, peak_limit=2)
+        if dense_peak_bursts
+        else _peak_neighborhood_indices(smoothed, radius=2, limit=3)
+    )
     if len(selected) >= sample_count:
         return sorted(selected)[:sample_count]
 
@@ -1103,7 +1523,97 @@ def _semantic_order_anchors(records: Sequence[dict[str, object]]) -> dict[str, f
     return anchors
 
 
-def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.02) -> bool:
+def _semantic_phase_bounds(record: dict[str, object]) -> tuple[float | None, float | None]:
+    start = record.get("phase_time_start")
+    end = record.get("phase_time_end")
+    if start is None:
+        start = record.get("time_start")
+    if end is None:
+        end = record.get("time_end")
+    try:
+        start_value = None if start is None else float(start)
+    except (TypeError, ValueError):
+        start_value = None
+    try:
+        end_value = None if end is None else float(end)
+    except (TypeError, ValueError):
+        end_value = None
+    if start_value is not None and end_value is not None and end_value <= start_value:
+        return None, None
+    return start_value, end_value
+
+
+def _semantic_refinement_max_delta(record: dict[str, object], default: float = 0.12) -> float:
+    value = record.get("max_refinement_delta_sec")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(parsed, 0.30))
+
+
+def _semantic_refinement_max_backward_delta(record: dict[str, object], default: float | None = None) -> float | None:
+    value = record.get("max_refinement_backward_delta_sec")
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(parsed, 0.30))
+
+
+def _semantic_refinement_window_seconds(record: dict[str, object], default: float) -> float:
+    value = record.get("refinement_window_seconds")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(parsed, 0.30))
+
+
+def _semantic_phase_end_refinement_tolerance(record: dict[str, object], key: str | None) -> float:
+    if key != "L":
+        return 0.0
+    value = record.get("phase_time_end_refinement_tolerance_sec")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(parsed, 0.25))
+
+
+def _semantic_phase_start_refinement_tolerance(record: dict[str, object], key: str | None) -> float:
+    if key != "L":
+        return 0.0
+    value = record.get("phase_time_start_refinement_tolerance_sec")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(parsed, 0.25))
+
+
+def _record_rejected_refinement_candidate(
+    output: dict[str, object],
+    *,
+    refined_ts: float,
+    original_ts: float,
+    fps: float,
+    motion_score: float,
+    reason: str,
+) -> None:
+    output["timestamp"] = round(original_ts, 3)
+    output["refinement_method"] = f"local_motion_peak_{reason}_rejected"
+    output["refinement_delta_sec"] = 0.0
+    output["refinement_fps"] = round(fps, 3)
+    output["refinement_motion_score"] = motion_score
+    output["refinement_candidate_timestamp"] = round(refined_ts, 3)
+    output["refinement_candidate_delta_sec"] = round(refined_ts - original_ts, 3)
+    output["refinement_reject_reason"] = reason
+
+
+def _violates_semantic_order(key: str | None, timestamp: float, anchors: dict[str, float], min_gap_sec: float = 0.10) -> bool:
     if key == "T":
         apex = anchors.get("A")
         landing = anchors.get("L")
@@ -1206,21 +1716,73 @@ async def refine_semantic_keyframe_timestamps(
             continue
 
         try:
+            record_window_seconds = _semantic_refinement_window_seconds(record, window_seconds)
             refined_ts, fps, motion_score = await _refine_motion_peak_timestamp(
                 video_path,
                 work_dir,
                 timestamp,
                 source_fps=source_fps,
                 video_duration_sec=video_duration_sec,
-                window_seconds=window_seconds,
+                window_seconds=record_window_seconds,
             )
+            phase_start, phase_end = _semantic_phase_bounds(record)
+            phase_start_tolerance = _semantic_phase_start_refinement_tolerance(record, key)
+            phase_end_tolerance = _semantic_phase_end_refinement_tolerance(record, key)
+            if phase_start_tolerance > 0:
+                output["phase_time_start_refinement_tolerance_sec"] = round(phase_start_tolerance, 3)
+            if phase_end_tolerance > 0:
+                output["phase_time_end_refinement_tolerance_sec"] = round(phase_end_tolerance, 3)
+            if (
+                (phase_start is not None and refined_ts < phase_start - phase_start_tolerance)
+                or (phase_end is not None and refined_ts > phase_end + phase_end_tolerance)
+            ):
+                _record_rejected_refinement_candidate(
+                    output,
+                    refined_ts=refined_ts,
+                    original_ts=timestamp,
+                    fps=fps,
+                    motion_score=motion_score,
+                    reason="phase",
+                )
+                quality_flags.append("semantic_keyframe_refinement_phase_rejected")
+                refined_records.append(output)
+                continue
             if _violates_semantic_order(key, refined_ts, order_anchors):
-                output["timestamp"] = round(timestamp, 3)
-                output["refinement_method"] = "local_motion_peak_order_rejected"
-                output["refinement_delta_sec"] = 0.0
-                output["refinement_fps"] = round(fps, 3)
-                output["refinement_motion_score"] = motion_score
+                _record_rejected_refinement_candidate(
+                    output,
+                    refined_ts=refined_ts,
+                    original_ts=timestamp,
+                    fps=fps,
+                    motion_score=motion_score,
+                    reason="order",
+                )
                 quality_flags.append("semantic_keyframe_refinement_order_rejected")
+                refined_records.append(output)
+                continue
+            max_delta = _semantic_refinement_max_delta(record)
+            if abs(refined_ts - timestamp) > max_delta:
+                _record_rejected_refinement_candidate(
+                    output,
+                    refined_ts=refined_ts,
+                    original_ts=timestamp,
+                    fps=fps,
+                    motion_score=motion_score,
+                    reason="delta",
+                )
+                quality_flags.append("semantic_keyframe_refinement_delta_rejected")
+                refined_records.append(output)
+                continue
+            max_backward_delta = _semantic_refinement_max_backward_delta(record)
+            if max_backward_delta is not None and refined_ts < timestamp - max_backward_delta:
+                _record_rejected_refinement_candidate(
+                    output,
+                    refined_ts=refined_ts,
+                    original_ts=timestamp,
+                    fps=fps,
+                    motion_score=motion_score,
+                    reason="backward_delta",
+                )
+                quality_flags.append("semantic_keyframe_refinement_backward_delta_rejected")
                 refined_records.append(output)
                 continue
             output["timestamp"] = refined_ts
@@ -1228,6 +1790,12 @@ async def refine_semantic_keyframe_timestamps(
             output["refinement_delta_sec"] = round(refined_ts - timestamp, 3)
             output["refinement_fps"] = round(fps, 3)
             output["refinement_motion_score"] = motion_score
+            if phase_start is not None and refined_ts < phase_start and phase_start_tolerance > 0:
+                output["refinement_phase_start_tolerance_used"] = True
+                quality_flags.append("semantic_keyframe_refinement_phase_start_tolerance_used")
+            if phase_end is not None and refined_ts > phase_end and phase_end_tolerance > 0:
+                output["refinement_phase_end_tolerance_used"] = True
+                quality_flags.append("semantic_keyframe_refinement_phase_end_tolerance_used")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Semantic keyframe local refinement failed at %.3fs: %s", timestamp, exc)
             output["timestamp"] = round(timestamp, 3)
@@ -1337,6 +1905,10 @@ async def extract_motion_sampled_frames(
     frames_dir: Path,
     action_type: str,
     analysis_profile: str | None = None,
+    *,
+    dense_peak_bursts: bool = False,
+    full_video_window: bool = False,
+    input_window: VideoInputWindow | None = None,
 ) -> tuple[list[Path], dict[str, object], VideoSamplingMetadata]:
     for existing_frame in frames_dir.glob("frame_*.jpg"):
         existing_frame.unlink(missing_ok=True)
@@ -1349,7 +1921,40 @@ async def extract_motion_sampled_frames(
     slow_motion_scale = get_slow_motion_scale(source_fps) if is_slow_motion else 1.0
     frame_rate = get_frame_rate_for_profile(analysis_profile)
     sample_count = get_max_frames_for_profile(analysis_profile)
-    start_sec, end_sec = await detect_action_window(video_path, action_type, source_fps, analysis_profile)
+    if input_window is not None:
+        start_sec = input_window.input_window_start_sec
+        end_sec = input_window.input_window_end_sec
+        window_diagnostics: dict[str, object] = {
+            "selection_reason": input_window.input_window_reason,
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+            "input_window_mode": input_window.input_window_mode,
+            "input_window_truncated": input_window.input_window_truncated,
+        }
+    elif full_video_window:
+        duration = detect_video_duration(video_path)
+        start_sec = 0.0
+        end_sec = min(float(MAX_SECONDS), float(duration)) if duration and duration > 0 else float(MAX_SECONDS)
+        window_diagnostics: dict[str, object] = {
+            "selection_reason": "full_video_debug",
+            "candidate_windows": [],
+            "late_window_override": False,
+            "selected_start_sec": round(start_sec, 3),
+            "selected_end_sec": round(end_sec, 3),
+        }
+    else:
+        start_sec, end_sec = await detect_action_window(video_path, action_type, source_fps, analysis_profile)
+        window_diagnostics = dict(_LAST_ACTION_WINDOW_DIAGNOSTICS.get() or {})
+        if not window_diagnostics:
+            window_diagnostics = {
+                "selection_reason": "detected_action_window",
+                "candidate_windows": [],
+                "late_window_override": False,
+                "selected_start_sec": round(start_sec, 3),
+                "selected_end_sec": round(end_sec, 3),
+            }
     window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
         start_sec,
         end_sec,
@@ -1397,7 +2002,7 @@ async def extract_motion_sampled_frames(
         raise RuntimeError("视频缩略图抽取结果为空，请检查上传文件是否损坏。")
 
     scores = _motion_scores_from_thumbs(thumbs)
-    selected_indices = _select_motion_weighted_indices(scores, sample_count)
+    selected_indices = _select_motion_weighted_indices(scores, sample_count, dense_peak_bursts=dense_peak_bursts)
 
     output_paths: list[Path] = []
     selected_records: list[dict[str, object]] = []
@@ -1451,9 +2056,18 @@ async def extract_motion_sampled_frames(
         "total_thumb_frames": len(thumbs),
         "sample_count": len(output_paths),
         "max_frames_for_profile": sample_count,
+        "selection_strategy": "dense_peak_bursts" if dense_peak_bursts else "motion_weighted",
+        "window_strategy": "full_video_debug" if full_video_window else "detected_action_window",
+        "window_diagnostics": window_diagnostics,
+        "top_motion_peaks": [
+            {**record, "timestamp": round(start_sec + float(record["timestamp_offset"]), 3)}
+            for record in _motion_peak_records(scores, frame_rate=frame_rate)
+        ],
+        "coverage_gaps": _coverage_gap_records(selected_indices, frame_rate=frame_rate),
         "selected": selected_records,
         "scores": [round(score, 4) for score in scores],
     }
+    attach_input_window_payload(motion_payload, input_window)
 
     return output_paths, motion_payload, sampling_metadata
 

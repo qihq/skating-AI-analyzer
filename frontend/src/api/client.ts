@@ -179,6 +179,15 @@ export interface AnalysisDetail extends AnalysisListItem {
   target_lock_status: string | null;
   action_window_start: number | null;
   action_window_end: number | null;
+  manual_action_window_start: number | null;
+  manual_action_window_end: number | null;
+  source_duration_sec: number | null;
+  input_window_start_sec: number | null;
+  input_window_end_sec: number | null;
+  input_window_duration_sec: number | null;
+  input_window_mode: string | null;
+  input_window_truncated: boolean;
+  input_window_reason: string | null;
   source_fps: number | null;
   is_slow_motion: boolean;
   skill_node_id: string | null;
@@ -195,6 +204,8 @@ export interface SelectedSemanticFrame {
   phase_label?: string | null;
   key_moment?: string | null;
   selection_reason?: string | null;
+  selection_status?: string | null;
+  partial_semantic_frame?: boolean | null;
   pre_refine_timestamp?: number | null;
   refinement_method?: string | null;
   refinement_delta_sec?: number | null;
@@ -206,11 +217,18 @@ export interface VideoTemporalDiagnostics {
   video_ai_confidence?: number | null;
   video_ai_ran?: boolean;
   video_ai_video_url?: string | null;
+  raw_response_excerpt?: string | null;
+  raw_response_length?: number | null;
+  raw_response_truncated?: boolean | null;
+  parse_error_detail?: string | null;
   timestamp_source?: string | null;
+  resolver_source?: string | null;
   resolved_confidence?: number | null;
   selected_semantic_frames?: SelectedSemanticFrame[];
+  partial_semantic_frames?: SelectedSemanticFrame[];
   fallback_reason?: string | null;
   quality_flags?: string[];
+  retry_rejection_flags?: string[];
   used_semantic_frames?: boolean;
   used_legacy_sampled_frames?: boolean;
 }
@@ -429,6 +447,48 @@ export interface AutoEvalSnapshotSummary {
   fusion_diagnostics: string[];
 }
 
+export type DebugRunMode = "local_pose_keyframes" | "video_ai_keyframes";
+export type DebugRunStatus = "pending" | "processing" | "awaiting_target_selection" | "completed" | "failed";
+export type DebugRunSourceType = "analysis" | "upload";
+
+export interface DebugRunSummary {
+  id: string;
+  mode: DebugRunMode | string;
+  source_type: DebugRunSourceType | string;
+  analysis_id: string | null;
+  action_type: string;
+  action_subtype: string | null;
+  analysis_profile: string | null;
+  note: string | null;
+  status: DebugRunStatus | string;
+  summary: Record<string, unknown> | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DebugRunDetail extends DebugRunSummary {
+  video_path: string | null;
+  result_json: Record<string, unknown> | null;
+  error_detail: string | null;
+}
+
+export interface DebugRunCreateResponse {
+  id: string;
+  status: DebugRunStatus | string;
+}
+
+export interface DebugRunCreatePayload {
+  analysisId?: string | null;
+  file?: File | null;
+  actionType?: string | null;
+  actionSubtype?: string | null;
+  analysisProfile?: string | null;
+  manualActionWindowStartSec?: string | number | null;
+  manualActionWindowEndSec?: string | number | null;
+  note?: string | null;
+}
+
 export interface ComparisonChange {
   category: string;
   before_severity: IssueSeverity | null;
@@ -468,6 +528,10 @@ export interface CompareKeyframePair {
   label: string;
   before: CompareKeyframeSide;
   after: CompareKeyframeSide;
+  delta_seconds?: number | null;
+  before_offset_seconds?: number | null;
+  after_offset_seconds?: number | null;
+  relative_delta_seconds?: number | null;
 }
 
 export interface CompareVideoSide {
@@ -541,6 +605,8 @@ export interface TrainingPlanSession {
   description: string;
   is_office_trainable: boolean;
   completed: boolean;
+  related_issue?: string | null;
+  parent_tip?: string | null;
 }
 
 export interface TrainingDay {
@@ -553,6 +619,8 @@ export interface TrainingPlanPayload {
   title: string;
   focus_skill: string;
   days: TrainingDay[];
+  generation_source?: "ai" | "fallback" | string | null;
+  generation_note?: string | null;
 }
 
 export interface TrainingPlanDetail {
@@ -586,6 +654,9 @@ export interface ArchiveResponse {
     session_type: string | null;
     session_duration_minutes: number | null;
   }>;
+  limit?: number | null;
+  offset?: number;
+  has_more?: boolean;
 }
 
 export interface SessionPayload {
@@ -838,7 +909,7 @@ export async function fetchAnalyses(params?: { action_type?: string; skater_id?:
 
 export async function fetchAnalysisCompare(idA: string, idB: string) {
   const response = await apiClient.get<AnalysisCompareResponse>("/analysis/compare", {
-    params: { id_a: idA, id_b: idB },
+    params: { id_a: idA, id_b: idB, _ts: Date.now() },
   });
   return response.data;
 }
@@ -848,8 +919,10 @@ export async function fetchProgress(params?: { action_type?: string; skater_id?:
   return response.data;
 }
 
-export async function createPlan(analysisId: string) {
-  const response = await apiClient.post<TrainingPlanDetail>(`/analysis/${analysisId}/plan`);
+export async function createPlan(analysisId: string, options?: { force?: boolean }) {
+  const response = await apiClient.post<TrainingPlanDetail>(`/analysis/${analysisId}/plan`, null, {
+    params: options?.force ? { force: true } : undefined,
+  });
   return response.data;
 }
 
@@ -887,8 +960,8 @@ export async function fetchSkaters() {
   return response.data;
 }
 
-export async function fetchArchive(skaterId: string) {
-  const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`);
+export async function fetchArchive(skaterId: string, params?: { limit?: number; offset?: number }) {
+  const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`, { params });
   return response.data;
 }
 
@@ -1005,6 +1078,67 @@ export async function fetchAutoEvalSnapshots(params?: {
       action_type: params?.action_type ?? undefined,
     },
   });
+  return response.data;
+}
+
+export async function fetchDebugRuns(params?: { limit?: number }) {
+  const response = await apiClient.get<DebugRunSummary[]>("/debug/runs", {
+    params: { limit: params?.limit ?? 50 },
+  });
+  return response.data;
+}
+
+export async function fetchDebugRun(id: string) {
+  const response = await apiClient.get<DebugRunDetail>(`/debug/runs/${id}`);
+  return response.data;
+}
+
+export async function deleteDebugRun(id: string) {
+  await apiClient.delete(`/debug/runs/${id}`);
+}
+
+function buildDebugRunFormData(payload: DebugRunCreatePayload) {
+  const formData = new FormData();
+  if (payload.analysisId) {
+    formData.append("analysis_id", payload.analysisId);
+  }
+  if (payload.file) {
+    formData.append("file", payload.file);
+  }
+  if (payload.actionType) {
+    formData.append("action_type", payload.actionType);
+  }
+  if (payload.actionSubtype) {
+    formData.append("action_subtype", payload.actionSubtype);
+  }
+  if (payload.analysisProfile) {
+    formData.append("analysis_profile", payload.analysisProfile);
+  }
+  if (payload.manualActionWindowStartSec != null && payload.manualActionWindowEndSec != null) {
+    formData.append("manual_action_window_start_sec", String(payload.manualActionWindowStartSec));
+    formData.append("manual_action_window_end_sec", String(payload.manualActionWindowEndSec));
+  }
+  if (payload.note) {
+    formData.append("note", payload.note);
+  }
+  return formData;
+}
+
+export async function createLocalDebugRun(payload: DebugRunCreatePayload) {
+  const response = await apiClient.post<DebugRunCreateResponse>("/debug/runs/local-pose-keyframes", buildDebugRunFormData(payload));
+  return response.data;
+}
+
+export async function createVideoAiDebugRun(payload: DebugRunCreatePayload) {
+  const response = await apiClient.post<DebugRunCreateResponse>("/debug/runs/video-ai-keyframes", buildDebugRunFormData(payload));
+  return response.data;
+}
+
+export async function confirmDebugTargetLock(
+  id: string,
+  payload: { candidate_id?: string | null; x?: number; y?: number; manual_bbox?: TargetBBox | null },
+) {
+  const response = await apiClient.post<DebugRunCreateResponse>(`/debug/runs/${id}/target-lock`, payload);
   return response.data;
 }
 

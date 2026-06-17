@@ -9,13 +9,29 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.providers import (
+    get_active_provider,
     request_dashscope_video_completion,
     request_doubao_vision_completion,
+    request_mimo_video_completion,
     request_text_completion,
 )
 
 
 class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_provider_falls_back_to_mimo_env_config(self) -> None:
+        execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+        session = SimpleNamespace(execute=AsyncMock(return_value=execute_result))
+
+        with patch.dict("os.environ", {"MIMO_API_KEY": "test-mimo-key"}, clear=False):
+            provider = await get_active_provider("report", session)
+
+        self.assertEqual(provider.id, "env:report:mimo")
+        self.assertEqual(provider.slot, "report")
+        self.assertEqual(provider.provider, "mimo")
+        self.assertEqual(provider.base_url, "https://api.xiaomimimo.com/v1")
+        self.assertEqual(provider.model_id, "mimo-v2.5-pro")
+        self.assertEqual(provider.api_key, "test-mimo-key")
+
     async def test_claude_provider_translates_openai_vision_content(self) -> None:
         provider = SimpleNamespace(
             provider="claude_compatible",
@@ -86,6 +102,106 @@ class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
         kwargs = create_mock.await_args.kwargs
         self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+
+    async def test_mimo_text_uses_max_completion_tokens_and_response_format(self) -> None:
+        provider = SimpleNamespace(
+            provider="mimo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model_id="mimo-v2.5-pro",
+            api_key="test-key",
+        )
+        response = {"choices": [{"message": {"content": '{"ok": true}'}}]}
+        post_mock = AsyncMock()
+        post_mock.return_value.raise_for_status = lambda: None
+        post_mock.return_value.json = lambda: response
+
+        with patch("app.services.providers.httpx.AsyncClient") as client_cls:
+            client_cls.return_value.__aenter__.return_value.post = post_mock
+            content = await request_text_completion(
+                provider,
+                temperature=0.1,
+                max_tokens=128,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": "return json"}],
+            )
+
+        self.assertEqual(content, '{"ok": true}')
+        self.assertEqual(post_mock.await_args.kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(post_mock.await_args.kwargs["headers"]["api-key"], "test-key")
+        self.assertEqual(post_mock.await_args.args[0], "https://api.xiaomimimo.com/v1/chat/completions")
+        payload = post_mock.await_args.kwargs["json"]
+        self.assertEqual(payload["max_completion_tokens"], 128)
+        self.assertNotIn("max_tokens", payload)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    async def test_mimo_video_sends_base64_video_url_options(self) -> None:
+        provider = SimpleNamespace(
+            id="mimo-provider",
+            slot="vision",
+            name="mimo",
+            provider="mimo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model_id="mimo-v2.5",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+        response = {"choices": [{"message": {"content": "video ok"}}]}
+        post_mock = AsyncMock()
+        post_mock.return_value.raise_for_status = lambda: None
+        post_mock.return_value.json = lambda: response
+
+        with patch("app.services.providers.httpx.AsyncClient") as client_cls:
+            client_cls.return_value.__aenter__.return_value.post = post_mock
+            content = await request_mimo_video_completion(
+                provider,
+                video_path=Path(__file__),
+                system_prompt="system",
+                user_prompt="user",
+                temperature=0,
+                max_tokens=32,
+            )
+
+        self.assertEqual(content, "video ok")
+        payload = post_mock.await_args.kwargs["json"]
+        video_block = payload["messages"][1]["content"][0]
+        self.assertEqual(video_block["type"], "video_url")
+        self.assertTrue(video_block["video_url"]["url"].startswith("data:video/mp4;base64,"))
+        self.assertEqual(video_block["fps"], 2)
+        self.assertEqual(video_block["media_resolution"], "default")
+        self.assertEqual(payload["max_completion_tokens"], 32)
+
+    async def test_mimo_video_rejects_base64_over_50mb_before_api_call(self) -> None:
+        provider = SimpleNamespace(
+            id="mimo-provider",
+            slot="vision",
+            name="mimo",
+            provider="mimo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model_id="mimo-v2.5",
+            vision_model=None,
+            api_key="test-key",
+            notes=None,
+        )
+
+        fake_stat = SimpleNamespace(st_size=40 * 1024 * 1024)
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "stat", return_value=fake_stat),
+            patch("app.services.providers.httpx.AsyncClient") as client_cls,
+            self.assertRaises(Exception) as caught,
+        ):
+            await request_mimo_video_completion(
+                provider,
+                video_path=Path("large.mp4"),
+                system_prompt="system",
+                user_prompt="user",
+                temperature=0,
+                max_tokens=32,
+            )
+
+        self.assertIn("50MB", str(caught.exception))
+        client_cls.assert_not_called()
 
     async def test_dashscope_video_budget_exceeded_raises_quota(self) -> None:
         provider = SimpleNamespace(

@@ -8,9 +8,12 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.action_profiles import infer_profile_from_input
+from app.services.action_profiles import infer_profile_from_input, is_mixed_action_input
 from app.services.video import (
+    VideoInputWindow,
     _select_motion_weighted_indices,
+    build_video_input_window,
+    cut_action_window_ai_clip,
     detect_action_window,
     extract_motion_sampled_frames,
     get_frame_rate_for_profile,
@@ -23,6 +26,14 @@ from app.services.video import (
 class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
     def test_infer_profile_from_axel_input_returns_jump(self) -> None:
         self.assertEqual(infer_profile_from_input("è·³è·ƒ", "Axel è·³è·ƒ"), "jump")
+
+    def test_mixed_freeskate_input_defers_profile_inference(self) -> None:
+        self.assertTrue(is_mixed_action_input("自由滑", "节目片段"))
+        self.assertIsNone(infer_profile_from_input("自由滑", "节目片段"))
+
+    def test_explicit_jump_input_still_returns_jump(self) -> None:
+        self.assertFalse(is_mixed_action_input("跳跃", "单跳"))
+        self.assertEqual(infer_profile_from_input("跳跃", "单跳"), "jump")
 
     def test_profile_sampling_configuration_prefers_jump_over_defaults(self) -> None:
         self.assertEqual(get_frame_rate_for_profile("jump"), 16)
@@ -74,6 +85,229 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(start_sec, 8.0)
         self.assertGreaterEqual(end_sec, 30.0)
         self.assertGreater(end_sec - start_sec, 20.0)
+
+    async def test_detect_action_window_uses_tight_jump_padding_to_reduce_glide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 41)]
+            motion_scores = [0.0] * 40
+            for index in range(10, 17):
+                motion_scores[index] = 1.0
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="ÃƒÂ¨Ã‚Â·Ã‚Â³ÃƒÂ¨Ã‚Â·Ã†â€™",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertEqual(start_sec, 4.65)
+        self.assertEqual(end_sec, 9.25)
+        self.assertLess(end_sec - start_sec, 5.0)
+
+    async def test_detect_action_window_jump_guard_prefers_later_sustained_motion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 61)]
+            motion_scores = [0.02] * 60
+            for index in range(1, 7):
+                motion_scores[index] = 1.0
+            for index in range(30, 36):
+                motion_scores[index] = 0.86
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="跳跃",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertGreaterEqual(start_sec, 14.0)
+        self.assertLess(end_sec - start_sec, 5.0)
+
+    async def test_detect_action_window_jump_guard_prefers_near_tie_late_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            thumb_paths = [root / f"thumb_{index:05d}.jpg" for index in range(1, 21)]
+            motion_scores = [0.02] * 20
+            for index, value in enumerate([0.65, 0.66, 0.64, 0.63, 0.66, 0.64, 0.65], start=1):
+                motion_scores[index] = value
+            for index, value in enumerate([0.53, 0.54, 0.52, 0.53, 0.54, 0.52, 0.53], start=10):
+                motion_scores[index] = value
+
+            with (
+                patch("app.services.video._extract_action_thumbnails", AsyncMock(return_value=thumb_paths)),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=motion_scores),
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="跳跃",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        self.assertEqual(start_sec, 4.65)
+        self.assertEqual(end_sec, 9.25)
+        self.assertLess(end_sec - start_sec, 5.0)
+
+    async def test_detect_action_window_keeps_full_context_for_short_jump_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+
+            with (
+                patch("app.services.video.detect_video_duration", return_value=12.335),
+                patch("app.services.video._extract_action_thumbnails", AsyncMock()) as extract_mock,
+            ):
+                start_sec, end_sec = await detect_action_window(
+                    video_path=video_path,
+                    action_type="è·³è·ƒ",
+                    source_fps=30.0,
+                    analysis_profile="jump",
+                )
+
+        extract_mock.assert_not_awaited()
+        self.assertEqual(start_sec, 0.0)
+        self.assertEqual(end_sec, 12.335)
+
+    async def test_ai_action_clip_allows_short_jump_full_context_past_ten_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            out_path = root / "action_window_ai.mp4"
+            ffmpeg_args: list[str] = []
+
+            async def fake_run_ffmpeg(args: list[str]) -> None:
+                ffmpeg_args.extend(args)
+                out_path.write_bytes(b"clip")
+
+            with patch("app.services.video._run_ffmpeg", side_effect=fake_run_ffmpeg):
+                result = await cut_action_window_ai_clip(video_path, 0.0, 12.335, out_path)
+
+        self.assertEqual(result, out_path)
+        self.assertIn("-to", ffmpeg_args)
+        self.assertEqual(ffmpeg_args[ffmpeg_args.index("-to") + 1], "12.335")
+
+    async def test_ai_action_clip_does_not_cap_full_context_at_fifteen_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            out_path = root / "action_window_ai.mp4"
+            ffmpeg_args: list[str] = []
+
+            async def fake_run_ffmpeg(args: list[str]) -> None:
+                ffmpeg_args.extend(args)
+                out_path.write_bytes(b"clip")
+
+            with patch("app.services.video._run_ffmpeg", side_effect=fake_run_ffmpeg):
+                await cut_action_window_ai_clip(video_path, 0.0, 25.0, out_path, max_duration_sec=None)
+
+        self.assertEqual(ffmpeg_args[ffmpeg_args.index("-to") + 1], "25.000")
+
+    def test_build_video_input_window_uses_full_context_without_manual_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "source.mp4"
+            video_path.write_bytes(b"fake")
+            with patch("app.services.video.detect_video_duration", return_value=32.5):
+                input_window = build_video_input_window(video_path)
+
+        self.assertEqual(input_window.input_window_mode, "full_context")
+        self.assertFalse(input_window.input_window_truncated)
+        self.assertEqual(input_window.input_window_start_sec, 0.0)
+        self.assertEqual(input_window.input_window_end_sec, 32.5)
+
+    def test_build_video_input_window_manual_window_overrides_full_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "source.mp4"
+            video_path.write_bytes(b"fake")
+            with patch("app.services.video.detect_video_duration", return_value=28.0):
+                input_window = build_video_input_window(video_path, manual_start_sec=10.0, manual_end_sec=10.6)
+
+        self.assertEqual(input_window.input_window_mode, "manual_window")
+        self.assertTrue(input_window.input_window_truncated)
+        self.assertEqual(input_window.input_window_start_sec, 10.0)
+        self.assertEqual(input_window.input_window_end_sec, 10.6)
+        self.assertEqual(input_window.input_window_reason, "manual window selected by user")
+
+    def test_build_video_input_window_manual_full_range_is_not_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "source.mp4"
+            video_path.write_bytes(b"fake")
+            with patch("app.services.video.detect_video_duration", return_value=30.0):
+                input_window = build_video_input_window(video_path, manual_start_sec=0.0, manual_end_sec=30.0)
+
+        self.assertEqual(input_window.input_window_mode, "manual_window")
+        self.assertFalse(input_window.input_window_truncated)
+        self.assertEqual(input_window.input_window_start_sec, 0.0)
+        self.assertEqual(input_window.input_window_end_sec, 30.0)
+
+    async def test_extract_motion_sampled_frames_uses_explicit_input_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            thumb_paths = [root / "thumbs" / f"thumb_{index:05d}.jpg" for index in range(1, 65)]
+
+            async def fake_extract_thumbnails_in_window(
+                _video_path: Path,
+                _thumbs_dir: Path,
+                _start_sec: float,
+                _end_sec: float,
+                frame_rate: int = 5,
+            ) -> list[Path]:
+                self.assertEqual((_start_sec, _end_sec), (0.0, 30.0))
+                _thumbs_dir.mkdir(parents=True, exist_ok=True)
+                for thumb_path in thumb_paths:
+                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                    thumb_path.write_bytes(b"thumb")
+                return thumb_paths
+
+            async def fake_extract_full_frame_at(_video_path: Path, _timestamp: float, target_path: Path) -> None:
+                target_path.write_bytes(b"frame")
+
+            input_window = VideoInputWindow(30.0, 0.0, 30.0, 30.0, "full_context", False, "full_context")
+            with (
+                patch("app.services.video.detect_video_fps", return_value=30.0),
+                patch("app.services.video.detect_action_window", AsyncMock()) as detect_window_mock,
+                patch("app.services.video._extract_thumbnails_in_window", side_effect=fake_extract_thumbnails_in_window),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=[float(index) for index in range(len(thumb_paths))]),
+                patch("app.services.video._extract_full_frame_at", side_effect=fake_extract_full_frame_at),
+            ):
+                sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path=video_path,
+                    frames_dir=frames_dir,
+                    action_type="è·³è·ƒ",
+                    analysis_profile="jump",
+                    input_window=input_window,
+                )
+
+        detect_window_mock.assert_not_called()
+        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(sampling_metadata.action_window_start, 0.0)
+        self.assertEqual(sampling_metadata.action_window_end, 30.0)
+        self.assertEqual(motion_payload["input_window_mode"], "full_context")
 
     async def test_jump_profile_uses_jump_frame_rate_during_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -188,6 +422,63 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(8.0 <= timestamp <= 16.0 for timestamp in extracted_timestamps))
         self.assertGreater(max(extracted_timestamps), 20.0)
         self.assertGreater(max(extracted_timestamps) - min(extracted_timestamps), 20.0)
+
+    async def test_full_video_debug_sampling_uses_video_duration_not_detected_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            thumb_paths = [root / "thumbs" / f"thumb_{index:05d}.jpg" for index in range(1, 193)]
+            extracted_timestamps: list[float] = []
+
+            async def fake_extract_thumbnails_in_window(
+                _video_path: Path,
+                _thumbs_dir: Path,
+                _start_sec: float,
+                _end_sec: float,
+                frame_rate: int = 5,
+            ) -> list[Path]:
+                self.assertEqual((_start_sec, _end_sec), (0.0, 12.0))
+                self.assertEqual(frame_rate, 16)
+                _thumbs_dir.mkdir(parents=True, exist_ok=True)
+                for thumb_path in thumb_paths:
+                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                    thumb_path.write_bytes(b"thumb")
+                return thumb_paths
+
+            async def fake_extract_full_frame_at(_video_path: Path, timestamp: float, target_path: Path) -> None:
+                extracted_timestamps.append(round(timestamp, 3))
+                target_path.write_bytes(b"frame")
+
+            scores = [0.02 for _ in thumb_paths]
+            for index in range(132, 145):
+                scores[index] = 1.0
+
+            with (
+                patch("app.services.video.detect_video_fps", return_value=30.0),
+                patch("app.services.video.detect_video_duration", return_value=12.0),
+                patch("app.services.video.detect_action_window", AsyncMock(return_value=(0.0, 5.0))) as detect_window_mock,
+                patch("app.services.video._extract_thumbnails_in_window", side_effect=fake_extract_thumbnails_in_window),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=scores),
+                patch("app.services.video._extract_full_frame_at", side_effect=fake_extract_full_frame_at),
+            ):
+                sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path=video_path,
+                    frames_dir=frames_dir,
+                    action_type="跳跃",
+                    analysis_profile="jump",
+                    dense_peak_bursts=True,
+                    full_video_window=True,
+                )
+
+        detect_window_mock.assert_not_called()
+        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(motion_payload["window_strategy"], "full_video_debug")
+        self.assertEqual(motion_payload["selection_strategy"], "dense_peak_bursts")
+        self.assertEqual(sampling_metadata.action_window_end, 12.0)
+        self.assertTrue(any(8.25 <= timestamp <= 9.1 for timestamp in extracted_timestamps))
 
 
 if __name__ == "__main__":
