@@ -25,6 +25,7 @@ AI-assisted figure skating training review for skaters, parents, and coaches. Th
   - Path A: pure visual/video-aware analysis.
   - Path B: skeleton-overlaid frames and biomechanics grounding.
 - Generate structured reports, Force Score, training plans, skill progress, archive timelines, debug logs, and shareable parent report images.
+- Training-plan generation uses the active `report` provider with a longer timeout, JSON-object mode where supported, and one automatic JSON-repair pass before falling back to the safe child-friendly plan.
 
 ## Video Analysis Pipeline
 
@@ -93,6 +94,7 @@ QWEN_VISION_MODEL=qwen3.6-plus
 QWEN_VISION_DAILY_COST_LIMIT_CNY=30
 QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 # VIDEO_TEMPORAL_MAX_FRAMES=12
+# TRAINING_PLAN_AI_TIMEOUT_SECONDS=120
 
 # Optional local model mounts.
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
@@ -104,6 +106,7 @@ Provider notes:
 
 - Backend startup no longer seeds provider rows automatically.
 - Use `/settings/api` to create and activate providers for `report`, `vision`, `vision_path_a`, and `vision_path_b`.
+- The `report` provider is also used for training plans, memory suggestions, and plan extension. Slow or malformed provider responses are retried or repaired where possible before safe fallback content is shown.
 - Existing NAS databases with legacy provider rows can keep working; duplicate old rows should not block startup.
 - `SECRET_KEY` is required because saved provider keys are encrypted in the app database.
 
@@ -160,6 +163,8 @@ Export:
 ```powershell
 .\scripts\export-allinone-image.ps1
 ```
+
+The export script builds `skating-analyzer-allinone:latest` and writes a timestamped NAS-ready tar under `deliverables/`, for example `skating-analyzer-allinone-v5.2.303-YYYYMMDD-HHMM.tar`.
 
 Keep `data`, `backups`, and `models` mounted on the host so runtime data and model files do not get baked into images.
 

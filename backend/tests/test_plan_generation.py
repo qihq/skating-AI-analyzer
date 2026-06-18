@@ -123,6 +123,7 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = completion.await_args.kwargs
         self.assertEqual(kwargs["temperature"], 0.55)
+        self.assertEqual(kwargs["timeout"], 120.0)
         messages = kwargs["messages"]
         self.assertIn("3-6岁小朋友", messages[0]["content"])
         self.assertIn("历史记忆：更喜欢音乐游戏", messages[0]["content"])
@@ -146,6 +147,21 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(PlanGenerationError, "AI 调用失败"):
                 await generate_training_plan("jump", _report(), "儿童滑冰学员", "skater-1")
+
+    async def test_generate_training_plan_repairs_malformed_json_once(self) -> None:
+        completion = AsyncMock(side_effect=['{"title":"bad" "focus_skill":"x"}', _ai_plan_json()])
+        with (
+            patch("app.services.plan.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.plan.build_memory_context", AsyncMock(return_value="")),
+            patch("app.services.plan.request_text_completion", completion),
+        ):
+            plan = await generate_training_plan("jump", _report(), "儿童滑冰学员", "skater-1")
+
+        self.assertEqual(plan["title"], "AI 生成 7 天训练计划")
+        self.assertEqual(completion.await_count, 2)
+        repair_prompt = completion.await_args_list[1].kwargs["messages"][1]["content"]
+        self.assertIn("JSON", repair_prompt)
+        self.assertIn("bad", repair_prompt)
 
     async def test_generate_training_plan_raises_when_ai_json_is_incomplete(self) -> None:
         with (
@@ -174,6 +190,7 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = completion.await_args.kwargs
         self.assertEqual(kwargs["temperature"], 0.45)
+        self.assertEqual(kwargs["timeout"], 120.0)
         prompt = kwargs["messages"][1]["content"]
         self.assertIn("练习对象：昭昭，4岁，初级", prompt)
         self.assertIn("膝盖缓冲不够", prompt)

@@ -591,8 +591,25 @@ async def _request_mimo_completion(
     if not isinstance(choices, list) or not choices:
         return ""
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    content = message.get("content") if isinstance(message, dict) else None
-    return extract_message_text(content).strip()
+    if not isinstance(message, dict):
+        return ""
+
+    for key in ("content", "reasoning_content", "text", "output_text"):
+        content = message.get(key)
+        text = extract_message_text(content).strip()
+        if text:
+            return text
+
+    choice_text = extract_message_text(choices[0].get("text")).strip() if isinstance(choices[0], dict) else ""
+    if choice_text:
+        return choice_text
+
+    logger.warning(
+        "MiMo completion returned empty assistant text; choice keys=%s message keys=%s",
+        sorted(choices[0].keys()) if isinstance(choices[0], dict) else [],
+        sorted(message.keys()),
+    )
+    return ""
 
 
 async def request_text_completion(

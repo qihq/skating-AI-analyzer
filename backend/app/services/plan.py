@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from app.services.providers import get_active_provider, request_text_completion
@@ -10,6 +11,76 @@ from app.services.snowball import build_memory_context
 
 
 logger = logging.getLogger(__name__)
+PLAN_JSON_MAX_ATTEMPTS = 2
+
+
+def _training_plan_timeout_seconds() -> float:
+    raw_value = os.getenv("TRAINING_PLAN_AI_TIMEOUT_SECONDS", "120").strip()
+    try:
+        return max(45.0, float(raw_value))
+    except ValueError:
+        logger.warning("Invalid TRAINING_PLAN_AI_TIMEOUT_SECONDS=%r; using 120 seconds.", raw_value)
+        return 120.0
+
+
+def _training_plan_response_format() -> dict[str, str]:
+    return {"type": "json_object"}
+
+
+def _invalid_json_detail(exc: json.JSONDecodeError, raw_text: str) -> str:
+    excerpt = raw_text[:300].replace("\n", "\\n")
+    if excerpt:
+        return f"{exc}; raw excerpt: {excerpt}"
+    return f"{exc}; AI returned empty content"
+
+
+async def _repair_training_plan_json(
+    provider: Any,
+    *,
+    system_prompt: str,
+    raw_content: str,
+    error: json.JSONDecodeError,
+    expected_shape: str = "object",
+) -> Any:
+    shape_instruction = (
+        "ä¸€ä¸ªå®Œæ•´åˆæ³• JSON arrayï¼Œç¬¬ä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ [ï¼Œæœ€åŽä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ ]"
+        if expected_shape == "array"
+        else "ä¸€ä¸ªå®Œæ•´åˆæ³• JSON objectï¼Œç¬¬ä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ {ï¼Œæœ€åŽä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ }"
+    )
+    repair_prompt = (
+        "ä¸Šä¸€æ¬¡è®­ç»ƒè®¡åˆ’è¾“å‡ºä¸æ˜¯åˆæ³• JSONã€‚"
+        f"JSON è§£æžé”™è¯¯ï¼š{error}\n\n"
+        f"è¯·ä¿®å¤ä¸‹é¢çš„å†…å®¹ï¼Œåªè¿”å›ž{shape_instruction}ï¼Œä¸è¦ Markdownã€è§£é‡Šæˆ–ä»£ç å—ã€‚\n\n"
+        "å¿…é¡»ä¿æŒè¿™ä¸ªç»“æž„ï¼š"
+        '{"title":"...","focus_skill":"...","days":[{"day":1,"theme":"...","sessions":[{"id":"d1s1","title":"...","duration":"6åˆ†é’Ÿ","description":"...","related_issue":"...","parent_tip":"...","is_office_trainable":true,"completed":false}]}]}\n\n'
+        f"éœ€è¦ä¿®å¤çš„å†…å®¹ï¼š\n{raw_content[:6000]}"
+    )
+    repaired_content = await request_text_completion(
+        provider,
+        temperature=0.1,
+        max_tokens=3200,
+        timeout=_training_plan_timeout_seconds(),
+        response_format=_training_plan_response_format(),
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": repair_prompt},
+        ],
+    )
+    repaired_cleaned = _clean_plan_json_text(repaired_content)
+    try:
+        repaired = json.loads(repaired_cleaned)
+    except json.JSONDecodeError as repair_error:
+        logger.warning("Training plan JSON repair failed: %s | raw: %s", repair_error, repaired_cleaned[:500])
+        raise PlanGenerationError(
+            f"AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ä¸æ˜¯åˆæ³• JSONï¼š{_invalid_json_detail(repair_error, repaired_content)}"
+        ) from repair_error
+    if expected_shape == "array":
+        if not isinstance(repaired, list):
+            raise PlanGenerationError("AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ JSON ä¸æ˜¯æ•°ç»„ã€‚")
+        return repaired
+    if not isinstance(repaired, dict):
+        raise PlanGenerationError("AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ JSON ä¸æ˜¯å¯¹è±¡ã€‚")
+    return repaired
 
 
 class PlanGenerationError(RuntimeError):
@@ -414,6 +485,8 @@ async def generate_training_plan(
             provider,
             temperature=0.55,
             max_tokens=3200,
+            timeout=_training_plan_timeout_seconds(),
+            response_format=_training_plan_response_format(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -459,7 +532,12 @@ async def generate_training_plan(
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         logger.warning("Training plan JSON parse failed: %s | raw: %s", exc, cleaned[:500])
-        raise PlanGenerationError(f"AI 返回的训练计划不是合法 JSON：{exc}") from exc
+        parsed = await _repair_training_plan_json(
+            provider,
+            system_prompt=system_prompt,
+            raw_content=raw_content,
+            error=exc,
+        )
 
     return normalize_plan(_require_complete_plan_payload(parsed), action_type, report, skater_context)
 
@@ -509,6 +587,8 @@ async def extend_training_plan(
             provider,
             temperature=0.45,
             max_tokens=2200,
+            timeout=_training_plan_timeout_seconds(),
+            response_format=_training_plan_response_format(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -541,7 +621,13 @@ async def extend_training_plan(
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         logger.warning("Extended training plan JSON parse failed: %s | raw: %s", exc, cleaned[:500])
-        raise PlanGenerationError(f"AI 返回的续期计划不是合法 JSON：{exc}") from exc
+        parsed = await _repair_training_plan_json(
+            provider,
+            system_prompt=system_prompt,
+            raw_content=raw_content,
+            error=exc,
+            expected_shape="array",
+        )
 
     regenerated_days = _require_regenerated_days_payload(parsed, remaining_days)
     normalized_regenerated = normalize_plan(

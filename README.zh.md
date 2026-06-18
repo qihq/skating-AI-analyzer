@@ -25,6 +25,7 @@
   - Path A：纯视觉 / 视频感知分析。
   - Path B：骨架叠加帧 + 生物力学 grounding。
 - 生成结构化报告、Force Score、训练计划、技能进度、档案时间轴、调试日志和家长报告分享图。
+- 训练计划使用激活的 `report` 供应商生成，默认使用更长超时、支持 JSON object 模式，并在模型返回坏 JSON 时自动做一次 JSON 修复，再失败才展示儿童安全兜底计划。
 
 ## 视频分析流程
 
@@ -93,6 +94,7 @@ QWEN_VISION_MODEL=qwen3.6-plus
 QWEN_VISION_DAILY_COST_LIMIT_CNY=30
 QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 # VIDEO_TEMPORAL_MAX_FRAMES=12
+# TRAINING_PLAN_AI_TIMEOUT_SECONDS=120
 
 # 可选本地模型挂载。
 # MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
@@ -104,6 +106,7 @@ QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
 
 - 后端启动不再自动 seed provider 行。
 - 在 `/settings/api` 分别创建并激活 `report`、`vision`、`vision_path_a`、`vision_path_b`。
+- `report` 供应商也会用于训练计划、记忆建议和计划续期。供应商响应慢或 JSON 格式异常时，系统会尽量重试或修复，然后才显示安全兜底内容。
 - NAS 旧数据库里的历史 provider 行可以保留；重复旧行不应再阻塞启动。
 - `SECRET_KEY` 必填，因为应用会加密保存 provider API Key。
 
@@ -160,6 +163,8 @@ docker run -d \
 ```powershell
 .\scripts\export-allinone-image.ps1
 ```
+
+导出脚本会构建 `skating-analyzer-allinone:latest`，并在 `deliverables/` 下生成带时间戳的 NAS 可导入 tar，例如 `skating-analyzer-allinone-v5.2.303-YYYYMMDD-HHMM.tar`。
 
 `data`、`backups`、`models` 建议始终保持宿主机挂载，避免运行时数据和模型文件被打进镜像。
 
