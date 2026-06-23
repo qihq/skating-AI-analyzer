@@ -2,13 +2,13 @@ import { NavLink } from "react-router-dom";
 
 import { useAppMode } from "./AppModeContext";
 
-export type PrimaryTab = "path" | "snowball" | "review" | "archive" | "history" | "settings" | "debug";
+export type PrimaryTab = "path" | "snowball" | "review" | "chat" | "archive" | "history" | "settings" | "debug";
 
 type BottomNavProps = {
   activeTab?: PrimaryTab;
 };
 
-const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings" | "debug">; to: string; label: string; icon: string }> = [
+const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings" | "debug" | "chat" | "history">; to: string; label: string; icon: string }> = [
   { tab: "path", to: "/path", label: "路径", icon: "⛸️" },
   { tab: "snowball", to: "/snowball", label: "冰宝", icon: "❄️" },
   { tab: "review", to: "/review", label: "复盘", icon: "🎬" },
@@ -17,6 +17,7 @@ const PRIMARY_NAV_ITEMS: Array<{ tab: Exclude<PrimaryTab, "settings" | "debug">;
 
 const PARENT_NAV_ITEMS: Array<{ tab: PrimaryTab; to: string; label: string; icon: string }> = [
   { tab: "review", to: "/review", label: "分析", icon: "📹" },
+  { tab: "chat", to: "/analysis-chat", label: "追问", icon: "💬" },
   { tab: "path", to: "/path", label: "计划", icon: "📋" },
   { tab: "history", to: "/history", label: "历史", icon: "📜" },
   { tab: "archive", to: "/archive", label: "进展", icon: "📊" },
@@ -35,7 +36,10 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         aria-label="主导航"
         className="bottom-nav fixed inset-x-0 bottom-0 z-30 border-t border-[#E5E7EB] bg-white/96 backdrop-blur web:hidden"
       >
-        <div className={`mx-auto grid h-full max-w-3xl ${mobileNavItems.length === 4 ? "grid-cols-4" : mobileNavItems.length === 5 ? "grid-cols-5" : "grid-cols-6"}`}>
+        <div
+          className="mx-auto grid h-full max-w-3xl"
+          style={{ gridTemplateColumns: `repeat(${mobileNavItems.length}, minmax(0, 1fr))` }}
+        >
           {mobileNavItems.map((item) => (
             <NavLink
               key={item.tab}
@@ -80,7 +84,7 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         <div className="mt-auto rounded-[24px] border border-blue-100 bg-blue-50/80 p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">家庭模式</p>
           <p className="mt-2 text-sm leading-6 text-slate-600">
-            手机与 iPad 使用底部导航，网页端使用左侧固定导航。进入家长模式后，会显示分析、计划、进展与设置四个入口。
+            手机与 iPad 使用底部导航，网页端使用左侧固定导航。家长模式会显示分析、追问、计划、历史、进展和设置入口。
           </p>
         </div>
       </aside>

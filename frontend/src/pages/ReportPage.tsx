@@ -22,6 +22,7 @@ import {
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
 import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
+import AnalysisFollowUpPanel from "../components/AnalysisFollowUpPanel";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
@@ -185,6 +186,23 @@ function normalizeShareText(value: string | null | undefined, fallback: string, 
     return fallback;
   }
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function formatActionConfirmation(report: AnalysisDetail["report"] | null | undefined) {
+  const confirmation = report?.action_confirmation;
+  if (!confirmation) {
+    return null;
+  }
+  const confirmed = String(confirmation.confirmed_action ?? confirmation.jump_type ?? "").trim();
+  if (!confirmed || confirmed === "不可分析") {
+    return null;
+  }
+  const confidence =
+    typeof confirmation.confidence === "number" && Number.isFinite(confirmation.confidence)
+      ? ` · ${Math.round(confirmation.confidence * 100)}%`
+      : "";
+  const family = confirmation.action_family ? `${confirmation.action_family} · ` : "";
+  return `${family}${confirmed}${confidence}`;
 }
 
 function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number) {
@@ -780,6 +798,7 @@ export default function ReportPage() {
   const autoUnlockedSkill = skills.find((item) => item.id === deferredAnalysis?.auto_unlocked_skill) ?? null;
   const flattenedSuggestions = useMemo(() => flattenSuggestionPreview(memorySuggestions), [memorySuggestions]);
   const shouldPollAnalysis = Boolean(id && analysis && isAnalysisInProgress(analysis.status));
+  const actionConfirmationText = formatActionConfirmation(deferredAnalysis?.report);
 
   useEffect(() => {
     let cancelled = false;
@@ -1384,9 +1403,31 @@ export default function ReportPage() {
                     <p className="mt-2">{deferredAnalysis.note}</p>
                   </div>
                 ) : null}
+                {deferredAnalysis.report?.user_note_response || actionConfirmationText ? (
+                  <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm leading-7 text-slate-700">
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">备注回应</p>
+                    {deferredAnalysis.report?.user_note_response ? (
+                      <p className="mt-2">{deferredAnalysis.report.user_note_response}</p>
+                    ) : null}
+                    {actionConfirmationText ? (
+                      <p className="mt-2 text-xs font-semibold text-blue-700">视频语义识别：{actionConfirmationText}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
+
+          {isParentMode ? (
+            <div className="web:hidden">
+              <AnalysisFollowUpPanel
+                analysis={deferredAnalysis}
+                compact
+                onAnalysisRefresh={() => id && void fetchAnalysis(id, { isParentRequest: isParentMode }).then(setAnalysis)}
+                onNotice={showNotice}
+              />
+            </div>
+          ) : null}
 
           <div className="grid min-w-0 max-w-full gap-6 overflow-hidden web:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
             <div className="min-w-0 space-y-6">
@@ -1494,6 +1535,15 @@ export default function ReportPage() {
                 </>
               ) : (
                 <>
+                  <div className="hidden web:block">
+                    <AnalysisFollowUpPanel
+                      analysis={deferredAnalysis}
+                      compact
+                      onAnalysisRefresh={() => id && void fetchAnalysis(id, { isParentRequest: isParentMode }).then(setAnalysis)}
+                      onNotice={showNotice}
+                    />
+                  </div>
+
                   <ReportCard title="问题列表" eyebrow="Issues">
                     <div className="space-y-4">
                       {deferredAnalysis.report?.issues?.length ? (

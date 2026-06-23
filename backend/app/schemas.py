@@ -34,6 +34,8 @@ class StructuredReport(BaseModel):
     subscores: dict[str, int] = Field(default_factory=dict)
     data_quality: str = "partial"
     user_note: str | None = None
+    user_note_response: str | None = None
+    action_confirmation: dict[str, Any] | None = None
 
 
 class AnalysisUploadResponse(BaseModel):
@@ -43,6 +45,71 @@ class AnalysisUploadResponse(BaseModel):
 
 class AnalysisRetryResponse(BaseModel):
     message: str
+
+
+class AnalysisChatMessagePublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_id: str
+    role: str
+    content: str
+    created_at: datetime
+
+
+class AnalysisChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class AnalysisChatResponse(BaseModel):
+    message: AnalysisChatMessagePublic
+    messages: list[AnalysisChatMessagePublic] = Field(default_factory=list)
+
+
+class AnalysisCorrectionPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_id: str
+    kind: str
+    payload: dict[str, Any]
+    rationale: str | None = None
+    source: str
+    status: str
+    original_snapshot: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
+
+
+class AnalysisCorrectionCreateRequest(BaseModel):
+    kind: str = Field(min_length=1, max_length=32)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    rationale: str | None = Field(default=None, max_length=2000)
+    source: str = Field(default="manual", max_length=24)
+    status: str = Field(default="proposed", max_length=16)
+
+
+class AnalysisCorrectionListResponse(BaseModel):
+    corrections: list[AnalysisCorrectionPublic] = Field(default_factory=list)
+    effective: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisCorrectionMutationResponse(BaseModel):
+    correction: AnalysisCorrectionPublic
+    corrections: list[AnalysisCorrectionPublic] = Field(default_factory=list)
+    effective: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisChatShareRequest(BaseModel):
+    message_ids: list[str] | None = None
+    include_pending_corrections: bool = True
+
+
+class AnalysisChatShareResponse(BaseModel):
+    title: str
+    text: str
+    image_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisLogEntry(BaseModel):

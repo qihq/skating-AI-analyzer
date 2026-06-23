@@ -387,6 +387,8 @@ async def _run_migrations(conn) -> None:
     await run_migrations_patch_h(conn)
     await run_migrations_patch_i(conn)
     await run_migrations_debug_runs(conn)
+    await run_migrations_analysis_chat(conn)
+    await run_migrations_analysis_corrections(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -670,6 +672,76 @@ async def _create_debug_run_tables(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_status_created_at ON debug_runs(status, created_at DESC)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_analysis_id ON debug_runs(analysis_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_mode ON debug_runs(mode)"))
+
+
+async def run_migrations_analysis_chat(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_analysis_chat_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_analysis_chat_tables(conn)
+
+
+async def _create_analysis_chat_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_chat_messages (
+                id TEXT PRIMARY KEY,
+                analysis_id TEXT NOT NULL REFERENCES analyses(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                context_snapshot JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_chat_messages_analysis_id ON analysis_chat_messages(analysis_id)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_chat_messages_analysis_created_at ON analysis_chat_messages(analysis_id, created_at)")
+    )
+
+
+async def run_migrations_analysis_corrections(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_analysis_correction_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_analysis_correction_tables(conn)
+
+
+async def _create_analysis_correction_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_corrections (
+                id TEXT PRIMARY KEY,
+                analysis_id TEXT NOT NULL REFERENCES analyses(id),
+                kind TEXT NOT NULL,
+                payload JSON NOT NULL,
+                rationale TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                status TEXT NOT NULL DEFAULT 'proposed',
+                original_snapshot JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                applied_at TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_id ON analysis_corrections(analysis_id)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_status ON analysis_corrections(analysis_id, status)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_created_at ON analysis_corrections(analysis_id, created_at)")
+    )
 
 
 async def _create_phase6_tables(conn) -> None:

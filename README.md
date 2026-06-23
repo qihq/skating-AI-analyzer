@@ -14,6 +14,11 @@ The current pipeline version is `v5.2.303`.
 
 Current branch updates improve the parent review workflow and local all-in-one responsiveness:
 
+- Reports and the standalone `/analysis-chat` workspace now support persisted multi-turn AI follow-up for any completed analysis.
+- AI or manual corrections for action labels, action confirmation, keyframes, report notes, and regenerated reports are stored as auditable correction cards before they are applied.
+- Report reads, exports, chat context, and sharing use the effective overlay of original analysis data plus applied corrections while preserving the original raw analysis JSON.
+- Follow-up sharing now returns copyable text plus a generated image-card payload covering the latest Q&A, applied corrections, pending corrections, and the report link.
+- The follow-up UI is responsive across phone, tablet, and desktop: compact mobile selector and sticky input, tablet mixed layout, and desktop list/chat/evidence columns.
 - Review uploads now allow broad action categories when the exact action name is unknown, and pre-submit comments are included in the earliest action-recognition prompt.
 - Training plan generation now records whether a plan came from AI or from a safe fallback, and fallback plans are clearly labeled in the UI.
 - Parent report sharing now generates a visual share card with the most important report information instead of only copying text.
@@ -49,6 +54,8 @@ The latest release makes review upload less brittle when the exact element name 
 - Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
 - Dual-path vision analysis with video-aware context, provider fallback, malformed-JSON recovery, retry handling, and cost limits.
 - AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
+- Persisted AI follow-up for completed videos, with evidence-grounded answers, manual/AI-suggested correction cards, explicit apply/dismiss actions, and report regeneration from applied corrections.
+- Standalone `/analysis-chat` workspace for selecting any completed analysis, reviewing effective recognition/keyframes, checking partial semantic candidates, applying corrections, and sharing text/image recap content.
 - Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, AI input windows, timings, and logs.
 - Docker Compose and all-in-one Docker deployment for NAS or local single-container use.
 
@@ -234,6 +241,7 @@ Backend regression tests cover:
 - bbox tracking, target lock, person tracking, and pose smoothing
 - keyframe candidates, T/A/L ordering, and biomechanics timing
 - dual-path vision, malformed Path A JSON recovery, provider retry, report fusion, and content normalization
+- AI follow-up persistence, prompt context with comments/action confirmation/partial semantic candidates, proposed correction cards, effective correction overlays, and share payload generation
 
 Run backend tests:
 
@@ -317,6 +325,7 @@ Recent inspection of `skating-analyzer-allinone:latest` showed:
 - `/path`: skill tree and learning path.
 - `/review`: upload and analyze training videos.
 - `/report/:id`: analysis report.
+- `/analysis-chat`: standalone parent/coach follow-up workspace for any completed analysis.
 - `/report/:id/pose-debug`: expanded skeleton replay and tracker diagnostics.
 - `/archive`: training archive and progress.
 - `/plan/:plan_id`: training plan.

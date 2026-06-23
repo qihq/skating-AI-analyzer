@@ -84,6 +84,37 @@ class Analysis(Base):
     session: Mapped["TrainingSession | None"] = relationship("TrainingSession", back_populates="analyses")
 
 
+class AnalysisChatMessage(Base):
+    __tablename__ = "analysis_chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    analysis_id: Mapped[str] = mapped_column(String(36), ForeignKey("analyses.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    context_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnalysisCorrection(Base):
+    __tablename__ = "analysis_corrections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    analysis_id: Mapped[str] = mapped_column(String(36), ForeignKey("analyses.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(24), default="manual", index=True)
+    status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)
+    original_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DebugRun(Base):
     __tablename__ = "debug_runs"
 

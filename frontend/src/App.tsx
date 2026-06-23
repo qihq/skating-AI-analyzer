@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import AppLayout from "./components/AppLayout";
+import AnalysisChatPage from "./pages/AnalysisChatPage";
 import ApiSettingsPage from "./pages/ApiSettingsPage";
 import ComparePage from "./pages/ComparePage";
 import DebugPage from "./pages/DebugPage";
@@ -123,6 +124,7 @@ export default function App() {
           <Route path="/path" element={<SkillTreePage />} />
           <Route path="/snowball" element={<SnowballPage />} />
           <Route path="/review" element={<ReviewPage />} />
+          <Route path="/analysis-chat" element={<AnalysisChatPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />

@@ -21,10 +21,14 @@ class AnalysisNoteTests(unittest.TestCase):
                 "subscores": {},
                 "data_quality": "good",
                 "user_note": "landing felt tight",
+                "user_note_response": "家长备注提到 landing felt tight，建议复核落冰。",
+                "action_confirmation": {"confirmed_action": "Toe Loop", "confidence": 0.75},
             }
         )
 
         self.assertEqual(report["user_note"], "landing felt tight")
+        self.assertEqual(report["user_note_response"], "家长备注提到 landing felt tight，建议复核落冰。")
+        self.assertEqual(report["action_confirmation"]["confirmed_action"], "Toe Loop")
 
     def test_sync_report_user_note_adds_updates_and_clears_note(self) -> None:
         report = {

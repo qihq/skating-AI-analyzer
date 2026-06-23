@@ -289,6 +289,55 @@ class ReportDualPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("用户备注/comments", prompt)
         self.assertIn("不要安排负重、Bosu、旋转椅或痛苦拉伸", prompt)
 
+    async def test_generate_report_adds_user_note_response_and_action_confirmation(self) -> None:
+        request_mock = AsyncMock(
+            return_value="""
+            {
+              "summary": "本次跳跃落冰阶段不够稳定。",
+              "issues": [{"category":"落冰控制","description":"落冰时上身前倾，滑出不稳。","severity":"medium","phase":"落冰","frames":[]}],
+              "improvements": [{"target":"落冰控制","action":"做单脚软膝落冰停住练习。"}],
+              "training_focus": "先复核落冰稳定性。",
+              "subscores": {"takeoff_power":70,"rotation_axis":65,"arm_coordination":70,"landing_absorption":60,"core_stability":68},
+              "data_quality": "partial"
+            }
+            """
+        )
+        context = AnalysisPromptContext(
+            action_type="跳跃",
+            action_subtype="单跳",
+            skill_category=None,
+            analysis_profile="jump",
+            profile_evidence={},
+            motion_features={},
+            bio_data={},
+            user_note="这个具体是哪个动作？落冰还是不稳是为什么？",
+            memory_context="",
+        )
+        dual_path_meta = {
+            "video_temporal": {
+                "action_confirmation": {
+                    "action_family": "jump",
+                    "confirmed_action": "Toe Loop",
+                    "jump_type": "Toe Loop",
+                    "confidence": 0.75,
+                    "notes": "点冰起跳特征更明显。",
+                }
+            }
+        }
+
+        with (
+            patch("app.services.report.get_active_provider", AsyncMock(return_value=_provider())),
+            patch("app.services.report.request_text_completion", request_mock),
+        ):
+            report = await generate_report("跳跃", {"frame_analysis": []}, bio_data=None, dual_path_meta=dual_path_meta, prompt_context=context)
+
+        prompt = request_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertIn('"user_note_response"', prompt)
+        self.assertEqual(report["user_note"], "这个具体是哪个动作？落冰还是不稳是为什么？")
+        self.assertEqual(report["action_confirmation"]["confirmed_action"], "Toe Loop")
+        self.assertIn("Toe Loop", report["user_note_response"])
+        self.assertIn("落冰不稳", report["user_note_response"])
+
     async def test_generate_report_refines_generic_items_with_path_b_evidence(self) -> None:
         request_mock = AsyncMock(
             return_value="""

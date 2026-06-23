@@ -44,6 +44,16 @@ export interface StructuredReport {
   training_focus: string;
   subscores?: Record<string, number>;
   data_quality?: "good" | "partial" | "poor" | string;
+  user_note?: string | null;
+  user_note_response?: string | null;
+  action_confirmation?: {
+    action_family?: string | null;
+    confirmed_action?: string | null;
+    jump_type?: string | null;
+    confidence?: number | null;
+    notes?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface BioData {
@@ -186,6 +196,67 @@ export interface AnalysisDetail extends AnalysisListItem {
   error_code: AnalysisErrorCode | null;
   error_detail: string | null;
   error_message: string | null;
+}
+
+export interface AnalysisChatMessage {
+  id: string;
+  analysis_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  created_at: string;
+}
+
+export interface AnalysisChatResponse {
+  message: AnalysisChatMessage;
+  messages: AnalysisChatMessage[];
+}
+
+export interface AnalysisCorrection {
+  id: string;
+  analysis_id: string;
+  kind: "action_label" | "keyframes" | "report_note" | "report_regeneration" | "target_lock" | string;
+  payload: Record<string, unknown>;
+  rationale: string | null;
+  source: "manual" | "chat_suggestion" | string;
+  status: "proposed" | "applied" | "dismissed" | string;
+  original_snapshot: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  applied_at: string | null;
+}
+
+export interface AnalysisCorrectionListResponse {
+  corrections: AnalysisCorrection[];
+  effective: Record<string, unknown>;
+}
+
+export interface AnalysisCorrectionMutationResponse extends AnalysisCorrectionListResponse {
+  correction: AnalysisCorrection;
+}
+
+export interface AnalysisCorrectionCreatePayload {
+  kind: string;
+  payload: Record<string, unknown>;
+  rationale?: string | null;
+  source?: string;
+  status?: string;
+}
+
+export interface AnalysisChatShareResponse {
+  title: string;
+  text: string;
+  image_payload: {
+    analysis_id?: string;
+    title?: string;
+    score?: number | null;
+    summary?: string;
+    question?: string;
+    answer?: string;
+    applied_corrections?: string[];
+    pending_corrections?: string[];
+    report_url?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface SelectedSemanticFrame {
@@ -880,6 +951,46 @@ export async function fetchAnalysisPose(id: string) {
   return response.data;
 }
 
+export async function fetchAnalysisChatMessages(id: string) {
+  const response = await apiClient.get<AnalysisChatMessage[]>(`/analysis/${id}/chat/messages`);
+  return response.data;
+}
+
+export async function sendAnalysisChatMessage(id: string, message: string) {
+  const response = await apiClient.post<AnalysisChatResponse>(`/analysis/${id}/chat`, { message });
+  return response.data;
+}
+
+export async function fetchAnalysisCorrections(id: string) {
+  const response = await apiClient.get<AnalysisCorrectionListResponse>(`/analysis/${id}/corrections`);
+  return response.data;
+}
+
+export async function createAnalysisCorrection(id: string, payload: AnalysisCorrectionCreatePayload) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections`, payload);
+  return response.data;
+}
+
+export async function applyAnalysisCorrection(id: string, correctionId: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/${correctionId}/apply`);
+  return response.data;
+}
+
+export async function dismissAnalysisCorrection(id: string, correctionId: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/${correctionId}/dismiss`);
+  return response.data;
+}
+
+export async function regenerateReportFromCorrections(id: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/regenerate-report`);
+  return response.data;
+}
+
+export async function shareAnalysisChat(id: string, options?: { message_ids?: string[]; include_pending_corrections?: boolean }) {
+  const response = await apiClient.post<AnalysisChatShareResponse>(`/analysis/${id}/chat/share`, options ?? {});
+  return response.data;
+}
+
 export async function fetchTargetPreview(id: string) {
   const response = await apiClient.get<TargetPreviewResponse>(`/analysis/${id}/target-preview`);
   return response.data;
@@ -893,9 +1004,13 @@ export async function confirmTargetLock(
   return response.data;
 }
 
-export async function fetchAnalyses(params?: { action_type?: string; skater_id?: string }) {
-  const response = await apiClient.get<AnalysisListItem[]>("/analysis/", { params });
-  return response.data;
+export async function fetchAnalyses(params?: { action_type?: string; skater_id?: string; limit?: number; offset?: number }) {
+  const response = await apiClient.get<AnalysisListItem[] | { value?: AnalysisListItem[]; items?: AnalysisListItem[]; analyses?: AnalysisListItem[] }>("/analysis/", { params });
+  const data = response.data;
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return data.value ?? data.items ?? data.analyses ?? [];
 }
 
 export async function fetchAnalysisCompare(idA: string, idB: string) {

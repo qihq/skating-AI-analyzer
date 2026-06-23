@@ -30,6 +30,15 @@ from app.database import (
 )
 from app.models import Analysis, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
+    AnalysisChatShareRequest,
+    AnalysisChatShareResponse,
+    AnalysisChatRequest,
+    AnalysisChatResponse,
+    AnalysisChatMessagePublic,
+    AnalysisCorrectionCreateRequest,
+    AnalysisCorrectionListResponse,
+    AnalysisCorrectionMutationResponse,
+    AnalysisCorrectionPublic,
     AnalysisCompareResponse,
     AnalysisAutoEvalSnapshot,
     AnalysisDetail,
@@ -55,6 +64,22 @@ from app.schemas import (
     TargetPreviewResponse,
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
+)
+from app.services.analysis_corrections import (
+    AnalysisCorrectionError,
+    apply_analysis_correction,
+    build_chat_share_image_payload,
+    build_chat_share_text,
+    create_analysis_correction,
+    dismiss_analysis_correction,
+    effective_analysis_for_read,
+    effective_payload_for_analysis,
+    list_analysis_corrections,
+)
+from app.services.analysis_chat import (
+    AnalysisChatError,
+    create_analysis_chat_reply,
+    list_analysis_chat_messages,
 )
 from app.services.action_profiles import (
     infer_analysis_profile,
@@ -5526,6 +5551,36 @@ def _detail_from_analysis(
     )
 
 
+def _correction_public_list(corrections: Sequence[Any]) -> list[AnalysisCorrectionPublic]:
+    return [AnalysisCorrectionPublic.model_validate(correction) for correction in corrections]
+
+
+async def _correction_list_response(
+    session: AsyncSession,
+    analysis: Analysis,
+) -> AnalysisCorrectionListResponse:
+    corrections = await list_analysis_corrections(session, analysis.id)
+    effective = await effective_payload_for_analysis(session, analysis)
+    return AnalysisCorrectionListResponse(
+        corrections=_correction_public_list(corrections),
+        effective=effective,
+    )
+
+
+async def _correction_mutation_response(
+    session: AsyncSession,
+    analysis: Analysis,
+    correction: Any,
+) -> AnalysisCorrectionMutationResponse:
+    corrections = await list_analysis_corrections(session, analysis.id)
+    effective = await effective_payload_for_analysis(session, analysis)
+    return AnalysisCorrectionMutationResponse(
+        correction=AnalysisCorrectionPublic.model_validate(correction),
+        corrections=_correction_public_list(corrections),
+        effective=effective,
+    )
+
+
 def _fusion_diagnostics_summary(cross_validation: dict[str, Any] | None) -> list[str]:
     if not isinstance(cross_validation, dict):
         return []
@@ -7631,6 +7686,224 @@ async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(ge
     return _plan_detail_from_model(plan)
 
 
+@router.get("/{analysis_id}/chat/messages", response_model=list[AnalysisChatMessagePublic])
+async def get_analysis_chat_messages(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisChatMessagePublic]:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    messages = await list_analysis_chat_messages(session, analysis_id)
+    return [AnalysisChatMessagePublic.model_validate(message) for message in messages]
+
+
+@router.post("/{analysis_id}/chat", response_model=AnalysisChatResponse)
+async def post_analysis_chat(
+    analysis_id: str,
+    payload: AnalysisChatRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisChatResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    try:
+        assistant_message, messages = await create_analysis_chat_reply(
+            session,
+            analysis,
+            message=payload.message,
+        )
+    except AnalysisChatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Analysis %s chat failed: %s", analysis_id, exc)
+        raise HTTPException(status_code=502, detail="AI 追问暂时没有顺利回复，请稍后再试。") from exc
+
+    return AnalysisChatResponse(
+        message=AnalysisChatMessagePublic.model_validate(assistant_message),
+        messages=[AnalysisChatMessagePublic.model_validate(message) for message in messages],
+    )
+
+
+@router.get("/{analysis_id}/corrections", response_model=AnalysisCorrectionListResponse)
+async def get_analysis_corrections(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionListResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    return await _correction_list_response(session, analysis)
+
+
+@router.post("/{analysis_id}/corrections", response_model=AnalysisCorrectionMutationResponse)
+async def post_analysis_correction(
+    analysis_id: str,
+    payload: AnalysisCorrectionCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能修正。")
+    try:
+        correction = await create_analysis_correction(
+            session,
+            analysis,
+            kind=payload.kind,
+            payload=payload.payload,
+            rationale=payload.rationale,
+            source=payload.source,
+            status=payload.status,
+        )
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/{correction_id}/apply", response_model=AnalysisCorrectionMutationResponse)
+async def apply_analysis_correction_route(
+    analysis_id: str,
+    correction_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    try:
+        correction = await apply_analysis_correction(session, analysis, correction_id)
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/{correction_id}/dismiss", response_model=AnalysisCorrectionMutationResponse)
+async def dismiss_analysis_correction_route(
+    analysis_id: str,
+    correction_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    try:
+        correction = await dismiss_analysis_correction(session, analysis, correction_id)
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/regenerate-report", response_model=AnalysisCorrectionMutationResponse)
+async def regenerate_report_from_corrections(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能重新生成报告。")
+
+    effective_analysis = await effective_analysis_for_read(session, analysis)
+    if not isinstance(effective_analysis.vision_structured, dict):
+        raise HTTPException(status_code=400, detail="当前分析缺少视觉结构化数据。")
+    if not isinstance(effective_analysis.bio_data, dict):
+        raise HTTPException(status_code=400, detail="当前分析缺少生物力学数据。")
+
+    frame_motion_scores = effective_analysis.frame_motion_scores if isinstance(effective_analysis.frame_motion_scores, dict) else None
+    dual_path_meta = _merge_video_temporal_cross_validation(
+        effective_analysis.cross_validation if isinstance(effective_analysis.cross_validation, dict) else None,
+        frame_motion_scores=frame_motion_scores,
+    )
+    dual_path_meta = _attach_path_b_report_evidence(
+        dual_path_meta,
+        effective_analysis.vision_path_b if isinstance(effective_analysis.vision_path_b, dict) else None,
+    )
+    profile_evidence = (
+        effective_analysis.bio_data.get("profile_evidence")
+        if isinstance(effective_analysis.bio_data.get("profile_evidence"), dict)
+        else None
+    )
+    report = await generate_report(
+        effective_analysis.action_type,
+        effective_analysis.vision_structured,
+        effective_analysis.bio_data,
+        effective_analysis.skater_id,
+        dual_path_meta=dual_path_meta,
+        prompt_context=await build_analysis_prompt_context(
+            action_type=effective_analysis.action_type,
+            action_subtype=effective_analysis.action_subtype,
+            skill_category=effective_analysis.skill_category,
+            analysis_profile=effective_analysis.analysis_profile,
+            profile_evidence=profile_evidence,
+            motion_features=frame_motion_scores,
+            bio_data=effective_analysis.bio_data,
+            skater_id=effective_analysis.skater_id,
+            user_note=effective_analysis.note,
+        ),
+    )
+    force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
+    try:
+        correction = await create_analysis_correction(
+            session,
+            analysis,
+            kind="report_regeneration",
+            payload={
+                "report": report,
+                "force_score": force_score,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            rationale="Regenerated report from applied corrections.",
+            source="manual",
+            status="applied",
+        )
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/chat/share", response_model=AnalysisChatShareResponse)
+async def share_analysis_chat(
+    analysis_id: str,
+    payload: AnalysisChatShareRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisChatShareResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    effective_analysis = await effective_analysis_for_read(session, analysis)
+    messages = await list_analysis_chat_messages(session, analysis_id)
+    selected_ids = set(payload.message_ids or []) if payload and payload.message_ids else set()
+    if selected_ids:
+        messages = [message for message in messages if message.id in selected_ids]
+    corrections = await list_analysis_corrections(session, analysis_id)
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    include_pending = True if payload is None else payload.include_pending_corrections
+    title = f"{skater_name + ' · ' if skater_name else ''}{effective_analysis.action_subtype or effective_analysis.action_type}"
+    return AnalysisChatShareResponse(
+        title=title,
+        text=build_chat_share_text(
+            effective_analysis,
+            messages,
+            corrections,
+            skater_name=skater_name,
+            include_pending_corrections=include_pending,
+        ),
+        image_payload=build_chat_share_image_payload(
+            effective_analysis,
+            messages,
+            corrections,
+            skater_name=skater_name,
+        ),
+    )
+
+
 @router.get("/{analysis_id}/pose", response_model=PoseResponse)
 async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PoseResponse:
     analysis = await session.get(Analysis, analysis_id)
@@ -7672,6 +7945,8 @@ async def get_analysis(
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
+    if analysis.status == "completed":
+        analysis = await effective_analysis_for_read(session, analysis)
     skater_name = None
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
@@ -7687,6 +7962,7 @@ async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能导出报告。")
 
+    effective_analysis = await effective_analysis_for_read(session, analysis)
     skater_name = None
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
@@ -7694,7 +7970,7 @@ async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends
 
     training_session = await session.get(TrainingSession, analysis.session_id) if analysis.session_id else None
     session_date = training_session.session_date.isoformat() if training_session else None
-    return PlainTextResponse(_build_export_text(analysis, skater_name, session_date))
+    return PlainTextResponse(_build_export_text(effective_analysis, skater_name, session_date))
 
 
 @router.post("/{analysis_id}/retry", response_model=AnalysisRetryResponse)
@@ -7710,13 +7986,24 @@ async def retry_analysis(
 
     stale_snapshot = _build_stale_analysis_snapshot(analysis)
     if stale_snapshot is not None:
-        analysis.status = "failed"
-        analysis.retry_from_stage = stale_snapshot.retry_from_stage
-        analysis.error_code = stale_snapshot.error_code
-        analysis.error_message = stale_snapshot.error_message
-        analysis.error_detail = stale_snapshot.error_detail
-        analysis.processing_logs = stale_snapshot.processing_logs
-        await session.commit()
+        async def _save_stale_snapshot() -> Analysis | None:
+            async with AsyncSessionLocal() as write_session:
+                current = await write_session.get(Analysis, analysis_id)
+                if current is None:
+                    return None
+                current.status = "failed"
+                current.retry_from_stage = stale_snapshot.retry_from_stage
+                current.error_code = stale_snapshot.error_code
+                current.error_message = stale_snapshot.error_message
+                current.error_detail = stale_snapshot.error_detail
+                current.processing_logs = stale_snapshot.processing_logs
+                await write_session.commit()
+                await write_session.refresh(current)
+                return current
+
+        refreshed = await run_db_write_with_retry(_save_stale_snapshot, context=f"retry_analysis_stale_snapshot:{analysis_id}")
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="未找到该分析记录。")
         await session.refresh(analysis)
 
     if analysis.status == "awaiting_target_selection":
@@ -7752,17 +8039,28 @@ async def retry_analysis(
     if source_video_path is None and retry_from_stage != 'report':
         raise HTTPException(status_code=404, detail="原始视频已清理或不可用，无法重新分析。")
 
-    analysis.status = "pending"
-    analysis.error_code = None
-    analysis.error_detail = None
-    analysis.error_message = None
-    analysis.processing_timings = None
-    analysis.pipeline_version = CURRENT_PIPELINE_VERSION
-    analysis.retry_from_stage = retry_from_stage
-    if retry_from_stage in {None, 'extract_frames', 'pose'} and not _is_confirmed_target_lock(analysis.target_lock):
-        analysis.target_lock_status = 'pending'
-    analysis.updated_at = datetime.now(timezone.utc)
-    await session.commit()
+    async def _mark_retry_pending() -> Analysis | None:
+        async with AsyncSessionLocal() as write_session:
+            current = await write_session.get(Analysis, analysis_id)
+            if current is None:
+                return None
+            current.status = "pending"
+            current.error_code = None
+            current.error_detail = None
+            current.error_message = None
+            current.processing_timings = None
+            current.pipeline_version = CURRENT_PIPELINE_VERSION
+            current.retry_from_stage = retry_from_stage
+            if retry_from_stage in {None, "extract_frames", "pose"} and not _is_confirmed_target_lock(current.target_lock):
+                current.target_lock_status = "pending"
+            current.updated_at = datetime.now(timezone.utc)
+            await write_session.commit()
+            await write_session.refresh(current)
+            return current
+
+    refreshed = await run_db_write_with_retry(_mark_retry_pending, context=f"retry_analysis_pending:{analysis_id}")
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
     if retry_from_stage:
