@@ -16,7 +16,7 @@ from app.services.analysis_corrections import (
     create_analysis_correction,
     list_analysis_corrections,
 )
-from app.services.providers import get_active_provider, request_text_completion
+from app.services.providers import ActiveProviderConfig, get_active_provider, get_provider_config_by_id, request_text_completion
 from app.services.snowball import build_memory_context
 
 
@@ -33,7 +33,17 @@ CORRECTION_SUGGESTION_PROMPT = (
     "or keyframes, you may propose a correction, but never say it has been applied. The last line must be exactly "
     "CORRECTION_SUGGESTION_JSON={\"kind\":\"action_label|keyframes|report_note\",\"payload\":{...},\"rationale\":\"...\"}. "
     "Use action_label for action_type/action_subtype/action_confirmation, keyframes for T/A/L or semantic frame changes, "
-    "and report_note only for a narrative note. If no concrete correction is requested, omit this marker."
+    "and report_note only for a narrative note. If the conversation confirms a more accurate action type, action name, "
+    "or T/A/L keyframes, output the marker with the best structured values so the UI can prefill a human-reviewed form. "
+    "For action_label payloads, include action_type when known, action_subtype when known, and action_confirmation.confirmed_action "
+    "for the action name. For keyframes payloads, include key_frames with T, A, and/or L values. If no concrete correction "
+    "is requested or confirmed, omit this marker."
+)
+MODEL_IDENTITY_PROMPT = (
+    "\n\nModel identity protocol: the actual model/provider for this request is supplied in the evidence JSON under "
+    "request_model. If the user asks what model, provider, vendor, or AI identity is being used, answer only from "
+    "request_model.name, request_model.provider, and request_model.model_id. Do not claim to be Claude, Anthropic, "
+    "OpenAI, ChatGPT, or any other vendor/model unless request_model explicitly says so."
 )
 
 MAX_HISTORY_MESSAGES = 12
@@ -50,6 +60,67 @@ def _clean_text(value: Any) -> str:
 
 def _compact_json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _provider_identity_payload(provider: ActiveProviderConfig) -> dict[str, str]:
+    return {
+        "id": provider.id,
+        "slot": provider.slot,
+        "name": provider.name,
+        "provider": provider.provider,
+        "model_id": provider.model_id,
+    }
+
+
+def _is_model_identity_question(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    if not normalized:
+        return False
+    english_patterns = (
+        "whatmodel",
+        "whichmodel",
+        "whatllm",
+        "whichllm",
+        "whatprovider",
+        "whichprovider",
+        "modelareyou",
+        "whoareyou",
+        "areyouclaude",
+        "areyouchatgpt",
+        "areyouopenai",
+    )
+    if any(pattern in normalized for pattern in english_patterns):
+        return True
+    chinese_patterns = (
+        "什么模型",
+        "哪个模型",
+        "哪一个模型",
+        "模型是什么",
+        "当前模型",
+        "现在模型",
+        "用的模型",
+        "使用的模型",
+        "什么provider",
+        "哪个provider",
+        "什么供应商",
+        "哪个供应商",
+        "你是谁",
+        "你是claude",
+        "你是chatgpt",
+    )
+    return any(pattern in normalized for pattern in chinese_patterns)
+
+
+def _model_identity_reply(provider: ActiveProviderConfig) -> str:
+    label = provider.name or provider.model_id or provider.provider
+    provider_name = provider.provider or "unknown"
+    model_id = provider.model_id or "unknown"
+    return (
+        f"本次追问实际使用的是 **{label}**。\n\n"
+        f"- Provider: `{provider_name}`\n"
+        f"- Model ID: `{model_id}`\n\n"
+        "如果页面上选择的是“默认模型”，它对应当前激活的 report 模型。"
+    )
 
 
 def _limit_list(value: Any, limit: int) -> list[Any]:
@@ -197,12 +268,17 @@ def render_analysis_chat_context(context: dict[str, Any]) -> str:
 
 
 def serialize_chat_message(message: AnalysisChatMessage) -> dict[str, Any]:
+    snapshot = message.context_snapshot if isinstance(message.context_snapshot, dict) else {}
+    provider = snapshot.get("provider") if isinstance(snapshot.get("provider"), dict) else {}
     return {
         "id": message.id,
         "analysis_id": message.analysis_id,
         "role": message.role,
         "content": message.content,
         "created_at": message.created_at,
+        "provider_id": provider.get("id") if message.role == "assistant" else None,
+        "provider_name": provider.get("name") if message.role == "assistant" else None,
+        "model_id": provider.get("model_id") if message.role == "assistant" else None,
     }
 
 
@@ -230,6 +306,17 @@ def _extract_correction_suggestion(text: str) -> tuple[str, dict[str, Any] | Non
     return before.rstrip(), payload
 
 
+def _fallback_text_for_correction_suggestion(suggestion: dict[str, Any] | None) -> str:
+    kind = suggestion.get("kind") if isinstance(suggestion, dict) else None
+    if kind == "action_label":
+        return "我已根据这轮追问生成动作类型/动作名称的待确认草稿。请在右侧 form 里核对，确认后再应用到当前系统数据。"
+    if kind == "keyframes":
+        return "我已根据这轮追问生成 T/A/L 关键帧的待确认草稿。请在右侧 form 里核对，确认后再应用到当前系统数据。"
+    if kind == "report_note":
+        return "我已根据这轮追问生成报告说明的待确认草稿。请先核对，确认后再应用。"
+    return ""
+
+
 async def _maybe_create_correction_suggestion(
     session: AsyncSession,
     analysis: Analysis,
@@ -255,11 +342,25 @@ async def _maybe_create_correction_suggestion(
         return
 
 
+async def _resolve_chat_provider(
+    session: AsyncSession,
+    provider_id: str | None,
+) -> ActiveProviderConfig:
+    selected_id = _clean_text(provider_id)
+    if not selected_id:
+        return await get_active_provider("report", session)
+    try:
+        return await get_provider_config_by_id(selected_id, slot="report", session=session)
+    except ValueError as exc:
+        raise AnalysisChatError("追问回复模型必须选择 report 类型的供应商。") from exc
+
+
 async def create_analysis_chat_reply(
     session: AsyncSession,
     analysis: Analysis,
     *,
     message: str,
+    provider_id: str | None = None,
 ) -> tuple[AnalysisChatMessage, list[AnalysisChatMessage]]:
     user_text = message.strip()
     if not user_text:
@@ -273,12 +374,18 @@ async def create_analysis_chat_reply(
     corrections = await list_analysis_corrections(session, analysis.id)
     memory_context = await build_memory_context(analysis.skater_id, session)
     context = build_analysis_chat_context(analysis, memory_context=memory_context, corrections=corrections)
+    provider = await _resolve_chat_provider(session, provider_id)
+    provider_identity = _provider_identity_payload(provider)
+    context = {"request_model": provider_identity, **context}
     context_snapshot = json.loads(_compact_json(context))
+    context_snapshot["provider"] = provider_identity
     context_text = render_analysis_chat_context(context)
-    provider = await get_active_provider("report", session)
 
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": ANALYSIS_CHAT_SYSTEM_PROMPT + CORRECTION_SUGGESTION_PROMPT},
+        {
+            "role": "system",
+            "content": ANALYSIS_CHAT_SYSTEM_PROMPT + CORRECTION_SUGGESTION_PROMPT + MODEL_IDENTITY_PROMPT,
+        },
         {"role": "user", "content": f"以下是这条视频分析的已保存证据 JSON：\n{context_text}"},
     ]
     for item in previous[-MAX_HISTORY_MESSAGES:]:
@@ -286,13 +393,18 @@ async def create_analysis_chat_reply(
             messages.append({"role": item.role, "content": item.content.strip()})
     messages.append({"role": "user", "content": user_text})
 
-    reply = await request_text_completion(
-        provider,
-        messages=messages,
-        temperature=0.35,
-        max_tokens=900,
-    )
+    if _is_model_identity_question(user_text):
+        reply = _model_identity_reply(provider)
+    else:
+        reply = await request_text_completion(
+            provider,
+            messages=messages,
+            temperature=0.35,
+            max_tokens=900,
+        )
     assistant_text, correction_suggestion = _extract_correction_suggestion((reply or "").strip())
+    if not assistant_text:
+        assistant_text = _fallback_text_for_correction_suggestion(correction_suggestion)
     if not assistant_text:
         assistant_text = "我暂时没有拿到稳定回复。可以换一种问法，或先重新生成报告后再追问。"
 

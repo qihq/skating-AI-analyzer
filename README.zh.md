@@ -23,7 +23,8 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 - 训练计划会记录来源是 AI 还是安全兜底，兜底计划在页面上明显标注。
 - 家长模式的报告分享改为生成含关键重要信息的分享图，便于发给教练或家人。
 - Pose Replay 播放不再因为报告页回写当前帧而只播一帧就停。
-- Archive 时间轴改为 `limit`/`offset` 分页首屏加载，保留总数统计并支持“加载更多”。
+- Archive 改为紧凑响应式指标条，并把查看对象、动作筛选、时间范围、列表/日历视图合并到记录区工具条；时间轴继续使用 `limit`/`offset` 分页首屏加载，保留总数统计并支持“加载更多”。
+- Report 主页面聚焦 Force Score、结论、训练重点、问题建议、分项评分、Quality Check 和常用操作；Pose Replay、Evidence、Diagnostics、Follow-up 已迁移到 `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`。
 - Debug 日志会修复已知 mojibake 文本，例如分析流程完成状态。
 
 最新版本降低了复盘上传时对“精确动作名称”的要求：只知道动作大类也可以提交，技能分类可保持不确定，上传前填写的补充说明会进入最早的视频语义动作识别提示词。
@@ -56,6 +57,7 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 - AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式；报告兜底会使用 Path B 证据和动作专项训练建议。
 - 已完成视频的持久化 AI 追问，基于现有证据回答，支持 AI/手动修正卡、应用/忽略确认，以及基于已应用修正重新生成报告。
 - 独立 `/analysis-chat` 工作台，可选择任意已完成分析，查看有效识别、关键帧、partial semantic candidates、修正历史，并分享文字/图片复盘内容。
+- 响应式 archive/report 工作台：archive 支持分页列表和日历 tab；report 保持主报告简洁，高级内容通过姿态、证据、诊断、追问 tab 展示。
 - Pose Debug 与 Debug 页面，用于骨架回放、tracker 缩略图、候选数量、姿态诊断、AI 输入范围、耗时和日志检查。
 - Docker Compose 与 all-in-one Docker 部署，适合 NAS 或本地单容器运行。
 
@@ -324,10 +326,11 @@ all-in-one 镜像比拆分前端镜像大是预期现象，因为它同时包含
 
 - `/path`：技能树与学习路径。
 - `/review`：上传视频并发起分析。
-- `/report/:id`：分析报告。
+- `/report/:id`：简洁版分析报告。
+- `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`：报告详情工作台，展示姿态回放、证据、诊断和 AI 追问。
 - `/analysis-chat`：独立家长/教练追问工作台，可选择任意已完成分析。
 - `/report/:id/pose-debug`：大屏骨架回放与 tracker 诊断。
-- `/archive`：历史档案与训练进度。
+- `/archive`：分页历史档案，支持列表和日历视图。
 - `/plan/:plan_id`：训练计划。
 - `/snowball`：陪练聊天和记忆建议。
 - `/settings`：PIN、备份、供应商、成本限制、姿态运行时和 YOLO 运行时检查。

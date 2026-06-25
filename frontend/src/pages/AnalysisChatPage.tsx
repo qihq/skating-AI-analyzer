@@ -22,6 +22,10 @@ function recordLabel(record: AnalysisListItem) {
   return `${skater}${record.action_type}${subtype}`;
 }
 
+function keyFrameChips(analysis: AnalysisDetail) {
+  return analysis.bio_data?.key_frames ? Object.entries(analysis.bio_data.key_frames).filter(([, value]) => value) : [];
+}
+
 export default function AnalysisChatPage() {
   const { isParentMode, enterParentMode } = useAppMode();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -32,6 +36,7 @@ export default function AnalysisChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [isListLoading, setIsListLoading] = useState(true);
   const [isAnalysisLoading, setIsAnalysisLoading] = useState(false);
+  const [isSelectorOpen, setIsSelectorOpen] = useState(false);
 
   const selectedId = searchParams.get("analysis") || "";
 
@@ -121,8 +126,11 @@ export default function AnalysisChatPage() {
   const handleSelectAnalysis = (analysisId: string) => {
     if (analysisId) {
       setSearchParams({ analysis: analysisId });
+      setIsSelectorOpen(false);
     }
   };
+
+  const selectedKeyFrames = selectedAnalysis ? keyFrameChips(selectedAnalysis) : [];
 
   const selectorContent = (
     <>
@@ -134,12 +142,12 @@ export default function AnalysisChatPage() {
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder="搜索动作、孩子、备注"
-        className="mt-4 hidden w-full rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-teal-300 focus:ring-4 focus:ring-teal-100 tablet:block"
+        className="mt-4 w-full rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
       />
       <select
         value={selectedId}
         onChange={(event) => handleSelectAnalysis(event.target.value)}
-        className="mt-4 w-full rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none transition focus:border-teal-300 focus:ring-4 focus:ring-teal-100 tablet:hidden"
+        className="mt-3 w-full rounded-[20px] border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none transition focus:border-teal-300 focus:ring-4 focus:ring-teal-100 tablet:hidden"
       >
         <option value="">{isListLoading ? "正在加载..." : "请选择一条已完成分析"}</option>
         {completedRecords.map((record) => (
@@ -149,7 +157,7 @@ export default function AnalysisChatPage() {
         ))}
       </select>
 
-      <div className="mt-4 hidden max-h-[32dvh] space-y-2 overflow-y-auto pr-1 tablet:block web:max-h-[calc(100dvh-260px)]">
+      <div className="mt-4 max-h-[min(58dvh,520px)] space-y-2 overflow-y-auto pr-1">
         {isListLoading ? (
           <p className="py-8 text-center text-sm text-slate-500">正在加载...</p>
         ) : filteredRecords.length ? (
@@ -182,25 +190,13 @@ export default function AnalysisChatPage() {
     </>
   );
 
+  const selectedRecord = completedRecords.find((record) => record.id === selectedId);
+  const selectedSummary = selectedAnalysis ? recordLabel(selectedAnalysis) : selectedRecord ? recordLabel(selectedRecord) : "请选择一条分析";
+
   return (
-    <div className="min-w-0 space-y-5">
+    <div className="min-w-0 space-y-4">
       {notice ? <div className="rounded-[24px] border border-teal-100 bg-teal-50 px-5 py-4 text-sm text-teal-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
-
-      <section className="app-card overflow-hidden p-5 tablet:p-6">
-        <div className="flex flex-col gap-4 tablet:flex-row tablet:items-end tablet:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-teal-600">AI Follow-up</p>
-            <h1 className="mt-2 text-2xl font-semibold text-slate-900 tablet:text-3xl">AI 追问工作台</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-500">手动选择任意已完成视频，继续追问、生成修正卡、确认应用并分享复盘内容。</p>
-          </div>
-          {selectedAnalysis ? (
-            <Link to={`/report/${selectedAnalysis.id}`} className="min-h-[42px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
-              打开报告
-            </Link>
-          ) : null}
-        </div>
-      </section>
 
       {!isParentMode ? (
         <section className="app-card p-6 text-center tablet:p-8">
@@ -215,46 +211,76 @@ export default function AnalysisChatPage() {
           </button>
         </section>
       ) : (
-      <div className="grid min-w-0 gap-5 web:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
-        <aside className="app-card min-w-0 p-4 tablet:p-5 web:sticky web:top-[112px] web:max-h-[calc(100dvh-140px)] web:overflow-hidden">
-          {selectorContent}
-        </aside>
-
-        <main className="min-w-0 space-y-5">
+        <main className="min-w-0 space-y-4">
           {isAnalysisLoading ? (
             <section className="app-card p-8 text-center text-sm text-slate-500">正在加载分析详情...</section>
           ) : null}
           {selectedAnalysis ? (
             <>
-              <section className="app-card grid gap-4 p-5 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-center">
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold uppercase tracking-[0.26em] text-slate-400">Selected Analysis</p>
-                  <h2 className="mt-2 truncate text-xl font-semibold text-slate-900">{recordLabel(selectedAnalysis)}</h2>
-                  <p className="mt-2 text-sm text-slate-500">{formatDate(selectedAnalysis.created_at)} · Force Score {selectedAnalysis.force_score ?? "--"}</p>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs text-slate-500">
-                  {selectedAnalysis.report?.action_confirmation?.confirmed_action ? (
-                    <span className="rounded-full bg-blue-50 px-3 py-1 font-semibold text-blue-600">{String(selectedAnalysis.report.action_confirmation.confirmed_action)}</span>
-                  ) : null}
-                  {selectedAnalysis.bio_data?.key_frames ? (
-                    Object.entries(selectedAnalysis.bio_data.key_frames).map(([key, value]) => (
-                      <span key={key} className="rounded-full bg-slate-100 px-3 py-1">{key}: {String(value)}</span>
-                    ))
-                  ) : null}
+              <section className="rounded-[24px] border border-slate-200 bg-white px-4 py-3 tablet:px-5">
+                <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-center">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-600">AI 追问</p>
+                    <h1 className="mt-1 truncate text-lg font-semibold text-slate-900 tablet:text-xl">{recordLabel(selectedAnalysis)}</h1>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      <span>{formatDate(selectedAnalysis.created_at)}</span>
+                      <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold">Force {selectedAnalysis.force_score ?? "--"}</span>
+                      {selectedAnalysis.report?.action_confirmation?.confirmed_action ? (
+                        <span className="rounded-full bg-blue-50 px-2 py-1 font-semibold text-blue-600">{String(selectedAnalysis.report.action_confirmation.confirmed_action)}</span>
+                      ) : null}
+                      {selectedKeyFrames.map(([key, value]) => (
+                        <span key={key} className="rounded-full bg-slate-100 px-2 py-1">{key}: {String(value)}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2 phone:flex-row tablet:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setIsSelectorOpen(true)}
+                      className="inline-flex min-h-[40px] items-center justify-center rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+                    >
+                      切换视频
+                    </button>
+                    <Link to={`/report/${selectedAnalysis.id}`} className="inline-flex min-h-[40px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white">
+                      打开报告
+                    </Link>
+                  </div>
                 </div>
               </section>
               <AnalysisFollowUpPanel
                 analysis={selectedAnalysis}
+                variant="workspace"
                 onAnalysisRefresh={() => void loadSelectedAnalysis(selectedAnalysis.id)}
                 onNotice={showNotice}
               />
             </>
           ) : (
-            <AnalysisFollowUpPanel analysis={null} />
+            <AnalysisFollowUpPanel analysis={null} variant="workspace" />
           )}
         </main>
-      </div>
       )}
+      {isSelectorOpen ? (
+        <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/36 p-0 backdrop-blur-sm tablet:items-center tablet:p-6">
+          <section className="max-h-[84dvh] w-full overflow-hidden rounded-t-[28px] border border-slate-200 bg-white p-4 shadow-[0_24px_80px_rgba(15,23,42,0.28)] tablet:max-w-2xl tablet:rounded-[28px] tablet:p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">切换视频</p>
+                <p className="mt-1 truncate text-sm font-semibold text-slate-900">{selectedSummary}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSelectorOpen(false)}
+                className="min-h-[38px] rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm font-semibold text-slate-600 transition hover:bg-white"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="mt-4">
+              {selectorContent}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

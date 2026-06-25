@@ -964,6 +964,31 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
             await session.close()
 
 
+async def get_provider_config_by_id(
+    provider_id: str,
+    *,
+    slot: str | None = None,
+    session: AsyncSession | None = None,
+) -> ActiveProviderConfig:
+    owns_session = session is None
+    if owns_session:
+        session = AsyncSessionLocal()
+
+    try:
+        provider = await session.get(AIProvider, provider_id)
+        if provider is None:
+            raise ValueError("Provider not found.")
+        if slot is not None and provider.slot != slot:
+            raise ValueError(f"Provider must belong to slot={slot}.")
+        api_key = decrypt_api_key(provider.api_key)
+        if not api_key:
+            raise ValueError(f"{provider.name} has no API key configured.")
+        return _active_provider_config_from_model(provider, api_key)
+    finally:
+        if owns_session:
+            await session.close()
+
+
 async def get_vision_providers(session: AsyncSession | None = None) -> list[ActiveProviderConfig]:
     """
     Return the configured ordered vision provider list.

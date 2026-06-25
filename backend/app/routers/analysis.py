@@ -80,6 +80,7 @@ from app.services.analysis_chat import (
     AnalysisChatError,
     create_analysis_chat_reply,
     list_analysis_chat_messages,
+    serialize_chat_message,
 )
 from app.services.action_profiles import (
     infer_analysis_profile,
@@ -5555,6 +5556,10 @@ def _correction_public_list(corrections: Sequence[Any]) -> list[AnalysisCorrecti
     return [AnalysisCorrectionPublic.model_validate(correction) for correction in corrections]
 
 
+def _chat_message_public(message: Any) -> AnalysisChatMessagePublic:
+    return AnalysisChatMessagePublic.model_validate(serialize_chat_message(message))
+
+
 async def _correction_list_response(
     session: AsyncSession,
     analysis: Analysis,
@@ -7696,7 +7701,7 @@ async def get_analysis_chat_messages(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     messages = await list_analysis_chat_messages(session, analysis_id)
-    return [AnalysisChatMessagePublic.model_validate(message) for message in messages]
+    return [_chat_message_public(message) for message in messages]
 
 
 @router.post("/{analysis_id}/chat", response_model=AnalysisChatResponse)
@@ -7714,6 +7719,7 @@ async def post_analysis_chat(
             session,
             analysis,
             message=payload.message,
+            provider_id=payload.provider_id,
         )
     except AnalysisChatError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -7722,8 +7728,8 @@ async def post_analysis_chat(
         raise HTTPException(status_code=502, detail="AI 追问暂时没有顺利回复，请稍后再试。") from exc
 
     return AnalysisChatResponse(
-        message=AnalysisChatMessagePublic.model_validate(assistant_message),
-        messages=[AnalysisChatMessagePublic.model_validate(message) for message in messages],
+        message=_chat_message_public(assistant_message),
+        messages=[_chat_message_public(message) for message in messages],
     )
 
 

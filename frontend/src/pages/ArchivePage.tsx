@@ -8,7 +8,6 @@ import { useAppMode } from "../components/AppModeContext";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
-import ZodiacAvatar from "../components/ZodiacAvatar";
 import { pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey, parseApiDate } from "../utils/datetime";
 
@@ -19,15 +18,24 @@ const RANGE_OPTIONS = [
   { value: "all", label: "全部", days: null },
 ] as const;
 const ALL_SKATERS_VIEW = "__all__";
-const ARCHIVE_PAGE_SIZE = 80;
+const ARCHIVE_PAGE_SIZE = 24;
+const TIMELINE_PAGE_SIZE = 12;
+const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
 type ParentRange = (typeof RANGE_OPTIONS)[number]["value"];
+type ArchiveViewTab = "timeline" | "calendar";
 type ArchiveStats = ArchiveResponse["stats"];
 type ArchiveTimelineEntry = ArchiveResponse["timeline"][number] & {
   skater_id: string;
   skater_name: string;
   skater_avatar_type: Skater["avatar_type"];
   skater_avatar_emoji: Skater["avatar_emoji"];
+};
+type CalendarDay = {
+  key: string;
+  date: Date;
+  isCurrentMonth: boolean;
+  entries: ArchiveTimelineEntry[];
 };
 type TimelineGroup = {
   key: string;
@@ -64,6 +72,43 @@ function formatDayKey(dateString: string) {
     day: "2-digit",
     timeZone: "Asia/Shanghai",
   }).format(parseApiDate(dateString));
+}
+
+function formatMonthTitle(date: Date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "long",
+  }).format(date);
+}
+
+function shiftMonth(date: Date, delta: number) {
+  return new Date(date.getFullYear(), date.getMonth() + delta, 1);
+}
+
+function buildCalendarDays(anchorDate: Date, timeline: ArchiveTimelineEntry[]): CalendarDay[] {
+  const monthStart = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), 1);
+  const gridStart = new Date(monthStart);
+  gridStart.setDate(monthStart.getDate() - monthStart.getDay());
+
+  const entriesByDay = new Map<string, ArchiveTimelineEntry[]>();
+  timeline.forEach((entry) => {
+    const key = formatDayKey(entry.created_at);
+    const entries = entriesByDay.get(key) ?? [];
+    entries.push(entry);
+    entriesByDay.set(key, entries);
+  });
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const key = localDateKey(date);
+    return {
+      key,
+      date,
+      isCurrentMonth: date.getMonth() === anchorDate.getMonth(),
+      entries: entriesByDay.get(key) ?? [],
+    };
+  });
 }
 
 function forceScoreTone(score: number | null) {
@@ -222,6 +267,12 @@ export default function ArchivePage() {
   const [pinRetryAnalysisId, setPinRetryAnalysisId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMoreSkaterIds, setLoadingMoreSkaterIds] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<ArchiveViewTab>("timeline");
+  const [timelinePage, setTimelinePage] = useState(1);
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  });
 
   useEffect(() => {
     const message = (location.state as { notice?: string } | null)?.notice;
@@ -375,7 +426,41 @@ export default function ArchivePage() {
     });
   }, [activeFilter, activeTimeline, isParentMode, parentRange]);
 
-  const timelineGroups = useMemo(() => buildTimelineGroups(filteredTimeline), [filteredTimeline]);
+  useEffect(() => {
+    setTimelinePage(1);
+  }, [activeFilter, activeScope, parentRange]);
+
+  useEffect(() => {
+    if (filteredTimeline.length) {
+      const latestEntryDate = parseApiDate(filteredTimeline[0].created_at);
+      setCalendarMonth(new Date(latestEntryDate.getFullYear(), latestEntryDate.getMonth(), 1));
+    }
+  }, [activeFilter, activeScope, filteredTimeline, parentRange]);
+
+  const totalTimelinePages = Math.max(1, Math.ceil(filteredTimeline.length / TIMELINE_PAGE_SIZE));
+
+  useEffect(() => {
+    setTimelinePage((current) => Math.min(current, totalTimelinePages));
+  }, [totalTimelinePages]);
+
+  const pagedTimeline = useMemo(() => {
+    const start = (timelinePage - 1) * TIMELINE_PAGE_SIZE;
+    return filteredTimeline.slice(start, start + TIMELINE_PAGE_SIZE);
+  }, [filteredTimeline, timelinePage]);
+
+  const timelineGroups = useMemo(() => buildTimelineGroups(pagedTimeline), [pagedTimeline]);
+  const calendarDays = useMemo(() => buildCalendarDays(calendarMonth, filteredTimeline), [calendarMonth, filteredTimeline]);
+  const calendarMonthEntries = useMemo(
+    () =>
+      filteredTimeline.filter((entry) => {
+        const entryDate = parseApiDate(entry.created_at);
+        return entryDate.getFullYear() === calendarMonth.getFullYear() && entryDate.getMonth() === calendarMonth.getMonth();
+      }),
+    [calendarMonth, filteredTimeline],
+  );
+  const loadedRecordCount = filteredTimeline.length;
+  const pageStartIndex = loadedRecordCount ? (timelinePage - 1) * TIMELINE_PAGE_SIZE + 1 : 0;
+  const pageEndIndex = Math.min(timelinePage * TIMELINE_PAGE_SIZE, loadedRecordCount);
 
   const activeStats = useMemo<ArchiveStats>(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
@@ -428,7 +513,7 @@ export default function ArchivePage() {
     };
   };
 
-  const handleLoadMore = async () => {
+  const handleLoadMore = async (advancePage = false) => {
     if (!skaterIdsNeedingMore.length || isLoadingMore) {
       return;
     }
@@ -464,8 +549,11 @@ export default function ArchivePage() {
       return merged;
     });
     setLoadingMoreSkaterIds((current) => current.filter((skaterId) => !requestedSkaterIds.includes(skaterId)));
+    if (!failedCount && advancePage) {
+      setTimelinePage((current) => current + 1);
+    }
     if (failedCount) {
-      setError("æ›´å¤šç»ƒä¹ æ¡£æ¡ˆåŠ è½½å¤±è´¥ï¼Œè¯·ç¨åŽé‡è¯•ã€‚");
+      setError("更多练习档案加载失败，请稍后重试。");
     }
   };
 
@@ -548,71 +636,127 @@ export default function ArchivePage() {
     [skaters],
   );
 
-  const renderStatsGrid = (
-    <section className="grid gap-4 phone:grid-cols-2 web:grid-cols-4">
-      <div className="app-card p-5">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">累计档案</p>
-        <p className="mt-3 text-3xl font-semibold text-slate-900">{activeStats.total_records}</p>
-        <p className="mt-2 text-sm text-slate-500">总记录数</p>
-      </div>
-      <div className="app-card p-5">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">近 7 天</p>
-        <p className="mt-3 text-3xl font-semibold text-slate-900">{activeStats.recent_7days}</p>
-        <p className="mt-2 text-sm text-slate-500">最近一周训练次数</p>
-      </div>
-      <div className="app-card p-5">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">连续记录</p>
-        <p className="mt-3 text-3xl font-semibold text-slate-900">{activeStats.current_streak}</p>
-        <p className="mt-2 text-sm text-slate-500">按自然日连续记录</p>
-      </div>
-      <div className="app-card p-5">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">本月课次</p>
-        <p className="mt-3 text-3xl font-semibold text-slate-900">{activeStats.monthly_sessions}</p>
-        <p className="mt-2 text-sm text-slate-500">已登记训练课次</p>
-      </div>
-    </section>
-  );
+  const renderTimelineEntry = (entry: ArchiveTimelineEntry, index: number, groupLength: number) => {
+    const isRetrying = retryingAnalysisId === entry.analysis_id;
+    const hideRetry = missingVideoRetryIds.includes(entry.analysis_id);
 
-  const renderFiltersCard = (
-    <section className="app-card p-6">
-      <div className="flex flex-col gap-5">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">动作筛选</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {FILTER_OPTIONS.map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => setActiveFilter(option)}
-                className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
-                  activeFilter === option ? "bg-blue-500 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                }`}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
+    return (
+      <article key={entry.id} className="content-visibility-auto relative min-w-0 pl-7 phone:pl-8">
+        {index < groupLength - 1 ? (
+          <div className="absolute left-3 top-10 h-[calc(100%-1rem)] w-px bg-gradient-to-b from-blue-200 to-slate-100" />
+        ) : null}
+        <div className="absolute left-0 top-7 flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-sm">⛸️</div>
 
-        {isParentMode ? (
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">时间范围</p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {RANGE_OPTIONS.map((option) => (
+        <div className="list-row min-w-0 max-w-full rounded-[20px] border border-slate-200 bg-white p-3 phone:p-4 tablet:p-5">
+          <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                {isParentMode && activeScope === ALL_SKATERS_VIEW ? (
+                  <span className="max-w-full break-words rounded-full bg-violet-50 px-3 py-1 text-sm text-violet-600">{entry.skater_name}</span>
+                ) : null}
+                <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.entry_type}</span>
+                <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.action_type}</span>
+                {entry.skill_category ? (
+                  <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{entry.skill_category}</span>
+                ) : null}
+                <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${forceScoreTone(entry.force_score)}`}>
+                  {isParentMode ? `AI 评分 ${entry.force_score ?? "--"}` : `星级 ${scoreStars(entry.force_score)}`}
+                </span>
+              </div>
+              <p className="mt-3 text-sm text-slate-400">{formatDate(entry.created_at)}</p>
+              <p className="mt-3 max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{entry.report_snippet}</p>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-3 tablet:items-end">
+              <div className="flex flex-wrap items-center gap-2 pr-0 tablet:justify-end tablet:pr-2">
+                {entry.status === "completed" || entry.status === "failed" ? (
+                  <Link
+                    to={`/report/${entry.analysis_id}`}
+                    title="查看分析报告"
+                    aria-label="查看分析报告"
+                    className={`${actionIconClassName} border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100`}
+                  >
+                    📄
+                  </Link>
+                ) : null}
+
+                {entry.status === "completed" ? (
+                  <button
+                    type="button"
+                    onClick={() => requestReanalysis(entry)}
+                    disabled={isRetrying}
+                    title="再次分析"
+                    aria-label="再次分析"
+                    className={`${actionIconClassName} border-orange-200 bg-orange-50 text-orange-600 hover:bg-orange-100`}
+                  >
+                    {isRetrying ? "…" : "🔄"}
+                  </button>
+                ) : null}
+
+                {isAnalysisInProgress(entry.status) ? (
+                  <Link
+                    to={`/report/${entry.analysis_id}`}
+                    title="分析进行中"
+                    aria-label="分析进行中"
+                    className={`${actionIconClassName} border-blue-100 bg-blue-50 text-blue-500 hover:bg-blue-100`}
+                  >
+                    ⏳
+                  </Link>
+                ) : null}
+
+                {entry.status === "failed" && !hideRetry ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleRetryEntry(entry)}
+                    disabled={isRetrying}
+                    title="分析失败，点击重试"
+                    aria-label="分析失败，点击重试"
+                    className={`${actionIconClassName} border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100`}
+                  >
+                    {isRetrying ? "…" : "❌"}
+                  </button>
+                ) : null}
+              </div>
+
+              {entry.status === "failed" && hideRetry ? (
                 <button
-                  key={option.value}
                   type="button"
-                  onClick={() => setParentRange(option.value)}
-                  className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
-                    parentRange === option.value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                  }`}
+                  onClick={() =>
+                    navigate("/review", {
+                      state: entry.skater_id ? { skaterId: entry.skater_id } : undefined,
+                    })
+                  }
+                  className="list-row-action inline-flex min-w-[44px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                 >
-                  {option.label}
+                  📤 重新上传
                 </button>
-              ))}
+              ) : null}
             </div>
           </div>
-        ) : null}
+        </div>
+      </article>
+    );
+  };
+
+  const statItems = [
+    { label: "累计档案", value: activeStats.total_records, hint: "总记录" },
+    { label: "近 7 天", value: activeStats.recent_7days, hint: "训练次数" },
+    { label: "连续记录", value: activeStats.current_streak, hint: "自然日" },
+    { label: "本月课次", value: activeStats.monthly_sessions, hint: "已归档" },
+  ];
+
+  const renderStatsGrid = (
+    <section className="app-card p-3 phone:p-4">
+      <div className="grid gap-2 phone:grid-cols-2 tablet:grid-cols-4">
+        {statItems.map((item) => (
+          <div key={item.label} className="min-w-0 rounded-[18px] bg-slate-50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">{item.label}</p>
+            <div className="mt-2 flex items-end gap-2">
+              <p className="text-2xl font-semibold leading-none text-slate-900 tablet:text-3xl">{item.value}</p>
+              <p className="pb-0.5 text-xs text-slate-500">{item.hint}</p>
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -620,157 +764,178 @@ export default function ArchivePage() {
   return (
     <div className="min-w-0 space-y-6 overflow-x-hidden">
       <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
-        <div className="flex flex-col gap-5 tablet:flex-row tablet:items-end tablet:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">
-              {isParentMode ? "Progress" : "Archive"}
-            </p>
-            <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">
-              {isParentMode ? "训练进展总览" : "练习档案时间轴"}
-            </h1>
-            <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
-              {isParentMode
-                ? "家长模式下可在两个孩子与家庭总览之间切换，统一查看课次归档、AI 评分与训练记录。"
-                : "把每次视频复盘沉淀成连续可追踪的成长记录。这里会保留冰宝（IceBuddy）诊断、评分变化和课次归档关系。"}
-            </p>
-          </div>
-
-          {isParentMode ? (
-            <div className="min-w-0 tablet:min-w-[280px]">
-              <p className="text-sm font-medium text-slate-700">查看对象</p>
-              <div className="mt-3 flex flex-wrap justify-start gap-2 tablet:justify-end">
-                {viewOptions.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => setActiveScope(option.id)}
-                    className={`min-h-[44px] rounded-full px-4 text-sm font-medium transition ${
-                      activeScope === option.id
-                        ? "bg-blue-500 text-white"
-                        : "border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-600"
-                    }`}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <label className="block min-w-0 space-y-2 tablet:min-w-[220px]">
-              <span className="text-sm font-medium text-slate-700">当前练习档案</span>
-              <select value={activeScope} onChange={(event) => setActiveScope(event.target.value)} className="app-select">
-                {skaters.map((skater) => (
-                  <option key={skater.id} value={skater.id}>
-                    {skaterLabel(skater)}
-                    {skater.level ? ` · ${skater.level}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">
+            {isParentMode ? "Progress" : "Archive"}
+          </p>
+          <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">
+            {isParentMode ? "训练进展总览" : "练习档案时间轴"}
+          </h1>
+          <p className="mt-4 max-w-3xl text-base leading-8 text-slate-500">
+            {isParentMode
+              ? "按对象、动作和时间快速定位训练记录，也可以切到日历视图查看训练分布。"
+              : "把每次视频复盘沉淀成连续可追踪的成长记录。这里会保留冰宝（IceBuddy）诊断、评分变化和课次归档关系。"}
+          </p>
         </div>
       </section>
 
       {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
 
-      {isParentMode ? renderStatsGrid : null}
+      {renderStatsGrid}
 
-      <div className="grid min-w-0 gap-6 web:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="min-w-0 space-y-6">
-          {isParentMode ? (
-            <section className="app-card p-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">
-                {activeScope === ALL_SKATERS_VIEW ? "家庭总览" : "当前对象"}
+      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
+        <div className="grid gap-5">
+          <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Archive</p>
+              <h2 className="mt-2 text-2xl font-semibold text-slate-900">{isParentMode ? "进展记录" : "复盘记录"}</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-500">
+                每页显示 {TIMELINE_PAGE_SIZE} 条，按需继续加载历史记录；日历视图可快速看到训练分布。
               </p>
-              {activeScope === ALL_SKATERS_VIEW ? (
-                <div className="mt-4 space-y-4 rounded-[28px] bg-slate-50 p-5">
-                  <div>
-                    <h2 className="text-xl font-semibold text-slate-900">坦坦 / 昭昭 进展总览</h2>
-                    <p className="mt-2 text-sm leading-6 text-slate-500">可统一浏览两个孩子的训练时间轴，并保留每条记录的孩子标识与 AI 评分。</p>
-                  </div>
-                  <div className="space-y-3">
-                    {skaters.map((skater) => (
+            </div>
+            <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
+              已加载 {loadedRecordCount}/{activeStats.total_records} 条
+            </span>
+          </div>
+
+          <div className="rounded-[24px] border border-slate-200 bg-slate-50 p-3 phone:p-4">
+            <div className="grid gap-4 web:grid-cols-[minmax(0,1.1fr)_minmax(0,1.25fr)_auto] web:items-end">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">查看对象</p>
+                {isParentMode ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {viewOptions.map((option) => (
                       <button
-                        key={skater.id}
+                        key={option.id}
                         type="button"
-                        onClick={() => setActiveScope(skater.id)}
-                        className="flex w-full items-center justify-between rounded-[22px] border border-white bg-white px-4 py-3 text-left transition hover:border-blue-200 hover:bg-blue-50/40"
+                        onClick={() => setActiveScope(option.id)}
+                        className={`min-h-[40px] rounded-full px-4 text-sm font-medium transition ${
+                          activeScope === option.id
+                            ? "bg-blue-500 text-white"
+                            : "border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-600"
+                        }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <ZodiacAvatar avatarType={skater.avatar_type} avatarEmoji={skater.avatar_emoji} size="sm" />
-                          <div>
-                            <p className="font-medium text-slate-900">{skaterLabel(skater)}</p>
-                            <p className="text-sm text-slate-500">XP {skater.total_xp} · 连续 {skater.current_streak} 天</p>
-                          </div>
-                        </div>
-                        <span className="text-sm font-medium text-blue-600">查看进展</span>
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <select value={activeScope} onChange={(event) => setActiveScope(event.target.value)} className="app-select mt-3">
+                    {skaters.map((skater) => (
+                      <option key={skater.id} value={skater.id}>
+                        {skaterLabel(skater)}
+                        {skater.level ? ` · ${skater.level}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">动作筛选</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {FILTER_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setActiveFilter(option)}
+                      className={`min-h-[40px] rounded-full px-4 text-sm font-medium transition ${
+                        activeFilter === option ? "bg-slate-900 text-white" : "bg-white text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {isParentMode ? (
+                <div className="min-w-0 web:min-w-[220px]">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">时间范围</p>
+                  <div className="mt-3 flex flex-wrap gap-2 web:justify-end">
+                    {RANGE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setParentRange(option.value)}
+                        className={`min-h-[40px] rounded-full px-4 text-sm font-medium transition ${
+                          parentRange === option.value ? "bg-blue-500 text-white" : "bg-white text-slate-600 hover:bg-slate-100"
+                        }`}
+                      >
+                        {option.label}
                       </button>
                     ))}
                   </div>
                 </div>
-              ) : selectedSkater ? (
-                <div className="mt-4 rounded-[28px] bg-slate-50 p-5">
-                  <ZodiacAvatar
-                    avatarType={selectedSkater.avatar_type}
-                    avatarEmoji={selectedSkater.avatar_emoji}
-                    size="lg"
-                    className="mx-auto tablet:mx-0"
-                  />
-                  <h2 className="mt-3 text-xl font-semibold text-slate-900">{skaterLabel(selectedSkater)}</h2>
-                  <p className="mt-2 text-sm text-slate-500">{selectedSkater.level ?? selectedSkater.current_level}</p>
-                  <p className="mt-4 text-sm text-slate-500">当前 XP：{selectedSkater.total_xp}</p>
-                  <p className="mt-2 text-sm text-slate-500">连续记录：{selectedSkater.current_streak} 天</p>
-                </div>
-              ) : null}
-            </section>
-          ) : selectedSkater ? (
-            <>
-              <section className="app-card p-6">
-                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">当前对象</p>
-                <div className="mt-4 rounded-[28px] bg-slate-50 p-5">
-                  <ZodiacAvatar
-                    avatarType={selectedSkater.avatar_type}
-                    avatarEmoji={selectedSkater.avatar_emoji}
-                    size="lg"
-                    className="mx-auto tablet:mx-0"
-                  />
-                  <h2 className="mt-3 text-xl font-semibold text-slate-900">{skaterLabel(selectedSkater)}</h2>
-                  <p className="mt-2 text-sm text-slate-500">{selectedSkater.level ?? selectedSkater.current_level}</p>
-                  <p className="mt-4 text-sm text-slate-500">当前 XP：{selectedSkater.total_xp}</p>
-                  <p className="mt-2 text-sm text-slate-500">连续记录：{selectedSkater.current_streak} 天</p>
-                </div>
-              </section>
-
-              {renderStatsGrid}
-            </>
-          ) : null}
-
-          {renderFiltersCard}
-        </div>
-
-        <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
-          <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Timeline</p>
-              <h2 className="mt-2 text-2xl font-semibold text-slate-900">{isParentMode ? "进展记录" : "复盘记录"}</h2>
-              {isParentMode ? (
-                <p className="mt-3 text-sm leading-6 text-slate-500">
-                  {activeScope === ALL_SKATERS_VIEW
-                    ? "已按训练课次自动归组，支持在家庭总览中查看两个孩子的完整时间轴。"
-                    : "已按训练课次自动归组，可结合 AI 评分回看阶段性变化。"}
-                </p>
               ) : null}
             </div>
-            <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
-              {filteredTimeline.length}/{activeStats.total_records} 条
-            </span>
-          </div>
 
-          {isLoading ? (
-            <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载练习档案...</div>
-          ) : timelineGroups.length ? (
-            <div className="mt-6 space-y-7">
+            <div className="mt-4 flex flex-col gap-3 border-t border-slate-200 pt-4 tablet:flex-row tablet:items-center tablet:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">
+                  {activeScope === ALL_SKATERS_VIEW ? "全部对象" : selectedSkater ? skaterLabel(selectedSkater) : "当前对象"}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {activeFilter} · {isParentMode ? RANGE_OPTIONS.find((option) => option.value === parentRange)?.label : "全部时间"}
+                </p>
+              </div>
+              <div className="flex w-full rounded-full bg-white p-1 tablet:w-auto">
+                {[
+                  { id: "timeline" as const, label: "列表" },
+                  { id: "calendar" as const, label: "日历" },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`min-h-[40px] flex-1 rounded-full px-4 text-sm font-semibold transition tablet:flex-none ${
+                      activeTab === tab.id ? "bg-slate-900 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div className="mt-6 rounded-[24px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载练习档案...</div>
+        ) : activeTab === "timeline" ? (
+          timelineGroups.length ? (
+            <div className="mt-6 space-y-6">
+              <div className="flex flex-col gap-3 rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 tablet:flex-row tablet:items-center tablet:justify-between">
+                <span>
+                  第 {timelinePage}/{totalTimelinePages} 页 · 显示 {pageStartIndex}-{pageEndIndex} 条
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTimelinePage((current) => Math.max(1, current - 1))}
+                    disabled={timelinePage === 1}
+                    className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (timelinePage < totalTimelinePages) {
+                        setTimelinePage((current) => current + 1);
+                        return;
+                      }
+                      void handleLoadMore(true);
+                    }}
+                    disabled={isLoadingMore || (timelinePage >= totalTimelinePages && !skaterIdsNeedingMore.length)}
+                    className="min-h-[40px] rounded-full bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isLoadingMore ? "加载中..." : timelinePage < totalTimelinePages ? "下一页" : "加载下一批"}
+                  </button>
+                </div>
+              </div>
+
               {timelineGroups.map((group) => (
                 <section key={group.key} className="space-y-4">
                   <div className="border-b border-slate-200 pb-3">
@@ -781,133 +946,122 @@ export default function ArchivePage() {
                   </div>
 
                   <div className="space-y-4">
-                    {group.items.map((entry, index) => {
-                      const isRetrying = retryingAnalysisId === entry.analysis_id;
-                      const hideRetry = missingVideoRetryIds.includes(entry.analysis_id);
-
-                      return (
-                        <article key={entry.id} className="content-visibility-auto relative min-w-0 pl-7 phone:pl-8">
-                          {index < group.items.length - 1 ? (
-                            <div className="absolute left-3 top-10 h-[calc(100%-1rem)] w-px bg-gradient-to-b from-blue-200 to-slate-100" />
-                          ) : null}
-                          <div className="absolute left-0 top-7 flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-sm">⛸️</div>
-
-                          <div className="list-row min-w-0 max-w-full rounded-[24px] border border-slate-200 bg-white p-3 phone:rounded-[28px] phone:p-5">
-                            <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
-                              <div className="min-w-0">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  {isParentMode && activeScope === ALL_SKATERS_VIEW ? (
-                                    <span className="max-w-full break-words rounded-full bg-violet-50 px-3 py-1 text-sm text-violet-600">{entry.skater_name}</span>
-                                  ) : null}
-                                  <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.entry_type}</span>
-                                  <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.action_type}</span>
-                                  {entry.skill_category ? (
-                                    <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{entry.skill_category}</span>
-                                  ) : null}
-                                  <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${forceScoreTone(entry.force_score)}`}>
-                                    {isParentMode ? `AI 评分 ${entry.force_score ?? "--"}` : `星级 ${scoreStars(entry.force_score)}`}
-                                  </span>
-                                </div>
-                                <p className="mt-3 text-sm text-slate-400">{formatDate(entry.created_at)}</p>
-                                <p className="mt-4 max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{entry.report_snippet}</p>
-                              </div>
-
-                              <div className="flex min-w-0 flex-col gap-3 tablet:items-end">
-                                <div className="flex flex-wrap items-center gap-2 pr-0 tablet:justify-end tablet:pr-2">
-                                  {entry.status === "completed" || entry.status === "failed" ? (
-                                    <>
-                                      <Link
-                                        to={`/report/${entry.analysis_id}`}
-                                        title="查看分析报告"
-                                        aria-label="查看分析报告"
-                                        className={`${actionIconClassName} border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100`}
-                                      >
-                                        📄
-                                      </Link>
-                                    </>
-                                  ) : null}
-
-                                  {entry.status === "completed" ? (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => requestReanalysis(entry)}
-                                        disabled={isRetrying}
-                                        title="再次分析"
-                                        aria-label="再次分析"
-                                        className={`${actionIconClassName} border-orange-200 bg-orange-50 text-orange-600 hover:bg-orange-100`}
-                                      >
-                                        {isRetrying ? "…" : "🔄"}
-                                      </button>
-                                    </>
-                                  ) : null}
-
-                                  {isAnalysisInProgress(entry.status) ? (
-                                    <Link
-                                      to={`/report/${entry.analysis_id}`}
-                                      title="分析进行中"
-                                      aria-label="分析进行中"
-                                      className={`${actionIconClassName} border-blue-100 bg-blue-50 text-blue-500 hover:bg-blue-100`}
-                                    >
-                                      ⏳
-                                    </Link>
-                                  ) : null}
-
-                                  {entry.status === "failed" && !hideRetry ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => void handleRetryEntry(entry)}
-                                      disabled={isRetrying}
-                                      title="分析失败，点击重试"
-                                      aria-label="分析失败，点击重试"
-                                      className={`${actionIconClassName} border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100`}
-                                    >
-                                      {isRetrying ? "…" : "❌"}
-                                    </button>
-                                  ) : null}
-                                </div>
-
-                                <div className="flex flex-wrap gap-3 tablet:justify-end">
-                                  {entry.status === "failed" && hideRetry ? (
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        navigate("/review", {
-                                          state: entry.skater_id ? { skaterId: entry.skater_id } : undefined,
-                                        })
-                                      }
-                                      className="list-row-action inline-flex min-w-[44px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                                    >
-                                      📤 重新上传
-                                    </button>
-                                  ) : null}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </article>
-                      );
-                    })}
+                    {group.items.map((entry, index) => renderTimelineEntry(entry, index, group.items.length))}
                   </div>
                 </section>
               ))}
+            </div>
+          ) : (
+            <div className="mt-6 rounded-[24px] bg-slate-50 px-5 py-6 text-sm text-slate-500">当前筛选下还没有复盘记录，先去上传一段训练视频吧。</div>
+          )
+        ) : (
+          <div className="mt-6 grid min-w-0 gap-6 wide:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="min-w-0 rounded-[24px] border border-slate-200 bg-slate-50 p-3 phone:p-4">
+              <div className="mb-4 flex flex-col gap-3 phone:flex-row phone:items-center phone:justify-between">
+                <h3 className="text-xl font-semibold text-slate-900">{formatMonthTitle(calendarMonth)}</h3>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth((current) => shiftMonth(current, -1))}
+                    className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                  >
+                    上月
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth((current) => shiftMonth(current, 1))}
+                    className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                  >
+                    下月
+                  </button>
+                </div>
+              </div>
 
+              <div className="grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-400">
+                {WEEKDAY_LABELS.map((label) => (
+                  <span key={label} className="py-2">
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {calendarDays.map((day) => (
+                  <div
+                    key={day.key}
+                    className={`min-h-[66px] rounded-[16px] border p-2 text-left tablet:min-h-[92px] ${
+                      day.isCurrentMonth ? "border-slate-200 bg-white" : "border-transparent bg-white/50 text-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-sm font-semibold">{day.date.getDate()}</span>
+                      {day.entries.length ? (
+                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-600">{day.entries.length}</span>
+                      ) : null}
+                    </div>
+                    {day.entries.length ? (
+                      <div className="mt-2 hidden space-y-1 tablet:block">
+                        {day.entries.slice(0, 2).map((entry) => (
+                          <Link
+                            key={entry.id}
+                            to={`/report/${entry.analysis_id}`}
+                            className="block truncate rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600 hover:bg-blue-50 hover:text-blue-600"
+                          >
+                            {isParentMode && activeScope === ALL_SKATERS_VIEW ? `${entry.skater_name} · ` : ""}
+                            {entry.action_type}
+                          </Link>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <aside className="min-w-0 rounded-[24px] border border-slate-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">Month</p>
+                  <h3 className="mt-2 text-lg font-semibold text-slate-900">本月记录</h3>
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">{calendarMonthEntries.length} 条</span>
+              </div>
+              {calendarMonthEntries.length ? (
+                <div className="mt-4 space-y-3">
+                  {calendarMonthEntries.slice(0, 8).map((entry) => (
+                    <Link
+                      key={entry.id}
+                      to={`/report/${entry.analysis_id}`}
+                      className="block rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/50"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate text-sm font-semibold text-slate-900">{entry.action_type}</p>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${forceScoreTone(entry.force_score)}`}>
+                          {entry.force_score ?? "--"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-400">{formatDate(entry.created_at)}</p>
+                      {isParentMode && activeScope === ALL_SKATERS_VIEW ? <p className="mt-1 text-xs text-blue-600">{entry.skater_name}</p> : null}
+                    </Link>
+                  ))}
+                  {calendarMonthEntries.length > 8 ? <p className="text-sm text-slate-500">还有 {calendarMonthEntries.length - 8} 条，请在列表页翻看。</p> : null}
+                </div>
+              ) : (
+                <p className="mt-4 rounded-[18px] bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-500">这个月份还没有已加载的复盘记录。</p>
+              )}
               {skaterIdsNeedingMore.length ? (
                 <button
                   type="button"
                   onClick={() => void handleLoadMore()}
                   disabled={isLoadingMore}
-                  className="min-h-[44px] w-full rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="mt-4 min-h-[44px] w-full rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isLoadingMore ? "正在加载更多..." : `加载更多（已显示 ${filteredTimeline.length}/${activeStats.total_records} 条）`}
+                  {isLoadingMore ? "正在加载更多..." : "加载更多历史记录"}
                 </button>
               ) : null}
-            </div>
-          ) : (
-            <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">当前筛选下还没有复盘记录，先去上传一段训练视频吧。</div>
-          )}
-        </section>
-      </div>
+            </aside>
+          </div>
+        )}
+      </section>
 
       {pinRetryEntry ? (
         <ParentPinVerifyModal

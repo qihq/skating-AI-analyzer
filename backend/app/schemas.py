@@ -55,10 +55,14 @@ class AnalysisChatMessagePublic(BaseModel):
     role: str
     content: str
     created_at: datetime
+    provider_id: str | None = None
+    provider_name: str | None = None
+    model_id: str | None = None
 
 
 class AnalysisChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+    provider_id: str | None = None
 
 
 class AnalysisChatResponse(BaseModel):

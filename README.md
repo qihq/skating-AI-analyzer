@@ -23,7 +23,8 @@ Current branch updates improve the parent review workflow and local all-in-one r
 - Training plan generation now records whether a plan came from AI or from a safe fallback, and fallback plans are clearly labeled in the UI.
 - Parent report sharing now generates a visual share card with the most important report information instead of only copying text.
 - Pose Replay playback no longer stops after one frame when the report page mirrors the active frame back into the viewer.
-- Archive timelines load the first page quickly with `limit`/`offset` pagination and a "load more" affordance while preserving total-count stats.
+- Archive now uses a compact responsive stats strip plus one record toolbar for skater, action, date range, list view, and calendar view. Timelines load the first page quickly with `limit`/`offset` pagination and a "load more" affordance while preserving total-count stats.
+- Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
@@ -56,6 +57,7 @@ The latest release makes review upload less brittle when the exact element name 
 - AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
 - Persisted AI follow-up for completed videos, with evidence-grounded answers, manual/AI-suggested correction cards, explicit apply/dismiss actions, and report regeneration from applied corrections.
 - Standalone `/analysis-chat` workspace for selecting any completed analysis, reviewing effective recognition/keyframes, checking partial semantic candidates, applying corrections, and sharing text/image recap content.
+- Responsive archive and report workspaces: paginated archive list with calendar tab, compact report summary, and advanced report workspace tabs for pose, evidence, diagnostics, and follow-up.
 - Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, AI input windows, timings, and logs.
 - Docker Compose and all-in-one Docker deployment for NAS or local single-container use.
 
@@ -324,10 +326,11 @@ Recent inspection of `skating-analyzer-allinone:latest` showed:
 
 - `/path`: skill tree and learning path.
 - `/review`: upload and analyze training videos.
-- `/report/:id`: analysis report.
+- `/report/:id`: compact analysis report.
+- `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`: report detail workspace for Pose Replay, Evidence, Diagnostics, and Follow-up.
 - `/analysis-chat`: standalone parent/coach follow-up workspace for any completed analysis.
 - `/report/:id/pose-debug`: expanded skeleton replay and tracker diagnostics.
-- `/archive`: training archive and progress.
+- `/archive`: paginated training archive with list and calendar views.
 - `/plan/:plan_id`: training plan.
 - `/snowball`: assistant chat and memory suggestions.
 - `/settings`: PIN, backups, providers, cost limits, pose runtime, and YOLO runtime checks.

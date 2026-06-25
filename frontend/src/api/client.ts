@@ -204,6 +204,9 @@ export interface AnalysisChatMessage {
   role: "user" | "assistant" | string;
   content: string;
   created_at: string;
+  provider_id?: string | null;
+  provider_name?: string | null;
+  model_id?: string | null;
 }
 
 export interface AnalysisChatResponse {
@@ -956,8 +959,11 @@ export async function fetchAnalysisChatMessages(id: string) {
   return response.data;
 }
 
-export async function sendAnalysisChatMessage(id: string, message: string) {
-  const response = await apiClient.post<AnalysisChatResponse>(`/analysis/${id}/chat`, { message });
+export async function sendAnalysisChatMessage(id: string, message: string, providerId?: string | null) {
+  const response = await apiClient.post<AnalysisChatResponse>(`/analysis/${id}/chat`, {
+    message,
+    provider_id: providerId || null,
+  });
   return response.data;
 }
 

@@ -1,20 +1,23 @@
 import axios from "axios";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import {
   AnalysisChatMessage,
   AnalysisChatShareResponse,
   AnalysisCorrection,
   AnalysisDetail,
+  ProviderPublic,
   applyAnalysisCorrection,
   createAnalysisCorrection,
   dismissAnalysisCorrection,
   fetchAnalysisChatMessages,
   fetchAnalysisCorrections,
+  fetchProviders,
   regenerateReportFromCorrections,
   sendAnalysisChatMessage,
   shareAnalysisChat,
 } from "../api/client";
+import KeyframeEvidencePanel, { type KeyframeSyncPatch } from "./KeyframeEvidencePanel";
 import { canvasToBlob, copyImageBlobToClipboard, drawRoundRect, drawWrappedText, ShareImagePreview } from "../utils/shareCanvas";
 
 const QUICK_PROMPTS = [
@@ -25,6 +28,7 @@ const QUICK_PROMPTS = [
 ];
 
 type ManualFormState = {
+  actionType: string;
   actionSubtype: string;
   takeoffFrame: string;
   apexFrame: string;
@@ -32,15 +36,23 @@ type ManualFormState = {
   rationale: string;
 };
 
+type SuggestedFormState = ManualFormState & {
+  sourceCorrectionId: string;
+};
+
+type ToolTab = "keyframes" | "form" | "corrections";
+
 type AnalysisFollowUpPanelProps = {
   analysis: AnalysisDetail | null;
   compact?: boolean;
+  variant?: "card" | "workspace";
   onAnalysisRefresh?: () => void;
   onNotice?: (message: string) => void;
 };
 
 function createDefaultManualForm(analysis: AnalysisDetail | null): ManualFormState {
   return {
+    actionType: analysis?.action_type ?? "",
     actionSubtype: analysis?.action_subtype ?? "",
     takeoffFrame: "",
     apexFrame: "",
@@ -113,11 +125,80 @@ function currentKeyFrames(analysis: AnalysisDetail | null) {
   return Object.entries(keyFrames).filter(([, value]) => value);
 }
 
-function semanticCandidates(analysis: AnalysisDetail | null) {
-  const diagnostics = analysis?.video_temporal_diagnostics;
+function frameValue(value: unknown) {
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return String(record.frame_id ?? record.frame ?? record.timestamp ?? "");
+  }
+  return value == null ? "" : String(value);
+}
+
+function extractSuggestionForm(correction: AnalysisCorrection, analysis: AnalysisDetail | null): SuggestedFormState | null {
+  if (correction.status !== "proposed" || correction.source !== "chat_suggestion") {
+    return null;
+  }
+  const payload = correction.payload;
+  const base = createDefaultManualForm(analysis);
+  if (correction.kind === "action_label") {
+    const confirmation = payload.action_confirmation && typeof payload.action_confirmation === "object" ? payload.action_confirmation as Record<string, unknown> : {};
+    const actionSubtype = String(payload.action_subtype ?? confirmation.confirmed_action ?? confirmation.jump_type ?? base.actionSubtype ?? "");
+    const actionType = String(payload.action_type ?? base.actionType ?? "");
+    if (!actionType && !actionSubtype) {
+      return null;
+    }
+    return {
+      ...base,
+      actionType,
+      actionSubtype,
+      rationale: correction.rationale ?? "",
+      sourceCorrectionId: correction.id,
+    };
+  }
+  if (correction.kind === "keyframes") {
+    const keyFrames = payload.key_frames && typeof payload.key_frames === "object" ? payload.key_frames as Record<string, unknown> : {};
+    const takeoffFrame = frameValue(keyFrames.T);
+    const apexFrame = frameValue(keyFrames.A);
+    const landingFrame = frameValue(keyFrames.L);
+    if (!takeoffFrame && !apexFrame && !landingFrame) {
+      return null;
+    }
+    return {
+      ...base,
+      takeoffFrame,
+      apexFrame,
+      landingFrame,
+      rationale: correction.rationale ?? "",
+      sourceCorrectionId: correction.id,
+    };
+  }
+  return null;
+}
+
+function mergeSuggestionForm(current: ManualFormState, suggestion: SuggestedFormState): ManualFormState {
   return {
-    selected: diagnostics?.selected_semantic_frames ?? [],
-    partial: diagnostics?.partial_semantic_frames ?? [],
+    actionType: suggestion.actionType || current.actionType,
+    actionSubtype: suggestion.actionSubtype || current.actionSubtype,
+    takeoffFrame: suggestion.takeoffFrame || current.takeoffFrame,
+    apexFrame: suggestion.apexFrame || current.apexFrame,
+    landingFrame: suggestion.landingFrame || current.landingFrame,
+    rationale: suggestion.rationale || current.rationale,
+  };
+}
+
+function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: AnalysisDetail | null): SuggestedFormState | null {
+  const suggestions = corrections
+    .map((correction) => extractSuggestionForm(correction, analysis))
+    .filter((suggestion): suggestion is SuggestedFormState => Boolean(suggestion));
+  if (!suggestions.length) {
+    return null;
+  }
+  const merged = suggestions.reduce<ManualFormState>(
+    (current, suggestion) => mergeSuggestionForm(current, suggestion),
+    createDefaultManualForm(analysis),
+  );
+  return {
+    ...merged,
+    sourceCorrectionId: suggestions[suggestions.length - 1].sourceCorrectionId,
   };
 }
 
@@ -209,14 +290,18 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   return { blob, filename };
 }
 
-export default function AnalysisFollowUpPanel({ analysis, compact = false, onAnalysisRefresh, onNotice }: AnalysisFollowUpPanelProps) {
+export default function AnalysisFollowUpPanel({ analysis, compact = false, variant = "card", onAnalysisRefresh, onNotice }: AnalysisFollowUpPanelProps) {
   const [messages, setMessages] = useState<AnalysisChatMessage[]>([]);
   const [corrections, setCorrections] = useState<AnalysisCorrection[]>([]);
+  const [providers, setProviders] = useState<ProviderPublic[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState("");
   const [input, setInput] = useState("");
   const [manualForm, setManualForm] = useState<ManualFormState>(() => createDefaultManualForm(analysis));
-  const [detailsOpenByDefault] = useState(() => (typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : false));
-  const [manualDetailsOpen, setManualDetailsOpen] = useState(() => !compact && detailsOpenByDefault);
-  const [evidenceDetailsOpen, setEvidenceDetailsOpen] = useState(() => !compact && detailsOpenByDefault);
+  const [manualFormDirty, setManualFormDirty] = useState(false);
+  const [pendingSuggestion, setPendingSuggestion] = useState<SuggestedFormState | null>(null);
+  const [syncedSuggestionId, setSyncedSuggestionId] = useState<string | null>(null);
+  const [activeToolTab, setActiveToolTab] = useState<ToolTab>("keyframes");
+  const [quickPromptsOpen, setQuickPromptsOpen] = useState(() => (typeof window !== "undefined" ? window.matchMedia("(min-width: 768px)").matches : true));
   const [error, setError] = useState<string | null>(null);
   const [shareText, setShareText] = useState("");
   const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
@@ -224,16 +309,56 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
   const [isSending, setIsSending] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const analysisId = analysis?.id ?? "";
-  const candidates = useMemo(() => semanticCandidates(analysis), [analysis]);
+  const reportProviders = useMemo(() => providers.filter((provider) => provider.slot === "report"), [providers]);
   const activeCorrections = corrections.filter((correction) => correction.status !== "dismissed");
   const pendingCorrections = corrections.filter((correction) => correction.status === "proposed");
   const appliedCorrections = corrections.filter((correction) => correction.status === "applied");
+  const draftKeyframes = useMemo(
+    () => ({
+      T: manualForm.takeoffFrame,
+      A: manualForm.apexFrame,
+      L: manualForm.landingFrame,
+    }),
+    [manualForm.apexFrame, manualForm.landingFrame, manualForm.takeoffFrame],
+  );
 
   useEffect(() => {
     setManualForm(createDefaultManualForm(analysis));
-  }, [analysis?.id, analysis?.action_subtype]);
+    setManualFormDirty(false);
+    setPendingSuggestion(null);
+    setSyncedSuggestionId(null);
+    setActiveToolTab("keyframes");
+  }, [analysis?.id, analysis?.action_type, analysis?.action_subtype]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadProviders = async () => {
+      try {
+        const data = await fetchProviders();
+        if (!cancelled) {
+          setProviders(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setProviders([]);
+        }
+      }
+    };
+    void loadProviders();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProviderId || reportProviders.some((provider) => provider.id === selectedProviderId)) {
+      return;
+    }
+    setSelectedProviderId("");
+  }, [reportProviders, selectedProviderId]);
 
   useEffect(() => {
     return () => {
@@ -269,9 +394,68 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
     void reload();
   }, [analysisId, analysis?.status]);
 
+  useEffect(() => {
+    const element = messageListRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
+  }, [analysisId, messages.length, isSending]);
+
   const showNotice = (message: string) => {
     onNotice?.(message);
   };
+
+  const updateManualForm = (patch: Partial<ManualFormState>) => {
+    setManualForm((current) => ({ ...current, ...patch }));
+    setManualFormDirty(true);
+  };
+
+  const syncKeyframesToForm = (patch: KeyframeSyncPatch, sourceLabel: string) => {
+    const nextPatch: Partial<ManualFormState> = {};
+    if (patch.T) {
+      nextPatch.takeoffFrame = patch.T;
+    }
+    if (patch.A) {
+      nextPatch.apexFrame = patch.A;
+    }
+    if (patch.L) {
+      nextPatch.landingFrame = patch.L;
+    }
+    if (!Object.keys(nextPatch).length) {
+      return;
+    }
+    setManualForm((current) => ({ ...current, ...nextPatch }));
+    setManualFormDirty(true);
+    setActiveToolTab("form");
+    showNotice(`${sourceLabel} 已同步到待确认 form`);
+  };
+
+  const applySuggestionToForm = (suggestion: SuggestedFormState) => {
+    setManualForm((current) => mergeSuggestionForm(current, suggestion));
+    setManualFormDirty(true);
+    setPendingSuggestion(null);
+    setSyncedSuggestionId(suggestion.sourceCorrectionId);
+    setActiveToolTab("form");
+  };
+
+  useEffect(() => {
+    const latestSuggestion = buildSuggestedForm(corrections, analysis);
+    if (!latestSuggestion || latestSuggestion.sourceCorrectionId === syncedSuggestionId) {
+      return;
+    }
+
+    if (manualFormDirty) {
+      setPendingSuggestion(latestSuggestion);
+      setActiveToolTab("form");
+      return;
+    }
+
+    setManualForm((current) => mergeSuggestionForm(current, latestSuggestion));
+    setManualFormDirty(false);
+    setSyncedSuggestionId(latestSuggestion.sourceCorrectionId);
+    setActiveToolTab("form");
+  }, [analysis, corrections, manualFormDirty, syncedSuggestionId]);
 
   const submitMessage = async (rawMessage: string) => {
     const message = rawMessage.trim();
@@ -293,7 +477,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
     setError(null);
     setIsSending(true);
     try {
-      const response = await sendAnalysisChatMessage(analysisId, message);
+      const response = await sendAnalysisChatMessage(analysisId, message, selectedProviderId || null);
       setMessages(response.messages);
       setInput("");
       const correctionData = await fetchAnalysisCorrections(analysisId);
@@ -324,6 +508,8 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
     try {
       const response = await action();
       setCorrections(response.corrections);
+      setManualFormDirty(false);
+      setPendingSuggestion(null);
       showNotice(successMessage);
       onAnalysisRefresh?.();
     } catch (requestError) {
@@ -343,9 +529,10 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
     }
     const rationale = manualForm.rationale || "手动确认修正";
     if (kind === "action_label") {
+      const actionType = manualForm.actionType.trim();
       const actionSubtype = manualForm.actionSubtype.trim();
-      if (!actionSubtype) {
-        setError("请先填写要修正的动作名称。");
+      if (!actionType && !actionSubtype) {
+        setError("请先填写要修正的动作类型或动作名称。");
         return;
       }
       await mutateCorrection(
@@ -356,9 +543,10 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
             status: "proposed",
             rationale,
             payload: {
-              action_subtype: actionSubtype,
+              ...(actionType ? { action_type: actionType } : {}),
+              ...(actionSubtype ? { action_subtype: actionSubtype } : {}),
               action_confirmation: {
-                confirmed_action: actionSubtype,
+                ...(actionSubtype ? { confirmed_action: actionSubtype } : {}),
                 notes: rationale,
               },
             },
@@ -422,37 +610,256 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
 
   if (!analysis) {
     return (
-      <section className="app-card p-6">
+      <section className={variant === "workspace" ? "rounded-[24px] border border-slate-200 bg-white p-6" : "app-card p-6"}>
         <p className="text-sm text-slate-500">请选择一条已完成分析开始追问。</p>
       </section>
     );
   }
 
-  return (
-    <section className={`app-card min-w-0 overflow-hidden p-4 phone:p-5 tablet:p-6 ${compact ? "" : "h-full"}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-teal-600">Follow-up</p>
-          <h2 className="mt-2 text-xl font-semibold text-slate-900">AI 追问</h2>
-          <p className="mt-1 text-sm leading-6 text-slate-500">基于已保存证据回答；修正需要人工确认后才会生效。</p>
-        </div>
+  const isWorkspace = variant === "workspace";
+  const toolTabs: Array<{ id: ToolTab; label: string; count?: number }> = [
+    { id: "keyframes", label: "关键帧" },
+    { id: "form", label: "待确认", count: pendingSuggestion ? 1 : undefined },
+    { id: "corrections", label: "修正卡", count: activeCorrections.length || undefined },
+  ];
+  const modelSelector = (
+    <div className="min-w-0">
+      <label className="sr-only" htmlFor={`chat-model-${analysisId}`}>
+        回复模型
+      </label>
+      <select
+        id={`chat-model-${analysisId}`}
+        value={selectedProviderId}
+        onChange={(event) => setSelectedProviderId(event.target.value)}
+        className="min-h-[38px] w-full rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 outline-none transition focus:border-teal-300 focus:ring-4 focus:ring-teal-100 tablet:w-[260px]"
+        title="回复模型"
+      >
+        <option value="">默认模型</option>
+        {reportProviders.map((provider) => (
+          <option key={provider.id} value={provider.id}>
+            {provider.name} · {provider.model_id}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+  const quickPromptBar = (
+    <div className="rounded-[22px] border border-teal-100 bg-teal-50/70 p-2">
+      <div className="flex items-center justify-between gap-3 tablet:hidden">
+        <p className="text-xs font-semibold text-teal-800">快捷问题</p>
         <button
           type="button"
-          onClick={() => void handleShare()}
-          disabled={isSharing || analysis.status !== "completed"}
-          className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={() => setQuickPromptsOpen((current) => !current)}
+          className="min-h-[32px] rounded-full bg-white px-3 py-1 text-xs font-semibold text-teal-700"
         >
-          {isSharing ? "生成中..." : "分享追问"}
+          {quickPromptsOpen ? "收起" : "展开"}
         </button>
       </div>
+      <div className={`${quickPromptsOpen ? "mt-2 tablet:mt-0" : "hidden tablet:flex"} flex gap-2 overflow-x-auto pb-1 tablet:flex-wrap tablet:overflow-visible tablet:pb-0`}>
+        {QUICK_PROMPTS.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            onClick={() => void submitMessage(prompt)}
+            disabled={isSending}
+            className="min-h-[36px] shrink-0 rounded-full border border-teal-100 bg-white px-3 py-1.5 text-xs font-semibold leading-5 text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+  const manualFormPanel = (
+    <div className="rounded-[24px] border border-slate-200 bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-slate-900">待确认数据 form</h3>
+        {pendingSuggestion ? <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">有新建议</span> : null}
+      </div>
+      <div className="mt-4 space-y-3">
+        {pendingSuggestion ? (
+          <div className="rounded-[18px] border border-amber-200 bg-amber-50 p-3">
+            <p className="text-xs leading-5 text-amber-700">发现新的 AI 建议，可同步到表单后再确认。</p>
+            <button
+              type="button"
+              onClick={() => applySuggestionToForm(pendingSuggestion)}
+              className="mt-2 min-h-[34px] rounded-full bg-amber-600 px-3 py-1 text-xs font-semibold text-white"
+            >
+              同步到表单
+            </button>
+          </div>
+        ) : null}
+        <label className="block text-xs font-semibold text-slate-500">
+          动作类型
+          <input
+            value={manualForm.actionType}
+            onChange={(event) => updateManualForm({ actionType: event.target.value })}
+            className="mt-2 w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
+            placeholder="例如 jump / spin / step"
+          />
+        </label>
+        <label className="block text-xs font-semibold text-slate-500">
+          动作名称
+          <input
+            value={manualForm.actionSubtype}
+            onChange={(event) => updateManualForm({ actionSubtype: event.target.value })}
+            className="mt-2 w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
+            placeholder="例如 Toe Loop / Salchow"
+          />
+        </label>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            ["takeoffFrame", "T"],
+            ["apexFrame", "A"],
+            ["landingFrame", "L"],
+          ].map(([key, label]) => (
+            <label key={key} className="block text-xs font-semibold text-slate-500">
+              {label}
+              <input
+                value={manualForm[key as keyof ManualFormState]}
+                onChange={(event) => updateManualForm({ [key]: event.target.value } as Partial<ManualFormState>)}
+                className="mt-2 w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
+                placeholder="frame id"
+              />
+            </label>
+          ))}
+        </div>
+        <textarea
+          value={manualForm.rationale}
+          onChange={(event) => updateManualForm({ rationale: event.target.value })}
+          rows={2}
+          className="w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
+          placeholder="修正理由"
+        />
+        <div className="grid gap-2 phone:grid-cols-2 xl:grid-cols-1">
+          <button
+            type="button"
+            onClick={() => void submitManualCorrection("action_label")}
+            disabled={isMutating}
+            className="min-h-[40px] rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            生成动作修正卡
+          </button>
+          <button
+            type="button"
+            onClick={() => void submitManualCorrection("keyframes")}
+            disabled={isMutating}
+            className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            生成关键帧修正卡
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+  const correctionsPanel = (
+    <div className="rounded-[24px] border border-slate-200 bg-white p-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-slate-900">修正卡</h3>
+        <button
+          type="button"
+          onClick={() => void mutateCorrection(() => regenerateReportFromCorrections(analysisId), "已按修正重新生成有效报告。")}
+          disabled={isMutating || !appliedCorrections.length}
+          className="min-h-[36px] rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          重新生成报告
+        </button>
+      </div>
+      <div className="mt-3 space-y-3">
+        {activeCorrections.length ? (
+          activeCorrections.slice().reverse().map((correction) => (
+            <article key={correction.id} className="rounded-[20px] border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">{correctionTitle(correction)}</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">{correctionSummary(correction)}</p>
+                </div>
+                <span className={`shrink-0 rounded-full px-2 py-1 text-xs font-semibold ${statusClass(correction.status)}`}>
+                  {statusLabel(correction.status)}
+                </span>
+              </div>
+              {correction.rationale ? <p className="mt-2 text-xs leading-5 text-slate-500">理由：{correction.rationale}</p> : null}
+              {correction.status === "proposed" ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void mutateCorrection(() => applyAnalysisCorrection(analysisId, correction.id), "修正已应用到有效数据。")}
+                    disabled={isMutating}
+                    className="min-h-[34px] rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    应用
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void mutateCorrection(() => dismissAnalysisCorrection(analysisId, correction.id), "已忽略该修正。")}
+                    disabled={isMutating}
+                    className="min-h-[34px] rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    忽略
+                  </button>
+                </div>
+              ) : null}
+            </article>
+          ))
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">暂无修正卡。AI 或手动提出后，会在这里等待确认。</p>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <section className={`${isWorkspace ? "min-w-0" : "app-card"} min-w-0 overflow-hidden ${isWorkspace ? "p-0" : "p-4 phone:p-5 tablet:p-6"} ${compact || isWorkspace ? "" : "h-full"}`}>
+      {!isWorkspace ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-teal-600">Follow-up</p>
+            <h2 className="mt-2 text-xl font-semibold text-slate-900">AI 追问</h2>
+            <p className="mt-1 text-sm leading-6 text-slate-500">基于已保存证据回答；修正需要人工确认后才会生效。</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleShare()}
+            disabled={isSharing || analysis.status !== "completed"}
+            className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isSharing ? "生成中..." : "分享追问"}
+          </button>
+        </div>
+      ) : null}
 
       {analysis.status !== "completed" ? (
         <div className="mt-5 rounded-[22px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">只有已完成分析才能继续追问。</div>
       ) : null}
 
-      <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.54fr)]">
+      <div className={`${isWorkspace ? "mt-0" : "mt-5"} grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]`}>
         <div className="min-w-0 space-y-4">
-          <div className="max-h-[min(58dvh,520px)] min-h-[260px] space-y-3 overflow-y-auto rounded-[24px] border border-slate-200 bg-slate-50 p-3 tablet:min-h-[340px]">
+          {isWorkspace ? (
+            <div className="rounded-[24px] border border-slate-200 bg-white p-3">
+              <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-900">AI 追问</h2>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">回答会基于当前报告和已确认修正。</p>
+                </div>
+                <div className="flex flex-col gap-2 phone:flex-row tablet:items-center">
+                  {modelSelector}
+                  <button
+                    type="button"
+                    onClick={() => void handleShare()}
+                    disabled={isSharing || analysis.status !== "completed"}
+                    className="min-h-[38px] rounded-full border border-teal-200 bg-teal-50 px-4 py-1.5 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isSharing ? "生成中..." : "分享追问"}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3">{quickPromptBar}</div>
+            </div>
+          ) : null}
+          <div
+            ref={messageListRef}
+            className="max-h-[min(64dvh,620px)] min-h-[360px] space-y-3 overflow-y-auto rounded-[24px] border border-slate-200 bg-slate-50 p-3 tablet:min-h-[440px] xl:min-h-[560px]"
+          >
             {isLoading ? (
               <p className="px-2 py-8 text-center text-sm text-slate-500">正在加载追问记录...</p>
             ) : messages.length ? (
@@ -465,6 +872,11 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
                         isUser ? "bg-teal-600 text-white" : "border border-white bg-white text-slate-700 shadow-sm"
                       }`}
                     >
+                      {!isUser && (message.provider_name || message.model_id) ? (
+                        <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                          {message.provider_name || message.model_id}
+                        </p>
+                      ) : null}
                       {message.content}
                     </div>
                   </div>
@@ -483,25 +895,21 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
             ) : null}
           </div>
 
-          <div className="grid grid-cols-1 gap-2 phone:grid-cols-2 tablet:flex tablet:flex-wrap">
-            {QUICK_PROMPTS.map((prompt) => (
-              <button
-                key={prompt}
-                type="button"
-                onClick={() => void submitMessage(prompt)}
-                disabled={isSending}
-                className="min-h-[40px] rounded-full border border-teal-100 bg-teal-50 px-3 py-2 text-left text-xs font-semibold leading-5 text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60 tablet:text-center"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
+          {!isWorkspace ? quickPromptBar : null}
 
           <form
             onSubmit={handleSubmit}
             className="sticky z-20 space-y-3 rounded-[24px] border border-slate-200 bg-white/95 p-3 shadow-[0_18px_46px_rgba(15,23,42,0.16)] backdrop-blur tablet:static tablet:border-0 tablet:bg-transparent tablet:p-0 tablet:shadow-none tablet:backdrop-blur-0"
             style={{ bottom: "calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 0px) + 12px)" }}
           >
+            {!isWorkspace ? (
+              <div className="grid gap-2 tablet:grid-cols-[minmax(0,1fr)_minmax(220px,320px)] tablet:items-end">
+                {modelSelector}
+                <p className="text-xs leading-5 text-slate-400">
+                  只影响本次追问回复；视频分析模型不会被切换。
+                </p>
+              </div>
+            ) : null}
             <textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -525,155 +933,49 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, onAna
         </div>
 
         <aside className="min-w-0 space-y-4">
-          <div className="rounded-[24px] border border-slate-200 bg-white p-4">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-900">有效识别</h3>
-              {appliedCorrections.length ? <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-600">已人工修正</span> : null}
-            </div>
-            <p className="mt-3 text-sm leading-6 text-slate-600">{analysis.action_subtype || analysis.action_type}</p>
-            <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-              {currentKeyFrames(analysis).map(([key, value]) => (
-                <span key={key} className="rounded-full bg-slate-100 px-3 py-1">{key}: {String(value)}</span>
-              ))}
-            </div>
-          </div>
-
-          <details
-            className="rounded-[24px] border border-slate-200 bg-white p-4"
-            open={manualDetailsOpen}
-            onToggle={(event) => setManualDetailsOpen(event.currentTarget.open)}
-          >
-            <summary className="cursor-pointer text-sm font-semibold text-slate-900">手动提出修正</summary>
-            <div className="mt-4 space-y-3">
-              <label className="block text-xs font-semibold text-slate-500">
-                动作名称
-                <input
-                  value={manualForm.actionSubtype}
-                  onChange={(event) => setManualForm((current) => ({ ...current, actionSubtype: event.target.value }))}
-                  className="mt-2 w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
-                  placeholder="例如 Toe Loop / Salchow"
-                />
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  ["takeoffFrame", "T"],
-                  ["apexFrame", "A"],
-                  ["landingFrame", "L"],
-                ].map(([key, label]) => (
-                  <label key={key} className="block text-xs font-semibold text-slate-500">
-                    {label}
-                    <input
-                      value={manualForm[key as keyof ManualFormState]}
-                      onChange={(event) => setManualForm((current) => ({ ...current, [key]: event.target.value }))}
-                      className="mt-2 w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
-                      placeholder="frame id"
-                    />
-                  </label>
+          {!isWorkspace ? (
+            <div className="rounded-[24px] border border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-slate-900">有效识别</h3>
+                {appliedCorrections.length ? <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-600">已人工修正</span> : null}
+              </div>
+              <p className="mt-3 text-sm leading-6 text-slate-600">{analysis.action_subtype || analysis.action_type}</p>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                {currentKeyFrames(analysis).map(([key, value]) => (
+                  <span key={key} className="rounded-full bg-slate-100 px-3 py-1">{key}: {String(value)}</span>
                 ))}
               </div>
-              <textarea
-                value={manualForm.rationale}
-                onChange={(event) => setManualForm((current) => ({ ...current, rationale: event.target.value }))}
-                rows={2}
-                className="w-full rounded-[18px] border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
-                placeholder="修正理由"
-              />
-              <div className="grid gap-2 phone:grid-cols-2 xl:grid-cols-1">
-                <button
-                  type="button"
-                  onClick={() => void submitManualCorrection("action_label")}
-                  disabled={isMutating}
-                  className="min-h-[40px] rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  生成动作修正卡
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void submitManualCorrection("keyframes")}
-                  disabled={isMutating}
-                  className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  生成关键帧修正卡
-                </button>
-              </div>
             </div>
-          </details>
-
-          <div className="rounded-[24px] border border-slate-200 bg-white p-4">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-900">修正卡</h3>
-              <button
-                type="button"
-                onClick={() => void mutateCorrection(() => regenerateReportFromCorrections(analysisId), "已按修正重新生成有效报告。")}
-                disabled={isMutating || !appliedCorrections.length}
-                className="min-h-[36px] rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                重新生成报告
-              </button>
-            </div>
-            <div className="mt-3 space-y-3">
-              {activeCorrections.length ? (
-                activeCorrections.slice().reverse().map((correction) => (
-                  <article key={correction.id} className="rounded-[20px] border border-slate-200 bg-slate-50 p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900">{correctionTitle(correction)}</p>
-                        <p className="mt-1 text-xs leading-5 text-slate-500">{correctionSummary(correction)}</p>
-                      </div>
-                      <span className={`shrink-0 rounded-full px-2 py-1 text-xs font-semibold ${statusClass(correction.status)}`}>
-                        {statusLabel(correction.status)}
-                      </span>
-                    </div>
-                    {correction.rationale ? <p className="mt-2 text-xs leading-5 text-slate-500">理由：{correction.rationale}</p> : null}
-                    {correction.status === "proposed" ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void mutateCorrection(() => applyAnalysisCorrection(analysisId, correction.id), "修正已应用到有效数据。")}
-                          disabled={isMutating}
-                          className="min-h-[34px] rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          应用
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void mutateCorrection(() => dismissAnalysisCorrection(analysisId, correction.id), "已忽略该修正。")}
-                          disabled={isMutating}
-                          className="min-h-[34px] rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          忽略
-                        </button>
-                      </div>
-                    ) : null}
-                  </article>
-                ))
-              ) : (
-                <p className="text-sm leading-6 text-slate-500">暂无修正卡。AI 或手动提出后，会在这里等待确认。</p>
-              )}
+          ) : null}
+          <div className="rounded-[24px] border border-slate-200 bg-white p-2">
+            <div className="grid grid-cols-3 gap-2">
+              {toolTabs.map((tab) => {
+                const selected = activeToolTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveToolTab(tab.id)}
+                    className={`min-h-[38px] rounded-full px-2 py-1 text-xs font-semibold transition ${
+                      selected ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    {tab.label}
+                    {tab.count ? <span className={selected ? "ml-1 text-white/80" : "ml-1 text-slate-400"}>{tab.count}</span> : null}
+                  </button>
+                );
+              })}
             </div>
           </div>
-
-          <details
-            className="rounded-[24px] border border-slate-200 bg-white p-4"
-            open={evidenceDetailsOpen}
-            onToggle={(event) => setEvidenceDetailsOpen(event.currentTarget.open)}
-          >
-            <summary className="cursor-pointer text-sm font-semibold text-slate-900">证据候选</summary>
-            <div className="mt-4 space-y-3 text-xs leading-5 text-slate-500">
-              <div>
-                <p className="font-semibold text-slate-700">最终关键帧</p>
-                {candidates.selected.length ? candidates.selected.slice(0, 4).map((item, index) => (
-                  <p key={`${item.frame_id}-${index}`} className="mt-1 rounded-[16px] bg-slate-50 px-3 py-2">{item.phase_code ?? item.key_moment ?? "?"}: {item.frame_id ?? item.timestamp}</p>
-                )) : <p className="mt-1">暂无</p>}
-              </div>
-              <div>
-                <p className="font-semibold text-slate-700">Partial semantic candidates</p>
-                {candidates.partial.length ? candidates.partial.slice(0, 5).map((item, index) => (
-                  <p key={`${item.frame_id}-${index}`} className="mt-1 rounded-[16px] bg-amber-50 px-3 py-2 text-amber-700">{item.phase_code ?? item.key_moment ?? "?"}: {item.frame_id ?? item.timestamp}</p>
-                )) : <p className="mt-1">暂无</p>}
-              </div>
-            </div>
-          </details>
+          {activeToolTab === "keyframes" ? (
+            <KeyframeEvidencePanel
+              analysis={analysis}
+              draftKeyframes={draftKeyframes}
+              onSyncFrames={syncKeyframesToForm}
+            />
+          ) : null}
+          {activeToolTab === "form" ? manualFormPanel : null}
+          {activeToolTab === "corrections" ? correctionsPanel : null}
         </aside>
       </div>
 

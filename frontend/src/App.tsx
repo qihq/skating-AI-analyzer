@@ -12,6 +12,7 @@ import ParentSetupPage from "./pages/ParentSetupPage";
 import PlanPage from "./pages/PlanPage";
 import PoseDebugPage from "./pages/PoseDebugPage";
 import ReportPage from "./pages/ReportPage";
+import ReportWorkspacePage from "./pages/ReportWorkspacePage";
 import ReviewPage from "./pages/ReviewPage";
 import SettingsPage from "./pages/SettingsPage";
 import SkillTreePage from "./pages/SkillTreePage";
@@ -129,6 +130,7 @@ export default function App() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
+          <Route path="/report/:id/workspace" element={<ReportWorkspacePage />} />
           <Route path="/report/:id/pose-debug" element={<PoseDebugPage />} />
           <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
