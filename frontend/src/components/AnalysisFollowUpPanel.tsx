@@ -592,11 +592,12 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       onAnalysisRefresh?.();
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
+        const detail = String(requestError.response?.data?.detail ?? "");
         if (requestError.response?.status === 404) {
-          setError("原始视频已清理或不可用，无法重新识别关键帧。");
+          setError(detail || "未找到视频 AI 重识别关键帧接口，请确认前端代理正在连接最新后端。");
           return;
         }
-        setError(String(requestError.response?.data?.detail ?? "视频 AI 重新识别关键帧失败，请稍后重试。"));
+        setError(detail || "视频 AI 重新识别关键帧失败，请稍后重试。");
       } else {
         setError("视频 AI 重新识别关键帧失败，请稍后重试。");
       }
