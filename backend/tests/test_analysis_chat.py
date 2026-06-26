@@ -258,6 +258,42 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await engine.dispose()
 
+    async def test_video_ai_keyframe_rerun_request_returns_lightweight_action(self) -> None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.database import Base
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+
+        completion = AsyncMock(return_value="不应该调用模型")
+        async with Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            with (
+                patch("app.services.analysis_chat.get_active_provider", AsyncMock(return_value=_provider())),
+                patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
+                patch("app.services.analysis_chat.request_text_completion", completion),
+            ):
+                assistant_message, messages, suggested_action = await create_analysis_chat_reply(
+                    session,
+                    analysis,
+                    message="不要重跑主人物，只重跑全量视频关键帧",
+                )
+
+            completion.assert_not_awaited()
+            self.assertIn("不会重跑主人物追踪", assistant_message.content)
+            self.assertIn("关键帧修正卡", assistant_message.content)
+            self.assertEqual(suggested_action["kind"], "video_ai_keyframe_rerun")
+            self.assertNotIn("reset_target_lock", suggested_action)
+            self.assertEqual([item.role for item in messages], ["user", "assistant"])
+
+        await engine.dispose()
+
     async def test_selected_provider_must_be_report_slot(self) -> None:
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 

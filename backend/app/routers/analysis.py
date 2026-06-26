@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import copy
 import json
 import shutil
 import time
@@ -149,6 +150,7 @@ from app.services.video import (
     cleanup_processing_dir,
     compute_video_sha256,
     cut_action_window_ai_clip,
+    detect_video_fps,
     encode_frames,
     extract_motion_sampled_frames,
     extract_precise_frames_at_timestamps,
@@ -163,6 +165,7 @@ from app.services.semantic_keyframe_pipeline import (
     merge_frame_motion_payload,
     resolve_semantic_keyframe_pipeline,
     retry_video_temporal_if_needed,
+    run_semantic_keyframe_pipeline,
     start_video_temporal_task,
     validate_semantic_keyframes_against_current_evidence,
 )
@@ -6301,6 +6304,205 @@ def _video_media_type(path: Path) -> str:
     return "video/mp4"
 
 
+def _full_video_sampling_metadata(video_path: Path, input_window: VideoInputWindow) -> VideoSamplingMetadata:
+    from app.services.video import MAX_SAMPLED_FRAMES, NORMAL_PLAYBACK_FPS, SLOW_MOTION_THRESHOLD_FPS
+
+    source_fps = detect_video_fps(video_path)
+    is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
+    slow_motion_scale = max(source_fps / NORMAL_PLAYBACK_FPS, 1.0) if is_slow_motion and source_fps > 0 else 1.0
+    duration = max(input_window.input_window_end_sec - input_window.input_window_start_sec, 1e-6)
+    effective_duration = duration / slow_motion_scale
+    effective_fps = (max(MAX_SAMPLED_FRAMES, 2) - 1) / max(effective_duration, 1e-6)
+    window_start_sec = input_window.input_window_start_sec / slow_motion_scale
+    return VideoSamplingMetadata(
+        action_window_start=round(input_window.input_window_start_sec, 3),
+        action_window_end=round(input_window.input_window_end_sec, 3),
+        window_start_sec=round(window_start_sec, 3),
+        window_end_sec=round(window_start_sec + effective_duration, 3),
+        effective_fps=round(effective_fps, 3),
+        source_fps=round(source_fps, 3),
+        is_slow_motion=is_slow_motion,
+    )
+
+
+def _semantic_tal_key(record: dict[str, Any]) -> str | None:
+    key_moment = str(record.get("key_moment") or "").strip().upper()
+    if key_moment.startswith("T"):
+        return "T"
+    if key_moment.startswith("A"):
+        return "A"
+    if key_moment.startswith("L"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "").strip().lower()
+    if phase_code in {"t", "takeoff"}:
+        return "T"
+    if phase_code in {"a", "air", "apex"}:
+        return "A"
+    if phase_code in {"l", "landing"}:
+        return "L"
+    return None
+
+
+def _phase_code_for_key(key: str, record: dict[str, Any]) -> str:
+    phase_code = str(record.get("phase_code") or "").strip()
+    if phase_code:
+        return phase_code
+    return {"T": "takeoff", "A": "air", "L": "landing"}.get(key, key)
+
+
+def _phase_label_for_key(key: str, record: dict[str, Any]) -> str:
+    label = str(record.get("phase_label") or "").strip()
+    if label:
+        return label
+    return {"T": "Takeoff", "A": "Apex", "L": "Landing"}.get(key, key)
+
+
+def _key_moment_for_key(key: str, record: dict[str, Any]) -> str:
+    key_moment = str(record.get("key_moment") or "").strip()
+    if key_moment:
+        return key_moment
+    return {"T": "T_takeoff", "A": "A_apex", "L": "L_landing"}.get(key, key)
+
+
+def _video_keyframe_rerun_keyframes(selected: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    key_frames: dict[str, dict[str, Any]] = {}
+    for record in selected:
+        key = _semantic_tal_key(record)
+        if key is None or key in key_frames:
+            continue
+        normalized: dict[str, Any] = {
+            "frame_id": str(record.get("frame_id") or "").strip(),
+            "phase_code": _phase_code_for_key(key, record),
+            "phase_label": _phase_label_for_key(key, record),
+            "key_moment": _key_moment_for_key(key, record),
+            "selection_reason": str(record.get("selection_reason") or "video_ai_full_video_keyframe_rerun"),
+        }
+        timestamp = _to_number(record.get("timestamp"))
+        if timestamp is not None:
+            normalized["timestamp"] = round(timestamp, 3)
+        confidence = _to_number(record.get("confidence"))
+        if confidence is not None:
+            normalized["confidence"] = round(confidence, 3)
+        key_frames[key] = {key: value for key, value in normalized.items() if value not in (None, "", [], {})}
+    return key_frames
+
+
+def _candidate_timestamp_map(bio_data: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(bio_data, dict):
+        return {}
+    candidates = bio_data.get("key_frame_candidates")
+    if isinstance(candidates, dict):
+        source = candidates
+    elif isinstance(bio_data.get("key_frame_timestamps"), dict):
+        source = bio_data.get("key_frame_timestamps")
+    else:
+        source = {}
+    output: dict[str, float] = {}
+    if isinstance(source, dict):
+        for key in ("T", "A", "L"):
+            value = source.get(key)
+            timestamp = _to_number(value.get("timestamp") if isinstance(value, dict) else value)
+            if timestamp is not None:
+                output[key] = timestamp
+    return output
+
+
+def _video_keyframe_rerun_diagnostics(
+    result: SemanticKeyframePipelineResult,
+    *,
+    selected: list[dict[str, Any]],
+    bio_data: dict[str, Any] | None,
+    motion_scores: dict[str, Any] | None,
+) -> dict[str, Any]:
+    resolved = result.resolved_keyframes if isinstance(result.resolved_keyframes, dict) else {}
+    video_temporal = result.video_temporal if isinstance(result.video_temporal, dict) else {}
+    key_frames = _video_keyframe_rerun_keyframes(selected)
+    video_timestamps = {
+        key: value
+        for key, value in (
+            (key, _to_number(frame.get("timestamp")) if isinstance(frame, dict) else None)
+            for key, frame in key_frames.items()
+        )
+        if value is not None
+    }
+    skeleton_timestamps = _candidate_timestamp_map(bio_data)
+    conflicts = []
+    for key in ("T", "A", "L"):
+        video_ts = video_timestamps.get(key)
+        skeleton_ts = skeleton_timestamps.get(key)
+        if video_ts is None or skeleton_ts is None:
+            continue
+        delta = round(video_ts - skeleton_ts, 3)
+        if abs(delta) >= 0.15:
+            conflicts.append(
+                {
+                    "key": key,
+                    "video_ai_timestamp": round(video_ts, 3),
+                    "skeleton_timestamp": round(skeleton_ts, 3),
+                    "delta_sec": delta,
+                }
+            )
+    return {
+        "video_ai_confidence": video_temporal.get("confidence") or resolved.get("confidence"),
+        "resolved_confidence": resolved.get("confidence"),
+        "quality_flags": _merge_quality_flags(result.quality_flags, video_temporal, resolved),
+        "used_semantic_frames": result.used_semantic_frames,
+        "effective_source": result.effective_source,
+        "selected_count": len(selected),
+        "missing_tal": [key for key in ("T", "A", "L") if key not in key_frames],
+        "conflicts": conflicts,
+        "conflict_summary": (
+            "video_ai_keyframes_conflict_with_skeleton_candidates"
+            if conflicts
+            else "no_timestamp_conflict_with_available_skeleton_candidates"
+        ),
+        "existing_resolved_source": (
+            motion_scores.get("resolved_keyframes", {}).get("source")
+            if isinstance(motion_scores, dict) and isinstance(motion_scores.get("resolved_keyframes"), dict)
+            else None
+        ),
+    }
+
+
+def _persist_video_keyframe_rerun_semantic_records(
+    analysis_id: str,
+    result: SemanticKeyframePipelineResult,
+) -> list[dict[str, Any]]:
+    selected = result.semantic_records if isinstance(result.semantic_records, list) else []
+    if not selected:
+        resolved = result.resolved_keyframes if isinstance(result.resolved_keyframes, dict) else {}
+        selected = resolved.get("selected") if isinstance(resolved.get("selected"), list) else []
+    selected_records = [dict(item) for item in selected if isinstance(item, dict)]
+    if not selected_records:
+        return []
+
+    target_dir = UPLOADS_DIR / analysis_id / "semantic_frames"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_token = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    paths_by_stem = {path.stem: path for path in result.semantic_frames if isinstance(path, Path)}
+    persisted: list[dict[str, Any]] = []
+    for index, record in enumerate(selected_records, start=1):
+        old_frame_id = str(record.get("frame_id") or "").strip()
+        source_path = paths_by_stem.get(old_frame_id)
+        if source_path is None and index <= len(result.semantic_frames):
+            source_path = result.semantic_frames[index - 1]
+        new_frame_id = f"semantic_video_ai_rerun_{timestamp_token}_{index:04d}"
+        if isinstance(source_path, Path) and source_path.exists():
+            shutil.copy2(source_path, target_dir / f"{new_frame_id}.jpg")
+            frame_id = new_frame_id
+        else:
+            frame_id = old_frame_id
+        persisted.append(
+            {
+                **record,
+                "frame_id": frame_id,
+                "source_frame_id": old_frame_id or None,
+                "selection_source": "video_ai_keyframe_rerun",
+            }
+        )
+    return persisted
+
+
 def _can_backfill_artifacts(status_value: str | None) -> bool:
     return status_value in {"completed", "failed"}
 
@@ -7734,6 +7936,86 @@ async def post_analysis_chat(
     )
 
 
+@router.post("/{analysis_id}/chat/video-keyframes-rerun", response_model=AnalysisCorrectionMutationResponse)
+async def rerun_video_ai_keyframes(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能重新识别关键帧。")
+
+    video_path = _video_path_if_available(analysis)
+    if video_path is None:
+        raise HTTPException(status_code=404, detail="原始视频已清理或不可用，无法重新识别关键帧。")
+
+    original_target_lock = copy.deepcopy(analysis.target_lock)
+    original_pose_data = copy.deepcopy(analysis.pose_data)
+    original_bio_data = copy.deepcopy(analysis.bio_data)
+    original_motion_scores = copy.deepcopy(analysis.frame_motion_scores)
+    motion_scores = copy.deepcopy(analysis.frame_motion_scores) if isinstance(analysis.frame_motion_scores, dict) else {}
+    bio_data = copy.deepcopy(analysis.bio_data) if isinstance(analysis.bio_data, dict) else None
+    processing_dir, processing_frames_dir = build_processing_frames_dir(analysis.id)
+    try:
+        input_window = build_video_input_window(video_path)
+        sampling_metadata = _full_video_sampling_metadata(video_path, input_window)
+        semantic_pipeline = await run_semantic_keyframe_pipeline(
+            video_path=video_path,
+            work_dir=processing_dir,
+            semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+            sampling_metadata=sampling_metadata,
+            action_type=analysis.action_type,
+            action_subtype=analysis.action_subtype,
+            motion_scores=motion_scores,
+            analysis_profile=analysis.analysis_profile,
+            bio_data=bio_data,
+            user_note=analysis.note,
+            analyzed_video_kind="full_video_keyframe_rerun",
+            input_window=input_window,
+            precheck=False,
+        )
+        selected = _persist_video_keyframe_rerun_semantic_records(analysis.id, semantic_pipeline)
+        key_frames = _video_keyframe_rerun_keyframes(selected)
+        if not key_frames and not selected:
+            raise HTTPException(status_code=502, detail="视频 AI 没有返回可用的关键帧结果，请稍后重试。")
+        diagnostics = _video_keyframe_rerun_diagnostics(
+            semantic_pipeline,
+            selected=selected,
+            bio_data=bio_data,
+            motion_scores=motion_scores,
+        )
+        try:
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                payload={
+                    "key_frames": key_frames,
+                    "selected_semantic_frames": selected,
+                    "source": "video_ai_full_video_keyframe_rerun",
+                    "diagnostics": diagnostics,
+                },
+                rationale="Video AI reran full source video keyframe localization. Review before applying.",
+                source="video_ai_keyframe_rerun",
+                status="proposed",
+            )
+        except AnalysisCorrectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.refresh(analysis)
+        if (
+            analysis.target_lock != original_target_lock
+            or analysis.pose_data != original_pose_data
+            or analysis.bio_data != original_bio_data
+            or analysis.frame_motion_scores != original_motion_scores
+        ):
+            raise HTTPException(status_code=500, detail="关键帧重识别不应修改原分析数据。")
+        return await _correction_mutation_response(session, analysis, correction)
+    finally:
+        cleanup_processing_dir(analysis.id)
+
+
 @router.get("/{analysis_id}/corrections", response_model=AnalysisCorrectionListResponse)
 async def get_analysis_corrections(
     analysis_id: str,
@@ -8320,6 +8602,7 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     if not (
         filename.startswith("frame_")
         or filename.startswith("semantic_")
+        or filename.startswith("semantic_video_ai_rerun_")
         or filename.startswith("partial_semantic_")
     ) or not filename.endswith(".jpg"):
         raise HTTPException(status_code=400, detail="无效的帧文件名。")
@@ -8333,7 +8616,12 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     semantic_dir = (UPLOADS_DIR / analysis_id / "semantic_frames").resolve()
     frames_root = (
         semantic_dir
-        if (filename.startswith("semantic_") or filename.startswith("partial_semantic_")) and semantic_dir.exists()
+        if (
+            filename.startswith("semantic_")
+            or filename.startswith("semantic_video_ai_rerun_")
+            or filename.startswith("partial_semantic_")
+        )
+        and semantic_dir.exists()
         else frames_dir
     )
     frame_path = (frames_root / filename).resolve()

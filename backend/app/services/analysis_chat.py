@@ -53,6 +53,10 @@ FULL_VIDEO_REANALYSIS_ACTION = {
     "label": "完整重新分析",
     "reset_target_lock": True,
 }
+VIDEO_AI_KEYFRAME_RERUN_ACTION = {
+    "kind": "video_ai_keyframe_rerun",
+    "label": "视频 AI 重识别关键帧",
+}
 
 
 class AnalysisChatError(RuntimeError):
@@ -162,12 +166,59 @@ def _is_full_video_reanalysis_request(text: str) -> bool:
     return any(needle in normalized for needle in english_needles)
 
 
+def _is_video_ai_keyframe_rerun_request(text: str) -> bool:
+    normalized = re.sub(r"[\s，,。.!！?？、；;：:]+", "", text.strip().lower())
+    if not normalized:
+        return False
+    chinese_needles = (
+        "只用视频ai重新识别关键帧",
+        "只用视频ai重识别关键帧",
+        "视频ai重新识别关键帧",
+        "视频ai重识别关键帧",
+        "视频ai重新跑关键帧",
+        "视频ai重跑关键帧",
+        "只跑全量视频关键帧",
+        "只重跑全量视频关键帧",
+        "只重跑视频关键帧",
+        "只重新识别关键帧",
+        "不要重跑主人物只重跑全量视频关键帧",
+        "不要重跑主人物只重新识别关键帧",
+        "不重跑主人物只重跑关键帧",
+        "不重跑主人物只重新识别关键帧",
+        "不重跑主人物追踪只重跑关键帧",
+        "不重跑主人物追踪只重新识别关键帧",
+    )
+    if any(needle in normalized for needle in chinese_needles):
+        return True
+    english_needles = (
+        "videoairerunkeyframes",
+        "videoaire-detectkeyframes",
+        "videoairedetectkeyframes",
+        "rerunkeyframesvideoai",
+        "redetectkeyframesvideoai",
+        "keyframesonlyrerun",
+        "keyframe-onlyrerun",
+        "onlyrerunkeyframes",
+        "donotreruntargetlock",
+        "withouttargetlock",
+    )
+    return any(needle in normalized for needle in english_needles)
+
+
 def _full_video_reanalysis_reply() -> str:
     return (
         "当前追问只会基于已经保存的分析证据回答，不会重新看完整视频或重新识别关键帧。\n\n"
         "如果你要重新识别关键帧，需要用原视频重新跑一次完整分析。这个过程会从主人物定位开始重新识别，"
         "不复用当前的主人物锁定；同时会消耗一次 AI 调用额度，并在完成后覆盖当前报告。\n\n"
         "我已为你准备好“完整重新分析”的确认操作。确认后系统会重新定位主人物并重新分析关键帧。"
+    )
+
+
+def _video_ai_keyframe_rerun_reply() -> str:
+    return (
+        "可以，只让视频 AI 重新看完整原视频来定位 T/A/L 关键帧。\n\n"
+        "这个操作不会重跑主人物追踪、pose、生物力学或 Path A/B 报告，也不会自动覆盖当前报告。"
+        "系统会生成一张“关键帧修正卡”，你确认应用后才会进入有效数据层；如果之后要更新文字或分数，再用现有的“从修正重新生成报告”。"
     )
 
 
@@ -442,7 +493,10 @@ async def create_analysis_chat_reply(
     messages.append({"role": "user", "content": user_text})
 
     suggested_action: dict[str, Any] | None = None
-    if _is_full_video_reanalysis_request(user_text):
+    if _is_video_ai_keyframe_rerun_request(user_text):
+        reply = _video_ai_keyframe_rerun_reply()
+        suggested_action = dict(VIDEO_AI_KEYFRAME_RERUN_ACTION)
+    elif _is_full_video_reanalysis_request(user_text):
         reply = _full_video_reanalysis_reply()
         suggested_action = dict(FULL_VIDEO_REANALYSIS_ACTION)
     elif _is_model_identity_question(user_text):

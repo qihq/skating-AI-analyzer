@@ -104,6 +104,30 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(effective["has_applied_corrections"])
             self.assertEqual(effective["bio_data"]["key_frames"]["T"], "frame_001")
 
+    async def test_keyframe_payload_preserves_video_ai_diagnostics(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                source="video_ai_keyframe_rerun",
+                payload={
+                    "key_frames": {"T": {"frame_id": "semantic_video_ai_rerun_0001", "timestamp": 1.2}},
+                    "selected_semantic_frames": [{"frame_id": "semantic_video_ai_rerun_0001", "phase_code": "takeoff"}],
+                    "source": "video_ai_full_video_keyframe_rerun",
+                    "diagnostics": {"video_ai_confidence": 0.82, "conflicts": []},
+                },
+                rationale="Video AI rerun",
+            )
+
+            self.assertEqual(correction.source, "video_ai_keyframe_rerun")
+            self.assertEqual(correction.payload["diagnostics"]["video_ai_confidence"], 0.82)
+            self.assertEqual(correction.payload["source"], "video_ai_full_video_keyframe_rerun")
+
     async def test_share_text_includes_applied_and_pending_corrections(self) -> None:
         async with self.Session() as session:
             analysis = _analysis()

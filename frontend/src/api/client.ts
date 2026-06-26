@@ -941,6 +941,11 @@ export async function retryAnalysis(id: string, options?: { retryFrom?: string |
   return response.data;
 }
 
+export async function rerunVideoAIKeyframes(id: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/chat/video-keyframes-rerun`);
+  return response.data;
+}
+
 export async function exportAnalysis(id: string) {
   const response = await apiClient.post<string>(`/analysis/${id}/export`, undefined, {
     responseType: "text",

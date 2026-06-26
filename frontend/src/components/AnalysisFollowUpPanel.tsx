@@ -14,6 +14,7 @@ import {
   fetchAnalysisCorrections,
   fetchProviders,
   regenerateReportFromCorrections,
+  rerunVideoAIKeyframes,
   retryAnalysis,
   sendAnalysisChatMessage,
   shareAnalysisChat,
@@ -352,6 +353,8 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
   const [isSharing, setIsSharing] = useState(false);
   const [isRetryConfirmOpen, setIsRetryConfirmOpen] = useState(false);
   const [isRetryingAnalysis, setIsRetryingAnalysis] = useState(false);
+  const [isVideoKeyframeConfirmOpen, setIsVideoKeyframeConfirmOpen] = useState(false);
+  const [isRerunningVideoKeyframes, setIsRerunningVideoKeyframes] = useState(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const analysisId = analysis?.id ?? "";
@@ -525,6 +528,8 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       setInput("");
       if (response.suggested_action?.kind === "full_video_reanalysis") {
         setIsRetryConfirmOpen(true);
+      } else if (response.suggested_action?.kind === "video_ai_keyframe_rerun") {
+        setIsVideoKeyframeConfirmOpen(true);
       }
       const correctionData = await fetchAnalysisCorrections(analysisId);
       setCorrections(correctionData.corrections);
@@ -569,6 +574,34 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       }
     } finally {
       setIsRetryingAnalysis(false);
+    }
+  };
+
+  const handleConfirmVideoAIKeyframeRerun = async () => {
+    if (!analysisId || isRerunningVideoKeyframes) {
+      return;
+    }
+    setIsRerunningVideoKeyframes(true);
+    setError(null);
+    try {
+      const response = await rerunVideoAIKeyframes(analysisId);
+      setCorrections(response.corrections);
+      setIsVideoKeyframeConfirmOpen(false);
+      setActiveToolTab("corrections");
+      showNotice("已生成关键帧修正卡，确认后才会生效。");
+      onAnalysisRefresh?.();
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        if (requestError.response?.status === 404) {
+          setError("原始视频已清理或不可用，无法重新识别关键帧。");
+          return;
+        }
+        setError(String(requestError.response?.data?.detail ?? "视频 AI 重新识别关键帧失败，请稍后重试。"));
+      } else {
+        setError("视频 AI 重新识别关键帧失败，请稍后重试。");
+      }
+    } finally {
+      setIsRerunningVideoKeyframes(false);
     }
   };
 
@@ -767,6 +800,15 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             {prompt}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => setIsVideoKeyframeConfirmOpen(true)}
+          disabled={isSending || isRerunningVideoKeyframes}
+          className="min-h-[36px] shrink-0 rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold leading-5 text-amber-700 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+          title="不重跑主人物追踪，只生成关键帧修正卡"
+        >
+          视频 AI 重识别关键帧
+        </button>
       </div>
     </div>
   );
@@ -1129,6 +1171,18 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             }
           }}
           onConfirm={() => void handleConfirmFullReanalysis()}
+        />
+      ) : null}
+      {isVideoKeyframeConfirmOpen ? (
+        <RetryAnalysisConfirmSheet
+          mode="video_keyframes"
+          isSubmitting={isRerunningVideoKeyframes}
+          onClose={() => {
+            if (!isRerunningVideoKeyframes) {
+              setIsVideoKeyframeConfirmOpen(false);
+            }
+          }}
+          onConfirm={() => void handleConfirmVideoAIKeyframeRerun()}
         />
       ) : null}
       {sharePreview && isSharePreviewOpen ? (

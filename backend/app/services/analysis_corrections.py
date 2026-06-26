@@ -14,7 +14,7 @@ from app.models import Analysis, AnalysisCorrection
 
 
 VALID_CORRECTION_KINDS = {"action_label", "keyframes", "report_note", "report_regeneration", "target_lock"}
-VALID_CORRECTION_SOURCES = {"manual", "chat_suggestion"}
+VALID_CORRECTION_SOURCES = {"manual", "chat_suggestion", "video_ai_keyframe_rerun"}
 VALID_CORRECTION_STATUSES = {"proposed", "applied", "dismissed"}
 KEYFRAME_KEYS = ("T", "A", "L")
 
@@ -137,6 +137,9 @@ def _normalize_keyframes_payload(payload: dict[str, Any]) -> dict[str, Any]:
     source = _clean_text(payload.get("source"))
     if source is not None:
         normalized["source"] = source
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        normalized["diagnostics"] = diagnostics
     if not normalized:
         raise AnalysisCorrectionError("Keyframe correction requires key_frames or semantic frame selections.")
     return normalized

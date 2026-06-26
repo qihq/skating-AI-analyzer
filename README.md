@@ -8,13 +8,14 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.304`.
+The current pipeline version is `v5.2.305`.
 
 ## Recent Updates
 
-Current branch updates improve the parent review workflow and local all-in-one responsiveness:
+Current branch updates improve follow-up keyframe review, parent review workflow, and local all-in-one responsiveness:
 
-- Follow-up chat now detects requests to re-identify keyframes from the full source video and offers an explicit full reanalysis confirmation that resets the target lock before rerunning.
+- Follow-up chat now detects requests to re-identify keyframes with video AI only, or users can click "Video AI re-identify keyframes"; this reruns full-source video keyframe localization and creates a proposed keyframes correction card without resetting target lock, rerunning pose/biomechanics/Path A/B, auto-applying data, or overwriting reports.
+- Follow-up chat still distinguishes full-video reanalysis requests and offers an explicit confirmation that resets the target lock before rerunning the full pipeline.
 - Analysis retry calls can request `reset_target_lock=true`, so archive/history retries and chat-triggered full reanalysis start again from target selection instead of reusing a stale skater lock.
 - Report and follow-up share cards now support long summaries, questions, answers, and correction notes with dynamic card height and compressed JPEG output for easier clipboard/file sharing.
 - Reports and the standalone `/analysis-chat` workspace now support persisted multi-turn AI follow-up for any completed analysis.
@@ -32,6 +33,7 @@ Current branch updates improve the parent review workflow and local all-in-one r
 
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
 
+- `v5.2.305`: follow-up can run a video-AI-only full-source keyframe rerun that produces a proposed keyframes correction card; it does not reset target lock, rerun pose/biomechanics/visual reports, auto-apply data, or overwrite reports.
 - `v5.2.304`: follow-up chat can queue full-video reanalysis with target-lock reset, retry confirmations explain when the skater lock will be rebuilt, and report/chat share images resize for long text while exporting compressed JPEGs.
 - `v5.2.303`: review uploads no longer require a precise action subtype or skill node; "unknown / broad category only" is accepted, and user comments are passed into video-temporal action recognition before keyframe and report generation.
 - `v5.2.302`: manual target locks fail closed when tracker diagnostics are missing, preventing pose backfills from redrawing the wrong skater's skeleton.
@@ -59,7 +61,7 @@ The latest release makes review upload less brittle when the exact element name 
 - Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
 - Dual-path vision analysis with video-aware context, provider fallback, malformed-JSON recovery, retry handling, and cost limits.
 - AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
-- Persisted AI follow-up for completed videos, with evidence-grounded answers, manual/AI-suggested correction cards, explicit apply/dismiss actions, and report regeneration from applied corrections.
+- Persisted AI follow-up for completed videos, with evidence-grounded answers, manual/AI-suggested correction cards, video-AI-only keyframe rerun cards, explicit apply/dismiss actions, and report regeneration from applied corrections.
 - Standalone `/analysis-chat` workspace for selecting any completed analysis, reviewing effective recognition/keyframes, checking partial semantic candidates, applying corrections, and sharing text/image recap content.
 - Responsive archive and report workspaces: paginated archive list with calendar tab, compact report summary, and advanced report workspace tabs for pose, evidence, diagnostics, and follow-up.
 - Pose Debug and Debug pages for replay, tracker thumbnails, candidate counts, pose diagnostics, AI input windows, timings, and logs.
