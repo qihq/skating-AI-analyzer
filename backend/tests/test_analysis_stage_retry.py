@@ -234,6 +234,152 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.target_lock["selected_bbox"], detected[0]["bbox"])
                 self.assertIn("target_lock_auto_resume_from_preview", saved.target_lock["quality_flags"])
 
+    async def test_full_retry_with_reset_target_lock_clears_existing_target_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        retry_from_stage="vision",
+                        target_lock={
+                            "status": "locked",
+                            "selected_candidate_id": "old_target",
+                            "selected_bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                            "lock_confidence": 0.91,
+                        },
+                        target_lock_status="locked",
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from=None,
+                    reset_target_lock=True,
+                    session=session,
+                )
+
+            self.assertEqual(response.message, "已重新提交分析。")
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0][1], (analysis_id, None))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.status, "pending")
+                self.assertIsNone(saved.retry_from_stage)
+                self.assertIsNone(saved.target_lock)
+                self.assertEqual(saved.target_lock_status, "pending")
+
+    async def test_report_retry_does_not_reset_target_lock_even_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            target_lock = {
+                "status": "locked",
+                "selected_candidate_id": "old_target",
+                "selected_bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                "lock_confidence": 0.91,
+            }
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        report={"summary": "saved"},
+                        vision_structured={"frame_analysis": []},
+                        bio_data={"key_frames": {}},
+                        target_lock=target_lock,
+                        target_lock_status="locked",
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from="report",
+                    reset_target_lock=True,
+                    session=session,
+                )
+
+            self.assertIn("report", response.message)
+            self.assertEqual(queued[0][1], (analysis_id, "report"))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.target_lock, target_lock)
+                self.assertEqual(saved.target_lock_status, "locked")
+                self.assertEqual(saved.retry_from_stage, "report")
+
     async def test_retry_awaiting_target_selection_refreshes_manual_review_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir

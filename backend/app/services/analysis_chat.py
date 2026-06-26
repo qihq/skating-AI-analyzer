@@ -48,6 +48,11 @@ MODEL_IDENTITY_PROMPT = (
 
 MAX_HISTORY_MESSAGES = 12
 MAX_CONTEXT_CHARS = 12000
+FULL_VIDEO_REANALYSIS_ACTION = {
+    "kind": "full_video_reanalysis",
+    "label": "完整重新分析",
+    "reset_target_lock": True,
+}
 
 
 class AnalysisChatError(RuntimeError):
@@ -120,6 +125,49 @@ def _model_identity_reply(provider: ActiveProviderConfig) -> str:
         f"- Provider: `{provider_name}`\n"
         f"- Model ID: `{model_id}`\n\n"
         "如果页面上选择的是“默认模型”，它对应当前激活的 report 模型。"
+    )
+
+
+def _is_full_video_reanalysis_request(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    if not normalized:
+        return False
+    chinese_needles = (
+        "重新识别关键帧",
+        "重识别关键帧",
+        "重新跑关键帧",
+        "重跑关键帧",
+        "重新分析关键帧",
+        "重新看完整视频",
+        "重新看一遍完整视频",
+        "重新用完整视频",
+        "用完整视频跑分析",
+        "完整视频跑分析",
+        "完整重新分析",
+        "重新完整分析",
+        "完整重跑",
+        "重新跑完整视频",
+    )
+    if any(needle in normalized for needle in chinese_needles):
+        return True
+    english_needles = (
+        "rerunkeyframes",
+        "re-detectkeyframes",
+        "redetectkeyframes",
+        "reanalyzefullvideo",
+        "rerunfullvideo",
+        "fullreanalysis",
+        "fullvideoanalysis",
+    )
+    return any(needle in normalized for needle in english_needles)
+
+
+def _full_video_reanalysis_reply() -> str:
+    return (
+        "当前追问只会基于已经保存的分析证据回答，不会重新看完整视频或重新识别关键帧。\n\n"
+        "如果你要重新识别关键帧，需要用原视频重新跑一次完整分析。这个过程会从主人物定位开始重新识别，"
+        "不复用当前的主人物锁定；同时会消耗一次 AI 调用额度，并在完成后覆盖当前报告。\n\n"
+        "我已为你准备好“完整重新分析”的确认操作。确认后系统会重新定位主人物并重新分析关键帧。"
     )
 
 
@@ -361,7 +409,7 @@ async def create_analysis_chat_reply(
     *,
     message: str,
     provider_id: str | None = None,
-) -> tuple[AnalysisChatMessage, list[AnalysisChatMessage]]:
+) -> tuple[AnalysisChatMessage, list[AnalysisChatMessage], dict[str, Any] | None]:
     user_text = message.strip()
     if not user_text:
         raise AnalysisChatError("追问内容不能为空。")
@@ -393,14 +441,18 @@ async def create_analysis_chat_reply(
             messages.append({"role": item.role, "content": item.content.strip()})
     messages.append({"role": "user", "content": user_text})
 
-    if _is_model_identity_question(user_text):
+    suggested_action: dict[str, Any] | None = None
+    if _is_full_video_reanalysis_request(user_text):
+        reply = _full_video_reanalysis_reply()
+        suggested_action = dict(FULL_VIDEO_REANALYSIS_ACTION)
+    elif _is_model_identity_question(user_text):
         reply = _model_identity_reply(provider)
     else:
         reply = await request_text_completion(
             provider,
             messages=messages,
             temperature=0.35,
-            max_tokens=900,
+            max_tokens=1800,
         )
     assistant_text, correction_suggestion = _extract_correction_suggestion((reply or "").strip())
     if not assistant_text:
@@ -432,4 +484,4 @@ async def create_analysis_chat_reply(
     await session.refresh(user_message)
     await session.refresh(assistant_message)
     await _maybe_create_correction_suggestion(session, analysis, correction_suggestion)
-    return assistant_message, await list_analysis_chat_messages(session, analysis.id)
+    return assistant_message, await list_analysis_chat_messages(session, analysis.id), suggested_action

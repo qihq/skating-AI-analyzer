@@ -212,6 +212,12 @@ export interface AnalysisChatMessage {
 export interface AnalysisChatResponse {
   message: AnalysisChatMessage;
   messages: AnalysisChatMessage[];
+  suggested_action?: {
+    kind: "full_video_reanalysis" | string;
+    label: string;
+    reset_target_lock?: boolean;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface AnalysisCorrection {
@@ -925,9 +931,12 @@ export async function fetchAnalysis(id: string, options?: { isParentRequest?: bo
   return response.data;
 }
 
-export async function retryAnalysis(id: string, options?: { retryFrom?: string | null }) {
+export async function retryAnalysis(id: string, options?: { retryFrom?: string | null; resetTargetLock?: boolean }) {
   const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`, undefined, {
-    params: options?.retryFrom ? { retry_from: options.retryFrom } : undefined,
+    params: {
+      retry_from: options?.retryFrom || undefined,
+      reset_target_lock: options?.resetTargetLock || undefined,
+    },
   });
   return response.data;
 }

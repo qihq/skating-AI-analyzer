@@ -251,6 +251,7 @@ export default function AnalysisChatPage() {
                 analysis={selectedAnalysis}
                 variant="workspace"
                 onAnalysisRefresh={() => void loadSelectedAnalysis(selectedAnalysis.id)}
+                onAnalysisRetryQueued={() => void loadSelectedAnalysis(selectedAnalysis.id)}
                 onNotice={showNotice}
               />
             </>

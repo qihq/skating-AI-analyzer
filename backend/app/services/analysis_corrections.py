@@ -567,7 +567,7 @@ def build_chat_share_text(
             prefix = "问" if getattr(message, "role", "") == "user" else "答"
             content = re.sub(r"\s+", " ", str(getattr(message, "content", "") or "")).strip()
             if content:
-                lines.append(f"{prefix}: {content[:220]}")
+                lines.append(f"{prefix}: {content}")
     if applied:
         lines.append("")
         lines.append("已应用修正：")
@@ -612,9 +612,9 @@ def build_chat_share_image_payload(
         "analysis_id": analysis.id,
         "title": f"{skater_name + ' · ' if skater_name else ''}{analysis.action_subtype or analysis.action_type}",
         "score": analysis.force_score,
-        "summary": str(report.get("summary") or "")[:220],
-        "question": str(getattr(latest_question, "content", "") or "")[:180],
-        "answer": str(getattr(latest_answer, "content", "") or "")[:260],
+        "summary": str(report.get("summary") or ""),
+        "question": str(getattr(latest_question, "content", "") or ""),
+        "answer": str(getattr(latest_answer, "content", "") or ""),
         "applied_corrections": [_correction_share_summary(item) for item in corrections if item.status == "applied"][:4],
         "pending_corrections": [_correction_share_summary(item) for item in corrections if item.status == "proposed"][:4],
         "report_url": f"/report/{analysis.id}",

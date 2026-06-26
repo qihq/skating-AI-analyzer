@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.models import Analysis
 from app.services.analysis_corrections import (
     apply_analysis_correction,
+    build_chat_share_image_payload,
     build_chat_share_text,
     create_analysis_correction,
     dismiss_analysis_correction,
@@ -131,6 +132,38 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("待确认修正", text)
             self.assertIn("Salchow", text)
             self.assertIn("partial_001", text)
+
+    async def test_chat_share_payload_preserves_full_summary_question_and_answer(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            long_summary = "总结" * 180
+            analysis.report = {**analysis.report, "summary": long_summary}
+            session.add(analysis)
+            await session.commit()
+
+            class _Message:
+                def __init__(self, role: str, content: str) -> None:
+                    self.role = role
+                    self.content = content
+
+            long_question = "重新解释这个关键帧为什么这样选。" * 40
+            long_answer = "这里需要完整说明证据链和不确定性。" * 60
+            payload = build_chat_share_image_payload(
+                analysis,
+                [_Message("user", long_question), _Message("assistant", long_answer)],
+                [],
+            )
+            text = build_chat_share_text(
+                analysis,
+                [_Message("user", long_question), _Message("assistant", long_answer)],
+                [],
+            )
+
+            self.assertEqual(payload["summary"], long_summary)
+            self.assertEqual(payload["question"], long_question)
+            self.assertEqual(payload["answer"], long_answer)
+            self.assertIn(long_question, text)
+            self.assertIn(long_answer, text)
 
 
 if __name__ == "__main__":

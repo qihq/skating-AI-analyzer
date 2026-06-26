@@ -125,9 +125,10 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, messages = await create_analysis_chat_reply(session, analysis, message="动作是不是识别错了？")
+                assistant_message, messages, suggested_action = await create_analysis_chat_reply(session, analysis, message="动作是不是识别错了？")
 
             self.assertEqual(assistant_message.role, "assistant")
+            self.assertIsNone(suggested_action)
             self.assertEqual(len(messages), 2)
             self.assertEqual(assistant_message.context_snapshot["provider"]["id"], "report-provider")
             self.assertEqual(assistant_message.context_snapshot["provider"]["model_id"], "test-report-model")
@@ -164,7 +165,7 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, _messages = await create_analysis_chat_reply(
+                assistant_message, _messages, suggested_action = await create_analysis_chat_reply(
                     session,
                     analysis,
                     message="换一个模型回答",
@@ -172,6 +173,7 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             get_by_id.assert_awaited_once()
+            self.assertIsNone(suggested_action)
             self.assertEqual(completion.await_args.args[0].id, "selected-report")
             self.assertEqual(assistant_message.context_snapshot["provider"]["model_id"], "second-model")
 
@@ -203,18 +205,55 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, messages = await create_analysis_chat_reply(
+                assistant_message, messages, suggested_action = await create_analysis_chat_reply(
                     session,
                     analysis,
                     message="你现在是哪个模型？",
                 )
 
             completion.assert_not_awaited()
+            self.assertIsNone(suggested_action)
             self.assertIn("MiMo V2.5 Pro", assistant_message.content)
             self.assertIn("mimo-v2.5-pro", assistant_message.content)
             self.assertNotIn("Claude", assistant_message.content)
             self.assertEqual(assistant_message.context_snapshot["provider"]["id"], "mimo-report")
             self.assertEqual(assistant_message.context_snapshot["request_model"]["model_id"], "mimo-v2.5-pro")
+            self.assertEqual([item.role for item in messages], ["user", "assistant"])
+
+        await engine.dispose()
+
+    async def test_full_video_reanalysis_request_returns_suggested_action_without_completion(self) -> None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.database import Base
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+
+        completion = AsyncMock(return_value="不应该调用模型")
+        async with Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            with (
+                patch("app.services.analysis_chat.get_active_provider", AsyncMock(return_value=_provider())),
+                patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
+                patch("app.services.analysis_chat.request_text_completion", completion),
+            ):
+                assistant_message, messages, suggested_action = await create_analysis_chat_reply(
+                    session,
+                    analysis,
+                    message="重新识别关键帧",
+                )
+
+            completion.assert_not_awaited()
+            self.assertIn("当前追问只会基于已经保存的分析证据回答", assistant_message.content)
+            self.assertIn("从主人物定位开始重新识别", assistant_message.content)
+            self.assertEqual(suggested_action["kind"], "full_video_reanalysis")
+            self.assertTrue(suggested_action["reset_target_lock"])
             self.assertEqual([item.role for item in messages], ["user", "assistant"])
 
         await engine.dispose()
@@ -305,9 +344,10 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, _messages = await create_analysis_chat_reply(session, analysis, message="把动作修正成 Salchow")
+                assistant_message, _messages, suggested_action = await create_analysis_chat_reply(session, analysis, message="把动作修正成 Salchow")
 
             self.assertNotIn("CORRECTION_SUGGESTION_JSON", assistant_message.content)
+            self.assertIsNone(suggested_action)
             corrections = await list_analysis_corrections(session, analysis.id)
             self.assertEqual(len(corrections), 1)
             self.assertEqual(corrections[0].status, "proposed")
@@ -341,9 +381,10 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, _messages = await create_analysis_chat_reply(session, analysis, message="T 是 frame_0002，A 是 frame_0005，L 是 frame_0008")
+                assistant_message, _messages, suggested_action = await create_analysis_chat_reply(session, analysis, message="T 是 frame_0002，A 是 frame_0005，L 是 frame_0008")
 
             self.assertNotIn("CORRECTION_SUGGESTION_JSON", assistant_message.content)
+            self.assertIsNone(suggested_action)
             corrections = await list_analysis_corrections(session, analysis.id)
             self.assertEqual(len(corrections), 1)
             self.assertEqual(corrections[0].kind, "keyframes")
@@ -377,9 +418,10 @@ class AnalysisChatServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.services.analysis_chat.build_memory_context", AsyncMock(return_value="")),
                 patch("app.services.analysis_chat.request_text_completion", completion),
             ):
-                assistant_message, _messages = await create_analysis_chat_reply(session, analysis, message="动作是 Toe Loop")
+                assistant_message, _messages, suggested_action = await create_analysis_chat_reply(session, analysis, message="动作是 Toe Loop")
 
             self.assertIn("待确认草稿", assistant_message.content)
+            self.assertIsNone(suggested_action)
             self.assertNotIn("暂时没有拿到稳定回复", assistant_message.content)
             corrections = await list_analysis_corrections(session, analysis.id)
             self.assertEqual(corrections[0].kind, "action_label")

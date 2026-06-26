@@ -7715,7 +7715,7 @@ async def post_analysis_chat(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     try:
-        assistant_message, messages = await create_analysis_chat_reply(
+        assistant_message, messages, suggested_action = await create_analysis_chat_reply(
             session,
             analysis,
             message=payload.message,
@@ -7730,6 +7730,7 @@ async def post_analysis_chat(
     return AnalysisChatResponse(
         message=_chat_message_public(assistant_message),
         messages=[_chat_message_public(message) for message in messages],
+        suggested_action=suggested_action,
     )
 
 
@@ -7984,6 +7985,7 @@ async def retry_analysis(
     analysis_id: str,
     background_tasks: BackgroundTasks,
     retry_from: str | None = Query(default=None),
+    reset_target_lock: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
     analysis = await session.get(Analysis, analysis_id)
@@ -8021,7 +8023,10 @@ async def retry_analysis(
     if retry_from is not None and not _is_retry_stage(retry_from):
         raise HTTPException(status_code=400, detail="retry_from 必须是 extract_frames / pose / biomechanics / vision / report 之一。")
 
-    retry_from_stage = retry_from or analysis.retry_from_stage or _default_retry_stage_for_error(analysis.error_code)
+    should_reset_target_lock = reset_target_lock and retry_from is None
+    retry_from_stage = retry_from or (None if should_reset_target_lock else analysis.retry_from_stage) or _default_retry_stage_for_error(analysis.error_code)
+    if should_reset_target_lock:
+        retry_from_stage = None
     if retry_from_stage == 'pose' and not isinstance(analysis.frame_motion_scores, dict):
         retry_from_stage = None
     if retry_from_stage == 'biomechanics' and not isinstance(analysis.pose_data, dict):
@@ -8057,6 +8062,9 @@ async def retry_analysis(
             current.processing_timings = None
             current.pipeline_version = CURRENT_PIPELINE_VERSION
             current.retry_from_stage = retry_from_stage
+            if should_reset_target_lock:
+                current.target_lock = None
+                current.target_lock_status = "pending"
             if retry_from_stage in {None, "extract_frames", "pose"} and not _is_confirmed_target_lock(current.target_lock):
                 current.target_lock_status = "pending"
             current.updated_at = datetime.now(timezone.utc)

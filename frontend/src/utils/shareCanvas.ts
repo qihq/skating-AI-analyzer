@@ -9,9 +9,30 @@ export type ShareImagePreview = {
   blob: Blob;
   filename: string;
   copiedToClipboard: boolean;
+  mimeType: string;
+  sizeBytes: number;
+  canNativeShare: boolean;
 };
 
-export function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number) {
+export type CanvasBlobOptions = {
+  type?: "image/jpeg" | "image/png" | "image/webp";
+  quality?: number;
+};
+
+export type ShareImageResult = {
+  blob: Blob;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  canNativeShare: boolean;
+};
+
+export function normalizeShareText(value: string | null | undefined, fallback = "") {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+export function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines = Number.POSITIVE_INFINITY) {
   const chars = Array.from(text);
   const lines: string[] = [];
   let current = "";
@@ -35,11 +56,21 @@ export function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxW
   if (lines.length > maxLines) {
     lines.length = maxLines;
   }
-  if (lines.length === maxLines && chars.join("").length > lines.join("").length) {
+  if (Number.isFinite(maxLines) && lines.length === maxLines && chars.join("").length > lines.join("").length) {
     const last = lines[maxLines - 1];
     lines[maxLines - 1] = `${last.slice(0, Math.max(last.length - 1, 0))}…`;
   }
   return lines;
+}
+
+export function measureWrappedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines = Number.POSITIVE_INFINITY,
+) {
+  return wrapCanvasText(ctx, text, maxWidth, maxLines).length * lineHeight;
 }
 
 export function drawRoundRect(
@@ -67,7 +98,7 @@ export function drawWrappedText(
   y: number,
   maxWidth: number,
   lineHeight: number,
-  maxLines: number,
+  maxLines = Number.POSITIVE_INFINITY,
 ) {
   const lines = wrapCanvasText(ctx, text, maxWidth, maxLines);
   lines.forEach((line, index) => {
@@ -76,7 +107,9 @@ export function drawWrappedText(
   return lines.length * lineHeight;
 }
 
-export function canvasToBlob(canvas: HTMLCanvasElement) {
+export function canvasToBlob(canvas: HTMLCanvasElement, options: CanvasBlobOptions = {}) {
+  const type = options.type ?? "image/jpeg";
+  const quality = options.quality ?? 0.82;
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) {
@@ -84,8 +117,25 @@ export function canvasToBlob(canvas: HTMLCanvasElement) {
         return;
       }
       reject(new Error("share_image_blob_failed"));
-    }, "image/png", 0.96);
+    }, type, quality);
   });
+}
+
+export async function canvasToCompressedBlob(
+  canvas: HTMLCanvasElement,
+  options: CanvasBlobOptions & { maxBytes?: number } = {},
+) {
+  const type = options.type ?? "image/jpeg";
+  let quality = options.quality ?? 0.82;
+  let blob = await canvasToBlob(canvas, { type, quality });
+  const maxBytes = options.maxBytes ?? 1_500_000;
+
+  while (type !== "image/png" && blob.size > maxBytes && quality > 0.62) {
+    quality = Math.max(0.62, quality - 0.08);
+    blob = await canvasToBlob(canvas, { type, quality });
+  }
+
+  return blob;
 }
 
 export async function copyImageBlobToClipboard(blob: Blob) {
@@ -95,13 +145,75 @@ export async function copyImageBlobToClipboard(blob: Blob) {
   }
 
   try {
+    const clipboardBlob = blob.type === "image/png" ? blob : await convertImageBlob(blob, "image/png");
     await navigator.clipboard.write([
       new ClipboardItemConstructor({
-        [blob.type]: blob,
+        [clipboardBlob.type]: clipboardBlob,
       }),
     ]);
     return true;
   } catch {
     return false;
   }
+}
+
+async function convertImageBlob(blob: Blob, type: "image/png" | "image/jpeg", quality = 0.92) {
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap.close();
+    throw new Error("share_image_canvas_failed");
+  }
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return canvasToBlob(canvas, { type, quality });
+}
+
+export function canNativeShareImage(blob: Blob, filename: string) {
+  if (!navigator.canShare || !navigator.share) {
+    return false;
+  }
+  try {
+    const file = new File([blob], filename, { type: blob.type });
+    return navigator.canShare({ files: [file] });
+  } catch {
+    return false;
+  }
+}
+
+export async function shareImageFile(blob: Blob, filename: string, title = "IceBuddy 分享图", text?: string) {
+  if (!navigator.share) {
+    return false;
+  }
+  try {
+    const file = new File([blob], filename, { type: blob.type });
+    if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+      return false;
+    }
+    await navigator.share({ title, text, files: [file] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createShareImageResult(blob: Blob, filename: string): ShareImageResult {
+  return {
+    blob,
+    filename,
+    mimeType: blob.type,
+    sizeBytes: blob.size,
+    canNativeShare: canNativeShareImage(blob, filename),
+  };
+}
+
+export function createShareImagePreview(result: ShareImageResult, copiedToClipboard: boolean): ShareImagePreview {
+  return {
+    ...result,
+    url: URL.createObjectURL(result.blob),
+    copiedToClipboard,
+  };
 }

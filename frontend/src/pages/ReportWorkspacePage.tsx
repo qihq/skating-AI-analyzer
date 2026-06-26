@@ -244,6 +244,7 @@ export default function ReportWorkspacePage() {
           compact
           variant="workspace"
           onAnalysisRefresh={() => void fetchAnalysis(analysis.id, { isParentRequest: true }).then((next) => setAnalysis(next))}
+          onAnalysisRetryQueued={() => void fetchAnalysis(analysis.id, { isParentRequest: true }).then((next) => setAnalysis(next))}
           onNotice={showNotice}
         />
       )}

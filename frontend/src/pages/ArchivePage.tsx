@@ -585,7 +585,7 @@ export default function ArchivePage() {
     setRetryingAnalysisId(entry.analysis_id);
     setError(null);
     try {
-      await retryAnalysis(entry.analysis_id);
+      await retryAnalysis(entry.analysis_id, { resetTargetLock: true });
       markAnalysisAsProcessing(entry.analysis_id, entry.skater_id);
       setMissingVideoRetryIds((current) => current.filter((id) => id !== entry.analysis_id));
       showNotice("已重新提交，请稍候");
@@ -1077,6 +1077,7 @@ export default function ArchivePage() {
       {confirmRetryEntry ? (
         <RetryAnalysisConfirmSheet
           isSubmitting={retryingAnalysisId === confirmRetryEntry.analysis_id}
+          resetTargetLock
           onClose={() => {
             if (retryingAnalysisId !== confirmRetryEntry.analysis_id) {
               setConfirmRetryAnalysisId(null);

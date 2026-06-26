@@ -2,6 +2,7 @@ type RetryAnalysisConfirmSheetProps = {
   isSubmitting: boolean;
   retryFromStage?: string | null;
   mode?: "analysis" | "report";
+  resetTargetLock?: boolean;
   onClose: () => void;
   onConfirm: () => void;
 };
@@ -10,6 +11,7 @@ export default function RetryAnalysisConfirmSheet({
   isSubmitting,
   retryFromStage,
   mode = "analysis",
+  resetTargetLock = false,
   onClose,
   onConfirm,
 }: RetryAnalysisConfirmSheetProps) {
@@ -25,7 +27,11 @@ export default function RetryAnalysisConfirmSheet({
         <p className="mt-5 text-xs font-semibold uppercase tracking-[0.32em] text-amber-500">{isReportOnly ? "Regenerate Report" : "Retry Analysis"}</p>
         <h2 className="mt-3 text-2xl font-semibold text-slate-900">{isReportOnly ? "重新生成这份报告？" : "重新分析这个视频？"}</h2>
         <p className="mt-4 text-sm leading-7 text-slate-500">
-          {isReportOnly ? "将复用已保存的视觉和生物力学结果，只重新生成文字报告并覆盖当前报告。" : "将消耗一次 AI 调用额度，原有报告将被覆盖。"}
+          {isReportOnly
+            ? "将复用已保存的视觉和生物力学结果，只重新生成文字报告并覆盖当前报告。"
+            : resetTargetLock
+              ? "将从主人物定位开始重新识别，不复用当前主人物锁定；会消耗一次 AI 调用额度，原有报告将被覆盖。"
+              : "将消耗一次 AI 调用额度，原有报告将被覆盖。"}
         </p>
         {retryFromStage ? (
           <div className="mt-4 rounded-[22px] border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-700">

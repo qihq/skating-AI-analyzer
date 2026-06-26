@@ -265,7 +265,7 @@ export default function HistoryPage() {
     setRetryingRecordId(record.id);
     setError(null);
     try {
-      await retryAnalysis(record.id);
+      await retryAnalysis(record.id, { resetTargetLock: true });
       markRecordAsProcessing(record.id);
       setMissingVideoRetryIds((current) => current.filter((id) => id !== record.id));
       showNotice("已重新提交，请稍候");
@@ -559,6 +559,7 @@ export default function HistoryPage() {
         {confirmRetryRecord ? (
           <RetryAnalysisConfirmSheet
             isSubmitting={retryingRecordId === confirmRetryRecord.id}
+            resetTargetLock
             onClose={() => {
               if (retryingRecordId !== confirmRetryRecord.id) {
                 setConfirmRetryRecordId(null);

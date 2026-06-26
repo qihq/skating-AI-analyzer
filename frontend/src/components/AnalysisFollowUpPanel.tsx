@@ -14,11 +14,24 @@ import {
   fetchAnalysisCorrections,
   fetchProviders,
   regenerateReportFromCorrections,
+  retryAnalysis,
   sendAnalysisChatMessage,
   shareAnalysisChat,
 } from "../api/client";
 import KeyframeEvidencePanel, { type KeyframeSyncPatch } from "./KeyframeEvidencePanel";
-import { canvasToBlob, copyImageBlobToClipboard, drawRoundRect, drawWrappedText, ShareImagePreview } from "../utils/shareCanvas";
+import {
+  canvasToCompressedBlob,
+  copyImageBlobToClipboard,
+  createShareImagePreview,
+  createShareImageResult,
+  drawRoundRect,
+  drawWrappedText,
+  measureWrappedText,
+  normalizeShareText,
+  shareImageFile,
+  ShareImagePreview,
+} from "../utils/shareCanvas";
+import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
 
 const QUICK_PROMPTS = [
   "我的 comments 有没有被考虑？",
@@ -47,6 +60,7 @@ type AnalysisFollowUpPanelProps = {
   compact?: boolean;
   variant?: "card" | "workspace";
   onAnalysisRefresh?: () => void;
+  onAnalysisRetryQueued?: () => void;
   onNotice?: (message: string) => void;
 };
 
@@ -205,8 +219,41 @@ function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: Analysi
 async function createChatShareImage(share: AnalysisChatShareResponse) {
   const canvas = document.createElement("canvas");
   const width = 1080;
-  const height = 1440;
-  const scale = window.devicePixelRatio > 1 ? 2 : 1;
+  const scale = 1;
+  const measureCanvas = document.createElement("canvas");
+  const measureCtx = measureCanvas.getContext("2d");
+  if (!measureCtx) {
+    throw new Error("share_image_canvas_failed");
+  }
+
+  const payload = share.image_payload ?? {};
+  const title = normalizeShareText(String(payload.title ?? share.title ?? ""), "AI追问复盘");
+  const summary = normalizeShareText(String(payload.summary ?? ""), "围绕已完成分析继续追问，并记录人工确认修正。");
+  const question = normalizeShareText(String(payload.question ?? ""), "本次追问");
+  const answer = normalizeShareText(String(payload.answer ?? ""), "AI 基于已保存证据给出复盘回答。");
+  const applied = Array.isArray(payload.applied_corrections) ? payload.applied_corrections.map((item) => String(item)) : [];
+  const pending = Array.isArray(payload.pending_corrections) ? payload.pending_corrections.map((item) => String(item)) : [];
+  const correctionText = [...applied.map((item) => `已应用：${item}`), ...pending.map((item) => `待确认：${item}`)].join("  ");
+
+  const contentWidth = 856;
+  const textWidth = 760;
+  measureCtx.font = "800 56px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const titleHeight = measureWrappedText(measureCtx, title, 760, 64);
+  measureCtx.font = "500 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const summaryHeight = measureWrappedText(measureCtx, summary, contentWidth, 44);
+  measureCtx.font = "650 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const questionHeight = measureWrappedText(measureCtx, question, textWidth, 42);
+  const answerHeight = measureWrappedText(measureCtx, answer, textWidth, 42);
+  measureCtx.font = "600 27px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const correctionHeight = measureWrappedText(measureCtx, correctionText || "暂无已应用修正。", textWidth, 36);
+  const questionBlockHeight = Math.max(154, 96 + questionHeight + 38);
+  const answerBlockHeight = Math.max(184, 96 + answerHeight + 38);
+  const correctionBlockHeight = Math.max(118, 82 + correctionHeight + 30);
+  const height = Math.min(
+    6000,
+    Math.max(980, 112 + 42 + 54 + titleHeight + 42 + summaryHeight + 74 + questionBlockHeight + 32 + answerBlockHeight + 32 + correctionBlockHeight + 126),
+  );
+
   canvas.width = width * scale;
   canvas.height = height * scale;
   canvas.style.width = `${width}px`;
@@ -217,14 +264,6 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
     throw new Error("share_image_canvas_failed");
   }
   ctx.scale(scale, scale);
-
-  const payload = share.image_payload ?? {};
-  const title = String(payload.title ?? share.title ?? "AI追问复盘");
-  const summary = String(payload.summary ?? "围绕已完成分析继续追问，并记录人工确认修正。");
-  const question = String(payload.question ?? "本次追问");
-  const answer = String(payload.answer ?? "AI 基于已保存证据给出复盘回答。");
-  const applied = Array.isArray(payload.applied_corrections) ? payload.applied_corrections : [];
-  const pending = Array.isArray(payload.pending_corrections) ? payload.pending_corrections : [];
 
   const gradient = ctx.createLinearGradient(0, 0, width, height);
   gradient.addColorStop(0, "#F8FBFF");
@@ -240,57 +279,58 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  let y = 142;
   ctx.fillStyle = "#0F766E";
   ctx.font = "800 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("IceBuddy AI 追问", 112, 142);
+  ctx.fillText("IceBuddy AI 追问", 112, y);
 
+  y += 84;
   ctx.fillStyle = "#0F172A";
   ctx.font = "800 56px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  drawWrappedText(ctx, title, 112, 226, 760, 64, 2);
+  y += drawWrappedText(ctx, title, 112, y, 760, 64) + 42;
 
   ctx.fillStyle = "#475569";
   ctx.font = "500 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  drawWrappedText(ctx, summary, 112, 380, 856, 44, 3);
+  y += drawWrappedText(ctx, summary, 112, y, contentWidth, 44) + 54;
 
   const blocks = [
-    { label: "追问", text: question, bg: "#EFF6FF", color: "#2563EB", lines: 3 },
-    { label: "回答", text: answer, bg: "#ECFDF5", color: "#059669", lines: 5 },
+    { label: "追问", text: question, bg: "#EFF6FF", color: "#2563EB", height: questionBlockHeight },
+    { label: "回答", text: answer, bg: "#ECFDF5", color: "#059669", height: answerBlockHeight },
   ];
-  let y = 566;
   blocks.forEach((block) => {
     ctx.fillStyle = block.bg;
-    drawRoundRect(ctx, 112, y, 856, block.lines === 5 ? 260 : 190, 28);
+    drawRoundRect(ctx, 112, y, contentWidth, block.height, 28);
     ctx.fill();
     ctx.fillStyle = block.color;
     ctx.font = "800 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     ctx.fillText(block.label, 152, y + 50);
     ctx.fillStyle = "#0F172A";
     ctx.font = "650 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    drawWrappedText(ctx, block.text, 152, y + 100, 760, 42, block.lines);
-    y += block.lines === 5 ? 292 : 222;
+    drawWrappedText(ctx, block.text, 152, y + 100, textWidth, 42);
+    y += block.height + 32;
   });
 
-  const correctionText = [...applied.map((item) => `已应用：${item}`), ...pending.map((item) => `待确认：${item}`)].join("  ");
   ctx.fillStyle = "#FFF7ED";
-  drawRoundRect(ctx, 112, 1110, 856, 132, 28);
+  drawRoundRect(ctx, 112, y, contentWidth, correctionBlockHeight, 28);
   ctx.fill();
   ctx.fillStyle = "#EA580C";
   ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("修正记录", 152, 1160);
+  ctx.fillText("修正记录", 152, y + 50);
   ctx.fillStyle = "#334155";
   ctx.font = "600 27px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  drawWrappedText(ctx, correctionText || "暂无已应用修正。", 152, 1202, 760, 36, 2);
+  drawWrappedText(ctx, correctionText || "暂无已应用修正。", 152, y + 92, textWidth, 36);
+  y += correctionBlockHeight + 64;
 
   ctx.fillStyle = "#94A3B8";
   ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("修正需人工确认后才会进入系统有效数据", 112, 1348);
+  ctx.fillText("修正需人工确认后才会进入系统有效数据", 112, Math.min(y, height - 92));
 
-  const blob = await canvasToBlob(canvas);
-  const filename = `icebuddy-chat-${String(payload.analysis_id ?? "share").slice(0, 8)}.png`;
-  return { blob, filename };
+  const blob = await canvasToCompressedBlob(canvas, { type: "image/jpeg", quality: 0.82, maxBytes: 1_500_000 });
+  const filename = `icebuddy-chat-${String(payload.analysis_id ?? "share").slice(0, 8)}.jpg`;
+  return createShareImageResult(blob, filename);
 }
 
-export default function AnalysisFollowUpPanel({ analysis, compact = false, variant = "card", onAnalysisRefresh, onNotice }: AnalysisFollowUpPanelProps) {
+export default function AnalysisFollowUpPanel({ analysis, compact = false, variant = "card", onAnalysisRefresh, onAnalysisRetryQueued, onNotice }: AnalysisFollowUpPanelProps) {
   const [messages, setMessages] = useState<AnalysisChatMessage[]>([]);
   const [corrections, setCorrections] = useState<AnalysisCorrection[]>([]);
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
@@ -305,10 +345,13 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
   const [error, setError] = useState<string | null>(null);
   const [shareText, setShareText] = useState("");
   const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [isSharePreviewOpen, setIsSharePreviewOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
+  const [isRetryConfirmOpen, setIsRetryConfirmOpen] = useState(false);
+  const [isRetryingAnalysis, setIsRetryingAnalysis] = useState(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const analysisId = analysis?.id ?? "";
@@ -480,6 +523,9 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       const response = await sendAnalysisChatMessage(analysisId, message, selectedProviderId || null);
       setMessages(response.messages);
       setInput("");
+      if (response.suggested_action?.kind === "full_video_reanalysis") {
+        setIsRetryConfirmOpen(true);
+      }
       const correctionData = await fetchAnalysisCorrections(analysisId);
       setCorrections(correctionData.corrections);
     } catch (requestError) {
@@ -497,6 +543,33 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     void submitMessage(input);
+  };
+
+  const handleConfirmFullReanalysis = async () => {
+    if (!analysisId || isRetryingAnalysis) {
+      return;
+    }
+    setIsRetryingAnalysis(true);
+    setError(null);
+    try {
+      await retryAnalysis(analysisId, { resetTargetLock: true });
+      setIsRetryConfirmOpen(false);
+      showNotice("已提交完整重新分析，将重新定位主人物并重新识别关键帧。");
+      onAnalysisRetryQueued?.();
+      onAnalysisRefresh?.();
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        if (requestError.response?.status === 404) {
+          setError("原始视频已清理或不可用，请重新上传后再分析。");
+          return;
+        }
+        setError(String(requestError.response?.data?.detail ?? "完整重新分析提交失败，请稍后重试。"));
+      } else {
+        setError("完整重新分析提交失败，请稍后重试。");
+      }
+    } finally {
+      setIsRetryingAnalysis(false);
+    }
   };
 
   const mutateCorrection = async (action: () => Promise<{ corrections: AnalysisCorrection[] }>, successMessage: string) => {
@@ -596,15 +669,42 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       const share = await shareAnalysisChat(analysisId, { include_pending_corrections: true });
       setShareText(share.text);
       await navigator.clipboard?.writeText(share.text);
-      const { blob, filename } = await createChatShareImage(share);
-      const copiedToClipboard = await copyImageBlobToClipboard(blob);
-      const url = URL.createObjectURL(blob);
-      setSharePreview({ url, blob, filename, copiedToClipboard });
-      showNotice(copiedToClipboard ? "追问分享文字和图片已生成" : "追问分享文字已复制，图片可下载");
+      const result = await createChatShareImage(share);
+      const copiedToClipboard = await copyImageBlobToClipboard(result.blob);
+      setSharePreview((current) => {
+        if (current?.url) {
+          URL.revokeObjectURL(current.url);
+        }
+        return createShareImagePreview(result, copiedToClipboard);
+      });
+      showNotice(copiedToClipboard ? "追问分享文字和图片已生成" : "追问分享文字已复制，图片可下载或系统分享");
     } catch {
       setError("追问分享内容生成失败，请稍后再试。");
     } finally {
       setIsSharing(false);
+    }
+  };
+
+  const handleCopyShareImage = async () => {
+    if (!sharePreview) {
+      return;
+    }
+    const copied = await copyImageBlobToClipboard(sharePreview.blob);
+    if (!copied) {
+      setError("当前浏览器不能直接复制图片，请使用系统分享或下载。");
+      return;
+    }
+    setSharePreview((current) => (current ? { ...current, copiedToClipboard: true } : current));
+    showNotice("分享图已复制");
+  };
+
+  const handleNativeShareImage = async () => {
+    if (!sharePreview) {
+      return;
+    }
+    const shared = await shareImageFile(sharePreview.blob, sharePreview.filename, "IceBuddy AI 追问", shareText);
+    if (!shared) {
+      setError("当前浏览器不支持直接系统分享图片，请下载后保存或发送。");
     }
   };
 
@@ -994,9 +1094,19 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
           <pre className="mt-3 max-h-44 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-teal-900">{shareText}</pre>
           {sharePreview ? (
             <div className="mt-4 grid gap-3 tablet:grid-cols-[160px_1fr] tablet:items-center">
-              <img src={sharePreview.url} alt="追问分享图预览" className="w-full max-w-[180px] rounded-[18px] border border-white object-contain" />
+              <button
+                type="button"
+                onClick={() => setIsSharePreviewOpen(true)}
+                className="w-full max-w-[180px] overflow-hidden rounded-[18px] border border-white bg-white text-left shadow-sm transition hover:scale-[1.01]"
+                aria-label="打开追问分享图大图预览"
+              >
+                <img src={sharePreview.url} alt="追问分享图预览" className="w-full object-contain" />
+              </button>
               <div className="space-y-2">
-                <p className="text-xs leading-5 text-teal-700">{sharePreview.copiedToClipboard ? "图片已复制到剪贴板。" : "当前浏览器未开放图片剪贴板，可下载后分享。"}</p>
+                <p className="text-xs leading-5 text-teal-700">
+                  {sharePreview.copiedToClipboard ? "图片已复制到剪贴板。" : "可点缩略图预览大图，或下载/系统分享。"}
+                </p>
+                <p className="text-[11px] text-teal-600">{Math.max(1, Math.round(sharePreview.sizeBytes / 1024))} KB · JPEG</p>
                 <a href={sharePreview.url} download={sharePreview.filename} className="inline-flex min-h-[36px] items-center rounded-full bg-teal-700 px-3 py-1 text-xs font-semibold text-white">
                   下载图片
                 </a>
@@ -1009,6 +1119,69 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       <div className="sr-only" aria-live="polite">
         {pendingCorrections.length} pending corrections
       </div>
+      {isRetryConfirmOpen ? (
+        <RetryAnalysisConfirmSheet
+          isSubmitting={isRetryingAnalysis}
+          resetTargetLock
+          onClose={() => {
+            if (!isRetryingAnalysis) {
+              setIsRetryConfirmOpen(false);
+            }
+          }}
+          onConfirm={() => void handleConfirmFullReanalysis()}
+        />
+      ) : null}
+      {sharePreview && isSharePreviewOpen ? (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
+          <section className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_24px_80px_rgba(15,23,42,0.28)] tablet:p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-teal-600">Share Image</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-900">追问分享图</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  {sharePreview.canNativeShare ? "可用系统分享保存到照片或发送给别人。" : "当前浏览器不支持直接系统分享图片，可下载后保存。"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSharePreviewOpen(false)}
+                className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="mt-5 overflow-hidden rounded-[22px] border border-slate-200 bg-slate-100">
+              <img src={sharePreview.url} alt="追问分享图大图预览" className="mx-auto block max-h-[62vh] w-auto max-w-full object-contain" />
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => void handleNativeShareImage()}
+                disabled={!sharePreview.canNativeShare}
+                className="min-h-[44px] rounded-full border border-teal-200 bg-teal-50 px-5 py-3 text-sm font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                系统分享/保存
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyShareImage()}
+                className="min-h-[44px] rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                复制图片
+              </button>
+              <a
+                href={sharePreview.url}
+                download={sharePreview.filename}
+                className="min-h-[44px] rounded-full bg-teal-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+              >
+                下载图片
+              </a>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

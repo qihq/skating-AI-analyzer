@@ -68,6 +68,7 @@ class AnalysisChatRequest(BaseModel):
 class AnalysisChatResponse(BaseModel):
     message: AnalysisChatMessagePublic
     messages: list[AnalysisChatMessagePublic] = Field(default_factory=list)
+    suggested_action: dict[str, Any] | None = None
 
 
 class AnalysisCorrectionPublic(BaseModel):

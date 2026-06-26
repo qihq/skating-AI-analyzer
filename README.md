@@ -8,12 +8,15 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.303`.
+The current pipeline version is `v5.2.304`.
 
 ## Recent Updates
 
 Current branch updates improve the parent review workflow and local all-in-one responsiveness:
 
+- Follow-up chat now detects requests to re-identify keyframes from the full source video and offers an explicit full reanalysis confirmation that resets the target lock before rerunning.
+- Analysis retry calls can request `reset_target_lock=true`, so archive/history retries and chat-triggered full reanalysis start again from target selection instead of reusing a stale skater lock.
+- Report and follow-up share cards now support long summaries, questions, answers, and correction notes with dynamic card height and compressed JPEG output for easier clipboard/file sharing.
 - Reports and the standalone `/analysis-chat` workspace now support persisted multi-turn AI follow-up for any completed analysis.
 - AI or manual corrections for action labels, action confirmation, keyframes, report notes, and regenerated reports are stored as auditable correction cards before they are applied.
 - Report reads, exports, chat context, and sharing use the effective overlay of original analysis data plus applied corrections while preserving the original raw analysis JSON.
@@ -29,6 +32,7 @@ Current branch updates improve the parent review workflow and local all-in-one r
 
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
 
+- `v5.2.304`: follow-up chat can queue full-video reanalysis with target-lock reset, retry confirmations explain when the skater lock will be rebuilt, and report/chat share images resize for long text while exporting compressed JPEGs.
 - `v5.2.303`: review uploads no longer require a precise action subtype or skill node; "unknown / broad category only" is accepted, and user comments are passed into video-temporal action recognition before keyframe and report generation.
 - `v5.2.302`: manual target locks fail closed when tracker diagnostics are missing, preventing pose backfills from redrawing the wrong skater's skeleton.
 - `v5.2.11`: videos use full-context AI input by default, optional manual start/end windows are supported in review and debug flows, reports/debug views show the actual AI input range, Path A consumes the generated AI clip, and review-flagged multi-person target locks require manual selection.
