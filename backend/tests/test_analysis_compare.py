@@ -670,10 +670,16 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
             second.action_subtype = "后外点冰跳"
             await session.commit()
 
-        async with self.database.AsyncSessionLocal() as session:
-            with self.assertRaises(Exception) as ctx:
-                await self.analysis_router.compare_analyses(first_id, second_id, session=session)
-        self.assertIn("同一动作小项", str(ctx.exception))
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=None)),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                result = await self.analysis_router.compare_analyses(first_id, second_id, session=session)
+        self.assertIsNotNone(result.quality)
+        assert result.quality is not None
+        self.assertTrue(result.quality.subtype_mismatch)
+        self.assertTrue(any("趋势参考" in warning for warning in result.quality.warnings))
 
     async def test_video_endpoint_rejects_missing_video(self) -> None:
         analysis_id = str(uuid4())

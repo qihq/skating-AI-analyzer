@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Analysis, AnalysisChatMessage, AnalysisCorrection
+from app.services.llm_context import split_user_note_questions
 from app.services.analysis_corrections import (
     AnalysisCorrectionError,
     build_effective_analysis_payload,
@@ -44,6 +45,11 @@ MODEL_IDENTITY_PROMPT = (
     "request_model. If the user asks what model, provider, vendor, or AI identity is being used, answer only from "
     "request_model.name, request_model.provider, and request_model.model_id. Do not claim to be Claude, Anthropic, "
     "OpenAI, ChatGPT, or any other vendor/model unless request_model explicitly says so."
+)
+MULTI_QUESTION_PROMPT = (
+    "\n\nComment question protocol: if saved user comments or the latest user message contain multiple questions, "
+    "answer each one explicitly. For every question, say what can be confirmed from saved evidence and what cannot "
+    "be confirmed from the current analysis."
 )
 
 MAX_HISTORY_MESSAGES = 12
@@ -354,6 +360,9 @@ def build_analysis_chat_context(
         "effective_bio_data": _bio_evidence(effective_bio),
         "corrections": effective.get("corrections") or [],
     }
+    note_questions = split_user_note_questions(analysis.note)
+    if note_questions:
+        context["user_comment_questions"] = note_questions
     if _clean_text(memory_context):
         context["skater_memory"] = memory_context
     return context
@@ -483,7 +492,7 @@ async def create_analysis_chat_reply(
     messages: list[dict[str, str]] = [
         {
             "role": "system",
-            "content": ANALYSIS_CHAT_SYSTEM_PROMPT + CORRECTION_SUGGESTION_PROMPT + MODEL_IDENTITY_PROMPT,
+            "content": ANALYSIS_CHAT_SYSTEM_PROMPT + CORRECTION_SUGGESTION_PROMPT + MODEL_IDENTITY_PROMPT + MULTI_QUESTION_PROMPT,
         },
         {"role": "user", "content": f"以下是这条视频分析的已保存证据 JSON：\n{context_text}"},
     ]

@@ -1425,6 +1425,10 @@ async def _extract_full_frame_at(video_path: Path, timestamp: float, target_path
     )
 
 
+async def extract_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
+    await _extract_full_frame_at(video_path, timestamp, target_path)
+
+
 async def _extract_precise_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
     width, height = _frame_dimensions()
     scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"

@@ -9,7 +9,7 @@ from app.schemas import Severity
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
-from app.services.llm_context import AnalysisPromptContext, render_prompt_context
+from app.services.llm_context import AnalysisPromptContext, render_prompt_context, split_user_note_questions
 
 
 logger = logging.getLogger(__name__)
@@ -455,6 +455,47 @@ def _user_note_response(
         focus = _text(report.get("training_focus") or report.get("summary"))
         if focus:
             parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
+    return " ".join(parts)
+
+
+def _answer_single_user_note_question(question: str, report: dict[str, Any], action_type: str) -> str:
+    if any(token in question for token in ("哪个动作", "哪一个动作", "什么动作", "具体", "跳种", "动作名", "动作")):
+        action_text = _action_confirmation_text(report.get("action_confirmation"), action_type)
+        return f"{question}：能确认的是，{action_text}；不能确认的是，当前证据不足以稳定支持的更细动作名称不应强行判定。"
+    if any(token in question for token in ("落冰", "不稳", "为什么", "为何", "原因", "怎么回事")):
+        landing_text = _landing_explanation_from_report(report)
+        return f"{question}：能确认的是，{landing_text}；不能确认的是，单靠当前证据无法排除拍摄角度、遮挡或关键帧偏差带来的影响。"
+    focus = _text(report.get("training_focus") or report.get("summary"))
+    if focus:
+        return f"{question}：能确认的是，本次报告已把这个问题纳入关注，当前训练重点是{focus}；不能确认的是，证据里没有直接覆盖的细节需要结合原视频或现场观察复核。"
+    return f"{question}：能确认的是，当前报告只能基于已保存的动作识别、关键帧和生物力学证据回答；不能确认的是，证据未覆盖的细节不能写成确定结论。"
+
+
+def _user_note_response(
+    *,
+    report: dict[str, Any],
+    action_type: str,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None,
+) -> str | None:
+    note = _text(prompt_context.user_note if prompt_context is not None else None)
+    if not note:
+        return None
+    existing = _text(report.get("user_note_response"))
+    if existing and note in existing and all(question in existing for question in split_user_note_questions(note)):
+        return existing
+
+    questions = split_user_note_questions(note)
+    if questions:
+        answers = [_answer_single_user_note_question(question, report, action_type) for question in questions]
+        return " 家长/学员备注提到：" + note + " " + " ".join(answers)
+
+    parts = [f"家长/学员备注提到：{note}"]
+    focus = _text(report.get("training_focus") or report.get("summary"))
+    if focus:
+        parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
+    else:
+        parts.append("当前报告已把这条备注作为观察线索；证据不足的部分不会写成确定结论。")
     return " ".join(parts)
 
 

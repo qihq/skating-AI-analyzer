@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.plan import PLAN_DAY_THEMES, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
+from app.services.plan import PLAN_DAY_THEMES, PLAN_REQUEST_TIMEOUT_SECONDS, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
 
 
 def _report() -> dict[str, object]:
@@ -100,6 +102,7 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["days"][0]["sessions"][0]["title"], "AI 训练 1")
         self.assertEqual(plan["days"][0]["sessions"][0]["related_issue"], "落冰缓冲不足")
         self.assertEqual(plan["days"][0]["sessions"][0]["parent_tip"], "听落地声音是否变轻")
+        self.assertEqual(plan["generation_status"], "ai")
 
     async def test_generate_training_plan_preserves_ai_personalized_themes(self) -> None:
         with (
@@ -122,16 +125,19 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
             await generate_training_plan("jump", _report(), "昭昭，4岁，初级", "skater-1", variation_key="seed-123")
 
         kwargs = completion.await_args.kwargs
-        self.assertEqual(kwargs["temperature"], 0.55)
+        self.assertEqual(kwargs["temperature"], 0.45)
+        self.assertEqual(kwargs["max_tokens"], 1800)
+        self.assertEqual(kwargs["timeout"], PLAN_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
         messages = kwargs["messages"]
-        self.assertIn("3-6岁小朋友", messages[0]["content"])
-        self.assertIn("历史记忆：更喜欢音乐游戏", messages[0]["content"])
-        self.assertIn("家长/教练备注：孩子害怕落冰声音。", messages[1]["content"])
-        self.assertIn("变化种子：seed-123", messages[1]["content"])
-        self.assertIn("不要直接照抄", messages[1]["content"])
-        self.assertIn("每个 session 必须有 related_issue", messages[1]["content"])
-        self.assertIn("家长观察点", messages[1]["content"])
-        self.assertIn("Day 7 所有项目必须 is_office_trainable=false", messages[1]["content"])
+        self.assertIn("child figure-skating coach", messages[0]["content"])
+        payload = json.loads(messages[1]["content"])
+        self.assertEqual(payload["skater"], "昭昭，4岁，初级")
+        self.assertEqual(payload["variation_key"], "seed-123")
+        self.assertIn("历史记忆：更喜欢音乐游戏", payload["memory"])
+        self.assertEqual(payload["report"]["user_note"], "孩子害怕落冰声音。")
+        self.assertTrue(any("related_issue" in rule for rule in payload["rules"]))
+        self.assertTrue(any("Day 7" in rule and "false" in rule for rule in payload["rules"]))
 
     async def test_generate_training_plan_raises_when_provider_setup_fails(self) -> None:
         with patch("app.services.plan.get_active_provider", AsyncMock(side_effect=RuntimeError("missing key"))):
@@ -183,6 +189,51 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("parent_tip", prompt)
         self.assertIn("不要安排负重、Bosu、旋转椅、痛苦拉伸", prompt)
         self.assertIn("Day 7 所有项目必须 is_office_trainable=false", prompt)
+
+    async def test_create_training_plan_ai_failure_does_not_overwrite_existing_ai_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in ["app.database", "app.models", "app.routers.analysis"]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            existing_plan_json = {**_original_plan(), "generation_source": "ai", "generation_status": "ai"}
+            async with database.AsyncSessionLocal() as session:
+                session.add(models.Skater(id="skater-1", name="kid"))
+                session.add(
+                    models.Analysis(
+                        id="analysis-1",
+                        skater_id="skater-1",
+                        action_type="jump",
+                        video_path=str(Path(tmpdir) / "source.mp4"),
+                        status="completed",
+                        report=_report(),
+                    )
+                )
+                session.add(
+                    models.TrainingPlan(
+                        id="plan-1",
+                        analysis_id="analysis-1",
+                        skater_id="skater-1",
+                        plan_json=existing_plan_json,
+                    )
+                )
+                await session.commit()
+
+                with patch("app.routers.analysis.generate_training_plan", AsyncMock(side_effect=PlanGenerationError("ReadTimeout"))):
+                    detail = await analysis_router.create_training_plan("analysis-1", force=True, session=session)
+
+                stored = await session.get(models.TrainingPlan, "plan-1")
+                assert stored is not None
+                self.assertEqual(detail.plan_json.generation_status, "ai")
+                self.assertEqual(stored.plan_json["generation_status"], "ai")
+                self.assertEqual(stored.plan_json["title"], existing_plan_json["title"])
 
 
 if __name__ == "__main__":

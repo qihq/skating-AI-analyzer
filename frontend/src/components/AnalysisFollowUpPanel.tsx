@@ -32,6 +32,13 @@ import {
   shareImageFile,
   ShareImagePreview,
 } from "../utils/shareCanvas";
+import {
+  buildKeyframeEvidenceItems,
+  buildSemanticKeyframeEvidenceItems,
+  formatKeyframeTimestamp,
+  keyframeConfidenceLabel,
+  type KeyframeEvidenceItem,
+} from "../utils/keyframeEvidence";
 import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
 
 const QUICK_PROMPTS = [
@@ -215,6 +222,134 @@ function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: Analysi
     ...merged,
     sourceCorrectionId: suggestions[suggestions.length - 1].sourceCorrectionId,
   };
+}
+
+function keyframePayload(correction: AnalysisCorrection) {
+  return correction.payload.key_frames && typeof correction.payload.key_frames === "object"
+    ? correction.payload.key_frames
+    : {};
+}
+
+function hasKeyframePayload(correction: AnalysisCorrection) {
+  return Object.values(keyframePayload(correction)).some((value) => {
+    if (value == null || value === "") {
+      return false;
+    }
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+    if (typeof value === "object") {
+      return Object.keys(value).length > 0;
+    }
+    return true;
+  });
+}
+
+function keyframeCardSourceLabel(correction: AnalysisCorrection) {
+  if (correction.source === "video_ai_keyframe_rerun") {
+    return "Video AI 重识别";
+  }
+  if (correction.source === "chat_suggestion") {
+    return "AI 追问建议";
+  }
+  return "人工确认";
+}
+
+function CorrectionKeyframePreview({
+  analysis,
+  correction,
+  layout = "workspace",
+}: {
+  analysis: AnalysisDetail;
+  correction: AnalysisCorrection;
+  layout?: "workspace" | "sidebar";
+}) {
+  const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
+  const sourceLabel = keyframeCardSourceLabel(correction);
+  const items = useMemo(() => {
+    if (hasKeyframePayload(correction)) {
+      return buildKeyframeEvidenceItems(analysis, keyframePayload(correction), sourceLabel);
+    }
+    const selected = Array.isArray(correction.payload.selected_semantic_frames)
+      ? correction.payload.selected_semantic_frames
+      : [];
+    return buildSemanticKeyframeEvidenceItems(analysis, selected, sourceLabel);
+  }, [analysis, correction, sourceLabel]);
+  const availableCount = items.filter((item) => item.value).length;
+  const gridClass = layout === "workspace" ? "grid gap-2 tablet:grid-cols-3" : "grid gap-2";
+
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+        <span className="font-semibold text-slate-600">T/A/L 定位预览</span>
+        <span className="rounded-full bg-white px-2 py-0.5 font-semibold text-slate-500 ring-1 ring-slate-200">
+          {sourceLabel} · {availableCount}/3
+        </span>
+      </div>
+      <div className={gridClass}>
+        {items.map((item) => (
+          <CorrectionKeyframeTile
+            key={item.key}
+            item={item}
+            imageErrored={Boolean(imageErrors[`${item.key}-${item.frameId ?? item.value}`])}
+            onImageError={() => {
+              const imageKey = `${item.key}-${item.frameId ?? item.value}`;
+              setImageErrors((current) => ({ ...current, [imageKey]: true }));
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CorrectionKeyframeTile({
+  item,
+  imageErrored,
+  onImageError,
+}: {
+  item: KeyframeEvidenceItem;
+  imageErrored: boolean;
+  onImageError: () => void;
+}) {
+  const confidence = keyframeConfidenceLabel(item.confidence);
+  const imageUnavailable = !item.imageUrl || imageErrored;
+
+  return (
+    <article className="min-w-0 overflow-hidden rounded-[14px] border border-slate-200 bg-white">
+      <div className="relative aspect-video bg-slate-950">
+        {!imageUnavailable ? (
+          <img
+            src={item.imageUrl ?? ""}
+            alt={`${item.key} ${item.label} ${item.value}`}
+            loading="lazy"
+            onError={onImageError}
+            className="h-full w-full object-contain"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center px-2 text-center text-[11px] leading-4 text-slate-400">
+            {item.value ? "帧图不可用" : "暂无帧图"}
+          </div>
+        )}
+        <span className="absolute left-2 top-2 rounded-full bg-white/90 px-2 py-1 text-xs font-bold text-slate-900 shadow-sm">
+          {item.key}
+        </span>
+        <span className="absolute bottom-2 right-2 rounded-full bg-slate-950/80 px-2 py-1 text-[11px] font-semibold text-white">
+          {formatKeyframeTimestamp(item.timestamp)}
+        </span>
+      </div>
+      <div className="min-w-0 px-2.5 py-2">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <p className="truncate text-xs font-semibold text-slate-900">{item.key} · {item.label}</p>
+          {confidence ? <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">{confidence}</span> : null}
+        </div>
+        <p className="mt-1 text-[11px] font-semibold text-slate-700">{formatKeyframeTimestamp(item.timestamp)}</p>
+        <p className="mt-0.5 truncate text-[10px] font-medium text-slate-500" title={item.frameId ?? item.value}>
+          {(item.frameId ?? item.value) || "--"}
+        </p>
+      </div>
+    </article>
+  );
 }
 
 async function createChatShareImage(share: AnalysisChatShareResponse) {
@@ -756,6 +891,28 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     { id: "form", label: "待确认", count: pendingSuggestion ? 1 : undefined },
     { id: "corrections", label: "修正卡", count: activeCorrections.length || undefined },
   ];
+  const toolTabBar = (
+    <div className={isWorkspace ? "rounded-[18px] bg-slate-100 p-1" : "rounded-[24px] border border-slate-200 bg-white p-2"}>
+      <div className="grid grid-cols-3 gap-1.5 phone:gap-2">
+        {toolTabs.map((tab) => {
+          const selected = activeToolTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveToolTab(tab.id)}
+              className={`min-h-[38px] rounded-full px-3 py-1 text-xs font-semibold transition ${
+                selected ? "bg-slate-900 text-white shadow-sm" : "bg-white text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              {tab.label}
+              {tab.count ? <span className={selected ? "ml-1 text-white/80" : "ml-1 text-slate-400"}>{tab.count}</span> : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
   const modelSelector = (
     <div className="min-w-0">
       <label className="sr-only" htmlFor={`chat-model-${analysisId}`}>
@@ -908,27 +1065,36 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
           重新生成报告
         </button>
       </div>
-      <div className="mt-3 space-y-3">
+      <div className={`mt-3 grid gap-3 ${isWorkspace ? "web:grid-cols-2 wide:grid-cols-3" : ""}`}>
         {activeCorrections.length ? (
           activeCorrections.slice().reverse().map((correction) => (
-            <article key={correction.id} className="rounded-[20px] border border-slate-200 bg-slate-50 p-3">
+            <article key={correction.id} className="rounded-[18px] border border-slate-200 bg-slate-50 p-2.5">
               <div className="flex items-start justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">{correctionTitle(correction)}</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">{correctionSummary(correction)}</p>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-slate-900">{correctionTitle(correction)}</p>
+                    <span className={`w-fit shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${statusClass(correction.status)}`}>
+                      {statusLabel(correction.status)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
+                    {correction.kind === "keyframes" ? "确认 T/A/L 图片、时间和帧号后再应用。" : correctionSummary(correction)}
+                  </p>
                 </div>
-                <span className={`shrink-0 rounded-full px-2 py-1 text-xs font-semibold ${statusClass(correction.status)}`}>
-                  {statusLabel(correction.status)}
-                </span>
               </div>
-              {correction.rationale ? <p className="mt-2 text-xs leading-5 text-slate-500">理由：{correction.rationale}</p> : null}
+              {correction.rationale ? (
+                <p className="mt-1 line-clamp-1 text-[11px] leading-5 text-slate-500" title={correction.rationale}>
+                  理由：{correction.rationale}
+                </p>
+              ) : null}
+              {correction.kind === "keyframes" ? <CorrectionKeyframePreview analysis={analysis} correction={correction} layout={isWorkspace ? "workspace" : "sidebar"} /> : null}
               {correction.status === "proposed" ? (
-                <div className="mt-3 flex flex-wrap gap-2">
+                <div className="mt-2 flex gap-2 border-t border-slate-200 pt-2">
                   <button
                     type="button"
                     onClick={() => void mutateCorrection(() => applyAnalysisCorrection(analysisId, correction.id), "修正已应用到有效数据。")}
                     disabled={isMutating}
-                    className="min-h-[34px] rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    className="min-h-[32px] flex-1 rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     应用
                   </button>
@@ -936,7 +1102,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
                     type="button"
                     onClick={() => void mutateCorrection(() => dismissAnalysisCorrection(analysisId, correction.id), "已忽略该修正。")}
                     disabled={isMutating}
-                    className="min-h-[34px] rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="min-h-[32px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     忽略
                   </button>
@@ -949,6 +1115,20 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
         )}
       </div>
     </div>
+  );
+  const toolPanelContent = (
+    <>
+      {activeToolTab === "keyframes" ? (
+        <KeyframeEvidencePanel
+          analysis={analysis}
+          draftKeyframes={draftKeyframes}
+          onSyncFrames={syncKeyframesToForm}
+          layout={isWorkspace ? "wide" : "sidebar"}
+        />
+      ) : null}
+      {activeToolTab === "form" ? manualFormPanel : null}
+      {activeToolTab === "corrections" ? correctionsPanel : null}
+    </>
   );
 
   return (
@@ -975,30 +1155,48 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
         <div className="mt-5 rounded-[22px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">只有已完成分析才能继续追问。</div>
       ) : null}
 
-      <div className={`${isWorkspace ? "mt-0" : "mt-5"} grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]`}>
-        <div className="min-w-0 space-y-4">
-          {isWorkspace ? (
-            <div className="rounded-[24px] border border-slate-200 bg-white p-3">
-              <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
-                <div className="min-w-0">
-                  <h2 className="text-base font-semibold text-slate-900">AI 追问</h2>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">回答会基于当前报告和已确认修正。</p>
-                </div>
-                <div className="flex flex-col gap-2 phone:flex-row tablet:items-center">
-                  {modelSelector}
-                  <button
-                    type="button"
-                    onClick={() => void handleShare()}
-                    disabled={isSharing || analysis.status !== "completed"}
-                    className="min-h-[38px] rounded-full border border-teal-200 bg-teal-50 px-4 py-1.5 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isSharing ? "生成中..." : "分享追问"}
-                  </button>
-                </div>
+      {isWorkspace ? (
+        <>
+          <div className="mt-4 rounded-[24px] border border-slate-200 bg-white p-3">
+            <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] tablet:items-center">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold text-slate-900">关键帧工作台</h2>
+                <p className="mt-1 text-xs leading-5 text-slate-500">先核对关键帧和修正卡，再回到对话追问。</p>
               </div>
-              <div className="mt-3">{quickPromptBar}</div>
+              <div className="min-w-0">{toolTabBar}</div>
             </div>
-          ) : null}
+          </div>
+          <div className="mt-4">{toolPanelContent}</div>
+        </>
+      ) : null}
+
+      {isWorkspace ? (
+        <div className="mt-4 rounded-[24px] border border-slate-200 bg-white p-3">
+          <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-start">
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-slate-900">AI 追问</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">回答会基于当前报告和已确认修正。</p>
+            </div>
+            <div className="flex flex-col gap-2 phone:flex-row tablet:items-center tablet:justify-end">
+              {modelSelector}
+              <button
+                type="button"
+                onClick={() => void handleShare()}
+                disabled={isSharing || analysis.status !== "completed"}
+                className="min-h-[38px] rounded-full border border-teal-200 bg-teal-50 px-4 py-1.5 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSharing ? "生成中..." : "分享追问"}
+              </button>
+            </div>
+          </div>
+          <div className="mt-3">
+            <div className="min-w-0">{quickPromptBar}</div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className={`${isWorkspace ? "mt-4" : "mt-5"} grid gap-4 ${isWorkspace ? "" : "xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]"}`}>
+        <div className="min-w-0 space-y-4">
           <div
             ref={messageListRef}
             className="max-h-[min(64dvh,620px)] min-h-[360px] space-y-3 overflow-y-auto rounded-[24px] border border-slate-200 bg-slate-50 p-3 tablet:min-h-[440px] xl:min-h-[560px]"
@@ -1075,7 +1273,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
           </form>
         </div>
 
-        <aside className="min-w-0 space-y-4">
+        {!isWorkspace ? <aside className="min-w-0 space-y-4">
           {!isWorkspace ? (
             <div className="rounded-[24px] border border-slate-200 bg-white p-4">
               <div className="flex items-center justify-between gap-3">
@@ -1090,36 +1288,9 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
               </div>
             </div>
           ) : null}
-          <div className="rounded-[24px] border border-slate-200 bg-white p-2">
-            <div className="grid grid-cols-3 gap-2">
-              {toolTabs.map((tab) => {
-                const selected = activeToolTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setActiveToolTab(tab.id)}
-                    className={`min-h-[38px] rounded-full px-2 py-1 text-xs font-semibold transition ${
-                      selected ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
-                    }`}
-                  >
-                    {tab.label}
-                    {tab.count ? <span className={selected ? "ml-1 text-white/80" : "ml-1 text-slate-400"}>{tab.count}</span> : null}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          {activeToolTab === "keyframes" ? (
-            <KeyframeEvidencePanel
-              analysis={analysis}
-              draftKeyframes={draftKeyframes}
-              onSyncFrames={syncKeyframesToForm}
-            />
-          ) : null}
-          {activeToolTab === "form" ? manualFormPanel : null}
-          {activeToolTab === "corrections" ? correctionsPanel : null}
-        </aside>
+          {!isWorkspace ? toolTabBar : null}
+          {toolPanelContent}
+        </aside> : null}
       </div>
 
       {shareText ? (

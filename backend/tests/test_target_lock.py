@@ -18,6 +18,40 @@ from app.services.target_lock import (
 )
 
 
+class TargetPreviewRouteCacheTests(unittest.TestCase):
+    def test_saved_target_lock_preview_reuses_candidates_without_detection(self) -> None:
+        from app.routers.analysis import _build_target_preview_cached_first
+        from app.models import Analysis
+
+        analysis = Analysis(
+            id="analysis-cache",
+            action_type="jump",
+            video_path="/tmp/source.mp4",
+            status="awaiting_target_selection",
+            target_lock_status="awaiting_manual",
+            target_lock={
+                "preview_frame": "frame_0002.jpg",
+                "selected_candidate_id": "candidate-1",
+                "lock_confidence": 0.61,
+                "status": "awaiting_manual",
+                "candidates": [
+                    {
+                        "id": "candidate-1",
+                        "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                        "confidence": 0.61,
+                        "source": "cached",
+                    }
+                ],
+            },
+        )
+
+        preview = _build_target_preview_cached_first(analysis, ["frame_0001.jpg", "frame_0002.jpg"], None)
+
+        self.assertEqual(preview.preview_frame, "frame_0002.jpg")
+        self.assertEqual(preview.auto_candidate_id, "candidate-1")
+        self.assertEqual(preview.candidates[0]["source"], "cached")
+
+
 class TargetLockTests(unittest.TestCase):
     @staticmethod
     def _zoomed_track_candidates(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,39 @@ def _json_compact(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def split_user_note_questions(note: str | None, *, limit: int = 6) -> list[str]:
+    text = _clean_text(note)
+    if not text:
+        return []
+
+    normalized = re.sub(r"[\r\n]+", " ", text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return []
+
+    pieces = [
+        piece.strip(" ，,。.!！?？；;：:")
+        for piece in re.split(r"(?<=[?？。.!！；;])\s*|[；;]\s*", normalized)
+        if piece.strip(" ，,。.!！?？；;：:")
+    ]
+    question_tokens = ("?", "？", "吗", "么", "什么", "哪个", "哪一个", "为什么", "为何", "怎么", "如何", "是不是", "能不能", "可不可以")
+    questions: list[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        if not any(token in piece for token in question_tokens):
+            continue
+        key = re.sub(r"\s+", "", piece)
+        if key in seen:
+            continue
+        seen.add(key)
+        questions.append(piece[:120])
+        if len(questions) >= limit:
+            break
+    if not questions and any(token in normalized for token in question_tokens):
+        questions.append(normalized[:120])
+    return questions
+
+
 def render_prompt_context(context: AnalysisPromptContext, *, include_bio: bool = False) -> str:
     subtype = _clean_text(context.action_subtype)
     skill_category = _clean_text(context.skill_category)
@@ -49,6 +83,10 @@ def render_prompt_context(context: AnalysisPromptContext, *, include_bio: bool =
         lines.append(f"bio_data: {_json_compact(context.bio_data)}")
     note = _clean_text(context.user_note)
     if note:
+        questions = split_user_note_questions(note)
+        if questions:
+            lines.append("comments questions:")
+            lines.extend(f"- Q{index}: {question}" for index, question in enumerate(questions, start=1))
         lines.append(f"上传备注/额外 comments: {note}")
     memory = _clean_text(context.memory_context)
     if memory:

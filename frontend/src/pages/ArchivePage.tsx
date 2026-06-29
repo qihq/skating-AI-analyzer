@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import axios from "axios";
 
-import { ArchiveResponse, fetchArchive, fetchSkaters, retryAnalysis, Skater } from "../api/client";
+import { ArchiveResponse, fetchArchive, fetchArchiveSummary, fetchSkaters, retryAnalysis, Skater } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
@@ -28,8 +28,8 @@ type ArchiveStats = ArchiveResponse["stats"];
 type ArchiveTimelineEntry = ArchiveResponse["timeline"][number] & {
   skater_id: string;
   skater_name: string;
-  skater_avatar_type: Skater["avatar_type"];
-  skater_avatar_emoji: Skater["avatar_emoji"];
+  skater_avatar_type: Skater["avatar_type"] | null;
+  skater_avatar_emoji: Skater["avatar_emoji"] | null;
 };
 type CalendarDay = {
   key: string;
@@ -74,6 +74,15 @@ function formatDayKey(dateString: string) {
   }).format(parseApiDate(dateString));
 }
 
+function formatCalendarGridKey(date: Date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "Asia/Shanghai",
+  }).format(date);
+}
+
 function formatMonthTitle(date: Date) {
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -81,8 +90,24 @@ function formatMonthTitle(date: Date) {
   }).format(date);
 }
 
+function formatCalendarDetailTitle(date: Date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  }).format(date);
+}
+
 function shiftMonth(date: Date, delta: number) {
   return new Date(date.getFullYear(), date.getMonth() + delta, 1);
+}
+
+function monthStartForDate(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function isSameCalendarMonth(left: Date, right: Date) {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth();
 }
 
 function buildCalendarDays(anchorDate: Date, timeline: ArchiveTimelineEntry[]): CalendarDay[] {
@@ -101,7 +126,7 @@ function buildCalendarDays(anchorDate: Date, timeline: ArchiveTimelineEntry[]): 
   return Array.from({ length: 42 }, (_, index) => {
     const date = new Date(gridStart);
     date.setDate(gridStart.getDate() + index);
-    const key = localDateKey(date);
+    const key = formatCalendarGridKey(date);
     return {
       key,
       date,
@@ -247,6 +272,24 @@ function annotateTimeline(skater: Skater, archive: ArchiveResponse | null | unde
   }));
 }
 
+function normalizeAggregateTimeline(archive: ArchiveResponse | null | undefined, skaters: Skater[]): ArchiveTimelineEntry[] {
+  if (!archive) {
+    return [];
+  }
+  const skaterById = new Map(skaters.map((skater) => [skater.id, skater]));
+  return archive.timeline.map((entry) => {
+    const skaterId = entry.skater_id ?? "";
+    const skater = skaterById.get(skaterId);
+    return {
+      ...entry,
+      skater_id: skaterId,
+      skater_name: entry.skater_name ?? (skater ? skaterLabel(skater) : "未归属"),
+      skater_avatar_type: entry.skater_avatar_type ?? skater?.avatar_type ?? null,
+      skater_avatar_emoji: entry.skater_avatar_emoji ?? skater?.avatar_emoji ?? null,
+    };
+  });
+}
+
 const actionIconClassName =
   "list-row-action inline-flex shrink-0 rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -273,6 +316,8 @@ export default function ArchivePage() {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
   });
+  const [calendarMonthPinned, setCalendarMonthPinned] = useState(false);
+  const [selectedCalendarDayKey, setSelectedCalendarDayKey] = useState<string | null>(null);
 
   useEffect(() => {
     const message = (location.state as { notice?: string } | null)?.notice;
@@ -330,13 +375,10 @@ export default function ArchivePage() {
       return;
     }
 
-    const targetSkaterIds = isParentMode
-      ? skaters.map((skater) => skater.id)
-      : activeScope && activeScope !== ALL_SKATERS_VIEW
-        ? [activeScope]
-        : [];
+    const isAggregateScope = isParentMode && activeScope === ALL_SKATERS_VIEW;
+    const targetSkaterId = !isAggregateScope && activeScope && activeScope !== ALL_SKATERS_VIEW ? activeScope : null;
 
-    if (!targetSkaterIds.length) {
+    if (!isAggregateScope && !targetSkaterId) {
       setIsLoading(false);
       return;
     }
@@ -345,35 +387,29 @@ export default function ArchivePage() {
 
     const loadArchives = async () => {
       setIsLoading(true);
-      const results = await Promise.allSettled(
-        targetSkaterIds.map(async (skaterId) => [skaterId, await fetchArchive(skaterId, { limit: ARCHIVE_PAGE_SIZE, offset: 0 })] as const),
-      );
+      try {
+        const archive = isAggregateScope
+          ? await fetchArchiveSummary({ limit: ARCHIVE_PAGE_SIZE, offset: 0 })
+          : await fetchArchive(targetSkaterId as string, { limit: ARCHIVE_PAGE_SIZE, offset: 0 });
 
-      if (cancelled) {
-        return;
-      }
-
-      const nextArchives: Record<string, ArchiveResponse> = {};
-      let failedCount = 0;
-
-      results.forEach((result) => {
-        if (result.status === "fulfilled") {
-          const [skaterId, archive] = result.value;
-          nextArchives[skaterId] = archive;
-        } else {
-          failedCount += 1;
+        if (cancelled) {
+          return;
         }
-      });
 
-      setArchiveBySkaterId((current) => ({ ...current, ...nextArchives }));
-      setError(
-        failedCount
-          ? failedCount === targetSkaterIds.length
-            ? "练习档案时间轴加载失败，请稍后重试。"
-            : "部分练习档案加载失败，请稍后重试。"
-          : null,
-      );
-      setIsLoading(false);
+        setArchiveBySkaterId((current) => ({
+          ...current,
+          [isAggregateScope ? ALL_SKATERS_VIEW : (targetSkaterId as string)]: archive,
+        }));
+        setError(null);
+      } catch {
+        if (!cancelled) {
+          setError("练习档案时间线加载失败，请稍后重试。");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
     };
 
     void loadArchives();
@@ -384,8 +420,9 @@ export default function ArchivePage() {
 
   const allTimelineEntries = useMemo(
     () =>
-      skaters
-        .flatMap((skater) => annotateTimeline(skater, archiveBySkaterId[skater.id]))
+      (archiveBySkaterId[ALL_SKATERS_VIEW]
+        ? normalizeAggregateTimeline(archiveBySkaterId[ALL_SKATERS_VIEW], skaters)
+        : skaters.flatMap((skater) => annotateTimeline(skater, archiveBySkaterId[skater.id])))
         .sort((left, right) => parseApiDate(right.created_at).getTime() - parseApiDate(left.created_at).getTime()),
     [archiveBySkaterId, skaters],
   );
@@ -426,16 +463,24 @@ export default function ArchivePage() {
     });
   }, [activeFilter, activeTimeline, isParentMode, parentRange]);
 
+  const latestCalendarMonth = useMemo(() => {
+    if (!filteredTimeline.length) {
+      return null;
+    }
+    return monthStartForDate(parseApiDate(filteredTimeline[0].created_at));
+  }, [filteredTimeline]);
+
   useEffect(() => {
     setTimelinePage(1);
+    setCalendarMonthPinned(false);
   }, [activeFilter, activeScope, parentRange]);
 
   useEffect(() => {
-    if (filteredTimeline.length) {
-      const latestEntryDate = parseApiDate(filteredTimeline[0].created_at);
-      setCalendarMonth(new Date(latestEntryDate.getFullYear(), latestEntryDate.getMonth(), 1));
+    if (!latestCalendarMonth || calendarMonthPinned) {
+      return;
     }
-  }, [activeFilter, activeScope, filteredTimeline, parentRange]);
+    setCalendarMonth((current) => (isSameCalendarMonth(current, latestCalendarMonth) ? current : latestCalendarMonth));
+  }, [calendarMonthPinned, latestCalendarMonth]);
 
   const totalTimelinePages = Math.max(1, Math.ceil(filteredTimeline.length / TIMELINE_PAGE_SIZE));
 
@@ -450,6 +495,10 @@ export default function ArchivePage() {
 
   const timelineGroups = useMemo(() => buildTimelineGroups(pagedTimeline), [pagedTimeline]);
   const calendarDays = useMemo(() => buildCalendarDays(calendarMonth, filteredTimeline), [calendarMonth, filteredTimeline]);
+  const selectedCalendarDay = useMemo(
+    () => calendarDays.find((day) => day.key === selectedCalendarDayKey && day.entries.length) ?? null,
+    [calendarDays, selectedCalendarDayKey],
+  );
   const calendarMonthEntries = useMemo(
     () =>
       filteredTimeline.filter((entry) => {
@@ -458,27 +507,21 @@ export default function ArchivePage() {
       }),
     [calendarMonth, filteredTimeline],
   );
+  const canJumpToLatestCalendarMonth =
+    latestCalendarMonth !== null && !isSameCalendarMonth(calendarMonth, latestCalendarMonth);
   const loadedRecordCount = filteredTimeline.length;
   const pageStartIndex = loadedRecordCount ? (timelinePage - 1) * TIMELINE_PAGE_SIZE + 1 : 0;
   const pageEndIndex = Math.min(timelinePage * TIMELINE_PAGE_SIZE, loadedRecordCount);
 
+  useEffect(() => {
+    if (selectedCalendarDayKey && !selectedCalendarDay) {
+      setSelectedCalendarDayKey(null);
+    }
+  }, [selectedCalendarDay, selectedCalendarDayKey]);
+
   const activeStats = useMemo<ArchiveStats>(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
-      return skaters.reduce<ArchiveStats>(
-        (stats, skater) => {
-          const archive = archiveBySkaterId[skater.id];
-          if (!archive) {
-            return stats;
-          }
-          return {
-            total_records: stats.total_records + archive.stats.total_records,
-            recent_7days: stats.recent_7days + archive.stats.recent_7days,
-            current_streak: Math.max(stats.current_streak, archive.stats.current_streak),
-            monthly_sessions: stats.monthly_sessions + archive.stats.monthly_sessions,
-          };
-        },
-        { total_records: 0, recent_7days: 0, current_streak: 0, monthly_sessions: 0 },
-      );
+      return archiveBySkaterId[ALL_SKATERS_VIEW]?.stats ?? computeAggregateStats(activeTimeline);
     }
     if (selectedSkater) {
       return archiveBySkaterId[selectedSkater.id]?.stats ?? computeAggregateStats(activeTimeline);
@@ -488,9 +531,7 @@ export default function ArchivePage() {
 
   const skaterIdsNeedingMore = useMemo(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
-      return skaters
-        .map((skater) => skater.id)
-        .filter((skaterId) => Boolean(archiveBySkaterId[skaterId]?.has_more));
+      return archiveBySkaterId[ALL_SKATERS_VIEW]?.has_more ? [ALL_SKATERS_VIEW] : [];
     }
     if (selectedSkater && archiveBySkaterId[selectedSkater.id]?.has_more) {
       return [selectedSkater.id];
@@ -526,7 +567,11 @@ export default function ArchivePage() {
       requestedSkaterIds.map(async (skaterId) => {
         const currentArchive = archiveBySkaterId[skaterId];
         const offset = currentArchive?.timeline.length ?? 0;
-        return [skaterId, await fetchArchive(skaterId, { limit: ARCHIVE_PAGE_SIZE, offset })] as const;
+        const archive =
+          skaterId === ALL_SKATERS_VIEW
+            ? await fetchArchiveSummary({ limit: ARCHIVE_PAGE_SIZE, offset })
+            : await fetchArchive(skaterId, { limit: ARCHIVE_PAGE_SIZE, offset });
+        return [skaterId, archive] as const;
       }),
     );
 
@@ -559,14 +604,13 @@ export default function ArchivePage() {
 
   const markAnalysisAsProcessing = (analysisId: string, skaterId: string) => {
     setArchiveBySkaterId((current) => {
-      const currentArchive = current[skaterId];
-      if (!currentArchive) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [skaterId]: {
+      const next = { ...current };
+      [skaterId, ALL_SKATERS_VIEW].forEach((archiveKey) => {
+        const currentArchive = next[archiveKey];
+        if (!currentArchive) {
+          return;
+        }
+        next[archiveKey] = {
           ...currentArchive,
           timeline: currentArchive.timeline.map((entry) =>
             entry.analysis_id === analysisId
@@ -576,8 +620,9 @@ export default function ArchivePage() {
                 }
               : entry,
           ),
-        },
-      };
+        };
+      });
+      return next;
     });
   };
 
@@ -955,21 +1000,29 @@ export default function ArchivePage() {
             <div className="mt-6 rounded-[24px] bg-slate-50 px-5 py-6 text-sm text-slate-500">当前筛选下还没有复盘记录，先去上传一段训练视频吧。</div>
           )
         ) : (
-          <div className="mt-6 grid min-w-0 gap-6 wide:grid-cols-[minmax(0,1fr)_360px]">
+          <div data-archive-calendar-view="true" className="mt-6 grid min-w-0 gap-6 wide:grid-cols-[minmax(0,1fr)_360px]">
             <div className="min-w-0 rounded-[24px] border border-slate-200 bg-slate-50 p-3 phone:p-4">
               <div className="mb-4 flex flex-col gap-3 phone:flex-row phone:items-center phone:justify-between">
-                <h3 className="text-xl font-semibold text-slate-900">{formatMonthTitle(calendarMonth)}</h3>
+                <h3 data-calendar-month-title="true" className="text-xl font-semibold text-slate-900">
+                  {formatMonthTitle(calendarMonth)}
+                </h3>
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCalendarMonth((current) => shiftMonth(current, -1))}
+                    onClick={() => {
+                      setCalendarMonthPinned(true);
+                      setCalendarMonth((current) => shiftMonth(current, -1));
+                    }}
                     className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
                   >
                     上月
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCalendarMonth((current) => shiftMonth(current, 1))}
+                    onClick={() => {
+                      setCalendarMonthPinned(true);
+                      setCalendarMonth((current) => shiftMonth(current, 1));
+                    }}
                     className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
                   >
                     下月
@@ -986,10 +1039,24 @@ export default function ArchivePage() {
               </div>
               <div className="grid grid-cols-7 gap-1">
                 {calendarDays.map((day) => (
-                  <div
+                  <button
                     key={day.key}
+                    type="button"
+                    data-calendar-day={day.key}
+                    data-calendar-entry-count={day.entries.length}
+                    disabled={!day.entries.length}
+                    aria-label={day.entries.length ? `查看${formatCalendarDetailTitle(day.date)}的${day.entries.length}条记录` : undefined}
+                    onClick={() => {
+                      if (day.entries.length) {
+                        setSelectedCalendarDayKey(day.key);
+                      }
+                    }}
                     className={`min-h-[66px] rounded-[16px] border p-2 text-left tablet:min-h-[92px] ${
                       day.isCurrentMonth ? "border-slate-200 bg-white" : "border-transparent bg-white/50 text-slate-300"
+                    } ${
+                      day.entries.length
+                        ? "cursor-pointer transition hover:border-blue-200 hover:bg-blue-50/60 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                        : "cursor-default disabled:opacity-100"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1">
@@ -1001,18 +1068,14 @@ export default function ArchivePage() {
                     {day.entries.length ? (
                       <div className="mt-2 hidden space-y-1 tablet:block">
                         {day.entries.slice(0, 2).map((entry) => (
-                          <Link
-                            key={entry.id}
-                            to={`/report/${entry.analysis_id}`}
-                            className="block truncate rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600 hover:bg-blue-50 hover:text-blue-600"
-                          >
+                          <span key={entry.id} className="block truncate rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
                             {isParentMode && activeScope === ALL_SKATERS_VIEW ? `${entry.skater_name} · ` : ""}
                             {entry.action_type}
-                          </Link>
+                          </span>
                         ))}
                       </div>
                     ) : null}
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -1048,6 +1111,21 @@ export default function ArchivePage() {
               ) : (
                 <p className="mt-4 rounded-[18px] bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-500">这个月份还没有已加载的复盘记录。</p>
               )}
+              {canJumpToLatestCalendarMonth ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!latestCalendarMonth) {
+                      return;
+                    }
+                    setCalendarMonthPinned(false);
+                    setCalendarMonth(latestCalendarMonth);
+                  }}
+                  className="mt-4 min-h-[44px] w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                >
+                  回到最近记录月份
+                </button>
+              ) : null}
               {skaterIdsNeedingMore.length ? (
                 <button
                   type="button"
@@ -1090,6 +1168,66 @@ export default function ArchivePage() {
             })()
           }
         />
+      ) : null}
+
+      {selectedCalendarDay ? (
+        <div
+          data-calendar-detail-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm tablet:p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="calendar-day-detail-title"
+          onClick={() => setSelectedCalendarDayKey(null)}
+        >
+          <div
+            className="max-h-[86dvh] w-full max-w-2xl overflow-hidden rounded-[24px] bg-white shadow-2xl tablet:rounded-[28px]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 tablet:px-6">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">Day Detail</p>
+                <h3 id="calendar-day-detail-title" className="mt-2 text-xl font-semibold text-slate-900">
+                  {formatCalendarDetailTitle(selectedCalendarDay.date)}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">{selectedCalendarDay.entries.length} 条训练记录</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedCalendarDayKey(null)}
+                className="min-h-[40px] shrink-0 rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="max-h-[calc(86dvh-112px)] space-y-3 overflow-y-auto px-5 py-4 tablet:px-6">
+              {selectedCalendarDay.entries.map((entry) => (
+                <Link
+                  key={entry.id}
+                  to={`/report/${entry.analysis_id}`}
+                  onClick={() => setSelectedCalendarDayKey(null)}
+                  className="block rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/70"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isParentMode && activeScope === ALL_SKATERS_VIEW ? (
+                      <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-600">{entry.skater_name}</span>
+                    ) : null}
+                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600">{entry.action_type}</span>
+                    {entry.skill_category ? (
+                      <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600">{entry.skill_category}</span>
+                    ) : null}
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${forceScoreTone(entry.force_score)}`}>
+                      {entry.force_score ?? "--"} 分
+                    </span>
+                  </div>
+                  <p className="mt-3 text-xs text-slate-400">{formatDate(entry.created_at)}</p>
+                  <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-600">{entry.report_snippet}</p>
+                  <p className="mt-3 text-sm font-semibold text-blue-600">查看报告</p>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

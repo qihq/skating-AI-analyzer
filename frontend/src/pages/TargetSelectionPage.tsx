@@ -175,7 +175,7 @@ export default function TargetSelectionPage() {
 
   return (
     <div className="space-y-6">
-      <section className="app-card p-6 tablet:p-8">
+      <section className="app-card p-4 phone:p-6 tablet:p-8">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Target Lock</p>
         <h1 className="mt-3 text-3xl font-semibold text-slate-900">确认主滑行者</h1>
         <p className="mt-4 max-w-2xl text-base leading-8 text-slate-500">
@@ -184,7 +184,7 @@ export default function TargetSelectionPage() {
       </section>
 
       <section className="app-card p-6 tablet:p-8">
-        <div className="mb-4 flex flex-wrap gap-3">
+        <div className="mb-4 flex flex-col gap-3 phone:flex-row phone:flex-wrap">
           <button
             type="button"
             onClick={() => {
@@ -222,10 +222,10 @@ export default function TargetSelectionPage() {
           onPointerMove={handlePointerMove}
           onPointerUp={finishDrag}
           onPointerCancel={finishDrag}
-          className="relative overflow-hidden rounded-[24px] border border-slate-200 bg-slate-100 touch-none"
+          className="relative aspect-video w-full overflow-hidden rounded-[24px] border border-slate-200 bg-slate-100 touch-none phone:min-h-[220px] tablet:min-h-[360px]"
         >
           {preview?.preview_frame_url ? (
-            <img src={preview.preview_frame_url} alt="target preview" draggable={false} className="block w-full select-none object-cover" />
+            <img src={preview.preview_frame_url} alt="target preview" draggable={false} className="h-full w-full select-none object-contain" />
           ) : (
             <div className="p-8 text-sm text-slate-500">预览帧加载中...</div>
           )}
@@ -245,7 +245,7 @@ export default function TargetSelectionPage() {
           ) : null}
         </div>
 
-        <div className="mt-6 grid gap-4 tablet:grid-cols-2">
+        <div className="mt-6 grid max-h-[520px] gap-4 overflow-y-auto pr-1 tablet:grid-cols-2 web:grid-cols-3">
           {preview?.candidates.map((candidate) => {
             const isAuto = candidate.id === preview.auto_candidate_id;
             const isSelected = candidate.id === selectedCandidateId && !manualBBox;
@@ -292,16 +292,16 @@ export default function TargetSelectionPage() {
         ) : null}
         {error ? <div className="mt-5 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</div> : null}
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-col gap-3 phone:flex-row phone:flex-wrap">
           <button
             type="button"
             onClick={handleConfirm}
             disabled={isSubmitting || (!manualBBox && !selectedCandidateId)}
-            className="app-pill min-h-[52px] px-5 font-semibold text-blue-600 disabled:opacity-60"
+            className="app-pill min-h-[52px] justify-center px-5 font-semibold text-blue-600 disabled:opacity-60"
           >
             {isSubmitting ? "确认中..." : preview && preview.lock_confidence >= AUTO_CONFIRM_THRESHOLD ? "确认并继续分析" : "锁定目标并继续分析"}
           </button>
-          <button type="button" onClick={() => navigate(`/report/${id}`)} className="app-pill min-h-[52px] px-5 font-semibold text-slate-600">
+          <button type="button" onClick={() => navigate(`/report/${id}`)} className="app-pill min-h-[52px] justify-center px-5 font-semibold text-slate-600">
             返回报告页
           </button>
         </div>

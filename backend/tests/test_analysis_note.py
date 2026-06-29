@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.routers.analysis import _sync_report_user_note
+from app.services.llm_context import split_user_note_questions
 from app.services.report import normalize_report
 
 
@@ -47,6 +48,11 @@ class AnalysisNoteTests(unittest.TestCase):
         cleared = _sync_report_user_note(updated, " ")
         assert cleared is not None
         self.assertNotIn("user_note", cleared)
+
+    def test_split_user_note_questions_extracts_multiple_questions(self) -> None:
+        questions = split_user_note_questions("这个具体是哪个动作？落冰为什么不稳？能不能给训练重点")
+
+        self.assertEqual(questions, ["这个具体是哪个动作", "落冰为什么不稳", "能不能给训练重点"])
 
 
 if __name__ == "__main__":

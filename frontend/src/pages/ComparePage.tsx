@@ -543,6 +543,11 @@ function HeroSummary({ data }: { data: AnalysisCompareResponse }) {
               {data.quality.warnings.join(" ")}
             </div>
           ) : null}
+          {data.quality?.subtype_mismatch || data.quality?.skill_mismatch ? (
+            <div className="mt-3 rounded-[22px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-700">
+              已允许同一动作大类下的跨小项对比；本页结论更适合看长期趋势，不用于判定某个细项技术优劣。
+            </div>
+          ) : null}
         </div>
         <div className={`rounded-[28px] border p-5 text-center ${scoreTone(data.score_delta)}`}>
           <p className="text-sm uppercase tracking-[0.24em] opacity-80">评分变化</p>

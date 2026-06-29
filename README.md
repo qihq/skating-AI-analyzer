@@ -8,7 +8,7 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.305`.
+The current pipeline version is `v5.2.306`.
 
 ## Recent Updates
 
@@ -33,6 +33,7 @@ Current branch updates improve follow-up keyframe review, parent review workflow
 
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
 
+- `v5.2.306`: follow-up chat detects multiple questions in user notes and answers each explicitly with what can/cannot be confirmed; training plan generation uses child-safe low-impact prompts with strict JSON schema and `generation_status`; report user-note response parses questions from upload notes into per-question Q&A; KeyframeEvidencePanel logic extracted to `keyframeEvidence.ts` utility with responsive layout; archive page adds aggregate `fetchArchiveSummary` API for parent mode, clickable calendar day detail modal, and jump-to-latest-month navigation; backfill frame tests added.
 - `v5.2.305`: follow-up can run a video-AI-only full-source keyframe rerun that produces a proposed keyframes correction card; it does not reset target lock, rerun pose/biomechanics/visual reports, auto-apply data, or overwrite reports.
 - `v5.2.304`: follow-up chat can queue full-video reanalysis with target-lock reset, retry confirmations explain when the skater lock will be rebuilt, and report/chat share images resize for long text while exporting compressed JPEGs.
 - `v5.2.303`: review uploads no longer require a precise action subtype or skill node; "unknown / broad category only" is accepted, and user comments are passed into video-temporal action recognition before keyframe and report generation.

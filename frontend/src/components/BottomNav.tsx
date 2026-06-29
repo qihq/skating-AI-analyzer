@@ -56,21 +56,21 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
         </div>
       </nav>
 
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-[240px] border-r border-[#E5E7EB] bg-white/92 px-5 py-8 backdrop-blur web:flex web:flex-col">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-kid-primary">IceBuddy</p>
-          <h1 className="mt-3 text-2xl font-semibold text-slate-900">花样滑冰训练分析系统</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-500">为家庭训练复盘、陪练建议和成长记录准备的滑冰助手。</p>
+      <aside className="desktop-sidebar fixed inset-y-0 left-0 z-20 hidden h-dvh w-[240px] overflow-hidden overscroll-contain border-r border-[#E5E7EB] bg-white/92 px-5 py-8 backdrop-blur web:flex web:flex-col">
+        <div className="desktop-sidebar-brand">
+          <p className="desktop-sidebar-kicker text-xs font-semibold uppercase tracking-[0.3em] text-kid-primary">IceBuddy</p>
+          <h1 className="desktop-sidebar-title mt-3 text-2xl font-semibold text-slate-900">花样滑冰训练分析系统</h1>
+          <p className="desktop-sidebar-description mt-3 text-sm leading-6 text-slate-500">为家庭训练复盘、陪练建议和成长记录准备的滑冰助手。</p>
         </div>
 
-        <div className="mt-10 space-y-2">
+        <nav className="desktop-sidebar-nav mt-10 flex flex-col gap-2" aria-label="桌面主导航">
           {desktopNavItems.map((item) => (
             <NavLink
               key={item.tab}
               to={item.to}
               className={({ isActive }) => {
                 const selected = isActive || activeTab === item.tab;
-                return `flex min-h-[56px] items-center gap-3 rounded-[20px] px-4 text-sm font-medium transition ${
+                return `desktop-sidebar-link flex min-h-[56px] items-center gap-3 rounded-[20px] px-4 text-sm font-medium transition ${
                   selected ? "bg-blue-50 text-[#3B82F6]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
                 }`;
               }}
@@ -79,9 +79,9 @@ export default function BottomNav({ activeTab }: BottomNavProps) {
               <span>{item.label}</span>
             </NavLink>
           ))}
-        </div>
+        </nav>
 
-        <div className="mt-auto rounded-[24px] border border-blue-100 bg-blue-50/80 p-4">
+        <div className="desktop-sidebar-note mt-auto rounded-[24px] border border-blue-100 bg-blue-50/80 p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">家庭模式</p>
           <p className="mt-2 text-sm leading-6 text-slate-600">
             手机与 iPad 使用底部导航，网页端使用左侧固定导航。家长模式会显示分析、追问、计划、历史、进展和设置入口。

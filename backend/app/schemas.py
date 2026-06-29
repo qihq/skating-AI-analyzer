@@ -365,6 +365,8 @@ class CompareQualityPayload(BaseModel):
     before_flags: list[str] = Field(default_factory=list)
     after_flags: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    subtype_mismatch: bool = False
+    skill_mismatch: bool = False
 
 
 class AnalysisCompareResponse(BaseModel):
@@ -402,6 +404,7 @@ class TrainingPlanPayload(BaseModel):
     focus_skill: str
     days: list[TrainingDay]
     generation_source: str | None = None
+    generation_status: str | None = None
     generation_note: str | None = None
 
 
@@ -435,8 +438,14 @@ class ArchiveTimelineEntry(BaseModel):
     created_at: datetime
     entry_type: str
     status: str
+    skater_id: str | None = None
+    skater_name: str | None = None
+    skater_avatar_type: str | None = None
+    skater_avatar_emoji: str | None = None
     skill_category: str | None = None
     action_type: str
+    action_subtype: str | None = None
+    skill_node_id: str | None = None
     force_score: int | None = None
     report_snippet: str
     analysis_id: str

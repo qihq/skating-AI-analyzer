@@ -632,6 +632,8 @@ export interface CompareQualityPayload {
   before_flags: string[];
   after_flags: string[];
   warnings: string[];
+  subtype_mismatch?: boolean;
+  skill_mismatch?: boolean;
 }
 
 export interface AnalysisCompareResponse {
@@ -691,6 +693,7 @@ export interface TrainingPlanPayload {
   focus_skill: string;
   days: TrainingDay[];
   generation_source?: "ai" | "fallback" | string | null;
+  generation_status?: "ai" | "fallback" | "generating" | string | null;
   generation_note?: string | null;
 }
 
@@ -713,9 +716,15 @@ export interface ArchiveResponse {
     id: string;
     created_at: string;
     status: AnalysisStatus;
+    skater_id?: string | null;
+    skater_name?: string | null;
+    skater_avatar_type?: Skater["avatar_type"] | null;
+    skater_avatar_emoji?: Skater["avatar_emoji"] | null;
     entry_type: string;
     skill_category: string | null;
     action_type: string;
+    action_subtype?: string | null;
+    skill_node_id?: string | null;
     force_score: number | null;
     report_snippet: string;
     analysis_id: string;
@@ -1088,6 +1097,11 @@ export async function fetchSkaters() {
 
 export async function fetchArchive(skaterId: string, params?: { limit?: number; offset?: number }) {
   const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`, { params });
+  return response.data;
+}
+
+export async function fetchArchiveSummary(params?: { limit?: number; offset?: number; skater_id?: string | null }) {
+  const response = await apiClient.get<ArchiveResponse>("/skaters/archive", { params });
   return response.data;
 }
 

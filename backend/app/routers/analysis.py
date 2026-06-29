@@ -131,6 +131,7 @@ from app.services.report import apply_child_score_floor, calculate_force_score, 
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
+    TargetPreview,
     build_target_lock_payload,
     build_target_preview,
     candidate_matches_target_anchor,
@@ -153,6 +154,7 @@ from app.services.video import (
     detect_video_fps,
     encode_frames,
     extract_motion_sampled_frames,
+    extract_full_frame_at,
     extract_precise_frames_at_timestamps,
     precheck_video,
     persist_frames,
@@ -175,6 +177,13 @@ from app.services.video_temporal import (
 )
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 from app.services.providers import get_active_provider, request_text_completion
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+except Exception:  # noqa: BLE001
+    cv2 = None
+    np = None
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -5710,6 +5719,49 @@ def _target_preview_detected_candidates_from_frames(
     return _formal_target_preview_candidates(sampled_frames, motion_scores or {})
 
 
+def _target_preview_from_saved_lock(
+    analysis_id: str,
+    status: str,
+    existing_target_lock: dict[str, Any] | None,
+    frame_names: list[str],
+) -> TargetPreview | None:
+    if not isinstance(existing_target_lock, dict):
+        return None
+    candidates = [dict(item) for item in existing_target_lock.get("candidates", []) if isinstance(item, dict)]
+    preview_frame = str(existing_target_lock.get("preview_frame") or "").strip()
+    if not candidates or not preview_frame or preview_frame not in frame_names:
+        return None
+    try:
+        lock_confidence = float(existing_target_lock.get("lock_confidence") or 0.0)
+    except (TypeError, ValueError):
+        lock_confidence = 0.0
+    return TargetPreview(
+        preview_frame=preview_frame,
+        preview_frame_url=f"/api/frames/{analysis_id}/{preview_frame}",
+        preview_frame_index=frame_names.index(preview_frame),
+        auto_candidate_id=str(existing_target_lock.get("selected_candidate_id") or "") or None,
+        lock_confidence=round(lock_confidence, 4),
+        candidates=candidates,
+        target_lock_status=str(existing_target_lock.get("status") or status or "awaiting_manual"),
+    )
+
+
+def _build_target_preview_cached_first(analysis: Analysis, frame_names: list[str], motion_scores: dict[str, Any] | None) -> TargetPreview:
+    saved_preview = _target_preview_from_saved_lock(analysis.id, analysis.target_lock_status or analysis.status, analysis.target_lock, frame_names)
+    if saved_preview is not None:
+        return saved_preview
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    return build_target_preview(
+        analysis.id,
+        frame_names,
+        existing_target_lock=analysis.target_lock,
+        motion_scores=motion_scores,
+        analysis_profile=analysis.analysis_profile,
+        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
+    )
+
+
 async def _resume_auto_target_lock_if_available(analysis: Analysis, session: AsyncSession) -> bool:
     if analysis.status != "awaiting_target_selection":
         return False
@@ -6616,6 +6668,100 @@ async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Anal
     return analysis, frames_dir
 
 
+def _frame_backfill_reason(path: Path) -> str | None:
+    if not path.exists():
+        return "missing"
+    if path.stat().st_size <= 0:
+        return "empty"
+    if cv2 is None or np is None:
+        return None
+    try:
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None or image.size <= 0:
+            return "unreadable"
+        mean_value = float(np.mean(image))
+        variance = float(np.var(image))
+        return "blank" if mean_value < 6.0 or variance < 2.0 else None
+    except Exception:  # noqa: BLE001
+        logger.info("Could not inspect frame image quality: %s", path, exc_info=True)
+        return None
+
+
+def _frame_image_is_blank(path: Path) -> bool:
+    return _frame_backfill_reason(path) in {"missing", "empty", "blank"}
+
+
+def _normalized_frame_stem(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text.removesuffix(".jpg")
+
+
+def _add_frame_timestamp(mapping: dict[str, float], frame_id: Any, timestamp: Any) -> None:
+    stem = _normalized_frame_stem(frame_id)
+    if not stem:
+        return
+    try:
+        value = float(timestamp)
+    except (TypeError, ValueError):
+        return
+    if value < 0:
+        return
+    mapping.setdefault(stem, value)
+
+
+def _frame_timestamp_map_for_backfill(analysis: Analysis) -> dict[str, float]:
+    mapping: dict[str, float] = {}
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
+    for item in motion_scores.get("selected", []) if isinstance(motion_scores.get("selected"), list) else []:
+        if isinstance(item, dict):
+            _add_frame_timestamp(mapping, item.get("frame_id"), item.get("timestamp"))
+
+    resolved = motion_scores.get("resolved_keyframes") if isinstance(motion_scores.get("resolved_keyframes"), dict) else {}
+    for key in ("selected", "partial_selected"):
+        for item in resolved.get(key, []) if isinstance(resolved.get(key), list) else []:
+            if isinstance(item, dict):
+                _add_frame_timestamp(mapping, item.get("frame_id"), item.get("timestamp"))
+
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+    candidates = bio_data.get("key_frame_candidates") if isinstance(bio_data.get("key_frame_candidates"), dict) else {}
+    for item in candidates.values():
+        if isinstance(item, dict):
+            _add_frame_timestamp(mapping, item.get("frame_id") or item.get("frame"), item.get("timestamp"))
+    key_frames = bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {}
+    timestamps = bio_data.get("key_frame_timestamps") if isinstance(bio_data.get("key_frame_timestamps"), dict) else {}
+    for key, frame_id in key_frames.items():
+        timestamp = timestamps.get(key)
+        if isinstance(timestamp, dict):
+            timestamp = timestamp.get("timestamp")
+        _add_frame_timestamp(mapping, frame_id, timestamp)
+    return mapping
+
+
+async def _backfill_frame_if_needed(analysis: Analysis, frame_path: Path, filename: str) -> tuple[Path, bool]:
+    backfill_reason = _frame_backfill_reason(frame_path)
+    if backfill_reason is None:
+        return frame_path, False
+
+    timestamp = _frame_timestamp_map_for_backfill(analysis).get(filename.removesuffix(".jpg"))
+    if timestamp is None:
+        return frame_path, False
+    video_path = _video_path_if_available(analysis)
+    if video_path is None:
+        if backfill_reason == "unreadable" and frame_path.exists() and frame_path.stat().st_size > 0:
+            return frame_path, False
+        raise HTTPException(status_code=404, detail="原视频已清理，无法补帧。")
+
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await extract_full_frame_at(video_path, timestamp, frame_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Analysis %s failed to backfill frame %s at %.3fs: %s", analysis.id, filename, timestamp, exc)
+        return frame_path, False
+    return frame_path, True
+
+
 async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) -> Analysis:
     if not _can_backfill_artifacts(analysis.status):
         return analysis
@@ -7359,16 +7505,22 @@ def _build_compare_quality(analysis_a: Analysis, analysis_b: Analysis) -> Compar
     before_flags = _quality_flags(analysis_a)
     after_flags = _quality_flags(analysis_b)
     warnings: list[str] = []
+    subtype_mismatch = _normalize_optional_text(analysis_a.action_subtype) != _normalize_optional_text(analysis_b.action_subtype)
+    skill_mismatch = _normalize_optional_text(analysis_a.skill_node_id) != _normalize_optional_text(analysis_b.skill_node_id)
     if _report_data_quality(analysis_a) == "poor" or _report_data_quality(analysis_b) == "poor":
         warnings.append("存在数据质量较弱的记录，变化结论需要保守解读。")
     if before_flags or after_flags:
         warnings.append("部分姿态或目标追踪信号存在不确定性，建议结合原视频复核。")
+    if subtype_mismatch or skill_mismatch:
+        warnings.append("两次记录属于同一动作大类，但动作小项或技能节点不同，结论仅作趋势参考。")
     return CompareQualityPayload(
         before_data_quality=_report_data_quality(analysis_a),
         after_data_quality=_report_data_quality(analysis_b),
         before_flags=before_flags,
         after_flags=after_flags,
         warnings=warnings,
+        subtype_mismatch=subtype_mismatch,
+        skill_mismatch=skill_mismatch,
     )
 
 
@@ -7478,13 +7630,30 @@ def _ordered_compare_pair(analysis_a: Analysis, analysis_b: Analysis) -> tuple[A
 
 
 def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
+    raw_plan = dict(plan.plan_json) if isinstance(plan.plan_json, dict) else {}
+    if raw_plan.get("generation_status") is None:
+        raw_plan["generation_status"] = raw_plan.get("generation_source") or "ai"
     return TrainingPlanDetail(
         id=plan.id,
         analysis_id=plan.analysis_id,
         skater_id=plan.skater_id,
-        plan_json=plan.plan_json,
+        plan_json=raw_plan,
         created_at=plan.created_at,
     )
+
+
+def _plan_generation_source(plan_json: Any) -> str:
+    if not isinstance(plan_json, dict):
+        return ""
+    return str(plan_json.get("generation_status") or plan_json.get("generation_source") or "").strip().lower()
+
+
+def _fallback_plan_after_ai_failure(action_type: str, report: dict[str, Any], skater_context: str) -> dict[str, Any]:
+    plan_json = build_fallback_plan(action_type, report, skater_context)
+    plan_json["generation_source"] = "fallback"
+    plan_json["generation_status"] = "fallback"
+    plan_json["generation_note"] = "AI 训练计划暂不可用，已生成安全兜底计划。可稍后重试个性化生成。"
+    return plan_json
 
 
 def _skater_context(skater: Skater) -> str:
@@ -7706,9 +7875,6 @@ async def compare_analyses(
         raise HTTPException(status_code=400, detail="只能比较同一位小朋友的训练记录。")
     if analysis_a.action_type != analysis_b.action_type:
         raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
-    if not _can_compare_same_subtype(analysis_a, analysis_b):
-        raise HTTPException(status_code=400, detail="请只选择同一动作小项或同一技能节点的记录进行对比。")
-
     analysis_a, analysis_b = _ordered_compare_pair(analysis_a, analysis_b)
 
     skater_map = await _get_skater_map(
@@ -7864,9 +8030,9 @@ async def create_training_plan(
         )
     except PlanGenerationError as exc:
         logger.warning("Analysis %s training plan AI failed, using fallback plan: %s", analysis_id, exc)
-        plan_json = build_fallback_plan(analysis.action_type, analysis.report, _skater_context(skater))
-        plan_json["generation_source"] = "fallback"
-        plan_json["generation_note"] = f"AI 训练计划暂不可用，已生成安全兜底计划：{exc}"
+        if existing_plan is not None and _plan_generation_source(existing_plan.plan_json) == "ai":
+            return _plan_detail_from_model(existing_plan)
+        plan_json = _fallback_plan_after_ai_failure(analysis.action_type, analysis.report, _skater_context(skater))
 
     if existing_plan is not None:
         existing_plan.plan_json = plan_json
@@ -8374,14 +8540,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
     frames_dir = _frames_dir_for_analysis(analysis)
     frame_names = frame_names_from_dir(frames_dir)
     motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-    preview = build_target_preview(
-        analysis_id,
-        frame_names,
-        existing_target_lock=analysis.target_lock,
-        motion_scores=motion_scores,
-        analysis_profile=analysis.analysis_profile,
-        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
-    )
+    preview = _build_target_preview_cached_first(analysis, frame_names, motion_scores)
     return TargetPreviewResponse(
         analysis_id=analysis.id,
         status=analysis.status,
@@ -8410,14 +8569,7 @@ async def confirm_target_lock(
     frames_dir = _frames_dir_for_analysis(analysis)
     frame_names = frame_names_from_dir(frames_dir)
     motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-    preview = build_target_preview(
-        analysis_id,
-        frame_names,
-        existing_target_lock=analysis.target_lock,
-        motion_scores=motion_scores,
-        analysis_profile=analysis.analysis_profile,
-        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
-    )
+    preview = _build_target_preview_cached_first(analysis, frame_names, motion_scores)
     try:
         selected = None if payload.manual_bbox is not None else resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
         if selected is None and payload.manual_bbox is None:
@@ -8625,6 +8777,11 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
         else frames_dir
     )
     frame_path = (frames_root / filename).resolve()
+    if filename.startswith("semantic_") or filename.startswith("semantic_video_ai_rerun_") or filename.startswith("partial_semantic_"):
+        frames_root = semantic_dir
+        frame_path = (frames_root / filename).resolve()
+    if frames_root in frame_path.parents:
+        frame_path, _ = await _backfill_frame_if_needed(analysis, frame_path, filename)
     if frames_root not in frame_path.parents or not frame_path.exists():
         raise HTTPException(status_code=404, detail="未找到该视频帧。")
 
