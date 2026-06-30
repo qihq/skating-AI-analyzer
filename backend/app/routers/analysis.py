@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -29,13 +29,16 @@ from app.database import (
     run_db_read_with_retry,
     run_db_write_with_retry,
 )
-from app.models import Analysis, Skater, TrainingPlan, TrainingSession
+from app.models import Analysis, AnalysisComparison, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
     AnalysisChatShareRequest,
     AnalysisChatShareResponse,
     AnalysisChatRequest,
     AnalysisChatResponse,
     AnalysisChatMessagePublic,
+    AnalysisComparisonCreateRequest,
+    AnalysisComparisonDetail,
+    AnalysisComparisonSummary,
     AnalysisCorrectionCreateRequest,
     AnalysisCorrectionListResponse,
     AnalysisCorrectionMutationResponse,
@@ -177,6 +180,7 @@ from app.services.video_temporal import (
 )
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 from app.services.providers import get_active_provider, request_text_completion
+from app.services.video_temporal import analyze_video_temporal
 
 try:
     import cv2  # type: ignore
@@ -6889,6 +6893,40 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
     )
 
 
+def _list_item_from_row(row: Any) -> AnalysisListItem:
+    skater_name = str(row.skater_display_name or row.skater_name or "").strip() or None
+    created_at = _parse_log_timestamp(row.created_at) if isinstance(row.created_at, str) else _coerce_utc_datetime(row.created_at)
+    updated_at = _parse_log_timestamp(row.updated_at) if isinstance(row.updated_at, str) else _coerce_utc_datetime(row.updated_at)
+    return AnalysisListItem(
+        id=row.id,
+        skater_id=row.skater_id,
+        session_id=row.session_id,
+        skater_name=skater_name,
+        skill_category=row.skill_category,
+        action_type=row.action_type,
+        action_subtype=row.action_subtype,
+        analysis_profile=row.analysis_profile,
+        pipeline_version=row.pipeline_version,
+        status=row.status,
+        force_score=row.force_score,
+        note=row.note,
+        created_at=created_at or row.created_at,
+        updated_at=updated_at or row.updated_at,
+    )
+
+
+def _progress_point_from_row(row: Any) -> ProgressPoint:
+    created_at = _parse_log_timestamp(row.created_at) if isinstance(row.created_at, str) else _coerce_utc_datetime(row.created_at)
+    summary = str(row.note or "").strip() or "暂无训练备注。"
+    return ProgressPoint(
+        id=row.id,
+        created_at=created_at or row.created_at,
+        action_type=row.action_type,
+        force_score=int(row.force_score or 0),
+        summary=summary,
+    )
+
+
 def _build_issue_map(report: dict[str, object] | None) -> dict[str, dict[str, str]]:
     issues = report.get("issues", []) if isinstance(report, dict) else []
     issue_map: dict[str, dict[str, str]] = {}
@@ -7566,6 +7604,7 @@ async def _build_ai_compare_narrative(
     summary: CompareSummary,
     quality: CompareQualityPayload,
     local_only: bool = False,
+    video_ai_json: dict[str, Any] | None = None,
 ) -> str:
     fallback = _fallback_compare_narrative(
         analysis_a=analysis_a,
@@ -7587,6 +7626,7 @@ async def _build_ai_compare_narrative(
             "metrics": [item.model_dump() for item in metric_deltas],
             "summary": summary.model_dump(),
             "quality": quality.model_dump(),
+            "video_ai": _compact_video_ai_for_narrative(video_ai_json),
         }
         raw = await request_text_completion(
             provider,
@@ -7599,7 +7639,8 @@ async def _build_ai_compare_narrative(
                     "role": "user",
                     "content": (
                         "请基于以下结构化差异，写3-5句家长可读的进步解读。"
-                        "不要夸大低质量数据；不要声称重新看过视频；包含一个下一次训练重点。"
+                        "你只会收到 JSON 文本，不能接收或分析视频；video_ai 字段是 vision 槽多模态模型已生成的结构化结果。"
+                        "不要夸大低质量数据；不要声称你自己重新看过视频；包含一个下一次训练重点。"
                         "如果 score_delta 很小或 quality.needs_human_review=true，请把结论写成谨慎观察。\n"
                         f"{json.dumps(payload, ensure_ascii=False)}"
                     ),
@@ -7654,6 +7695,76 @@ def _fallback_plan_after_ai_failure(action_type: str, report: dict[str, Any], sk
     plan_json["generation_status"] = "fallback"
     plan_json["generation_note"] = "AI 训练计划暂不可用，已生成安全兜底计划。可稍后重试个性化生成。"
     return plan_json
+
+
+def _minimal_report_context_for_plan(analysis: Analysis) -> dict[str, Any]:
+    if isinstance(analysis.report, dict):
+        report = dict(analysis.report)
+    else:
+        action_label = " · ".join(
+            item
+            for item in (analysis.action_type, analysis.action_subtype, analysis.skill_category)
+            if isinstance(item, str) and item.strip()
+        )
+        score_text = f"当前评分 {analysis.force_score} 分。" if analysis.force_score is not None else ""
+        note_text = f"训练备注：{analysis.note}" if analysis.note else ""
+        summary = " ".join(item for item in (action_label, score_text, note_text) if item).strip()
+        report = {
+            "summary": summary or f"{analysis.action_type}训练复盘。",
+            "issues": [
+                {
+                    "category": analysis.action_subtype or analysis.skill_category or analysis.action_type,
+                    "description": "结构化报告缺失，请先做低冲击、稳定性和基础节奏训练。",
+                    "severity": "medium",
+                }
+            ],
+            "improvements": [],
+            "training_focus": analysis.action_subtype or analysis.skill_category or f"{analysis.action_type}基础稳定",
+            "data_quality": "partial",
+        }
+
+    if not str(report.get("training_focus") or "").strip():
+        report["training_focus"] = analysis.action_subtype or analysis.skill_category or f"{analysis.action_type}基础稳定"
+    if not str(report.get("summary") or "").strip():
+        report["summary"] = f"{analysis.action_subtype or analysis.action_type}训练复盘。"
+    if not isinstance(report.get("issues"), list):
+        report["issues"] = []
+    if analysis.note and not report.get("user_note"):
+        report["user_note"] = analysis.note
+    return report
+
+
+def _fallback_extended_plan_after_ai_failure(
+    *,
+    original_plan: dict[str, Any],
+    completed_days: list[int],
+    action_type: str,
+    report: dict[str, Any],
+    skater_context: str | None,
+) -> dict[str, Any]:
+    fallback = build_fallback_plan(action_type, report, skater_context)
+    original_days = original_plan.get("days", []) if isinstance(original_plan, dict) else []
+    original_by_day = {
+        int(day.get("day", 0)): day
+        for day in original_days
+        if isinstance(day, dict) and int(day.get("day", 0) or 0)
+    }
+    completed_day_set = set(completed_days)
+    days: list[dict[str, Any]] = []
+    for fallback_day in fallback.get("days", []):
+        if not isinstance(fallback_day, dict):
+            continue
+        day_number = int(fallback_day.get("day", 0) or 0)
+        days.append(original_by_day.get(day_number) if day_number in completed_day_set and day_number in original_by_day else fallback_day)
+
+    return {
+        "title": str(original_plan.get("title") or fallback.get("title") or "7天亲子滑冰小练习").strip(),
+        "focus_skill": str(original_plan.get("focus_skill") or fallback.get("focus_skill") or report.get("training_focus") or action_type).strip(),
+        "days": days,
+        "generation_source": "fallback",
+        "generation_status": "fallback",
+        "generation_note": "AI 训练计划续期暂不可用，已保留已完成内容并生成安全兜底续期。",
+    }
 
 
 def _skater_context(skater: Skater) -> str:
@@ -7767,8 +7878,21 @@ async def upload_analysis(
         retry_from_stage=None,
         target_lock_status="pending",
     )
-    session.add(analysis)
-    await session.commit()
+    async def _create_analysis_record() -> None:
+        session.add(analysis)
+        await session.commit()
+
+    try:
+        await run_db_write_with_retry(
+            _create_analysis_record,
+            context=f"upload_analysis_create:{analysis_id}",
+            attempts=5,
+            base_delay_seconds=0.3,
+        )
+    except Exception:
+        await session.rollback()
+        video_path.unlink(missing_ok=True)
+        raise
 
     background_tasks.add_task(process_analysis, analysis_id)
     return AnalysisUploadResponse(id=analysis_id, status="pending")
@@ -7813,57 +7937,50 @@ async def list_analyses(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnalysisListItem]:
-    query = (
-        select(Analysis)
-        .options(
-            load_only(
-                Analysis.id,
-                Analysis.skater_id,
-                Analysis.session_id,
-                Analysis.skill_category,
-                Analysis.action_type,
-                Analysis.action_subtype,
-                Analysis.analysis_profile,
-                Analysis.pipeline_version,
-                Analysis.status,
-                Analysis.force_score,
-                Analysis.note,
-                Analysis.created_at,
-                Analysis.updated_at,
-                Analysis.retry_from_stage,
-                Analysis.processing_logs,
-            )
-        )
-        .order_by(Analysis.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    where_clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit, "offset": offset}
     if action_type:
-        query = query.where(Analysis.action_type == action_type)
+        where_clauses.append("ali.action_type = :action_type")
+        params["action_type"] = action_type
     if skater_id:
-        query = query.where(Analysis.skater_id == skater_id)
+        where_clauses.append("ali.skater_id = :skater_id")
+        params["skater_id"] = skater_id
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.skater_id,
+            ali.session_id,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.analysis_profile,
+            ali.pipeline_version,
+            ali.status,
+            ali.force_score,
+            ali.note,
+            ali.created_at,
+            ali.updated_at,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name
+        FROM analysis_list_items AS ali
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
+        {where_sql}
+        ORDER BY ali.created_at DESC
+        LIMIT :limit OFFSET :offset
+        """
+    )
 
     result = await run_db_read_with_retry(
-        lambda: session.execute(query),
+        lambda: session.execute(query, params),
         context="list_analyses",
     )
-    analyses = await _recover_stale_analyses(session, list(result.scalars().all()))
-    skater_map = await _get_skater_map(session, {analysis.skater_id for analysis in analyses if analysis.skater_id})
-    return [
-        _list_item_from_analysis(
-            analysis,
-            _skater_display_name(skater_map[analysis.skater_id]) if analysis.skater_id in skater_map else None,
-        )
-        for analysis in analyses
-    ]
+    return [_list_item_from_row(row) for row in result.all()]
 
 
-@router.get("/compare", response_model=AnalysisCompareResponse)
-async def compare_analyses(
-    id_a: str = Query(...),
-    id_b: str = Query(...),
-    session: AsyncSession = Depends(get_session),
-) -> AnalysisCompareResponse:
+async def _load_compare_pair(session: AsyncSession, id_a: str, id_b: str) -> tuple[Analysis, Analysis]:
     analysis_a = await session.get(Analysis, id_a)
     analysis_b = await session.get(Analysis, id_b)
 
@@ -7875,6 +7992,63 @@ async def compare_analyses(
         raise HTTPException(status_code=400, detail="只能比较同一位小朋友的训练记录。")
     if analysis_a.action_type != analysis_b.action_type:
         raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
+    return _ordered_compare_pair(analysis_a, analysis_b)
+
+
+def _compact_video_ai_side_for_narrative(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "valid": payload.get("valid"),
+        "provider": payload.get("provider"),
+        "model": payload.get("model"),
+        "confidence": payload.get("confidence"),
+        "data_quality_hint": payload.get("data_quality_hint"),
+        "overall_impression": str(payload.get("overall_impression") or "")[:500],
+        "macro_assessment": payload.get("macro_assessment") if isinstance(payload.get("macro_assessment"), dict) else None,
+        "action_confirmation": payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else None,
+        "quality_flags": payload.get("quality_flags") if isinstance(payload.get("quality_flags"), list) else [],
+        "fallback_reason": payload.get("fallback_reason"),
+        "fallback_recommendation": payload.get("fallback_recommendation"),
+    }
+
+
+def _compact_video_ai_for_narrative(video_ai_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    return {
+        "status": video_ai_json.get("status"),
+        "provider": video_ai_json.get("provider"),
+        "model": video_ai_json.get("model"),
+        "before": _compact_video_ai_side_for_narrative(video_ai_json.get("before") if isinstance(video_ai_json.get("before"), dict) else None),
+        "after": _compact_video_ai_side_for_narrative(video_ai_json.get("after") if isinstance(video_ai_json.get("after"), dict) else None),
+    }
+
+
+def _append_video_ai_quality_warning(quality: CompareQualityPayload, video_ai_json: dict[str, Any] | None) -> None:
+    if not isinstance(video_ai_json, dict):
+        return
+    provider = str(video_ai_json.get("provider") or "vision").strip()
+    model = str(video_ai_json.get("model") or "").strip()
+    label = f"{provider}/{model}" if model else provider
+    status_value = str(video_ai_json.get("status") or "").strip().lower()
+    if status_value == "completed":
+        quality.warnings.append(f"已使用 vision 槽视频模型 {label} 分别分析两段完整原视频，并结合结构化数据生成结论。")
+        return
+    if status_value == "partial":
+        quality.warnings.append(f"vision 槽视频模型 {label} 只完成了部分全量视频分析，本页结论已降级为视频与数据混合参考。")
+        return
+    if status_value:
+        quality.warnings.append(f"vision 槽视频模型 {label} 未能完成全量视频分析，本页主要基于已保存数据对比。")
+
+
+async def _build_analysis_compare_response(
+    session: AsyncSession,
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    *,
+    video_ai_json: dict[str, Any] | None = None,
+) -> AnalysisCompareResponse:
     analysis_a, analysis_b = _ordered_compare_pair(analysis_a, analysis_b)
 
     skater_map = await _get_skater_map(
@@ -7887,6 +8061,7 @@ async def compare_analyses(
     keyframe_compare = _build_keyframe_compare(analysis_a, analysis_b)
     video_compare = _build_video_compare(analysis_a, analysis_b)
     quality = _build_compare_quality(analysis_a, analysis_b)
+    _append_video_ai_quality_warning(quality, video_ai_json)
     summary = _compare_reports(
         analysis_a.report if isinstance(analysis_a.report, dict) else None,
         analysis_b.report if isinstance(analysis_b.report, dict) else None,
@@ -7911,6 +8086,7 @@ async def compare_analyses(
         summary=summary,
         quality=quality,
         local_only=same_video_core_stable,
+        video_ai_json=video_ai_json,
     )
 
     return AnalysisCompareResponse(
@@ -7933,40 +8109,348 @@ async def compare_analyses(
     )
 
 
+def _comparison_result_from_model(comparison: AnalysisComparison) -> AnalysisCompareResponse | None:
+    if not isinstance(comparison.result_json, dict):
+        return None
+    try:
+        return AnalysisCompareResponse.model_validate(comparison.result_json)
+    except Exception:  # noqa: BLE001
+        logger.warning("Invalid stored comparison result for %s", comparison.id, exc_info=True)
+        return None
+
+
+def _comparison_video_ai_status(video_ai_json: dict[str, Any] | None) -> str | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    status_value = str(video_ai_json.get("status") or "").strip()
+    return status_value or None
+
+
+def _comparison_summary_from_model(
+    comparison: AnalysisComparison,
+    *,
+    analysis_a: Analysis | None = None,
+    analysis_b: Analysis | None = None,
+    skater: Skater | None = None,
+) -> AnalysisComparisonSummary:
+    result = _comparison_result_from_model(comparison)
+    before_created_at = result.analysis_a.created_at if result else (_coerce_utc_datetime(analysis_a.created_at) if analysis_a else None)
+    after_created_at = result.analysis_b.created_at if result else (_coerce_utc_datetime(analysis_b.created_at) if analysis_b else None)
+    before_score = result.analysis_a.force_score if result else (analysis_a.force_score if analysis_a else None)
+    after_score = result.analysis_b.force_score if result else (analysis_b.force_score if analysis_b else None)
+    return AnalysisComparisonSummary(
+        id=comparison.id,
+        analysis_a_id=comparison.analysis_a_id,
+        analysis_b_id=comparison.analysis_b_id,
+        skater_id=comparison.skater_id,
+        skater_name=_skater_display_name(skater) if skater else None,
+        action_type=comparison.action_type,
+        status=comparison.status,
+        score_delta=result.score_delta if result else None,
+        ai_narrative=result.ai_narrative if result else None,
+        error_message=comparison.error_message,
+        video_ai_status=_comparison_video_ai_status(comparison.video_ai_json),
+        before_created_at=before_created_at,
+        after_created_at=after_created_at,
+        before_score=before_score,
+        after_score=after_score,
+        created_at=_coerce_utc_datetime(comparison.created_at) or comparison.created_at,
+        updated_at=_coerce_utc_datetime(comparison.updated_at) or comparison.updated_at,
+    )
+
+
+def _comparison_detail_from_model(
+    comparison: AnalysisComparison,
+    *,
+    analysis_a: Analysis | None = None,
+    analysis_b: Analysis | None = None,
+    skater: Skater | None = None,
+) -> AnalysisComparisonDetail:
+    summary = _comparison_summary_from_model(
+        comparison,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        skater=skater,
+    )
+    return AnalysisComparisonDetail(
+        **summary.model_dump(),
+        result=_comparison_result_from_model(comparison),
+        video_ai_json=comparison.video_ai_json if isinstance(comparison.video_ai_json, dict) else None,
+    )
+
+
+async def _run_full_video_ai_for_compare_side(
+    analysis: Analysis,
+    *,
+    provider: Any,
+) -> dict[str, Any]:
+    video_path = _safe_video_response_path(analysis)
+    if video_path is None:
+        return {
+            "valid": False,
+            "provider": str(getattr(provider, "provider", "unknown")),
+            "model": str(getattr(provider, "model_id", "")),
+            "quality_flags": ["compare_full_video_source_unavailable"],
+            "fallback_reason": "source_video_unavailable",
+            "fallback_recommendation": "use_saved_analysis_data",
+        }
+
+    input_window = _input_window_payload_for_saved_analysis(analysis)
+    source_duration = _to_number(input_window.get("source_duration_sec"))
+    source_fps = _to_number(analysis.source_fps)
+    if source_fps is None:
+        try:
+            source_fps = detect_video_fps(video_path)
+        except Exception:  # noqa: BLE001
+            source_fps = None
+    try:
+        return await analyze_video_temporal(
+            video_path,
+            action_type=analysis.action_type,
+            action_subtype=analysis.action_subtype,
+            user_note=analysis.note,
+            video_duration_sec=source_duration,
+            source_video_duration_sec=source_duration,
+            source_fps=source_fps,
+            analyzed_video_kind="full_source",
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "valid": False,
+            "provider": str(getattr(provider, "provider", "unknown")),
+            "model": str(getattr(provider, "model_id", "")),
+            "quality_flags": ["compare_full_video_ai_failed"],
+            "fallback_reason": "compare_full_video_ai_failed",
+            "fallback_recommendation": "use_saved_analysis_data",
+            "error": str(exc),
+        }
+
+
+async def _run_full_video_ai_for_compare(analysis_a: Analysis, analysis_b: Analysis, session: AsyncSession) -> dict[str, Any]:
+    try:
+        provider = await get_active_provider("vision", session)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "provider": "unknown",
+            "model": None,
+            "error": str(exc),
+            "before": {"valid": False, "quality_flags": ["compare_video_ai_provider_unavailable"]},
+            "after": {"valid": False, "quality_flags": ["compare_video_ai_provider_unavailable"]},
+        }
+
+    before_payload = await _run_full_video_ai_for_compare_side(analysis_a, provider=provider)
+    after_payload = await _run_full_video_ai_for_compare_side(analysis_b, provider=provider)
+    valid_count = sum(1 for payload in (before_payload, after_payload) if isinstance(payload, dict) and payload.get("valid"))
+    status_value = "completed" if valid_count == 2 else "partial" if valid_count == 1 else "failed"
+    return {
+        "status": status_value,
+        "provider": str(getattr(provider, "provider", "")),
+        "model": str(getattr(provider, "model_id", "")),
+        "before_analysis_id": analysis_a.id,
+        "after_analysis_id": analysis_b.id,
+        "before": before_payload,
+        "after": after_payload,
+    }
+
+
+async def process_analysis_comparison(comparison_id: str) -> None:
+    async with AsyncSessionLocal() as session:
+        comparison = await session.get(AnalysisComparison, comparison_id)
+        if comparison is None:
+            return
+        try:
+            comparison.status = "processing"
+            comparison.error_message = None
+            comparison.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            analysis_a, analysis_b = await _load_compare_pair(session, comparison.analysis_a_id, comparison.analysis_b_id)
+            video_ai_json = await _run_full_video_ai_for_compare(analysis_a, analysis_b, session)
+            result = await _build_analysis_compare_response(
+                session,
+                analysis_a,
+                analysis_b,
+                video_ai_json=video_ai_json,
+            )
+
+            comparison.video_ai_json = video_ai_json
+            comparison.result_json = result.model_dump(mode="json")
+            comparison.status = "completed"
+            comparison.error_message = None
+            comparison.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+        except HTTPException as exc:
+            await session.rollback()
+            comparison = await session.get(AnalysisComparison, comparison_id)
+            if comparison is not None:
+                comparison.status = "failed"
+                comparison.error_message = str(exc.detail)
+                comparison.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Comparison %s failed", comparison_id, exc_info=True)
+            await session.rollback()
+            comparison = await session.get(AnalysisComparison, comparison_id)
+            if comparison is not None:
+                comparison.status = "failed"
+                comparison.error_message = str(exc)
+                comparison.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
+@router.post("/comparisons", response_model=AnalysisComparisonDetail)
+async def create_analysis_comparison(
+    payload: AnalysisComparisonCreateRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    analysis_a, analysis_b = await _load_compare_pair(session, payload.id_a, payload.id_b)
+    comparison = AnalysisComparison(
+        analysis_a_id=analysis_a.id,
+        analysis_b_id=analysis_b.id,
+        skater_id=analysis_b.skater_id,
+        action_type=analysis_b.action_type,
+        status="pending",
+    )
+    session.add(comparison)
+    await session.commit()
+    await session.refresh(comparison)
+
+    background_tasks.add_task(process_analysis_comparison, comparison.id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.get("/comparisons", response_model=list[AnalysisComparisonSummary])
+async def list_analysis_comparisons(
+    skater_id: str | None = Query(default=None),
+    action_type: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=24, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisComparisonSummary]:
+    query = select(AnalysisComparison).order_by(AnalysisComparison.created_at.desc()).offset(offset).limit(limit)
+    if skater_id:
+        query = query.where(AnalysisComparison.skater_id == skater_id)
+    if action_type:
+        query = query.where(AnalysisComparison.action_type == action_type)
+    if status_filter:
+        query = query.where(AnalysisComparison.status == status_filter)
+    result = await session.execute(query)
+    comparisons = list(result.scalars().all())
+    analysis_ids = {comparison.analysis_a_id for comparison in comparisons} | {comparison.analysis_b_id for comparison in comparisons}
+    skater_ids = {comparison.skater_id for comparison in comparisons if comparison.skater_id}
+    analyses: dict[str, Analysis] = {}
+    if analysis_ids:
+        analysis_result = await session.execute(select(Analysis).where(Analysis.id.in_(analysis_ids)))
+        analyses = {analysis.id: analysis for analysis in analysis_result.scalars().all()}
+    skater_map = await _get_skater_map(session, skater_ids)
+    return [
+        _comparison_summary_from_model(
+            comparison,
+            analysis_a=analyses.get(comparison.analysis_a_id),
+            analysis_b=analyses.get(comparison.analysis_b_id),
+            skater=skater_map.get(comparison.skater_id or ""),
+        )
+        for comparison in comparisons
+    ]
+
+
+@router.get("/comparisons/{comparison_id}", response_model=AnalysisComparisonDetail)
+async def get_analysis_comparison(
+    comparison_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    comparison = await session.get(AnalysisComparison, comparison_id)
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="未找到该对比记录。")
+    analysis_a = await session.get(Analysis, comparison.analysis_a_id)
+    analysis_b = await session.get(Analysis, comparison.analysis_b_id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.post("/comparisons/{comparison_id}/retry", response_model=AnalysisComparisonDetail)
+async def retry_analysis_comparison(
+    comparison_id: str,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    comparison = await session.get(AnalysisComparison, comparison_id)
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="未找到该对比记录。")
+    if comparison.status in {"pending", "processing"}:
+        raise HTTPException(status_code=400, detail="当前对比仍在生成中，请稍后查看。")
+    comparison.status = "pending"
+    comparison.error_message = None
+    comparison.video_ai_json = None
+    comparison.result_json = None
+    comparison.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(comparison)
+    background_tasks.add_task(process_analysis_comparison, comparison.id)
+    analysis_a = await session.get(Analysis, comparison.analysis_a_id)
+    analysis_b = await session.get(Analysis, comparison.analysis_b_id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.get("/compare", response_model=AnalysisCompareResponse)
+async def compare_analyses(
+    id_a: str = Query(...),
+    id_b: str = Query(...),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCompareResponse:
+    analysis_a, analysis_b = await _load_compare_pair(session, id_a, id_b)
+    return await _build_analysis_compare_response(session, analysis_a, analysis_b)
+
+
 @router.get("/progress", response_model=ProgressResponse)
 async def get_progress(
     action_type: str | None = Query(default=None),
     skater_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
     session: AsyncSession = Depends(get_session),
 ) -> ProgressResponse:
-    query = (
-        select(Analysis)
-        .where(Analysis.status == "completed", Analysis.force_score.is_not(None))
-        .order_by(Analysis.created_at.asc())
-    )
+    where_clauses = ["status = 'completed'", "force_score IS NOT NULL"]
+    params: dict[str, object] = {}
     if action_type:
-        query = query.where(Analysis.action_type == action_type)
+        where_clauses.append("action_type = :action_type")
+        params["action_type"] = action_type
     if skater_id:
-        query = query.where(Analysis.skater_id == skater_id)
+        where_clauses.append("skater_id = :skater_id")
+        params["skater_id"] = skater_id
 
-    result = await session.execute(query)
-    analyses = list(result.scalars().all())
+    query = text(
+        f"""
+        SELECT
+            analysis_id AS id,
+            created_at,
+            action_type,
+            force_score,
+            note
+        FROM analysis_list_items
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY created_at DESC
+        LIMIT :limit
+        """
+    )
+    params["limit"] = limit
 
-    points = [
-        ProgressPoint(
-            id=analysis.id,
-            created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
-            action_type=analysis.action_type,
-            force_score=analysis.force_score or 0,
-            summary=_report_summary(analysis),
-        )
-        for analysis in analyses
-    ]
-    recent_scores = [analysis.force_score or 0 for analysis in analyses[-5:]]
+    result = await run_db_read_with_retry(
+        lambda: session.execute(query, params),
+        context="progress:list",
+    )
+    points = list(reversed([_progress_point_from_row(row) for row in result.all()]))
+    scores = [point.force_score for point in points]
+    recent_scores = scores[-5:]
     stats = ProgressStats(
-        total_count=len(analyses),
-        latest_score=analyses[-1].force_score if analyses else None,
-        best_score=max((analysis.force_score or 0 for analysis in analyses), default=None),
+        total_count=len(points),
+        latest_score=scores[-1] if scores else None,
+        best_score=max(scores, default=None),
         recent_five_average=round(mean(recent_scores), 1) if recent_scores else None,
     )
     return ProgressResponse(points=points, stats=stats)
@@ -8006,8 +8490,7 @@ async def create_training_plan(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
-    if not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="当前分析缺少结构化报告，无法生成训练计划。")
+    report_context = _minimal_report_context_for_plan(analysis)
 
     existing_plan = await _get_plan_by_analysis(session, analysis_id)
     if existing_plan is not None and not force:
@@ -8023,7 +8506,7 @@ async def create_training_plan(
     try:
         plan_json = await generate_training_plan(
             analysis.action_type,
-            analysis.report,
+            report_context,
             _skater_context(skater),
             skater.id,
             variation_key=f"{analysis.id}:{datetime.now(timezone.utc).isoformat()}",
@@ -8032,7 +8515,7 @@ async def create_training_plan(
         logger.warning("Analysis %s training plan AI failed, using fallback plan: %s", analysis_id, exc)
         if existing_plan is not None and _plan_generation_source(existing_plan.plan_json) == "ai":
             return _plan_detail_from_model(existing_plan)
-        plan_json = _fallback_plan_after_ai_failure(analysis.action_type, analysis.report, _skater_context(skater))
+        plan_json = _fallback_plan_after_ai_failure(analysis.action_type, report_context, _skater_context(skater))
 
     if existing_plan is not None:
         existing_plan.plan_json = plan_json
@@ -8724,10 +9207,11 @@ async def extend_plan(
         raise HTTPException(status_code=404, detail="未找到该训练计划。")
 
     analysis = await session.get(Analysis, plan.analysis_id)
-    if analysis is None or not isinstance(analysis.report, dict):
+    if analysis is None:
         raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
 
     skater = await session.get(Skater, plan.skater_id)
+    report_context = _minimal_report_context_for_plan(analysis)
     completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
     if len(completed_days) < 3:
         raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
@@ -8737,12 +9221,19 @@ async def extend_plan(
             original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
             completed_days=completed_days,
             action_type=analysis.action_type,
-            report=analysis.report,
+            report=report_context,
             skater_context=_skater_context(skater) if skater else None,
             skater_id=skater.id if skater else None,
         )
     except PlanGenerationError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.warning("Training plan %s extension AI failed, using fallback extension: %s", plan_id, exc)
+        plan.plan_json = _fallback_extended_plan_after_ai_failure(
+            original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
+            completed_days=completed_days,
+            action_type=analysis.action_type,
+            report=report_context,
+            skater_context=_skater_context(skater) if skater else None,
+        )
 
     await session.commit()
     await session.refresh(plan)

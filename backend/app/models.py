@@ -84,6 +84,26 @@ class Analysis(Base):
     session: Mapped["TrainingSession | None"] = relationship("TrainingSession", back_populates="analyses")
 
 
+class AnalysisComparison(Base):
+    __tablename__ = "analysis_comparisons"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    analysis_a_id: Mapped[str] = mapped_column(String(36), ForeignKey("analyses.id"), index=True)
+    analysis_b_id: Mapped[str] = mapped_column(String(36), ForeignKey("analyses.id"), index=True)
+    skater_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    action_type: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    video_ai_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class AnalysisChatMessage(Base):
     __tablename__ = "analysis_chat_messages"
 

@@ -2,7 +2,17 @@ import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import { AnalysisListItem, deleteAnalysis, fetchAnalyses, fetchSkaters, retryAnalysis, Skater } from "../api/client";
+import {
+  AnalysisComparisonSummary,
+  AnalysisListItem,
+  createAnalysisComparison,
+  deleteAnalysis,
+  fetchAnalyses,
+  fetchAnalysisComparisons,
+  fetchSkaters,
+  retryAnalysis,
+  Skater,
+} from "../api/client";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import { useAppMode } from "../components/AppModeContext";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
@@ -13,6 +23,8 @@ import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkater
 import { parseApiDate } from "../utils/datetime";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
+const HISTORY_PAGE_SIZE = 24;
+type HistoryTab = "records" | "comparisons";
 
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -59,6 +71,29 @@ function statusTone(status: AnalysisListItem["status"]) {
   return "bg-blue-50 text-blue-500";
 }
 
+function comparisonStatusLabel(status: AnalysisComparisonSummary["status"]) {
+  if (status === "completed") {
+    return "已完成";
+  }
+  if (status === "failed") {
+    return "失败";
+  }
+  if (status === "processing") {
+    return "生成中";
+  }
+  return "排队中";
+}
+
+function comparisonStatusTone(status: AnalysisComparisonSummary["status"]) {
+  if (status === "completed") {
+    return "bg-emerald-50 text-emerald-600";
+  }
+  if (status === "failed") {
+    return "bg-rose-50 text-rose-500";
+  }
+  return "bg-blue-50 text-blue-600";
+}
+
 const actionIconClassName =
   "list-row-action inline-flex shrink-0 rounded-full border text-[20px] leading-none transition disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -66,8 +101,10 @@ export default function HistoryPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { isParentMode, pinLength, childView } = useAppMode();
+  const [activeTab, setActiveTab] = useState<HistoryTab>("records");
   const [activeFilter, setActiveFilter] = useState<(typeof FILTER_OPTIONS)[number]>("全部");
   const [records, setRecords] = useState<AnalysisListItem[]>([]);
+  const [comparisons, setComparisons] = useState<AnalysisComparisonSummary[]>([]);
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -82,6 +119,10 @@ export default function HistoryPage() {
   const [pinRetryRecordId, setPinRetryRecordId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMoreRecords, setHasMoreRecords] = useState(false);
+  const [isLoadingComparisons, setIsLoadingComparisons] = useState(false);
+  const [isCreatingComparison, setIsCreatingComparison] = useState(false);
   const [isSkaterContextReady, setIsSkaterContextReady] = useState(false);
   const focusedSkaterId = (location.state as { skaterId?: string } | null)?.skaterId ?? "";
 
@@ -134,6 +175,14 @@ export default function HistoryPage() {
   const emptyStateName = currentSkater?.display_name || currentSkater?.name || childViewLabel(childView);
   const emptyStateSkaterId = currentSkaterId || focusedSkaterId || "";
 
+  const analysisQueryParams = useMemo(
+    () => ({
+      ...(activeFilter === "全部" ? {} : { action_type: activeFilter }),
+      ...(currentSkaterId ? { skater_id: currentSkaterId } : {}),
+    }),
+    [activeFilter, currentSkaterId],
+  );
+
   useEffect(() => {
     if (!isParentMode && !currentSkaterId && !isSkaterContextReady) {
       return;
@@ -144,19 +193,22 @@ export default function HistoryPage() {
     const load = async () => {
       setIsLoading(true);
       try {
-        const params = {
-          ...(activeFilter === "全部" ? {} : { action_type: activeFilter }),
-          ...(currentSkaterId ? { skater_id: currentSkaterId } : {}),
-        };
-        const data = await fetchAnalyses(Object.keys(params).length ? params : undefined);
+        const data = await fetchAnalyses({
+          ...analysisQueryParams,
+          limit: HISTORY_PAGE_SIZE + 1,
+          offset: 0,
+        });
         if (!cancelled) {
-          setRecords(data);
+          const visibleRecords = data.slice(0, HISTORY_PAGE_SIZE);
+          setRecords(visibleRecords);
+          setHasMoreRecords(data.length > HISTORY_PAGE_SIZE);
           setError((current) => (current === "练习档案加载失败，请稍后刷新。" ? current : null));
-          setSelectedIds((current) => current.filter((id) => data.some((record) => record.id === id)));
+          setSelectedIds((current) => current.filter((id) => visibleRecords.some((record) => record.id === id)));
         }
       } catch {
         if (!cancelled) {
           setError("历史记录加载失败，请稍后刷新。");
+          setHasMoreRecords(false);
         }
       } finally {
         if (!cancelled) {
@@ -166,6 +218,42 @@ export default function HistoryPage() {
     };
 
     void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [analysisQueryParams, currentSkaterId, isParentMode, isSkaterContextReady]);
+
+  useEffect(() => {
+    if (!isParentMode && !currentSkaterId && !isSkaterContextReady) {
+      return;
+    }
+
+    let cancelled = false;
+    const loadComparisons = async () => {
+      setIsLoadingComparisons(true);
+      try {
+        const data = await fetchAnalysisComparisons({
+          ...(activeFilter === "全部" ? {} : { action_type: activeFilter }),
+          ...(currentSkaterId ? { skater_id: currentSkaterId } : {}),
+          limit: HISTORY_PAGE_SIZE,
+          offset: 0,
+        });
+        if (!cancelled) {
+          setComparisons(data);
+          setError((current) => (current === "对比结果加载失败，请稍后刷新。" ? null : current));
+        }
+      } catch {
+        if (!cancelled) {
+          setError("对比结果加载失败，请稍后刷新。");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingComparisons(false);
+        }
+      }
+    };
+
+    void loadComparisons();
     return () => {
       cancelled = true;
     };
@@ -312,6 +400,53 @@ export default function HistoryPage() {
     });
   };
 
+  const handleLoadMore = async () => {
+    if (isLoading || isLoadingMore || !hasMoreRecords) {
+      return;
+    }
+
+    setIsLoadingMore(true);
+    setError(null);
+    try {
+      const data = await fetchAnalyses({
+        ...analysisQueryParams,
+        limit: HISTORY_PAGE_SIZE + 1,
+        offset: records.length,
+      });
+      const nextRecords = data.slice(0, HISTORY_PAGE_SIZE);
+      setRecords((current) => {
+        const existingIds = new Set(current.map((record) => record.id));
+        return [...current, ...nextRecords.filter((record) => !existingIds.has(record.id))];
+      });
+      setHasMoreRecords(data.length > HISTORY_PAGE_SIZE);
+    } catch {
+      setError("更多历史记录加载失败，请稍后重试。");
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
+  const handleStartComparison = async () => {
+    if (selectedRecords.length !== 2 || isCreatingComparison) {
+      return;
+    }
+    setIsCreatingComparison(true);
+    setError(null);
+    try {
+      const comparison = await createAnalysisComparison(selectedRecords[0].id, selectedRecords[1].id);
+      setSelectedIds([]);
+      navigate(`/compare/results/${comparison.id}`);
+    } catch (requestError) {
+      if (axios.isAxiosError(requestError)) {
+        setError(String(requestError.response?.data?.detail ?? "对比任务创建失败，请稍后重试。"));
+      } else {
+        setError("对比任务创建失败，请稍后重试。");
+      }
+    } finally {
+      setIsCreatingComparison(false);
+    }
+  };
+
   return (
     <div className="min-w-0 space-y-6 overflow-x-hidden">
       <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-8">
@@ -350,6 +485,26 @@ export default function HistoryPage() {
         </div>
       </section>
 
+      <section className="app-card p-2">
+        <div className="flex rounded-[24px] bg-slate-100 p-1">
+          {[
+            { id: "records" as const, label: "分析记录" },
+            { id: "comparisons" as const, label: "对比结果" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`min-h-[44px] flex-1 rounded-[20px] px-4 text-sm font-semibold transition ${
+                activeTab === tab.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </section>
+
       {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
 
@@ -357,12 +512,69 @@ export default function HistoryPage() {
         <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Records</p>
-            <h2 className="mt-2 text-2xl font-semibold text-slate-900">历史记录</h2>
+            <h2 className="mt-2 text-2xl font-semibold text-slate-900">{activeTab === "records" ? "历史记录" : "对比结果"}</h2>
           </div>
-          <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">{records.length} 条</span>
+          <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-500">
+            已加载 {activeTab === "records" ? records.length : comparisons.length} 条
+          </span>
         </div>
 
-        {isLoading ? (
+        {activeTab === "comparisons" ? (
+          isLoadingComparisons ? (
+            <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载对比结果…</div>
+          ) : comparisons.length ? (
+            <div className="mt-6 space-y-4">
+              {comparisons.map((comparison) => (
+                <article
+                  key={comparison.id}
+                  className="list-row min-w-0 max-w-full rounded-[24px] border border-slate-200 bg-white p-3 transition hover:bg-slate-50 phone:rounded-[28px] phone:p-5"
+                >
+                  <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
+                    <div className="min-w-0 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{comparison.action_type}</span>
+                        <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${comparisonStatusTone(comparison.status)}`}>
+                          {comparisonStatusLabel(comparison.status)}
+                        </span>
+                        {comparison.score_delta != null ? (
+                          <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${comparison.score_delta >= 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
+                            评分 {comparison.score_delta >= 0 ? "+" : ""}
+                            {comparison.score_delta}
+                          </span>
+                        ) : null}
+                        {comparison.video_ai_status ? (
+                          <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">Video AI {comparison.video_ai_status}</span>
+                        ) : null}
+                      </div>
+
+                      <div className="text-sm text-slate-400">
+                        <span>{formatDate(comparison.created_at)}</span>
+                        {comparison.skater_name ? <span className="ml-3">练习档案：{comparison.skater_name}</span> : null}
+                      </div>
+
+                      <p className="max-w-3xl whitespace-normal break-words leading-7 text-slate-600">
+                        {comparison.ai_narrative || comparison.error_message || "对比任务已保存，结果生成后会显示完整复盘。"}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap gap-3 tablet:justify-end">
+                      <Link
+                        to={`/compare/results/${comparison.id}`}
+                        className="rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
+                      >
+                        {comparison.status === "completed" ? "查看对比" : comparison.status === "failed" ? "查看/重试" : "查看进度"}
+                      </Link>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm leading-7 text-slate-500">
+              当前筛选下还没有对比结果。回到分析记录，选择两条 completed 记录即可创建后台对比。
+            </div>
+          )
+        ) : isLoading ? (
           <div className="mt-6 rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载历史记录…</div>
         ) : records.length ? (
           <div className="mt-6 space-y-4">
@@ -490,6 +702,16 @@ export default function HistoryPage() {
                 </article>
               );
             })}
+            {hasMoreRecords ? (
+              <button
+                type="button"
+                onClick={() => void handleLoadMore()}
+                disabled={isLoadingMore}
+                className="min-h-[44px] w-full rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isLoadingMore ? "正在加载更多..." : "加载更多历史记录"}
+              </button>
+            ) : null}
           </div>
         ) : (
           <div className="mt-6 flex flex-col items-center rounded-[28px] bg-slate-50 px-6 py-10 text-center">
@@ -522,10 +744,10 @@ export default function HistoryPage() {
             <button
               type="button"
               disabled={selectedRecords.length !== 2}
-              onClick={() => navigate(`/compare/${selectedRecords[0].id}/${selectedRecords[1].id}`)}
+              onClick={() => void handleStartComparison()}
               className="rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              开始对比
+              {isCreatingComparison ? "正在创建…" : "开始对比"}
             </button>
           </div>
         </div>

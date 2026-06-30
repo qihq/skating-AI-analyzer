@@ -653,6 +653,31 @@ export interface AnalysisCompareResponse {
   ai_narrative: string | null;
 }
 
+export interface AnalysisComparisonSummary {
+  id: string;
+  analysis_a_id: string;
+  analysis_b_id: string;
+  skater_id: string | null;
+  skater_name: string | null;
+  action_type: string;
+  status: "pending" | "processing" | "completed" | "failed" | string;
+  score_delta: number | null;
+  ai_narrative: string | null;
+  error_message: string | null;
+  video_ai_status: string | null;
+  before_created_at: string | null;
+  after_created_at: string | null;
+  before_score: number | null;
+  after_score: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnalysisComparisonDetail extends AnalysisComparisonSummary {
+  result: AnalysisCompareResponse | null;
+  video_ai_json: Record<string, unknown> | null;
+}
+
 export interface ProgressPoint {
   id: string;
   created_at: string;
@@ -1046,6 +1071,37 @@ export async function fetchAnalysisCompare(idA: string, idB: string) {
   const response = await apiClient.get<AnalysisCompareResponse>("/analysis/compare", {
     params: { id_a: idA, id_b: idB, _ts: Date.now() },
   });
+  return response.data;
+}
+
+export async function createAnalysisComparison(idA: string, idB: string) {
+  const response = await apiClient.post<AnalysisComparisonDetail>("/analysis/comparisons", {
+    id_a: idA,
+    id_b: idB,
+  });
+  return response.data;
+}
+
+export async function fetchAnalysisComparisons(params?: {
+  skater_id?: string;
+  action_type?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const response = await apiClient.get<AnalysisComparisonSummary[]>("/analysis/comparisons", { params });
+  return response.data;
+}
+
+export async function fetchAnalysisComparison(id: string) {
+  const response = await apiClient.get<AnalysisComparisonDetail>(`/analysis/comparisons/${id}`, {
+    params: { _ts: Date.now() },
+  });
+  return response.data;
+}
+
+export async function retryAnalysisComparison(id: string) {
+  const response = await apiClient.post<AnalysisComparisonDetail>(`/analysis/comparisons/${id}/retry`);
   return response.data;
 }
 

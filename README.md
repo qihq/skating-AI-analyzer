@@ -8,12 +8,20 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.306`.
+The current pipeline version is `v5.2.307`.
 
 ## Recent Updates
 
-Current branch updates improve follow-up keyframe review, parent review workflow, and local all-in-one responsiveness:
+Current branch updates add a persisted comparison workbench, separate video-capable AI from text-only report AI, and harden training plan generation:
 
+- Comparison generation now starts as a background task and immediately saves an `analysis_comparisons` record with pending, processing, completed, and failed states.
+- The comparison workbench sends the two full source videos only to the active `vision` provider. When `vision=mimo`, it uses the currently active vision model, such as `mimo-v2.5`; when `vision=qwen`, it uses the configured Qwen video model instead of a hidden hard-coded default.
+- The `report` provider now receives only structured comparison JSON and writes the parent-readable summary from text data. It is not asked to process videos or use multimodal features.
+- Comparison results fuse video AI output with saved scores, reports, biomechanics, keyframes, and synchronized playback metadata before generating the final structured result.
+- History now has separate tabs for analysis records and comparison results, with comparison detail, polling, failed-state retry, and status-aware entry points.
+- The comparison page now has the same share flow as regular analysis: generated share image preview, copy image, download, and system share where supported.
+- Synchronized comparison playback waits for both video metadata tracks, seeks both sides together, plays/pauses both sides together, and keeps one side's pause event from incorrectly flipping the shared playback state.
+- Training plan creation and renewal now return safe fallback plans when AI fails, JSON is incomplete, a report has an unexpected structure, or only minimal action context is available.
 - Follow-up chat now detects requests to re-identify keyframes with video AI only, or users can click "Video AI re-identify keyframes"; this reruns full-source video keyframe localization and creates a proposed keyframes correction card without resetting target lock, rerunning pose/biomechanics/Path A/B, auto-applying data, or overwriting reports.
 - Follow-up chat still distinguishes full-video reanalysis requests and offers an explicit confirmation that resets the target lock before rerunning the full pipeline.
 - Analysis retry calls can request `reset_target_lock=true`, so archive/history retries and chat-triggered full reanalysis start again from target selection instead of reusing a stale skater lock.
@@ -33,6 +41,7 @@ Current branch updates improve follow-up keyframe review, parent review workflow
 
 The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
 
+- `v5.2.307`: comparison generation is persisted in `analysis_comparisons` background tasks; full source videos go only through the active `vision` model while the `report` provider summarizes structured JSON text; comparison result history, retry, sharing, synchronized playback, and training-plan fallbacks were hardened.
 - `v5.2.306`: follow-up chat detects multiple questions in user notes and answers each explicitly with what can/cannot be confirmed; training plan generation uses child-safe low-impact prompts with strict JSON schema and `generation_status`; report user-note response parses questions from upload notes into per-question Q&A; KeyframeEvidencePanel logic extracted to `keyframeEvidence.ts` utility with responsive layout; archive page adds aggregate `fetchArchiveSummary` API for parent mode, clickable calendar day detail modal, and jump-to-latest-month navigation; backfill frame tests added.
 - `v5.2.305`: follow-up can run a video-AI-only full-source keyframe rerun that produces a proposed keyframes correction card; it does not reset target lock, rerun pose/biomechanics/visual reports, auto-apply data, or overwrite reports.
 - `v5.2.304`: follow-up chat can queue full-video reanalysis with target-lock reset, retry confirmations explain when the skater lock will be rebuilt, and report/chat share images resize for long text while exporting compressed JPEGs.
@@ -62,6 +71,7 @@ The latest release makes review upload less brittle when the exact element name 
 - Semantic keyframe extraction with timestamp arbitration across video AI, motion density, and skeleton candidates.
 - Dual-path vision analysis with video-aware context, provider fallback, malformed-JSON recovery, retry handling, and cost limits.
 - AI-assisted reports, training plans, skill tree, archive, progress tracking, child mode, and parent mode, with Path B-grounded fallback issues and action-specific drills.
+- Background comparison workbench with persisted comparison history, full-source video AI comparison through the `vision` slot, text-only parent summaries through the `report` slot, synchronized playback, retry, and share-image export.
 - Persisted AI follow-up for completed videos, with evidence-grounded answers, manual/AI-suggested correction cards, video-AI-only keyframe rerun cards, explicit apply/dismiss actions, and report regeneration from applied corrections.
 - Standalone `/analysis-chat` workspace for selecting any completed analysis, reviewing effective recognition/keyframes, checking partial semantic candidates, applying corrections, and sharing text/image recap content.
 - Responsive archive and report workspaces: paginated archive list with calendar tab, compact report summary, and advanced report workspace tabs for pose, evidence, diagnostics, and follow-up.

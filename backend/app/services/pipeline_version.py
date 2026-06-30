@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.305"
+CURRENT_PIPELINE_VERSION = "v5.2.307"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -21,6 +21,8 @@ CURRENT_PIPELINE_VERSION = "v5.2.305"
 # v5.2.303: Allow review uploads with only a broad action category and pass user comments into video-temporal action recognition.
 # v5.2.304: Let follow-up chat queue full-video reanalysis with target-lock reset and make report/chat share images adapt to long text.
 # v5.2.305: Add follow-up video-AI-only full-source keyframe rerun cards without resetting target lock or overwriting reports.
+# v5.2.306: Answer multiple user-note questions, harden child-safe training-plan JSON, and add responsive archive summary day details.
+# v5.2.307: Persist background analysis comparisons, split vision/report AI roles, add comparison sharing, and harden plan fallbacks.
 # v5.2.301: Treat manual target selection as identity-authoritative by blocking automatic support-anchor recovery and blanking those poses.
 # v5.2.300: Harden manual target locks by rejecting no-overlap initial target binding and same-ID recovery drift instead of switching skeleton identity.
 # v5.2.299: Blank semantic Path B skeleton annotations under manual target lock so auxiliary vision prompts cannot inherit wrong-person pose.

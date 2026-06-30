@@ -382,6 +382,38 @@ class AnalysisCompareResponse(BaseModel):
     ai_narrative: str | None = None
 
 
+class AnalysisComparisonCreateRequest(BaseModel):
+    id_a: str
+    id_b: str
+
+
+class AnalysisComparisonSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_a_id: str
+    analysis_b_id: str
+    skater_id: str | None = None
+    skater_name: str | None = None
+    action_type: str
+    status: str
+    score_delta: int | None = None
+    ai_narrative: str | None = None
+    error_message: str | None = None
+    video_ai_status: str | None = None
+    before_created_at: datetime | None = None
+    after_created_at: datetime | None = None
+    before_score: int | None = None
+    after_score: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisComparisonDetail(AnalysisComparisonSummary):
+    result: AnalysisCompareResponse | None = None
+    video_ai_json: dict[str, Any] | None = None
+
+
 class TrainingPlanSession(BaseModel):
     id: str
     title: str

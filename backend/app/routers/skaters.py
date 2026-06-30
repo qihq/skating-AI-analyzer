@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Load
 
@@ -98,6 +98,34 @@ def archive_timeline_entry(
     )
 
 
+def archive_timeline_entry_from_row(row: Any) -> ArchiveTimelineEntry:
+    report_snippet = str(row.note or "").strip()
+    if not report_snippet:
+        report_snippet = "分析进行中，请稍后查看报告。" if row.status != "completed" else "暂无训练备注。"
+    return ArchiveTimelineEntry(
+        id=row.id,
+        created_at=row.created_at,
+        status=row.status,
+        entry_type="冰宝（IceBuddy）诊断",
+        skater_id=row.skater_id,
+        skater_name=str(row.skater_display_name or row.skater_name or "").strip() or None,
+        skater_avatar_type=row.skater_avatar_type,
+        skater_avatar_emoji=row.skater_avatar_emoji,
+        skill_category=row.skill_category or "未分类",
+        action_type=row.action_type,
+        action_subtype=row.action_subtype,
+        skill_node_id=None,
+        force_score=row.force_score,
+        report_snippet=report_snippet[:120],
+        analysis_id=row.id,
+        session_id=row.session_id,
+        session_date=row.session_date,
+        session_location=row.session_location,
+        session_type=row.session_type,
+        session_duration_minutes=row.session_duration_minutes,
+    )
+
+
 def as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -147,29 +175,50 @@ def normalize_archive_date(value: Any) -> date | None:
 
 async def build_archive_stats(session: AsyncSession, skater_id: str | None = None) -> ArchiveStats:
     now = datetime.now(timezone.utc)
-    total_query = select(func.count(Analysis.id))
-    recent_query = select(func.count(Analysis.id)).where(Analysis.created_at >= now - timedelta(days=7))
-    date_expr = func.date(Analysis.created_at)
-    dates_query = select(date_expr).distinct().order_by(date_expr.desc())
+    where_clauses: list[str] = []
+    params: dict[str, object] = {"recent_cutoff": now - timedelta(days=7)}
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     monthly_sessions_query = select(func.count(TrainingSession.id)).where(
         TrainingSession.session_date >= month_start.date(),
     )
     if skater_id:
-        total_query = total_query.where(Analysis.skater_id == skater_id)
-        recent_query = recent_query.where(Analysis.skater_id == skater_id)
-        dates_query = dates_query.where(Analysis.skater_id == skater_id)
+        where_clauses.append("skater_id = :skater_id")
+        params["skater_id"] = skater_id
         monthly_sessions_query = monthly_sessions_query.where(TrainingSession.skater_id == skater_id)
 
-    dates_result = await session.execute(dates_query)
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    recent_where_sql = f"{where_sql} AND created_at >= :recent_cutoff" if where_sql else "WHERE created_at >= :recent_cutoff"
+    total_result = await run_db_read_with_retry(
+        lambda: session.execute(text(f"SELECT COUNT(*) FROM analysis_list_items {where_sql}"), params),
+        context="archive_stats:total",
+    )
+    recent_result = await run_db_read_with_retry(
+        lambda: session.execute(text(f"SELECT COUNT(*) FROM analysis_list_items {recent_where_sql}"), params),
+        context="archive_stats:recent",
+    )
+    dates_result = await run_db_read_with_retry(
+        lambda: session.execute(
+            text(
+                f"""
+                SELECT DISTINCT date(created_at) AS archive_date
+                FROM analysis_list_items
+                {where_sql}
+                ORDER BY archive_date DESC
+                LIMIT 90
+                """
+            ),
+            {key: value for key, value in params.items() if key == "skater_id"},
+        ),
+        context="archive_stats:dates",
+    )
     active_dates = [
         archive_date
         for archive_date in (normalize_archive_date(value) for value in dates_result.scalars().all())
         if archive_date is not None
     ]
     return ArchiveStats(
-        total_records=int(await session.scalar(total_query) or 0),
-        recent_7days=int(await session.scalar(recent_query) or 0),
+        total_records=int(total_result.scalar_one() or 0),
+        recent_7days=int(recent_result.scalar_one() or 0),
         current_streak=calculate_current_streak_from_dates(active_dates),
         monthly_sessions=int(await session.scalar(monthly_sessions_query) or 0),
     )
@@ -357,59 +406,58 @@ async def get_archive(
     if skater_id and await session.get(Skater, skater_id) is None:
         raise HTTPException(status_code=404, detail="未找到该练习档案对应的选手。")
 
-    base_query = (
-        select(Analysis, TrainingSession, Skater)
-        .options(
-            Load(Analysis).load_only(
-                Analysis.id,
-                Analysis.skater_id,
-                Analysis.session_id,
-                Analysis.skill_category,
-                Analysis.action_type,
-                Analysis.action_subtype,
-                Analysis.skill_node_id,
-                Analysis.force_score,
-                Analysis.status,
-                Analysis.report,
-                Analysis.error_message,
-                Analysis.note,
-                Analysis.created_at,
-            ),
-            Load(TrainingSession).load_only(
-                TrainingSession.id,
-                TrainingSession.session_date,
-                TrainingSession.location,
-                TrainingSession.session_type,
-                TrainingSession.duration_minutes,
-            ),
-            Load(Skater).load_only(
-                Skater.id,
-                Skater.name,
-                Skater.display_name,
-                Skater.avatar_type,
-                Skater.avatar_emoji,
-            ),
-        )
-        .outerjoin(TrainingSession, Analysis.session_id == TrainingSession.id)
-        .outerjoin(Skater, Analysis.skater_id == Skater.id)
-        .order_by(Analysis.created_at.desc())
-    )
-    count_query = select(func.count(Analysis.id))
+    where_sql = ""
+    params: dict[str, object] = {"limit": limit, "offset": offset}
     if skater_id:
-        base_query = base_query.where(Analysis.skater_id == skater_id)
-        count_query = count_query.where(Analysis.skater_id == skater_id)
+        where_sql = "WHERE ali.skater_id = :skater_id"
+        params["skater_id"] = skater_id
+
+    list_query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.status,
+            ali.skater_id,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name,
+            s.avatar_type AS skater_avatar_type,
+            s.avatar_emoji AS skater_avatar_emoji,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.note,
+            ali.session_id,
+            ts.session_date,
+            ts.location AS session_location,
+            ts.session_type,
+            ts.duration_minutes AS session_duration_minutes
+        FROM analysis_list_items AS ali
+        LEFT JOIN training_sessions AS ts ON ts.id = ali.session_id
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
+        {where_sql}
+        ORDER BY ali.created_at DESC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    count_query = text(f"SELECT COUNT(*) FROM analysis_list_items AS ali {where_sql}")
 
     result = await run_db_read_with_retry(
-        lambda: session.execute(base_query.offset(offset).limit(limit)),
+        lambda: session.execute(list_query, params),
         context="archive:list",
     )
     rows = list(result.all())
-    total_records = int(await session.scalar(count_query) or 0)
+    total_result = await run_db_read_with_retry(
+        lambda: session.execute(count_query, {key: value for key, value in params.items() if key == "skater_id"}),
+        context="archive:count",
+    )
+    total_records = int(total_result.scalar_one() or 0)
     stats = await build_archive_stats(session, skater_id)
 
     return ArchiveResponse(
         stats=stats,
-        timeline=[archive_timeline_entry(analysis, training_session, skater) for analysis, training_session, skater in rows],
+        timeline=[archive_timeline_entry_from_row(row) for row in rows],
         limit=limit,
         offset=offset,
         has_more=offset + len(rows) < total_records,
@@ -427,52 +475,62 @@ async def get_skater_archive(
     if skater is None:
         raise HTTPException(status_code=404, detail="未找到该练习档案对应的选手。")
 
-    base_query = (
-        select(Analysis, TrainingSession)
-        .options(
-            Load(Analysis).load_only(
-                Analysis.id,
-                Analysis.skater_id,
-                Analysis.session_id,
-                Analysis.skill_category,
-                Analysis.action_type,
-                Analysis.action_subtype,
-                Analysis.skill_node_id,
-                Analysis.force_score,
-                Analysis.status,
-                Analysis.report,
-                Analysis.error_message,
-                Analysis.note,
-                Analysis.created_at,
-                Analysis.updated_at,
-                Analysis.retry_from_stage,
-            ),
-            Load(TrainingSession).load_only(
-                TrainingSession.id,
-                TrainingSession.session_date,
-                TrainingSession.location,
-                TrainingSession.session_type,
-                TrainingSession.duration_minutes,
-            ),
-        )
-        .outerjoin(TrainingSession, Analysis.session_id == TrainingSession.id)
-        .where(Analysis.skater_id == skater_id)
-        .order_by(Analysis.created_at.desc())
-    )
-
-    paged_query = base_query.offset(offset)
+    params: dict[str, object] = {"skater_id": skater_id, "offset": offset}
+    limit_sql = ""
     if limit is not None:
-        paged_query = paged_query.limit(limit)
+        params["limit"] = limit
+        limit_sql = "LIMIT :limit"
 
-    result = await session.execute(paged_query)
-    rows = list(result.all())
-    total_records = int(
-        await session.scalar(select(func.count(Analysis.id)).where(Analysis.skater_id == skater_id))
-        or 0
+    list_query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.status,
+            ali.skater_id,
+            :skater_display_name AS skater_display_name,
+            :skater_name AS skater_name,
+            :skater_avatar_type AS skater_avatar_type,
+            :skater_avatar_emoji AS skater_avatar_emoji,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.note,
+            ali.session_id,
+            ts.session_date,
+            ts.location AS session_location,
+            ts.session_type,
+            ts.duration_minutes AS session_duration_minutes
+        FROM analysis_list_items AS ali
+        LEFT JOIN training_sessions AS ts ON ts.id = ali.session_id
+        WHERE ali.skater_id = :skater_id
+        ORDER BY ali.created_at DESC
+        {limit_sql} OFFSET :offset
+        """
     )
+    params.update(
+        {
+            "skater_display_name": skater.display_name,
+            "skater_name": skater.name,
+            "skater_avatar_type": skater.avatar_type,
+            "skater_avatar_emoji": skater.avatar_emoji,
+        }
+    )
+
+    result = await run_db_read_with_retry(
+        lambda: session.execute(list_query, params),
+        context="skater_archive:list",
+    )
+    rows = list(result.all())
+    count_result = await run_db_read_with_retry(
+        lambda: session.execute(text("SELECT COUNT(*) FROM analysis_list_items WHERE skater_id = :skater_id"), {"skater_id": skater_id}),
+        context="skater_archive:count",
+    )
+    total_records = int(count_result.scalar_one() or 0)
 
     stats = await build_archive_stats(session, skater_id)
-    timeline = [archive_timeline_entry(analysis, training_session, skater) for analysis, training_session in rows]
+    timeline = [archive_timeline_entry_from_row(row) for row in rows]
 
     return ArchiveResponse(
         stats=stats,

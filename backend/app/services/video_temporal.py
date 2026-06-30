@@ -1481,11 +1481,11 @@ def build_video_temporal_prompts(
     retry_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
-    Build the Qwen 3.6 Plus video-temporal prompts for semantic phase localization.
+    Build video-temporal prompts for semantic phase localization.
     """
     duration_text = "unknown" if video_duration_sec is None else f"{max(0.0, float(video_duration_sec)):.2f}"
     fps_text = "unknown" if source_fps is None else f"{max(0.0, float(source_fps)):.2f}"
-    model_text = DEFAULT_MODEL if not _string(model) or model in {"qwen-vl-max-latest"} else _string(model)
+    model_text = _string(model, DEFAULT_MODEL)
     action_type_text = _string(action_type, "unknown")
     action_subtype_text = _string(action_subtype, "unknown")
     user_note_text = _string(user_note)
@@ -1865,13 +1865,14 @@ def _video_temporal_failure_flag(exc: Exception) -> str:
 
 
 def _qwen_temporal_provider(provider: ActiveProviderConfig) -> ActiveProviderConfig:
+    model_id = _string(provider.vision_model) or _string(provider.model_id) or DEFAULT_MODEL
     return ActiveProviderConfig(
         id=provider.id,
         slot=provider.slot,
         name=provider.name,
         provider=provider.provider,
         base_url=provider.base_url,
-        model_id=DEFAULT_MODEL,
+        model_id=model_id,
         vision_model=provider.vision_model,
         api_key=provider.api_key,
         notes=provider.notes,
@@ -1954,7 +1955,7 @@ async def analyze_video_temporal(
         )
 
     request_provider = _qwen_temporal_provider(active_provider) if provider_name == "qwen" else active_provider
-    request_model = DEFAULT_MODEL if provider_name == "qwen" else (_string(active_provider.model_id, "") or DEFAULT_MIMO_VISION_MODEL)
+    request_model = _string(request_provider.model_id) or (DEFAULT_MODEL if provider_name == "qwen" else DEFAULT_MIMO_VISION_MODEL)
     system_prompt, user_prompt = build_video_temporal_prompts(
         action_type=action_type,
         action_subtype=action_subtype,

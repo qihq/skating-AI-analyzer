@@ -128,6 +128,7 @@ export default function App() {
           <Route path="/analysis-chat" element={<AnalysisChatPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/compare/results/:comparison_id" element={<ComparePage />} />
           <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
           <Route path="/report/:id/workspace" element={<ReportWorkspacePage />} />
