@@ -54,6 +54,13 @@ type VideoEntry = {
   side: CompareVideoSide;
 };
 
+function prepareVideoForSync(video: HTMLVideoElement) {
+  video.muted = true;
+  video.defaultMuted = true;
+  video.volume = 0;
+  video.playsInline = true;
+}
+
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -109,11 +116,44 @@ function scoreTone(delta: number) {
   return "border-slate-200 bg-slate-50 text-slate-700";
 }
 
+function videoAiDirectionTone(direction: string) {
+  if (direction === "improved") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+  if (direction === "regressed") {
+    return "border-rose-200 bg-rose-50 text-rose-600";
+  }
+  if (direction === "unchanged") {
+    return "border-slate-200 bg-slate-50 text-slate-600";
+  }
+  return "border-sky-200 bg-sky-50 text-sky-700";
+}
+
+function videoAiDirectionLabel(direction: string) {
+  if (direction === "improved") {
+    return "改善";
+  }
+  if (direction === "regressed") {
+    return "需关注";
+  }
+  if (direction === "unchanged") {
+    return "稳定";
+  }
+  return "观察";
+}
+
 function deltaBarWidth(delta: number | null) {
   if (typeof delta !== "number") {
     return "0%";
   }
   return `${Math.min(Math.abs(delta), 30) * (100 / 30)}%`;
+}
+
+function formatPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "--";
+  }
+  return `${Math.round(value * 100)}%`;
 }
 
 function normalizeShareSnippet(value: string | null | undefined, fallback: string, maxLength = 92) {
@@ -197,6 +237,10 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
   const actionTitle = normalizeShareSnippet(after.action_subtype || after.skill_category || after.action_type, "滑冰对比复盘", 24);
   const skaterLabel = before.skater_name ?? after.skater_name ?? "小运动员";
   const narrative = normalizeShareText(data.ai_narrative, "本次对比结果已生成，建议结合评分、关键帧和教练现场观察继续复盘。");
+  const videoAiHighlight = normalizeShareText(
+    data.video_ai_report?.summary || data.video_ai_report?.changes[0]?.description,
+    "视频 AI 宏观观察可作为评分和关键帧之外的辅助参考。",
+  );
   const improved = data.summary.improved[0];
   const added = data.summary.added[0];
   const bestMetric = data.metric_deltas.find((item) => item.available && typeof item.delta === "number");
@@ -229,6 +273,16 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
       color: "#2563EB",
       bg: "#EFF6FF",
     },
+    ...(data.video_ai_report
+      ? [
+          {
+            label: "视频 AI 观察",
+            title: videoAiHighlight,
+            color: "#0E7490",
+            bg: "#ECFEFF",
+          },
+        ]
+      : []),
   ];
 
   const measureCanvas = document.createElement("canvas");
@@ -348,8 +402,8 @@ function VideoPane({
   videoRef: React.RefObject<HTMLVideoElement>;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-[28px] border border-slate-200 bg-white">
-      <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+    <div className="min-w-0 overflow-hidden rounded-[22px] border border-slate-200 bg-white">
+      <div className="flex min-h-[68px] items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-blue-500">{title}</p>
           <p className="mt-1 text-sm text-slate-500">
@@ -357,14 +411,23 @@ function VideoPane({
           </p>
         </div>
         {side.is_slow_motion ? (
-          <span className="rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-600">
+          <span className="shrink-0 rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-600">
             慢动作 {Math.round(side.source_fps ?? 0)}fps
           </span>
         ) : null}
       </div>
       <div className="aspect-video bg-slate-950">
         {side.available && side.video_url ? (
-          <video ref={videoRef} src={side.video_url} preload="metadata" playsInline className="h-full w-full object-contain" />
+          <video
+            ref={videoRef}
+            src={side.video_url}
+            preload="metadata"
+            muted
+            playsInline
+            disablePictureInPicture
+            controlsList="nodownload noplaybackrate"
+            className="h-full w-full object-contain"
+          />
         ) : (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-7 text-slate-400">
             {side.missing_reason ?? "原视频不可用，仍可查看关键帧与量化对比。"}
@@ -403,11 +466,17 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
     if (!videoCompare) {
       return [];
     }
-    return [
+    const entries = [
       { video: beforeRef.current, side: videoCompare.before },
       { video: afterRef.current, side: videoCompare.after },
     ].filter((entry): entry is VideoEntry => Boolean(entry.video && entry.side.available && entry.side.video_url));
+    entries.forEach(({ video }) => prepareVideoForSync(video));
+    return entries;
   }, [videoCompare]);
+
+  useEffect(() => {
+    getPlayableEntries();
+  }, [getPlayableEntries]);
 
   const pauseEntries = useCallback((entries: VideoEntry[]) => {
     suppressMediaEventsRef.current = true;
@@ -477,6 +546,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
       const maxDuration = Math.max(beforeDuration ?? 1, afterDuration ?? 1);
 
       getPlayableEntries().forEach(({ video, side }) => {
+        prepareVideoForSync(video);
         const duration = getActionWindow(side).duration;
         video.playbackRate = duration ? baseSpeed * (duration / maxDuration) : baseSpeed;
       });
@@ -505,6 +575,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
     await Promise.all(entries.map(({ video }) => waitForVideoMetadata(video)));
     applyProportionalRates(speed);
     entries.forEach(({ video, side }) => {
+      prepareVideoForSync(video);
       const { start } = getActionWindow(side);
       seekVideoTo(video, start);
     });
@@ -535,13 +606,11 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
       setIsPlaying(entries.every(({ video }) => !video.paused && !video.ended));
     };
     entries.forEach(({ video }) => {
-      video.addEventListener("ended", handlePause);
       video.addEventListener("ended", handleEnded);
       video.addEventListener("pause", handlePause);
     });
     return () => {
       entries.forEach(({ video }) => {
-        video.removeEventListener("ended", handlePause);
         video.removeEventListener("ended", handleEnded);
         video.removeEventListener("pause", handlePause);
       });
@@ -563,38 +632,135 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
         <VideoPane title="现在" side={videoCompare.after} videoRef={afterRef} />
       </div>
 
-      <div className="mt-5 flex flex-wrap items-center gap-3 rounded-[24px] border border-slate-200 bg-slate-50 p-3">
-        <button type="button" onClick={() => void seekBoth(0)} className="pill-link">
-          跳到动作开始
-        </button>
-        {data.keyframe_compare.map((item) => {
-          return (
-            <button key={item.key} type="button" onClick={() => void seekKeyframe(item)} className="pill-link">
-              {item.label}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => void togglePlayback()}
-          className="rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
-        >
-          {isPlaying ? "暂停" : "同步播放"}
-        </button>
-        <div className="ml-auto flex rounded-full border border-slate-200 bg-white p-1">
-          {SPEED_OPTIONS.map((option) => (
+      <div className="mt-4 rounded-[22px] border border-slate-200 bg-slate-50 p-3 tablet:p-4">
+        <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              key={option}
               type="button"
-              onClick={() => setPlaybackRate(option)}
-              className={`rounded-full px-3 py-2 text-xs font-semibold transition ${
-                speed === option ? "bg-blue-500 text-white" : "text-slate-500 hover:bg-slate-100"
-              }`}
+              onClick={() => void togglePlayback()}
+              className="min-h-[44px] rounded-full bg-blue-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-600"
             >
-              {option}x
+              {isPlaying ? "暂停" : "同步播放"}
             </button>
+            <button type="button" onClick={() => void seekBoth(0)} className="pill-link">
+              跳到动作开始
+            </button>
+            <span className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">全程静音</span>
+          </div>
+
+          <div className="flex w-fit rounded-full border border-slate-200 bg-white p-1">
+            {SPEED_OPTIONS.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setPlaybackRate(option)}
+                className={`min-h-[34px] rounded-full px-3 text-xs font-semibold transition ${
+                  speed === option ? "bg-blue-500 text-white" : "text-slate-500 hover:bg-slate-100"
+                }`}
+              >
+                {option}x
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {data.keyframe_compare.length ? (
+          <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-200 pt-3">
+            {data.keyframe_compare.map((item) => {
+              return (
+                <button key={item.key} type="button" onClick={() => void seekKeyframe(item)} className="pill-link">
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </ReportCard>
+  );
+}
+
+function VideoAiInsightSection({ data }: { data: AnalysisCompareResponse }) {
+  const report = data.video_ai_report;
+  if (!report) {
+    return null;
+  }
+
+  const statusLabel = report.status === "completed" ? "完整视频已分析" : report.status === "partial" ? "部分视频已分析" : "视频 AI 辅助观察";
+  const modelLabel = [report.provider, report.model].filter(Boolean).join(" / ") || "vision 模型";
+  const primaryChange = report.changes[0];
+
+  return (
+    <ReportCard title="视频 AI 观察" eyebrow="Full Video">
+      <div className="space-y-5">
+        <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-slate-900">{statusLabel}</p>
+            <p className="mt-1 text-sm text-slate-500">
+              {modelLabel} · 平均置信度 {formatPercent(report.average_confidence)}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs font-semibold text-slate-500">
+            <span className="rounded-full bg-slate-100 px-3 py-1">之前 {formatPercent(report.before_confidence)}</span>
+            <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">现在 {formatPercent(report.after_confidence)}</span>
+          </div>
+        </div>
+
+        <section className="rounded-[24px] border border-cyan-100 bg-cyan-50/70 p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-semibold text-slate-900">视频级变化</h3>
+            {primaryChange ? (
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${videoAiDirectionTone(primaryChange.direction)}`}>
+                {videoAiDirectionLabel(primaryChange.direction)}
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-3 text-sm leading-7 text-slate-600">{report.summary}</p>
+          {primaryChange ? <p className="mt-3 text-sm leading-7 text-slate-700">{primaryChange.description}</p> : null}
+        </section>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {report.observations.map((item) => (
+            <article key={item.key} className="min-w-0 rounded-[22px] border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm font-semibold text-slate-900">{item.label}</p>
+              <div className="mt-3 space-y-3 text-sm leading-6">
+                <p className="text-slate-500">
+                  <span className="font-medium text-slate-700">之前：</span>
+                  {item.before || "--"}
+                </p>
+                <p className="text-slate-500">
+                  <span className="font-medium text-blue-700">现在：</span>
+                  {item.after || "--"}
+                </p>
+              </div>
+            </article>
           ))}
         </div>
+
+        {report.changes.length > 1 ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {report.changes.slice(1).map((item, index) => (
+              <article key={`${item.category}-${index}`} className={`rounded-[22px] border p-4 ${videoAiDirectionTone(item.direction)}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold">{item.category}</p>
+                  <span className="rounded-full bg-white/70 px-3 py-1 text-xs">{videoAiDirectionLabel(item.direction)}</span>
+                </div>
+                <p className="mt-3 text-sm leading-7">{item.description}</p>
+              </article>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="rounded-[22px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-800">
+          <span className="font-semibold">下一次训练重点：</span>
+          {report.training_focus}
+        </div>
+
+        {report.caveats.length ? (
+          <div className="rounded-[22px] border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-700">
+            {report.caveats.join(" ")}
+          </div>
+        ) : null}
       </div>
     </ReportCard>
   );
@@ -1080,8 +1246,9 @@ export default function ComparePage() {
         <div className="space-y-6">
           <HeroSummary data={data} />
           <SyncedVideoSection data={data} />
-          <KeyframeCompareSection data={data} />
+          <VideoAiInsightSection data={data} />
           <MetricsSection data={data} />
+          <KeyframeCompareSection data={data} />
           <div className="grid gap-6 lg:grid-cols-3">
             <SummaryGroup title="改善项" items={data.summary.improved} tone="border border-emerald-200 bg-emerald-50/70" />
             <SummaryGroup title="新增项" items={data.summary.added} tone="border border-rose-200 bg-rose-50/70" />

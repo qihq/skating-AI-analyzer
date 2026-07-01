@@ -319,7 +319,16 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
             video_calls.append({"video_path": video_path, **kwargs})
             return _video_ai_payload(str(getattr(kwargs["provider"], "model_id")), Path(video_path).parent.name)
 
-        completion_mock = AsyncMock(return_value="结合两个完整视频和结构化数据，孩子这次更稳定。")
+        completion_mock = AsyncMock(
+            side_effect=[
+                (
+                    '{"summary":"视频 AI 看到现在的整体节奏更清楚。",'
+                    '"changes":[{"category":"节奏","direction":"improved","description":"进入到起跳的节奏更连贯。","confidence":0.82}],'
+                    '"training_focus":"下次继续保持稳定节奏和轻柔落冰。","caveats":["视频观察只作辅助参考。"]}'
+                ),
+                "结合两个完整视频和结构化数据，孩子这次更稳定。",
+            ]
+        )
 
         with (
             patch("app.routers.analysis.get_active_provider", fake_get_active_provider),
@@ -328,14 +337,17 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.analysis_router.process_analysis_comparison(created.id)
 
-        self.assertEqual([call[0] for call in provider_calls], ["vision", "report"])
+        self.assertEqual([call[0] for call in provider_calls], ["vision", "report", "report"])
         self.assertIsNotNone(provider_calls[0][1])
         self.assertEqual(len(video_calls), 2)
         self.assertEqual({call["analyzed_video_kind"] for call in video_calls}, {"full_source"})
         self.assertTrue(all(str(getattr(call["provider"], "slot")) == "vision" for call in video_calls))
         self.assertTrue(all(str(getattr(call["provider"], "model_id")) == "mimo-v2.5" for call in video_calls))
 
-        messages = completion_mock.await_args.kwargs["messages"]
+        self.assertEqual(completion_mock.await_count, 2)
+        video_report_messages = completion_mock.await_args_list[0].kwargs["messages"]
+        self.assertIn("严格 JSON", video_report_messages[0]["content"])
+        messages = completion_mock.await_args_list[1].kwargs["messages"]
         self.assertIsInstance(messages[1]["content"], str)
         self.assertIn("你只会收到 JSON 文本，不能接收或分析视频", messages[1]["content"])
         self.assertIn("mimo-v2.5", messages[1]["content"])
@@ -359,6 +371,15 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail.result.analysis_a.id, older_id)
         self.assertEqual(detail.result.analysis_b.id, newer_id)
         self.assertEqual(detail.result.ai_narrative, "结合两个完整视频和结构化数据，孩子这次更稳定。")
+        self.assertIsNotNone(detail.result.video_ai_report)
+        assert detail.result.video_ai_report is not None
+        self.assertEqual(detail.result.video_ai_report.status, "completed")
+        self.assertEqual(detail.result.video_ai_report.provider, "mimo")
+        self.assertEqual(detail.result.video_ai_report.model, "mimo-v2.5")
+        self.assertEqual(detail.result.video_ai_report.summary, "视频 AI 看到现在的整体节奏更清楚。")
+        self.assertEqual(detail.result.video_ai_report.changes[0].direction, "improved")
+        self.assertEqual(detail.result.video_ai_report.observations[0].label, "节奏")
+        self.assertEqual(detail.result.video_ai_report.training_focus, "下次继续保持稳定节奏和轻柔落冰。")
         self.assertTrue(any("vision 槽视频模型 mimo/mimo-v2.5" in warning for warning in (detail.result.quality.warnings if detail.result.quality else [])))
 
     async def test_comparison_list_detail_retry_and_video_ai_failure_fallback(self) -> None:
@@ -420,6 +441,7 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail.video_ai_status, "failed")
         self.assertIsNotNone(detail.result)
         assert detail.result is not None
+        self.assertIsNone(detail.result.video_ai_report)
         self.assertTrue(any("未能完成全量视频分析" in warning for warning in (detail.result.quality.warnings if detail.result.quality else [])))
         self.assertIsInstance(detail.video_ai_json, dict)
         assert detail.video_ai_json is not None
@@ -441,6 +463,112 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(retried.error_message)
         self.assertIsNone(retried.video_ai_json)
         self.assertIsNone(retried.result)
+
+    async def test_video_ai_report_partial_and_invalid_json_uses_fallback(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=76,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        partial_video_ai = {
+            "status": "partial",
+            "provider": "mimo",
+            "model": "mimo-v2.5",
+            "before_analysis_id": older_id,
+            "after_analysis_id": newer_id,
+            "before": _video_ai_payload("mimo-v2.5", "before"),
+            "after": {
+                "valid": False,
+                "provider": "mimo",
+                "model": "mimo-v2.5",
+                "quality_flags": ["compare_full_video_ai_failed"],
+                "fallback_reason": "compare_full_video_ai_failed",
+            },
+        }
+
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=_provider("report", "mimo", "mimo-v2.5-pro"))),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="not json")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                older = await session.get(self.models.Analysis, older_id)
+                newer = await session.get(self.models.Analysis, newer_id)
+                assert older is not None
+                assert newer is not None
+                result = await self.analysis_router._build_analysis_compare_response(
+                    session,
+                    older,
+                    newer,
+                    video_ai_json=partial_video_ai,
+                )
+
+        self.assertIsNotNone(result.video_ai_report)
+        assert result.video_ai_report is not None
+        self.assertEqual(result.video_ai_report.status, "partial")
+        self.assertEqual(result.video_ai_report.before_confidence, 0.86)
+        self.assertIsNone(result.video_ai_report.after_confidence)
+        self.assertTrue(any("部分完整视频分析" in caveat for caveat in result.video_ai_report.caveats))
+        self.assertTrue(any("不参与评分" in caveat for caveat in result.video_ai_report.caveats))
+        self.assertEqual(result.video_ai_report.observations[0].before, "节奏清楚")
+        self.assertIsNone(result.video_ai_report.observations[0].after)
+        self.assertEqual(result.video_ai_report.changes[0].direction, "uncertain")
+
+    async def test_stored_legacy_comparison_result_without_video_ai_report_validates(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=74,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=None)),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                older = await session.get(self.models.Analysis, older_id)
+                newer = await session.get(self.models.Analysis, newer_id)
+                assert older is not None
+                assert newer is not None
+                result = await self.analysis_router._build_analysis_compare_response(session, older, newer)
+                payload = result.model_dump(mode="json")
+                payload.pop("video_ai_report", None)
+                comparison = self.models.AnalysisComparison(
+                    analysis_a_id=older_id,
+                    analysis_b_id=newer_id,
+                    skater_id=skater_id,
+                    action_type="跳跃",
+                    status="completed",
+                    result_json=payload,
+                )
+                session.add(comparison)
+                await session.commit()
+                await session.refresh(comparison)
+                detail = await self.analysis_router.get_analysis_comparison(comparison.id, session=session)
+
+        self.assertIsNotNone(detail.result)
+        assert detail.result is not None
+        self.assertIsNone(detail.result.video_ai_report)
 
     async def test_compare_video_sync_uses_final_bio_keyframe_when_semantic_conflicts(self) -> None:
         older_id = str(uuid4())

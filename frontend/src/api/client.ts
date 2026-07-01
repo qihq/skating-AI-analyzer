@@ -626,6 +626,36 @@ export interface CompareVideoPayload {
   sync_anchor_key?: string | null;
 }
 
+export interface CompareVideoAiObservation {
+  key: string;
+  label: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface CompareVideoAiChange {
+  category: string;
+  direction: "improved" | "regressed" | "unchanged" | "uncertain" | string;
+  description: string;
+  confidence: number | null;
+}
+
+export interface CompareVideoAiReport {
+  status: string;
+  provider: string | null;
+  model: string | null;
+  before_confidence: number | null;
+  after_confidence: number | null;
+  before_data_quality: string | null;
+  after_data_quality: string | null;
+  average_confidence: number | null;
+  summary: string;
+  observations: CompareVideoAiObservation[];
+  changes: CompareVideoAiChange[];
+  training_focus: string;
+  caveats: string[];
+}
+
 export interface CompareQualityPayload {
   before_data_quality: string | null;
   after_data_quality: string | null;
@@ -651,6 +681,7 @@ export interface AnalysisCompareResponse {
   video_compare: CompareVideoPayload | null;
   quality: CompareQualityPayload | null;
   ai_narrative: string | null;
+  video_ai_report: CompareVideoAiReport | null;
 }
 
 export interface AnalysisComparisonSummary {

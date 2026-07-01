@@ -55,6 +55,9 @@ from app.schemas import (
     CompareKeyframeSide,
     CompareQualityPayload,
     CompareSummary,
+    CompareVideoAiChange,
+    CompareVideoAiObservation,
+    CompareVideoAiReport,
     CompareVideoPayload,
     CompareVideoSide,
     ComparisonChange,
@@ -130,7 +133,7 @@ from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.llm_context import build_analysis_prompt_context
-from app.services.report import apply_child_score_floor, calculate_force_score, generate_report
+from app.services.report import apply_child_score_floor, calculate_force_score, clean_json_text, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
@@ -216,6 +219,14 @@ NON_JUMP_METRIC_LABELS = {
     "hip_shoulder_alignment": ("髋肩对齐", "分"),
     "trunk_pitch_degrees": ("躯干倾角", "°"),
 }
+VIDEO_AI_OBSERVATION_LABELS = {
+    "timing_rhythm": "节奏",
+    "speed_flow": "速度流动",
+    "axis_overall": "轴心",
+    "entry_quality": "进入质量",
+    "exit_or_landing_quality": "落冰/滑出质量",
+}
+VIDEO_AI_CHANGE_DIRECTIONS = {"improved", "regressed", "unchanged", "uncertain"}
 COMPARE_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 COMPARE_SAME_VIDEO_KEYFRAME_STABILITY_SECONDS = 0.10
 COMPARE_SAME_VIDEO_SCORE_STABILITY_DELTA = 1.0
@@ -314,6 +325,11 @@ COMPARE_NARRATIVE_SYSTEM_PROMPT = (
     "你是儿童花样滑冰复盘助手。用中文给家长解释两次同动作对比，只输出自然语言，不要 Markdown。"
     "必须温和、具体、可执行；不要夸大进步，不要把低质量或低置信数据说成确定事实。"
     "如果动作子类型未知或两次细项不完全一致，请用动作大类/阶段描述，不要编造具体动作名。"
+)
+VIDEO_AI_COMPARE_REPORT_SYSTEM_PROMPT = (
+    "你是儿童花样滑冰视频级对比助手。你只会收到两个视频 AI 的结构化观察 JSON，"
+    "不能声称自己重新观看或分析了视频。请输出严格 JSON 对象，不要 Markdown。"
+    "结论必须保守、具体、面向家长，只能作为辅助证据，不要改写评分结论。"
 )
 MAX_ANALYSIS_LOG_ENTRIES = 200
 CONFIRMED_TARGET_LOCK_STATUSES = {"auto_locked", "locked", "manual"}
@@ -8042,6 +8058,260 @@ def _append_video_ai_quality_warning(quality: CompareQualityPayload, video_ai_js
         quality.warnings.append(f"vision 槽视频模型 {label} 未能完成全量视频分析，本页主要基于已保存数据对比。")
 
 
+def _video_ai_side_payload(video_ai_json: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    payload = video_ai_json.get(key)
+    return payload if isinstance(payload, dict) else None
+
+
+def _video_ai_side_is_valid(payload: dict[str, Any] | None) -> bool:
+    return bool(isinstance(payload, dict) and payload.get("valid"))
+
+
+def _clean_video_ai_text(value: object, limit: int = 220) -> str | None:
+    text = str(value or "").replace("\n", " ").strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _video_ai_confidence(payload: dict[str, Any] | None) -> float | None:
+    confidence = _to_number(payload.get("confidence") if isinstance(payload, dict) else None)
+    if confidence is None:
+        return None
+    return max(0.0, min(1.0, round(confidence, 3)))
+
+
+def _video_ai_average_confidence(before: dict[str, Any] | None, after: dict[str, Any] | None) -> float | None:
+    values = [value for value in (_video_ai_confidence(before), _video_ai_confidence(after)) if value is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 3)
+
+
+def _video_ai_macro_assessment(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    macro = payload.get("macro_assessment")
+    return macro if isinstance(macro, dict) else {}
+
+
+def _build_video_ai_observations(
+    before_payload: dict[str, Any] | None,
+    after_payload: dict[str, Any] | None,
+) -> list[CompareVideoAiObservation]:
+    before_macro = _video_ai_macro_assessment(before_payload)
+    after_macro = _video_ai_macro_assessment(after_payload)
+    return [
+        CompareVideoAiObservation(
+            key=key,
+            label=label,
+            before=_clean_video_ai_text(before_macro.get(key), 140),
+            after=_clean_video_ai_text(after_macro.get(key), 140),
+        )
+        for key, label in VIDEO_AI_OBSERVATION_LABELS.items()
+    ]
+
+
+def _video_ai_list_text(payload: dict[str, Any] | None, key: str) -> list[str]:
+    macro = _video_ai_macro_assessment(payload)
+    values = macro.get(key)
+    if not isinstance(values, list):
+        return []
+    cleaned = [_clean_video_ai_text(value, 80) for value in values]
+    return [value for value in cleaned if value]
+
+
+def _video_ai_side_label(payload: dict[str, Any] | None, fallback: str) -> str:
+    if _video_ai_side_is_valid(payload):
+        return fallback
+    return f"{fallback}（未完成）"
+
+
+def _fallback_video_ai_change_description(before_payload: dict[str, Any] | None, after_payload: dict[str, Any] | None) -> str:
+    before_text = _clean_video_ai_text(before_payload.get("overall_impression") if before_payload else None, 180)
+    after_text = _clean_video_ai_text(after_payload.get("overall_impression") if after_payload else None, 180)
+    if before_text and after_text:
+        return f"之前：{before_text}；现在：{after_text}"
+    if after_text:
+        return f"本次视频 AI 观察：{after_text}"
+    if before_text:
+        return f"之前视频 AI 观察：{before_text}"
+    return "视频 AI 已产出宏观观察，但可直接比较的信息有限。"
+
+
+def _fallback_video_ai_training_focus(after_payload: dict[str, Any] | None) -> str:
+    issues = _video_ai_list_text(after_payload, "top_issues")
+    if issues:
+        return f"下一次训练优先复核：{issues[0]}。"
+    return "下一次训练优先结合节奏、轴心和落冰/滑出质量继续复核。"
+
+
+def _video_ai_caveats(video_ai_json: dict[str, Any], before_payload: dict[str, Any] | None, after_payload: dict[str, Any] | None) -> list[str]:
+    caveats: list[str] = []
+    status_value = str(video_ai_json.get("status") or "").strip().lower()
+    if status_value == "partial":
+        caveats.append("视频 AI 只完成了部分完整视频分析，未完成的一侧已按已有数据保守展示。")
+    if not _video_ai_side_is_valid(before_payload):
+        reason = _clean_video_ai_text((before_payload or {}).get("fallback_reason"), 80)
+        caveats.append(f"之前视频未形成可靠视频 AI 观察{f'：{reason}' if reason else '。'}")
+    if not _video_ai_side_is_valid(after_payload):
+        reason = _clean_video_ai_text((after_payload or {}).get("fallback_reason"), 80)
+        caveats.append(f"现在视频未形成可靠视频 AI 观察{f'：{reason}' if reason else '。'}")
+    for label, payload in (("之前", before_payload), ("现在", after_payload)):
+        data_quality = str((payload or {}).get("data_quality_hint") or "").strip().lower()
+        if data_quality in {"partial", "poor"}:
+            caveats.append(f"{label}视频 AI 数据质量为 {data_quality}，结论需保守解读。")
+        flags = (payload or {}).get("quality_flags")
+        if isinstance(flags, list) and flags:
+            caveats.append(f"{label}视频 AI 标记了质量提示：{', '.join(str(value) for value in flags[:3] if value)}。")
+    caveats.append("视频 AI 观察仅作为辅助证据，不参与评分、关键帧或生物力学指标计算。")
+    return list(dict.fromkeys(value for value in caveats if value))
+
+
+def _fallback_video_ai_compare_report(video_ai_json: dict[str, Any]) -> CompareVideoAiReport | None:
+    before_payload = _video_ai_side_payload(video_ai_json, "before")
+    after_payload = _video_ai_side_payload(video_ai_json, "after")
+    if not (_video_ai_side_is_valid(before_payload) or _video_ai_side_is_valid(after_payload)):
+        return None
+
+    observations = _build_video_ai_observations(before_payload, after_payload)
+    average_confidence = _video_ai_average_confidence(before_payload, after_payload)
+    summary = (
+        f"视频 AI 已生成{_video_ai_side_label(before_payload, '之前')}和"
+        f"{_video_ai_side_label(after_payload, '现在')}的宏观观察，可作为评分与关键帧之外的辅助参考。"
+    )
+    changes = [
+        CompareVideoAiChange(
+            category="整体观感",
+            direction="uncertain",
+            description=_fallback_video_ai_change_description(before_payload, after_payload),
+            confidence=average_confidence,
+        )
+    ]
+    strengths = _video_ai_list_text(after_payload, "top_strengths")
+    issues = _video_ai_list_text(after_payload, "top_issues")
+    if strengths or issues:
+        parts = []
+        if strengths:
+            parts.append(f"现在的优势：{'、'.join(strengths[:2])}")
+        if issues:
+            parts.append(f"仍需观察：{'、'.join(issues[:2])}")
+        changes.append(
+            CompareVideoAiChange(
+                category="当前重点",
+                direction="uncertain",
+                description="；".join(parts),
+                confidence=_video_ai_confidence(after_payload) or average_confidence,
+            )
+        )
+    return CompareVideoAiReport(
+        status=str(video_ai_json.get("status") or "completed"),
+        provider=_clean_video_ai_text(video_ai_json.get("provider"), 80),
+        model=_clean_video_ai_text(video_ai_json.get("model"), 120),
+        before_confidence=_video_ai_confidence(before_payload),
+        after_confidence=_video_ai_confidence(after_payload),
+        before_data_quality=_clean_video_ai_text((before_payload or {}).get("data_quality_hint"), 40),
+        after_data_quality=_clean_video_ai_text((after_payload or {}).get("data_quality_hint"), 40),
+        average_confidence=average_confidence,
+        summary=summary,
+        observations=observations,
+        changes=changes[:4],
+        training_focus=_fallback_video_ai_training_focus(after_payload),
+        caveats=_video_ai_caveats(video_ai_json, before_payload, after_payload),
+    )
+
+
+def _normalize_video_ai_direction(value: object) -> str:
+    direction = str(value or "uncertain").strip().lower()
+    return direction if direction in VIDEO_AI_CHANGE_DIRECTIONS else "uncertain"
+
+
+def _normalize_video_ai_changes(payload: object, fallback: CompareVideoAiReport) -> list[CompareVideoAiChange]:
+    if not isinstance(payload, list):
+        return fallback.changes
+    changes: list[CompareVideoAiChange] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        description = _clean_video_ai_text(item.get("description"), 260)
+        if not description:
+            continue
+        confidence = _to_number(item.get("confidence"))
+        changes.append(
+            CompareVideoAiChange(
+                category=_clean_video_ai_text(item.get("category"), 40) or "视频级变化",
+                direction=_normalize_video_ai_direction(item.get("direction")),
+                description=description,
+                confidence=max(0.0, min(1.0, round(confidence, 3))) if confidence is not None else None,
+            )
+        )
+    return (changes or fallback.changes)[:4]
+
+
+def _normalize_video_ai_compare_report(payload: dict[str, Any], fallback: CompareVideoAiReport) -> CompareVideoAiReport:
+    summary = _clean_video_ai_text(payload.get("summary"), 360) or fallback.summary
+    training_focus = _clean_video_ai_text(payload.get("training_focus"), 220) or fallback.training_focus
+    raw_caveats = payload.get("caveats")
+    model_caveats = [_clean_video_ai_text(value, 180) for value in raw_caveats] if isinstance(raw_caveats, list) else []
+    caveats = list(dict.fromkeys([*(value for value in model_caveats if value), *fallback.caveats]))
+    return CompareVideoAiReport(
+        status=fallback.status,
+        provider=fallback.provider,
+        model=fallback.model,
+        before_confidence=fallback.before_confidence,
+        after_confidence=fallback.after_confidence,
+        before_data_quality=fallback.before_data_quality,
+        after_data_quality=fallback.after_data_quality,
+        average_confidence=fallback.average_confidence,
+        summary=summary,
+        observations=fallback.observations,
+        changes=_normalize_video_ai_changes(payload.get("changes"), fallback),
+        training_focus=training_focus,
+        caveats=caveats[:6],
+    )
+
+
+async def _build_video_ai_compare_report(video_ai_json: dict[str, Any] | None) -> CompareVideoAiReport | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    fallback = _fallback_video_ai_compare_report(video_ai_json)
+    if fallback is None:
+        return None
+
+    try:
+        provider = await get_active_provider("report")
+        request_payload = _compact_video_ai_for_narrative(video_ai_json)
+        raw = await request_text_completion(
+            provider,
+            temperature=0.1,
+            max_tokens=700,
+            timeout=35,
+            messages=[
+                {"role": "system", "content": VIDEO_AI_COMPARE_REPORT_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "请把 before/after 两段视频 AI 结构化观察整理成一个短 JSON："
+                        '{"summary":"一句总览","changes":[{"category":"节奏/速度/轴心/进入/落冰滑出/整体",'
+                        '"direction":"improved|regressed|unchanged|uncertain","description":"家长可读变化","confidence":0.0}],'
+                        '"training_focus":"一句下次训练重点","caveats":["必要的保守提示"]}。'
+                        "changes 返回 2-4 条；不要声称你重新看过视频；不要改变评分或关键帧结论。\n"
+                        f"{json.dumps(request_payload, ensure_ascii=False)}"
+                    ),
+                },
+            ],
+        )
+        parsed = json.loads(clean_json_text(raw))
+        if not isinstance(parsed, dict):
+            return fallback
+        return _normalize_video_ai_compare_report(parsed, fallback)
+    except Exception:  # noqa: BLE001
+        logger.info("Compare video AI report unavailable, using fallback.", exc_info=True)
+        return fallback
+
+
 async def _build_analysis_compare_response(
     session: AsyncSession,
     analysis_a: Analysis,
@@ -8077,6 +8347,7 @@ async def _build_analysis_compare_response(
     if same_video_core_stable:
         summary = _stabilize_same_video_compare_summary(summary)
         quality.warnings.append("同一原视频重复分析的关键帧和评分稳定；报告问题分类差异已按重复分析噪声处理。")
+    video_ai_report = await _build_video_ai_compare_report(video_ai_json)
     ai_narrative = await _build_ai_compare_narrative(
         analysis_a=analysis_a,
         analysis_b=analysis_b,
@@ -8106,6 +8377,7 @@ async def _build_analysis_compare_response(
         video_compare=video_compare,
         quality=quality,
         ai_narrative=ai_narrative,
+        video_ai_report=video_ai_report,
     )
 
 

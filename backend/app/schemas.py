@@ -369,6 +369,36 @@ class CompareQualityPayload(BaseModel):
     skill_mismatch: bool = False
 
 
+class CompareVideoAiObservation(BaseModel):
+    key: str
+    label: str
+    before: str | None = None
+    after: str | None = None
+
+
+class CompareVideoAiChange(BaseModel):
+    category: str
+    direction: str = "uncertain"
+    description: str
+    confidence: float | None = None
+
+
+class CompareVideoAiReport(BaseModel):
+    status: str
+    provider: str | None = None
+    model: str | None = None
+    before_confidence: float | None = None
+    after_confidence: float | None = None
+    before_data_quality: str | None = None
+    after_data_quality: str | None = None
+    average_confidence: float | None = None
+    summary: str
+    observations: list[CompareVideoAiObservation] = Field(default_factory=list)
+    changes: list[CompareVideoAiChange] = Field(default_factory=list)
+    training_focus: str
+    caveats: list[str] = Field(default_factory=list)
+
+
 class AnalysisCompareResponse(BaseModel):
     analysis_a: AnalysisDetail
     analysis_b: AnalysisDetail
@@ -380,6 +410,7 @@ class AnalysisCompareResponse(BaseModel):
     video_compare: CompareVideoPayload | None = None
     quality: CompareQualityPayload | None = None
     ai_narrative: str | None = None
+    video_ai_report: CompareVideoAiReport | None = None
 
 
 class AnalysisComparisonCreateRequest(BaseModel):
