@@ -1045,6 +1045,26 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(flags, ["person_tracker_tiny_target_low_pose_tracking_risk"])
 
+    async def test_progress_point_preserves_share_fields(self) -> None:
+        point = self.analysis_router._progress_point_from_row(
+            SimpleNamespace(
+                id="analysis-1",
+                created_at=datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
+                skater_display_name="小七",
+                skater_name="Qiqi",
+                action_type="旋转",
+                action_subtype="直立旋转",
+                force_score=88,
+                note="这次入转更稳，出转需要继续压低重心。",
+            )
+        )
+
+        self.assertEqual(point.skater_name, "小七")
+        self.assertEqual(point.action_subtype, "直立旋转")
+        self.assertEqual(point.note, "这次入转更稳，出转需要继续压低重心。")
+        self.assertEqual(point.comments, point.note)
+        self.assertEqual(point.summary, point.note)
+
     async def test_multiperson_relock_instability_risk_flag_helper(self) -> None:
         target_lock = {
             "selected_candidate_id": "target",

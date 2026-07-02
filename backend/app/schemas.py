@@ -270,8 +270,12 @@ class SkaterPublic(BaseModel):
 class ProgressPoint(BaseModel):
     id: str
     created_at: datetime
+    skater_name: str | None = None
     action_type: str
+    action_subtype: str | None = None
     force_score: int
+    note: str | None = None
+    comments: str | None = None
     summary: str
 
 

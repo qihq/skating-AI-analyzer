@@ -29,13 +29,9 @@ import {
 import ReportCard from "../components/ReportCard";
 import { parseApiDate } from "../utils/datetime";
 import {
-  canvasToCompressedBlob,
   copyImageBlobToClipboard,
+  createAdaptiveSharePoster,
   createShareImagePreview,
-  createShareImageResult,
-  drawRoundRect,
-  drawWrappedText,
-  measureWrappedText,
   normalizeShareText,
   shareImageFile,
   ShareImagePreview,
@@ -229,22 +225,24 @@ function seekVideoTo(video: HTMLVideoElement, value: number) {
 }
 
 async function createCompareShareImage(data: AnalysisCompareResponse) {
-  const canvas = document.createElement("canvas");
-  const width = 1080;
-  const scale = 1;
   const before = data.analysis_a;
   const after = data.analysis_b;
   const actionTitle = normalizeShareSnippet(after.action_subtype || after.skill_category || after.action_type, "滑冰对比复盘", 24);
   const skaterLabel = before.skater_name ?? after.skater_name ?? "小运动员";
   const narrative = normalizeShareText(data.ai_narrative, "本次对比结果已生成，建议结合评分、关键帧和教练现场观察继续复盘。");
-  const videoAiHighlight = normalizeShareText(
-    data.video_ai_report?.summary || data.video_ai_report?.changes[0]?.description,
-    "视频 AI 宏观观察可作为评分和关键帧之外的辅助参考。",
-  );
   const improved = data.summary.improved[0];
   const added = data.summary.added[0];
   const bestMetric = data.metric_deltas.find((item) => item.available && typeof item.delta === "number");
   const bestSubscore = data.subscore_deltas.find((item) => typeof item.delta === "number");
+  const videoAi = data.video_ai_report;
+  const keyframeSummary = data.keyframe_compare
+    .map((item) => {
+      const beforeText = item.before.timestamp != null ? `${item.before.timestamp.toFixed(2)}s` : "--";
+      const afterText = item.after.timestamp != null ? `${item.after.timestamp.toFixed(2)}s` : "--";
+      const rhythm = item.relative_delta_seconds != null ? `，节奏 ${signedValue(item.relative_delta_seconds, "s")}` : "";
+      return `${item.label}：${beforeText} → ${afterText}${rhythm}`;
+    })
+    .join("；");
   const sections = [
     {
       label: "主要变化",
@@ -273,123 +271,53 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
       color: "#2563EB",
       bg: "#EFF6FF",
     },
-    ...(data.video_ai_report
+    ...(videoAi
       ? [
           {
             label: "视频 AI 观察",
-            title: videoAiHighlight,
+            title: normalizeShareText(videoAi.summary, "视频 AI 宏观观察可作为评分和关键帧之外的辅助参考。"),
+            body: [
+              ...videoAi.changes.map((item) => `${item.category}：${item.description}`),
+              videoAi.training_focus ? `训练重点：${videoAi.training_focus}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            meta: videoAi.caveats.join(" "),
             color: "#0E7490",
             bg: "#ECFEFF",
           },
         ]
       : []),
+    ...(keyframeSummary
+      ? [
+          {
+            label: "关键帧",
+            title: keyframeSummary,
+            color: "#7C3AED",
+            bg: "#F5F3FF",
+          },
+        ]
+      : []),
+    {
+      label: "Comments",
+      title: `之前：${normalizeShareText(before.note, "未填写")}`,
+      body: `现在：${normalizeShareText(after.note, "未填写")}`,
+      color: "#EA580C",
+      bg: "#FFF7ED",
+    },
   ];
-
-  const measureCanvas = document.createElement("canvas");
-  const measureCtx = measureCanvas.getContext("2d");
-  if (!measureCtx) {
-    throw new Error("share_image_canvas_failed");
-  }
-  const contentWidth = 856;
-  const textWidth = 760;
-  measureCtx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const narrativeHeight = measureWrappedText(measureCtx, narrative, contentWidth, 46, 5);
-  measureCtx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const sectionHeights = sections.map((section) => Math.max(152, 88 + measureWrappedText(measureCtx, section.title, textWidth, 40, 3) + 34));
-  const height = Math.min(
-    6000,
-    Math.max(1080, 64 + 330 + 70 + narrativeHeight + 70 + sectionHeights.reduce((sum, item) => sum + item + 32, 0) + 140),
-  );
-  canvas.width = width * scale;
-  canvas.height = height * scale;
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("share_image_canvas_failed");
-  }
-  ctx.scale(scale, scale);
-
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#F8FBFF");
-  gradient.addColorStop(0.54, "#EEF7F4");
-  gradient.addColorStop(1, "#FFF7ED");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(255,255,255,0.88)";
-  drawRoundRect(ctx, 64, 64, width - 128, height - 128, 48);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(148,163,184,0.32)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.fillStyle = "#2563EB";
-  ctx.font = "700 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("冰宝对比分享", 112, 142);
-
-  ctx.fillStyle = "#0F172A";
-  ctx.font = "800 58px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  drawWrappedText(ctx, `${actionTitle} 进步复盘`, 112, 230, 560, 66, 2);
-
-  ctx.fillStyle = "#64748B";
-  ctx.font = "500 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText(`${skaterLabel} · ${formatShortDate(before.created_at)} → ${formatShortDate(after.created_at)}`, 112, 352);
-
-  ctx.fillStyle = data.score_delta >= 0 ? "#DCFCE7" : "#FFE4E6";
-  drawRoundRect(ctx, 710, 142, 220, 220, 110);
-  ctx.fill();
-  ctx.strokeStyle = data.score_delta >= 0 ? "#86EFAC" : "#FDA4AF";
-  ctx.lineWidth = 5;
-  ctx.stroke();
-  ctx.fillStyle = data.score_delta >= 0 ? "#047857" : "#E11D48";
-  ctx.font = "800 72px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(`${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`, 820, 248);
-  ctx.font = "700 26px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("Score Δ", 820, 292);
-  ctx.fillStyle = "#64748B";
-  ctx.font = "600 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText(`${before.force_score ?? "--"} → ${after.force_score ?? "--"}`, 820, 326);
-  ctx.textAlign = "start";
-
-  ctx.fillStyle = "#334155";
-  ctx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const narrativeUsedHeight = drawWrappedText(ctx, narrative, 112, 460, contentWidth, 46, 5);
-
-  let y = 460 + narrativeUsedHeight + 70;
-  sections.forEach((section, index) => {
-    ctx.fillStyle = section.bg;
-    const blockHeight = sectionHeights[index];
-    drawRoundRect(ctx, 112, y, contentWidth, blockHeight, 28);
-    ctx.fill();
-    ctx.fillStyle = section.color;
-    ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillText(section.label, 152, y + 48);
-    ctx.fillStyle = "#0F172A";
-    ctx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    drawWrappedText(ctx, section.title, 152, y + 94, textWidth, 40, 3);
-    y += blockHeight + 32;
+  return createAdaptiveSharePoster({
+    eyebrow: "冰宝对比分享",
+    title: `${actionTitle} 进步复盘`,
+    subtitle: `${skaterLabel} · ${formatShortDate(before.created_at)} → ${formatShortDate(after.created_at)}`,
+    scoreLabel: "Score Δ",
+    scoreValue: `${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`,
+    scoreMeta: `${before.force_score ?? "--"} → ${after.force_score ?? "--"}`,
+    intro: narrative,
+    sections,
+    footer: "对比结论仅供复盘参考，冰上动作请在教练或家长陪同下完成",
+    filename: `icebuddy-compare-${after.id.slice(0, 8)}.jpg`,
   });
-
-  ctx.strokeStyle = "rgba(148,163,184,0.34)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(112, y + 26);
-  ctx.lineTo(968, y + 26);
-  ctx.stroke();
-
-  ctx.fillStyle = "#475569";
-  ctx.font = "600 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("由冰宝（IceBuddy）生成", 112, y + 86);
-  ctx.fillStyle = "#94A3B8";
-  ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("对比结论仅供复盘参考，冰上动作请在教练或家长陪同下完成", 112, y + 126);
-
-  const blob = await canvasToCompressedBlob(canvas, { type: "image/jpeg", quality: 0.82, maxBytes: 1_500_000 });
-  const filename = `icebuddy-compare-${after.id.slice(0, 8)}.jpg`;
-  return createShareImageResult(blob, filename);
 }
 
 function VideoPane({
@@ -1282,8 +1210,8 @@ export default function ComparePage() {
               </button>
             </div>
 
-            <div className="mt-5 overflow-hidden rounded-[28px] border border-slate-200 bg-slate-100">
-              <img src={shareImagePreview.url} alt="对比分享图预览" className="mx-auto block max-h-[62vh] w-auto max-w-full object-contain" />
+            <div className="mt-5 max-h-[62vh] overflow-auto rounded-[28px] border border-slate-200 bg-slate-100">
+              <img src={shareImagePreview.url} alt="对比分享图预览" className="mx-auto block h-auto w-full max-w-[720px]" />
             </div>
 
             <div className="mt-5 flex flex-wrap justify-end gap-3">

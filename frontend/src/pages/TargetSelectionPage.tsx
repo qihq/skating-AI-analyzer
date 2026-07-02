@@ -6,6 +6,8 @@ import { confirmTargetLock, fetchAnalysis, fetchTargetPreview, TargetBBox, Targe
 const AUTO_CONFIRM_THRESHOLD = 0.72;
 const MIN_BBOX_SIZE = 0.02;
 type SelectionMode = "candidate" | "manual";
+type RectSize = { width: number; height: number };
+type ImageRect = { left: number; top: number; width: number; height: number };
 
 function candidateLabel(candidate: TargetCandidate, isAuto: boolean) {
   return `${isAuto ? "自动推荐" : "候选"} · ${(candidate.confidence * 100).toFixed(0)}%`;
@@ -32,6 +34,8 @@ export default function TargetSelectionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const [previewSize, setPreviewSize] = useState<RectSize | null>(null);
+  const [imageSize, setImageSize] = useState<RectSize | null>(null);
   const [preview, setPreview] = useState<TargetPreviewResponse | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState<SelectionMode>("candidate");
@@ -73,11 +77,45 @@ export default function TargetSelectionPage() {
     };
   }, [id, navigate]);
 
+  useEffect(() => {
+    const node = previewRef.current;
+    if (!node) {
+      return;
+    }
+    const updateSize = () => {
+      const rect = node.getBoundingClientRect();
+      setPreviewSize({ width: rect.width, height: rect.height });
+    };
+    updateSize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => window.removeEventListener("resize", updateSize);
+    }
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [preview?.preview_frame_url]);
+
   const selectedCandidate = useMemo(
     () => preview?.candidates.find((candidate) => candidate.id === selectedCandidateId) ?? null,
     [preview, selectedCandidateId],
   );
   const activeBBox = selectionMode === "manual" ? draftBBox ?? manualBBox : selectedCandidate?.bbox ?? null;
+  const imageRect = useMemo<ImageRect>(() => {
+    if (!previewSize || !imageSize || previewSize.width <= 0 || previewSize.height <= 0 || imageSize.width <= 0 || imageSize.height <= 0) {
+      return { left: 0, top: 0, width: previewSize?.width ?? 0, height: previewSize?.height ?? 0 };
+    }
+    const containerRatio = previewSize.width / previewSize.height;
+    const imageRatio = imageSize.width / imageSize.height;
+    if (containerRatio > imageRatio) {
+      const height = previewSize.height;
+      const width = height * imageRatio;
+      return { left: (previewSize.width - width) / 2, top: 0, width, height };
+    }
+    const width = previewSize.width;
+    const height = width / imageRatio;
+    return { left: 0, top: (previewSize.height - height) / 2, width, height };
+  }, [imageSize, previewSize]);
   const requiresChoice = (preview?.lock_confidence ?? 0) < AUTO_CONFIRM_THRESHOLD;
   const noPersonDetected = preview?.target_lock_status === "no_person_detected";
 
@@ -97,12 +135,12 @@ export default function TargetSelectionPage() {
 
   const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = previewRef.current?.getBoundingClientRect();
-    if (!rect) {
+    if (!rect || imageRect.width <= 0 || imageRect.height <= 0) {
       return null;
     }
     return {
-      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
-      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+      x: clamp((event.clientX - rect.left - imageRect.left) / imageRect.width, 0, 1),
+      y: clamp((event.clientY - rect.top - imageRect.top) / imageRect.height, 0, 1),
     };
   };
 
@@ -222,26 +260,38 @@ export default function TargetSelectionPage() {
           onPointerMove={handlePointerMove}
           onPointerUp={finishDrag}
           onPointerCancel={finishDrag}
-          className="relative aspect-video w-full overflow-hidden rounded-[24px] border border-slate-200 bg-slate-100 touch-none phone:min-h-[220px] tablet:min-h-[360px]"
+          className="relative h-[62vh] min-h-[340px] w-full overflow-hidden rounded-[24px] border-2 border-slate-300 bg-slate-100 touch-none phone:h-[68vh] phone:min-h-[420px] tablet:h-[min(72vh,680px)] tablet:min-h-[520px]"
         >
           {preview?.preview_frame_url ? (
-            <img src={preview.preview_frame_url} alt="target preview" draggable={false} className="h-full w-full select-none object-contain" />
+            <img
+              src={preview.preview_frame_url}
+              alt="target preview"
+              draggable={false}
+              onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+              className="h-full w-full select-none object-contain"
+            />
           ) : (
             <div className="p-8 text-sm text-slate-500">预览帧加载中...</div>
           )}
 
           {activeBBox ? (
             <div
-              className={`pointer-events-none absolute border-2 ${
-                selectionMode === "manual" ? "border-emerald-300 bg-emerald-300/15" : "border-blue-400 bg-blue-400/15"
+              className={`pointer-events-none absolute border-4 ${
+                selectionMode === "manual" ? "border-emerald-300 bg-emerald-300/18" : "border-blue-400 bg-blue-400/18"
               }`}
               style={{
-                left: `${activeBBox.x * 100}%`,
-                top: `${activeBBox.y * 100}%`,
-                width: `${activeBBox.width * 100}%`,
-                height: `${activeBBox.height * 100}%`,
+                left: `${imageRect.left + activeBBox.x * imageRect.width}px`,
+                top: `${imageRect.top + activeBBox.y * imageRect.height}px`,
+                width: `${activeBBox.width * imageRect.width}px`,
+                height: `${activeBBox.height * imageRect.height}px`,
+                boxShadow: "0 0 0 9999px rgba(15,23,42,0.22), 0 0 0 2px rgba(255,255,255,0.95), 0 12px 32px rgba(15,23,42,0.32)",
               }}
-            />
+            >
+              <span className="absolute -left-1.5 -top-1.5 h-4 w-4 border-l-4 border-t-4 border-white" />
+              <span className="absolute -right-1.5 -top-1.5 h-4 w-4 border-r-4 border-t-4 border-white" />
+              <span className="absolute -bottom-1.5 -left-1.5 h-4 w-4 border-b-4 border-l-4 border-white" />
+              <span className="absolute -bottom-1.5 -right-1.5 h-4 w-4 border-b-4 border-r-4 border-white" />
+            </div>
           ) : null}
         </div>
 

@@ -22,7 +22,7 @@ export default function RetryAnalysisConfirmSheet({
   const description = isReportOnly
     ? "将复用已保存的视觉和生物力学结果，只重新生成文字报告并覆盖当前报告。"
     : isVideoKeyframes
-      ? "将只让视频 AI 重新看完整原视频定位 T/A/L 关键帧；不重跑主人物追踪、pose、生物力学或视觉报告。结果会生成关键帧修正卡，确认应用后才会生效。"
+      ? "将只让视频 AI 重新看完整原视频，并按当前动作类型定位关键帧阶段；不重跑主人物追踪、pose、生物力学或视觉报告。结果会生成关键帧修正卡，确认应用后才会生效。"
       : resetTargetLock
         ? "将从主人物定位开始重新识别，不复用当前主人物锁定；会消耗一次 AI 调用额度，原有报告将被覆盖。"
         : "将消耗一次 AI 调用额度，原有报告将被覆盖。";

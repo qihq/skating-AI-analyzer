@@ -712,8 +712,12 @@ export interface AnalysisComparisonDetail extends AnalysisComparisonSummary {
 export interface ProgressPoint {
   id: string;
   created_at: string;
+  skater_name?: string | null;
   action_type: string;
+  action_subtype?: string | null;
   force_score: number;
+  note?: string | null;
+  comments?: string | null;
   summary: string;
 }
 

@@ -1357,6 +1357,243 @@ def _apply_resolved_video_ai_profile_override_to_bio_data(
     return resolved_profile, rebuilt_bio_data, next_evidence
 
 
+VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE = 0.82
+VIDEO_AI_ACTION_SUGGESTION_MIN_CONFIDENCE = 0.50
+PROFILE_TO_ACTION_TYPE = {
+    "jump": "跳跃",
+    "spin": "旋转",
+    "step": "步法",
+    "spiral": "步法",
+}
+PROFILE_DEFAULT_SUBTYPE = {
+    "spin": "未指定",
+    "step": "步法序列",
+    "spiral": "燕式滑行",
+}
+AUTO_APPLY_NEUTRAL_ACTION_TYPES = {"", "自由滑"}
+
+
+def _video_ai_auto_apply_has_strong_label_conflict(
+    current_action_type: str,
+    current_action_subtype: str | None,
+    family: str,
+) -> bool:
+    current_type = str(current_action_type or "").strip()
+    if current_type in AUTO_APPLY_NEUTRAL_ACTION_TYPES:
+        return False
+    current_profile = infer_profile_from_input(current_type, current_action_subtype)
+    if current_profile is None:
+        return False
+    return current_profile != family
+
+
+def _video_ai_action_label_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    selected_video_temporal, selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    if family not in SUPPORTED_VIDEO_AI_PROFILES:
+        return None
+    confidence = _video_ai_action_confidence_from_payload(selected_video_temporal)
+    if confidence < VIDEO_AI_ACTION_SUGGESTION_MIN_CONFIDENCE:
+        return None
+    confirmation = (
+        selected_video_temporal.get("action_confirmation")
+        if isinstance(selected_video_temporal, dict) and isinstance(selected_video_temporal.get("action_confirmation"), dict)
+        else {}
+    )
+    confirmed_action = str(confirmation.get("confirmed_action") or confirmation.get("jump_type") or "").strip()
+    if confirmed_action in {"", "不可分析", "unknown"}:
+        confirmed_action = ""
+    next_action_type = PROFILE_TO_ACTION_TYPE.get(family)
+    if not next_action_type:
+        return None
+    if family == "jump":
+        next_subtype = "单跳" if current_action_type in {"自由滑", "jump"} else normalize_action_subtype(next_action_type, current_action_subtype)
+    elif family == "spin":
+        next_subtype = (
+            confirmed_action
+            if confirmed_action in {"直立旋转", "蹲转", "燕式旋转", "联合旋转", "飞旋"}
+            else PROFILE_DEFAULT_SUBTYPE[family]
+        )
+    else:
+        next_subtype = PROFILE_DEFAULT_SUBTYPE.get(family)
+    payload: dict[str, Any] = {
+        "action_type": next_action_type,
+        "action_subtype": next_subtype,
+        "analysis_profile": family,
+        "action_confirmation": {
+            **confirmation,
+            "action_family": family,
+            "confidence": confidence,
+            "source": f"video_ai_{selected_source or 'primary'}",
+        },
+    }
+    return payload
+
+
+def _video_ai_auto_action_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    analysis_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = _video_ai_action_label_payload(
+        current_action_type=current_action_type,
+        current_action_subtype=current_action_subtype,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        return None
+    family = str(payload.get("analysis_profile") or "").strip().lower()
+    confidence = _video_ai_action_confidence(video_temporal)
+    if confidence < VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE:
+        return None
+    normalized_profile = str(analysis_profile or "").strip().lower()
+    if normalized_profile and normalized_profile != family:
+        return None
+    if not normalized_profile and _video_ai_auto_apply_has_strong_label_conflict(current_action_type, current_action_subtype, family):
+        return None
+    confirmation = payload.get("action_confirmation")
+    if isinstance(confirmation, dict):
+        payload["action_confirmation"] = {
+            **confirmation,
+            "auto_applied": True,
+        }
+    return payload
+
+
+def _video_ai_pending_action_suggestion_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    analysis_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = _video_ai_action_label_payload(
+        current_action_type=current_action_type,
+        current_action_subtype=current_action_subtype,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        return None
+    family = str(payload.get("analysis_profile") or "").strip().lower()
+    confidence = _video_ai_action_confidence(video_temporal)
+    normalized_profile = str(analysis_profile or "").strip().lower()
+    strong_conflict = _video_ai_auto_apply_has_strong_label_conflict(current_action_type, current_action_subtype, family)
+    should_suggest = (
+        confidence < VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE
+        or (normalized_profile and normalized_profile != family)
+        or (not normalized_profile and strong_conflict)
+    )
+    if not should_suggest:
+        return None
+    confirmation = payload.get("action_confirmation")
+    if isinstance(confirmation, dict):
+        payload["action_confirmation"] = {
+            **confirmation,
+            "auto_applied": False,
+            "pending_confirmation": True,
+        }
+    return payload
+
+
+def _action_payload_changes_analysis(analysis: Analysis, payload: dict[str, Any]) -> bool:
+    return any(
+        [
+            analysis.action_type != payload.get("action_type"),
+            (analysis.action_subtype or None) != (payload.get("action_subtype") or None),
+            (analysis.analysis_profile or None) != (payload.get("analysis_profile") or None),
+        ]
+    )
+
+
+async def _has_active_video_ai_action_correction(session: AsyncSession, analysis_id: str) -> bool:
+    corrections = await list_analysis_corrections(session, analysis_id)
+    return any(
+        correction.kind == "action_label"
+        and correction.source == "video_ai_auto"
+        and correction.status in {"proposed", "applied"}
+        for correction in corrections
+    )
+
+
+async def _auto_apply_video_ai_action_if_confident(
+    session: AsyncSession,
+    analysis: Analysis,
+    *,
+    video_temporal: dict[str, Any] | None,
+    analysis_profile: str | None,
+) -> None:
+    payload = _video_ai_auto_action_payload(
+        current_action_type=analysis.action_type,
+        current_action_subtype=analysis.action_subtype,
+        analysis_profile=analysis_profile,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        suggestion = _video_ai_pending_action_suggestion_payload(
+            current_action_type=analysis.action_type,
+            current_action_subtype=analysis.action_subtype,
+            analysis_profile=analysis_profile,
+            video_temporal=video_temporal,
+        )
+        if suggestion is None or not _action_payload_changes_analysis(analysis, suggestion):
+            return
+        if await _has_active_video_ai_action_correction(session, analysis.id):
+            return
+        try:
+            await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload=suggestion,
+                rationale="Video AI action judgment needs confirmation before updating the system label.",
+                source="video_ai_auto",
+                status="proposed",
+            )
+        except AnalysisCorrectionError:
+            return
+        return
+    if not _action_payload_changes_analysis(analysis, payload):
+        return
+    if await _has_active_video_ai_action_correction(session, analysis.id):
+        return
+    try:
+        await create_analysis_correction(
+            session,
+            analysis,
+            kind="action_label",
+            payload=payload,
+            rationale="High-confidence video AI action judgment auto-applied.",
+            source="video_ai_auto",
+            status="applied",
+        )
+    except AnalysisCorrectionError:
+        return
+    analysis.action_type = str(payload["action_type"])
+    analysis.action_subtype = str(payload["action_subtype"]) if payload.get("action_subtype") is not None else None
+    analysis.analysis_profile = str(payload["analysis_profile"])
+    report = analysis.report if isinstance(analysis.report, dict) else {}
+    report["action_confirmation"] = {
+        **(report.get("action_confirmation") if isinstance(report.get("action_confirmation"), dict) else {}),
+        **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
+    }
+    analysis.report = report
+    motion = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
+    video_payload = motion.setdefault("video_temporal", {})
+    if isinstance(video_payload, dict):
+        video_payload["action_confirmation"] = {
+            **(video_payload.get("action_confirmation") if isinstance(video_payload.get("action_confirmation"), dict) else {}),
+            **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
+        }
+    analysis.frame_motion_scores = motion
+
+
 def _mixed_action_profile_reuse_allowed_by_video_ai(
     video_temporal: dict[str, Any] | None,
     video_ai_profile_flags: list[str] | None,
@@ -5218,6 +5455,12 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis.source_fps = sampling_metadata.source_fps
                     analysis.is_slow_motion = sampling_metadata.is_slow_motion
                     analysis.force_score = force_score
+                    await _auto_apply_video_ai_action_if_confident(
+                        session,
+                        analysis,
+                        video_temporal=video_temporal_result,
+                        analysis_profile=analysis_profile,
+                    )
                     analysis.status = 'completed'
                     analysis.error_code = None
                     analysis.error_detail = None
@@ -6934,11 +7177,17 @@ def _list_item_from_row(row: Any) -> AnalysisListItem:
 def _progress_point_from_row(row: Any) -> ProgressPoint:
     created_at = _parse_log_timestamp(row.created_at) if isinstance(row.created_at, str) else _coerce_utc_datetime(row.created_at)
     summary = str(row.note or "").strip() or "暂无训练备注。"
+    skater_name = str(getattr(row, "skater_display_name", None) or getattr(row, "skater_name", None) or "").strip() or None
+    note = str(row.note or "").strip() or None
     return ProgressPoint(
         id=row.id,
         created_at=created_at or row.created_at,
+        skater_name=skater_name,
         action_type=row.action_type,
+        action_subtype=row.action_subtype,
         force_score=int(row.force_score or 0),
+        note=note,
+        comments=note,
         summary=summary,
     )
 
@@ -7185,9 +7434,9 @@ def _semantic_key_for_record(record: dict[str, Any]) -> str | None:
         return "L"
     phase_code = str(record.get("phase_code") or "").strip()
     profile_phase_labels = {
-        "spin_entry": "旋转入",
-        "spin_main": "旋转中",
-        "spin_exit": "旋转出",
+        "spin_entry": "spin_entry",
+        "spin_main": "spin_main",
+        "spin_exit": "spin_exit",
         "spiral_hold": "峰值",
         "step_sequence": "步法序列",
     }
@@ -7338,7 +7587,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
 def _keyframe_labels_for_profile(profile: str | None) -> list[tuple[str, str]]:
     normalized_profile = str(profile or "").strip().lower()
     if normalized_profile == "spin":
-        return [("旋转入", "旋转入"), ("旋转中", "旋转中"), ("旋转出", "旋转出")]
+        return [("spin_entry", "入转"), ("spin_main", "旋转中"), ("spin_exit", "出转")]
     if normalized_profile == "spiral":
         return [("峰值", "姿态峰值")]
     if normalized_profile in {"step", "step_sequence"}:
@@ -8687,26 +8936,30 @@ async def get_progress(
     limit: int = Query(default=500, ge=1, le=2000),
     session: AsyncSession = Depends(get_session),
 ) -> ProgressResponse:
-    where_clauses = ["status = 'completed'", "force_score IS NOT NULL"]
+    where_clauses = ["ali.status = 'completed'", "ali.force_score IS NOT NULL"]
     params: dict[str, object] = {}
     if action_type:
-        where_clauses.append("action_type = :action_type")
+        where_clauses.append("ali.action_type = :action_type")
         params["action_type"] = action_type
     if skater_id:
-        where_clauses.append("skater_id = :skater_id")
+        where_clauses.append("ali.skater_id = :skater_id")
         params["skater_id"] = skater_id
 
     query = text(
         f"""
         SELECT
-            analysis_id AS id,
-            created_at,
-            action_type,
-            force_score,
-            note
-        FROM analysis_list_items
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.note,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name
+        FROM analysis_list_items AS ali
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
         WHERE {' AND '.join(where_clauses)}
-        ORDER BY created_at DESC
+        ORDER BY ali.created_at DESC
         LIMIT :limit
         """
     )

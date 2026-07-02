@@ -8,6 +8,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.models import Analysis
+from app.routers.analysis import _auto_apply_video_ai_action_if_confident, _video_ai_auto_action_payload
 from app.services.analysis_corrections import (
     apply_analysis_correction,
     build_chat_share_image_payload,
@@ -188,6 +189,124 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["answer"], long_answer)
             self.assertIn(long_question, text)
             self.assertIn(long_answer, text)
+
+    async def test_low_confidence_video_ai_action_creates_pending_correction(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            analysis.action_type = "自由滑"
+            analysis.action_subtype = "节目片段"
+            analysis.analysis_profile = None
+            session.add(analysis)
+            await session.commit()
+
+            await _auto_apply_video_ai_action_if_confident(
+                session,
+                analysis,
+                video_temporal={
+                    "confidence": 0.7,
+                    "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.7},
+                },
+                analysis_profile=None,
+            )
+
+            corrections = await list_analysis_corrections(session, analysis.id)
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0].source, "video_ai_auto")
+            self.assertEqual(corrections[0].status, "proposed")
+            self.assertEqual(corrections[0].payload["analysis_profile"], "spin")
+            self.assertEqual(analysis.action_type, "自由滑")
+
+    async def test_high_confidence_video_ai_action_applies_correction(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            analysis.action_type = "自由滑"
+            analysis.action_subtype = "节目片段"
+            analysis.analysis_profile = None
+            session.add(analysis)
+            await session.commit()
+
+            await _auto_apply_video_ai_action_if_confident(
+                session,
+                analysis,
+                video_temporal={
+                    "confidence": 0.9,
+                    "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.9},
+                },
+                analysis_profile=None,
+            )
+
+            corrections = await list_analysis_corrections(session, analysis.id)
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0].status, "applied")
+            self.assertEqual(analysis.action_type, "旋转")
+            self.assertEqual(analysis.action_subtype, "直立旋转")
+            self.assertEqual(analysis.analysis_profile, "spin")
+
+
+class VideoAiAutoActionPayloadTests(unittest.TestCase):
+    def test_high_confidence_spin_payload_auto_applies_neutral_input(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="自由滑",
+            current_action_subtype="节目片段",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.9,
+                "action_confirmation": {
+                    "action_family": "spin",
+                    "confirmed_action": "直立旋转",
+                    "confidence": 0.88,
+                },
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["action_type"], "旋转")
+        self.assertEqual(payload["action_subtype"], "直立旋转")
+        self.assertEqual(payload["analysis_profile"], "spin")
+        self.assertTrue(payload["action_confirmation"]["auto_applied"])
+
+    def test_low_confidence_video_ai_payload_is_not_auto_applied(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="自由滑",
+            current_action_subtype="节目片段",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.6,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.6},
+            },
+        )
+
+        self.assertIsNone(payload)
+
+    def test_strong_existing_action_conflict_is_not_auto_applied(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="跳跃",
+            current_action_subtype="单跳",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.92,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.92},
+            },
+        )
+
+        self.assertIsNone(payload)
+
+    def test_final_profile_match_allows_auto_apply_from_old_label(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="跳跃",
+            current_action_subtype="单跳",
+            analysis_profile="spin",
+            video_temporal={
+                "confidence": 0.92,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.92},
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["action_type"], "旋转")
+        self.assertEqual(payload["analysis_profile"], "spin")
 
 
 if __name__ == "__main__":

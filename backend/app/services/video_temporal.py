@@ -125,6 +125,10 @@ STEP_SEQUENCE_COVERAGE_POINTS = (
     ("step_exit", 0.82),
 )
 INFERRED_TAIL_PHASE_DURATION_GUARD_SECONDS = 0.08
+SPIN_PHASE_CONFIDENCE_FLOOR = 0.52
+SPIN_PHASE_MIN_GAP_SECONDS = 0.05
+SPIN_MAIN_STABLE_MARGIN_RATIO = 0.18
+SPIN_MAIN_STABLE_MARGIN_MAX_SECONDS = 0.45
 MAX_RESOLVED_KEYFRAMES = 12
 SKELETON_ANCHOR_CONFIDENCE = 0.65
 SKELETON_FALLBACK_CONFIDENCE = 0.65
@@ -3125,8 +3129,8 @@ def _coherent_profile_phases_are_usable(
         "step": ("step_sequence",),
     }
     expected = expected_by_profile.get(profile)
-    confidence_floor = 0.50 if profile == "step" else 0.70
-    phase_confidence_floor = 0.65 if profile == "step" and confidence < 0.70 else 0.60
+    confidence_floor = 0.50 if profile == "step" else 0.62 if profile == "spin" else 0.70
+    phase_confidence_floor = 0.65 if profile == "step" and confidence < 0.70 else SPIN_PHASE_CONFIDENCE_FLOOR if profile == "spin" else 0.60
     if expected is None or confidence < confidence_floor or duration_sec <= 0:
         return False
 
@@ -3157,7 +3161,8 @@ def _coherent_profile_phases_are_usable(
         hint = _to_float(segment.get("key_frame_hint"))
         if hint is not None and not (start <= hint <= end):
             return False
-        if previous_end is not None and start + 0.25 < previous_end:
+        min_order_gap = SPIN_PHASE_MIN_GAP_SECONDS if profile == "spin" else 0.25
+        if previous_end is not None and start + min_order_gap < previous_end:
             return False
         previous_end = end
         if _clamp_confidence(segment.get("confidence")) < phase_confidence_floor:
@@ -4212,6 +4217,145 @@ def _step_sequence_coverage_records(
     return records, flags if records else []
 
 
+def _resolve_spin_segment_timestamp(
+    segment: dict[str, Any],
+    *,
+    motion_records: list[dict[str, Any]],
+    duration_sec: float,
+) -> tuple[float | None, str, list[str]]:
+    flags: list[str] = []
+    phase_code = str(segment.get("phase_code") or "")
+    start = _to_float(segment.get("time_start"))
+    end = _to_float(segment.get("time_end"))
+    hint = _to_float(segment.get("key_frame_hint"))
+    if start is None or end is None or end <= start:
+        return None, "invalid_phase_range", ["video_temporal_resolver_invalid_phase_range"]
+    start = max(0.0, min(start, duration_sec))
+    end = max(start, min(end, duration_sec))
+    span = end - start
+    if span <= 0:
+        return None, "invalid_phase_range", ["video_temporal_resolver_invalid_phase_range"]
+
+    if phase_code == "spin_entry":
+        target = start + span * 0.58
+        reason = "video_phase_range_spin_entry_anchor"
+    elif phase_code == "spin_exit":
+        target = start + span * 0.42
+        reason = "video_phase_range_spin_exit_anchor"
+    elif phase_code == "spin_main":
+        margin = min(SPIN_MAIN_STABLE_MARGIN_MAX_SECONDS, span * SPIN_MAIN_STABLE_MARGIN_RATIO)
+        stable_start = start + margin
+        stable_end = end - margin
+        if stable_end <= stable_start:
+            stable_start, stable_end = start, end
+        peak = _motion_peak_in_range(motion_records, stable_start, stable_end)
+        if peak is not None:
+            return peak, "video_phase_range_spin_main_motion_peak", flags
+        target = (stable_start + stable_end) / 2.0
+        reason = "video_phase_range_spin_main_center"
+    else:
+        target = hint if hint is not None and start <= hint <= end else (start + end) / 2.0
+        reason = "video_phase_range_non_jump_center"
+
+    if hint is not None and start <= hint <= end and phase_code != "spin_main":
+        target = (target * 0.55) + (hint * 0.45)
+        reason = f"{reason}_hint_blend"
+    return round(max(0.0, min(target, duration_sec)), 3), reason, flags
+
+
+def _spin_phase_segment_map(normalized_video: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(normalized_video, dict):
+        return {}
+    output: dict[str, dict[str, Any]] = {}
+    for segment in normalized_video.get("phase_segments", []):
+        if not isinstance(segment, dict):
+            continue
+        code = str(segment.get("phase_code") or "")
+        if code not in SPIN_PHASE_CODES:
+            continue
+        current = output.get(code)
+        if current is None or _clamp_confidence(segment.get("confidence")) > _clamp_confidence(current.get("confidence")):
+            output[code] = segment
+    return output
+
+
+def _spin_coverage_fallback_selected(
+    normalized_video: dict[str, Any] | None,
+    *,
+    motion_records: list[dict[str, Any]],
+    duration_sec: float,
+    confidence: float,
+    max_frames: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    segments = _spin_phase_segment_map(normalized_video)
+    if not segments or duration_sec <= 0:
+        return [], []
+    available_ranges = [
+        _valid_phase_time_range(segment, duration_sec)
+        for segment in segments.values()
+    ]
+    available_ranges = [item for item in available_ranges if item is not None]
+    if not available_ranges:
+        return [], []
+    start = min(item[0] for item in available_ranges)
+    end = max(item[1] for item in available_ranges)
+    if end <= start:
+        return [], []
+
+    span = end - start
+    fallback_ratios = {
+        "spin_entry": 0.18,
+        "spin_main": 0.50,
+        "spin_exit": 0.82,
+    }
+    flags = ["video_temporal_resolver_spin_phase_coverage_fallback"]
+    selected: list[dict[str, Any]] = []
+    for phase_code in SPIN_RESOLVER_PHASES:
+        if len(selected) >= max_frames:
+            flags.append("video_temporal_resolver_frame_budget_trimmed")
+            break
+        segment = segments.get(phase_code)
+        if segment is not None:
+            timestamp, reason, segment_flags = _resolve_spin_segment_timestamp(
+                segment,
+                motion_records=motion_records,
+                duration_sec=duration_sec,
+            )
+            flags.extend(segment_flags)
+            phase_start = _to_float(segment.get("time_start"))
+            phase_end = _to_float(segment.get("time_end"))
+            phase_conf = _clamp_confidence(segment.get("confidence"), default=confidence)
+        else:
+            timestamp = round(start + span * fallback_ratios[phase_code], 3)
+            reason = "video_phase_range_spin_coverage_fallback"
+            phase_start = max(0.0, timestamp - max(0.12, span * 0.08))
+            phase_end = min(duration_sec, timestamp + max(0.12, span * 0.08))
+            phase_conf = min(confidence, 0.58)
+            flags.append(f"video_temporal_resolver_inferred_{phase_code}_phase")
+        if timestamp is None:
+            continue
+        selected.append(
+            {
+                "frame_id": f"semantic_{len(selected) + 1:04d}",
+                "timestamp": round(timestamp, 3),
+                "phase_code": phase_code,
+                "phase_label": PHASE_LABELS[phase_code],
+                "key_moment": None,
+                "selection_reason": reason,
+                "confidence": phase_conf,
+                "phase_time_start": phase_start,
+                "phase_time_end": phase_end,
+            }
+        )
+
+    if len(selected) < 2:
+        return [], flags
+    selected.sort(key=lambda item: float(item.get("timestamp", 0.0) or 0.0))
+    for index, item in enumerate(selected, start=1):
+        item["frame_id"] = f"semantic_{index:04d}"
+    return selected, flags
+
+
 def resolve_semantic_keyframes(
     video_ai_result: dict[str, Any] | None,
     skeleton_timestamps: dict[str, Any] | None,
@@ -4249,6 +4393,7 @@ def resolve_semantic_keyframes(
         )
 
     confidence = _clamp_confidence(normalized_video.get("confidence") if isinstance(normalized_video, dict) else 0.0)
+    requested_profile = str(analysis_profile or "").strip().lower()
     occlusion_risk = _video_temporal_has_occlusion_risk(normalized_video)
     skeleton_phase_edge_anchors = (
         _coherent_skeleton_tal_anchors(skeleton_candidates, duration_sec=duration)
@@ -4270,7 +4415,6 @@ def resolve_semantic_keyframes(
         duration_sec=duration,
     )
     flags.extend(profile_override_flags)
-    requested_profile = str(analysis_profile or "").strip().lower()
     provider_family = (
         str(normalized_video.get("action_confirmation", {}).get("action_family") or "").strip().lower()
         if isinstance(normalized_video, dict) and isinstance(normalized_video.get("action_confirmation"), dict)
@@ -4392,6 +4536,23 @@ def resolve_semantic_keyframes(
             flags.append("video_temporal_resolver_low_video_confidence")
         else:
             flags.append("video_temporal_resolver_video_fallback_recommended")
+        if str(effective_analysis_profile or requested_profile or "").strip().lower() == "spin":
+            spin_selected, spin_flags = _spin_coverage_fallback_selected(
+                normalized_video,
+                motion_records=motion_records,
+                duration_sec=duration,
+                confidence=confidence,
+                max_frames=max_frames,
+            )
+            if spin_selected:
+                flags.extend(spin_flags)
+                return {
+                    "source": "blended",
+                    "confidence": confidence,
+                    "quality_flags": _merge_flags(flags),
+                    "selected": spin_selected,
+                    "video_ai": normalized_video or {},
+                }
         if fallback_selected and not _selected_has_complete_ordered_core_tal(fallback_selected, min_confidence=SKELETON_FALLBACK_CONFIDENCE):
             flags.append("video_temporal_resolver_partial_skeleton_fallback")
         motion_cluster_selected, motion_cluster_flags = _jump_motion_cluster_fallback_selected(
@@ -4521,17 +4682,25 @@ def resolve_semantic_keyframes(
                     selected.append(item)
                 continue
             flags.extend(coverage_flags)
-        timestamp, reason, key_moment, segment_flags = _resolve_segment_timestamp(
-            segment,
-            source=source,
-            video_ai_result=normalized_video,
-            skeleton_candidates=skeleton_candidates,
-            motion_records=motion_records,
-            prefer_key_moments=allow_core_candidate_phase and explicit_video_fallback,
-            preserve_key_moments=preserve_core_key_moments,
-            prefer_key_moments_before_skeleton=preserve_video_tal_despite_weak_retry_motion_conflict,
-            skeleton_phase_edge_anchors=skeleton_phase_edge_anchors,
-        )
+        if str(effective_analysis_profile or "").strip().lower() == "spin" and phase_code in SPIN_PHASE_CODES:
+            timestamp, reason, segment_flags = _resolve_spin_segment_timestamp(
+                segment,
+                motion_records=motion_records,
+                duration_sec=duration,
+            )
+            key_moment = None
+        else:
+            timestamp, reason, key_moment, segment_flags = _resolve_segment_timestamp(
+                segment,
+                source=source,
+                video_ai_result=normalized_video,
+                skeleton_candidates=skeleton_candidates,
+                motion_records=motion_records,
+                prefer_key_moments=allow_core_candidate_phase and explicit_video_fallback,
+                preserve_key_moments=preserve_core_key_moments,
+                prefer_key_moments_before_skeleton=preserve_video_tal_despite_weak_retry_motion_conflict,
+                skeleton_phase_edge_anchors=skeleton_phase_edge_anchors,
+            )
         flags.extend(segment_flags)
         if timestamp is None:
             continue
@@ -4648,6 +4817,25 @@ def resolve_semantic_keyframes(
     if inferred_spin_exit is not None and len(selected) < max_frames:
         selected = _append_inferred_phase(selected, inferred_spin_exit)
         flags.extend(spin_exit_flags)
+
+    if str(effective_analysis_profile or "").strip().lower() == "spin":
+        selected_codes = {str(item.get("phase_code") or "") for item in selected if isinstance(item, dict)}
+        if not set(SPIN_RESOLVER_PHASES).issubset(selected_codes):
+            spin_selected, spin_flags = _spin_coverage_fallback_selected(
+                normalized_video,
+                motion_records=motion_records,
+                duration_sec=duration,
+                confidence=confidence,
+                max_frames=max_frames,
+            )
+            if spin_selected:
+                current_by_code = {str(item.get("phase_code") or ""): item for item in selected if isinstance(item, dict)}
+                merged: list[dict[str, Any]] = []
+                for item in spin_selected:
+                    code = str(item.get("phase_code") or "")
+                    merged.append(current_by_code.get(code, item))
+                selected = merged
+                flags.extend(spin_flags)
 
     return {
         "source": source,

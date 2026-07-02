@@ -14,7 +14,7 @@ from app.models import Analysis, AnalysisCorrection
 
 
 VALID_CORRECTION_KINDS = {"action_label", "keyframes", "report_note", "report_regeneration", "target_lock"}
-VALID_CORRECTION_SOURCES = {"manual", "chat_suggestion", "video_ai_keyframe_rerun"}
+VALID_CORRECTION_SOURCES = {"manual", "chat_suggestion", "video_ai_keyframe_rerun", "video_ai_auto"}
 VALID_CORRECTION_STATUSES = {"proposed", "applied", "dismissed"}
 KEYFRAME_KEYS = ("T", "A", "L")
 
