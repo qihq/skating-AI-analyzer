@@ -6,6 +6,7 @@ import {
   buildDraftKeyframeEvidenceItems,
   buildSemanticKeyframeEvidenceItems,
   formatKeyframeTimestamp,
+  keyframeOrderForAnalysis,
   keyframeConfidenceLabel,
   type KeyframeEvidenceItem,
   type KeyframeKey,
@@ -14,7 +15,7 @@ import {
 
 export type { KeyframeSyncPatch } from "../utils/keyframeEvidence";
 
-type DraftKeyframes = Record<KeyframeKey, string>;
+type DraftKeyframes = Partial<Record<KeyframeKey, string>>;
 type SourceId = "current" | "selected" | "partial" | "draft";
 
 type KeyframeEvidenceSource = {
@@ -48,6 +49,8 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
   }, [analysis, draftKeyframes]);
 
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? sources[0];
+  const expectedKeys = keyframeOrderForAnalysis(analysis);
+  const canSyncToJumpForm = expectedKeys.every((key) => key === "T" || key === "A" || key === "L");
   const availableCount = activeSource.items.filter((item) => item.value).length;
   const videoSrc = `/api/analysis/${encodeURIComponent(analysis.id)}/video`;
   const sourceTabsClass = layout === "wide"
@@ -65,7 +68,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
   };
 
   const syncItem = (item: KeyframeEvidenceItem) => {
-    if (!item.value) {
+    if (!item.value || !canSyncToJumpForm) {
       return;
     }
     seekTo(item.timestamp);
@@ -79,7 +82,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
       }
       return current;
     }, {});
-    if (Object.keys(patch).length) {
+    if (canSyncToJumpForm && Object.keys(patch).length) {
       onSyncFrames(patch, activeSource.label);
     }
   };
@@ -89,15 +92,15 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
       <div className="flex flex-col gap-3 phone:flex-row phone:items-start phone:justify-between">
         <div>
           <h3 className="text-sm font-semibold text-slate-900">关键帧核对台</h3>
-          <p className="mt-1 text-xs text-slate-500">{activeSource.label} · {availableCount}/3</p>
+          <p className="mt-1 text-xs text-slate-500">{activeSource.label} · {availableCount}/{expectedKeys.length}</p>
         </div>
         <button
           type="button"
           onClick={syncAll}
-          disabled={!availableCount}
+          disabled={!availableCount || !canSyncToJumpForm}
           className="min-h-[36px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          同步三帧到 form
+          {canSyncToJumpForm ? "同步三帧到 form" : "动作区间仅查看"}
         </button>
       </div>
 
@@ -147,7 +150,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
               <button
                 type="button"
                 onClick={() => syncItem(item)}
-                disabled={!item.value}
+                disabled={!item.value || !canSyncToJumpForm}
                 className="group block w-full overflow-hidden rounded-[16px] bg-slate-950 text-left disabled:cursor-not-allowed"
               >
                 <div className="relative aspect-video">
@@ -192,7 +195,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
                   <button
                     type="button"
                     onClick={() => syncItem(item)}
-                    disabled={!item.value}
+                    disabled={!item.value || !canSyncToJumpForm}
                     className="min-h-[34px] flex-1 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 transition hover:bg-teal-50 hover:text-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     同步 {item.key}

@@ -258,6 +258,58 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.keyframe_compare[0].before.source, "bio_key_frames")
         self.assertEqual(result.keyframe_compare[0].before.timestamp, 0.1)
         self.assertEqual(result.keyframe_compare[0].before.confidence, 0.8)
+
+    async def test_compare_subscores_fall_back_to_bio_subscores(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=82,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async with self.database.AsyncSessionLocal() as session:
+            older = await session.get(self.models.Analysis, older_id)
+            newer = await session.get(self.models.Analysis, newer_id)
+            assert older is not None and newer is not None
+            older.report = {**_report(70), "subscores": {}}
+            newer.report = {**_report(82), "subscores": {}}
+            older.bio_data = {**_bio(70), "bio_subscores": {
+                "takeoff_power": 70,
+                "rotation_axis": 69,
+                "arm_coordination": 68,
+                "landing_absorption": 67,
+                "core_stability": 66,
+            }}
+            newer.bio_data = {**_bio(82), "bio_subscores": {
+                "takeoff_power": 82,
+                "rotation_axis": 81,
+                "arm_coordination": 80,
+                "landing_absorption": 79,
+                "core_stability": 78,
+            }}
+            await session.commit()
+
+        completion_mock = AsyncMock(return_value="孩子这次动作更稳定。")
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=object())),
+            patch("app.routers.analysis.request_text_completion", completion_mock),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                result = await self.analysis_router.compare_analyses(newer_id, older_id, session=session)
+
+        self.assertTrue(all(item.available for item in result.subscore_deltas))
+        self.assertEqual(result.subscore_deltas[0].before, 70)
+        self.assertEqual(result.subscore_deltas[0].after, 82)
+        self.assertEqual(result.subscore_deltas[0].delta, 12)
         self.assertTrue(result.keyframe_compare[0].before.available)
         self.assertEqual(result.keyframe_compare[0].after.timestamp, 0.1)
         self.assertEqual(result.keyframe_compare[0].delta_seconds, 0.0)

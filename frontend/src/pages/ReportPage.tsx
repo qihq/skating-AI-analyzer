@@ -68,6 +68,12 @@ const DATA_QUALITY_LABELS: Record<string, string> = {
   poor: "较弱",
 };
 
+const SUBSCORE_SOURCE_LABELS: Record<string, string> = {
+  ai_fused: "AIèžåˆ",
+  biomechanics: "ç”Ÿç‰©åŠ›å­¦",
+  fallback_reference: "é™çº§å‚è€ƒ",
+};
+
 const RADAR_VIEWBOX_SIZE = 300;
 const RADAR_CENTER = RADAR_VIEWBOX_SIZE / 2;
 const RADAR_RADIUS = 88;
@@ -125,10 +131,27 @@ function scoreStars(score: number | null | undefined) {
   return `${"★".repeat(stars)}${"☆".repeat(5 - stars)}`;
 }
 
-function buildSubscoreRadarData(subscores: Record<string, number>) {
+function validSubscoreValue(value: unknown) {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) && numeric >= 0 && numeric <= 100 ? Math.round(numeric) : null;
+}
+
+function normalizeSubscores(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const normalized = Object.keys(SUBSCORE_LABELS).reduce<Record<string, number | null>>((current, key) => {
+    current[key] = validSubscoreValue(record[key]);
+    return current;
+  }, {});
+  return Object.values(normalized).some((score) => score != null) ? normalized : null;
+}
+
+function buildSubscoreRadarData(subscores: Record<string, number | null>) {
   return Object.entries(SUBSCORE_LABELS).map(([key, label]) => ({
     label,
-    value: Math.max(0, Math.min(Number(subscores[key] ?? 0), 100)),
+    value: validSubscoreValue(subscores[key]),
   }));
 }
 
@@ -211,6 +234,9 @@ async function createReportShareImage(analysis: AnalysisDetail) {
   const topImprovement = report?.improvements?.[0];
   const summary = normalizeShareText(report?.summary, "本次报告已生成，建议结合训练重点继续练习。");
   const focus = normalizeShareText(report?.training_focus, "先把动作做稳，再慢慢加速度。");
+  const commentText = normalizeShareText(analysis.note, "");
+  const commentResponse = normalizeShareText(report?.user_note_response, "");
+  const commentShareText = [commentText ? `Comments: ${commentText}` : "", commentResponse ? `AI: ${commentResponse}` : ""].filter(Boolean).join("  ");
   const issueText = normalizeShareText(
     topIssue ? `${topIssue.category}：${topIssue.description}` : null,
     "本次没有识别到明显高风险问题。",
@@ -233,6 +259,8 @@ async function createReportShareImage(analysis: AnalysisDetail) {
   const textWidth = 760;
   measureCtx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   const summaryHeight = measureWrappedText(measureCtx, summary, contentWidth, 46);
+  measureCtx.font = "600 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  const commentHeight = commentShareText ? Math.max(118, 70 + measureWrappedText(measureCtx, commentShareText, textWidth, 34, 3)) : 0;
   const sections = [
     { label: "核心问题", title: issueText, sub: secondIssueText, color: "#F97316", bg: "#FFF7ED" },
     { label: "训练重点", title: focus, sub: null, color: "#2563EB", bg: "#EFF6FF" },
@@ -244,9 +272,27 @@ async function createReportShareImage(analysis: AnalysisDetail) {
     const subHeight = section.sub ? measureWrappedText(measureCtx, section.sub, textWidth, 32) : 0;
     return Math.max(section.sub ? 176 : 152, 88 + titleHeight + (section.sub ? 14 + subHeight : 0) + 34);
   });
+  const shareSubscores = normalizeSubscores(report?.subscores) ?? normalizeSubscores(analysis.bio_data?.bio_subscores);
+  const subscoreItems = Object.entries(shareSubscores ?? {})
+    .filter(([, value]) => value != null)
+    .map(([key, value]) => ({ key, label: SUBSCORE_LABELS[key] ?? key, value: value as number }))
+    .sort((a, b) => b.value - a.value);
+  const visibleSubscores = subscoreItems.length <= 5
+    ? subscoreItems
+    : [
+        subscoreItems[0],
+        subscoreItems[subscoreItems.length - 1],
+        ...subscoreItems
+          .filter((item) => item.value < 76 && item.key !== subscoreItems[0].key && item.key !== subscoreItems[subscoreItems.length - 1].key)
+          .slice(0, 1),
+      ].filter((item, index, list) => item && list.findIndex((candidate) => candidate.key === item.key) === index);
+  const subscoreBlockHeight = visibleSubscores.length ? 82 + visibleSubscores.length * 42 : 0;
   const height = Math.min(
     6000,
-    Math.max(1080, 64 + 312 + 70 + summaryHeight + 70 + sectionHeights.reduce((sum, item) => sum + item + 32, 0) + 140),
+    Math.max(
+      1080,
+      64 + 312 + 70 + summaryHeight + (commentHeight ? 26 + commentHeight : 0) + 70 + sectionHeights.reduce((sum, item) => sum + item + 32, 0) + (subscoreBlockHeight ? 24 + subscoreBlockHeight : 0) + 140,
+    ),
   );
   canvas.width = width * scale;
   canvas.height = height * scale;
@@ -312,6 +358,19 @@ async function createReportShareImage(analysis: AnalysisDetail) {
   const summaryUsedHeight = drawWrappedText(ctx, summary, 112, 486, contentWidth, 46);
 
   let y = 486 + summaryUsedHeight + 70;
+  if (commentShareText) {
+    y -= 44;
+    ctx.fillStyle = "#F8FAFC";
+    drawRoundRect(ctx, 112, y, contentWidth, commentHeight, 26);
+    ctx.fill();
+    ctx.fillStyle = "#0F766E";
+    ctx.font = "800 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.fillText("Comments", 152, y + 42);
+    ctx.fillStyle = "#334155";
+    ctx.font = "600 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    drawWrappedText(ctx, commentShareText, 152, y + 78, textWidth, 34, 3);
+    y += commentHeight + 54;
+  }
   sections.forEach((section, index) => {
     ctx.fillStyle = section.bg;
     const blockHeight = sectionHeights[index];
@@ -330,6 +389,31 @@ async function createReportShareImage(analysis: AnalysisDetail) {
     }
     y += blockHeight + 32;
   });
+
+  if (visibleSubscores.length) {
+    ctx.fillStyle = "#F8FAFC";
+    drawRoundRect(ctx, 112, y, contentWidth, subscoreBlockHeight, 26);
+    ctx.fill();
+    ctx.fillStyle = "#2563EB";
+    ctx.font = "800 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.fillText("SUBSCORES", 152, y + 42);
+    visibleSubscores.forEach((item, index) => {
+      const rowY = y + 76 + index * 42;
+      ctx.fillStyle = "#334155";
+      ctx.font = "700 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.fillText(item.label, 152, rowY);
+      ctx.fillStyle = "#DBEAFE";
+      drawRoundRect(ctx, 388, rowY - 24, 410, 20, 10);
+      ctx.fill();
+      ctx.fillStyle = "#2563EB";
+      drawRoundRect(ctx, 388, rowY - 24, Math.max(18, 410 * (item.value / 100)), 20, 10);
+      ctx.fill();
+      ctx.fillStyle = "#0F172A";
+      ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.fillText(String(item.value), 830, rowY);
+    });
+    y += subscoreBlockHeight + 32;
+  }
 
   ctx.strokeStyle = "rgba(148,163,184,0.34)";
   ctx.lineWidth = 2;
@@ -484,15 +568,16 @@ function FailedState({ message }: { message: string | null }) {
   );
 }
 
-function SubscoreRadarChart({ subscores }: { subscores: Record<string, number> }) {
+function SubscoreRadarChart({ subscores }: { subscores: Record<string, number | null> }) {
   const data = buildSubscoreRadarData(subscores);
   const axisCount = Math.max(data.length, 1);
+  const hasMissingValues = data.some((item) => item.value == null);
   const gridPolygons = Array.from({ length: RADAR_LEVELS }, (_, level) =>
     buildRadarPolygonPoints(axisCount, () => (RADAR_RADIUS * (level + 1)) / RADAR_LEVELS),
   );
   // 修改前：雷达图中心点和多边形坐标交给第三方布局推断，不同断点下不容易保持绝对居中。
   // 修改后：所有点位都基于同一个 viewBox 中心显式计算，保证双端图形始终围绕同一中心。
-  const valuePolygon = buildRadarPolygonPoints(axisCount, (index) => (RADAR_RADIUS * data[index].value) / 100);
+  const valuePolygon = buildRadarPolygonPoints(axisCount, (index) => (RADAR_RADIUS * (data[index].value ?? 0)) / 100);
 
   return (
     <div className="mx-auto flex aspect-square h-64 w-full max-w-[320px] items-center justify-center rounded-[28px] border border-slate-200 bg-slate-50 p-4">
@@ -548,9 +633,14 @@ function SubscoreRadarChart({ subscores }: { subscores: Record<string, number> }
         <polygon points={valuePolygon} fill="#60A5FA" fillOpacity="0.28" stroke="#3B82F6" strokeWidth="2.5" />
 
         {data.map((item, index) => {
-          const point = getRadarPoint((360 / axisCount) * index, (RADAR_RADIUS * item.value) / 100);
+          const point = getRadarPoint((360 / axisCount) * index, (RADAR_RADIUS * (item.value ?? 0)) / 100);
           return <circle key={`dot-${item.label}`} cx={point.x} cy={point.y} r="3.5" fill="#1D4ED8" />;
         })}
+        {hasMissingValues ? (
+          <text x={RADAR_CENTER} y={RADAR_VIEWBOX_SIZE - 12} textAnchor="middle" className="fill-slate-400 text-[10px] font-semibold">
+            æ•°æ®ä¸è¶³
+          </text>
+        ) : null}
       </svg>
     </div>
   );
@@ -664,9 +754,15 @@ export default function ReportPage() {
   const [isSharing, setIsSharing] = useState(false);
   const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview | null>(null);
   const deferredAnalysis = useDeferredValue(analysis);
-  const subscores = deferredAnalysis?.report?.subscores ?? deferredAnalysis?.bio_data?.bio_subscores ?? null;
+  const rawReportSubscores = normalizeSubscores(deferredAnalysis?.report?.subscores);
+  const rawBioSubscores = normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
+  const subscores = rawReportSubscores ?? rawBioSubscores;
+  const subscoreSource =
+    deferredAnalysis?.report?.subscores_source ??
+    (rawReportSubscores ? "ai_fused" : rawBioSubscores ? "biomechanics" : null);
+  const subscoreSourceLabel = subscoreSource ? SUBSCORE_SOURCE_LABELS[subscoreSource] ?? subscoreSource : null;
   const reportDataQuality = deferredAnalysis?.report?.data_quality ?? "partial";
-  const hasReliableSubscores = reportDataQuality === "good" && Boolean(subscores);
+  const hasUsableSubscores = Boolean(subscores);
   const reportSkater = skaters.find((item) => item.id === deferredAnalysis?.skater_id) ?? null;
   const autoUnlockedSkill = skills.find((item) => item.id === deferredAnalysis?.auto_unlocked_skill) ?? null;
   const flattenedSuggestions = useMemo(() => flattenSuggestionPreview(memorySuggestions), [memorySuggestions]);
@@ -1315,16 +1411,17 @@ export default function ReportPage() {
                 </div>
               </ReportCard>
 
-              {(hasReliableSubscores && subscores) || (isParentMode && (subscores || reportDataQuality !== "good")) ? (
+              {hasUsableSubscores || (isParentMode && reportDataQuality !== "good") ? (
                 <ReportCard title="分项评分" eyebrow="Subscores">
-                  {hasReliableSubscores && subscores ? (
+                  {subscores ? (
                     <div className="grid min-w-0 gap-6 ipad:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
                       <SubscoreRadarChart subscores={subscores} />
                       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                         {Object.entries(subscores).map(([key, value]) => (
                           <article key={key} className="rounded-[20px] bg-slate-50 p-4">
                             <p className="text-sm text-slate-500">{SUBSCORE_LABELS[key] ?? key}</p>
-                            <p className="mt-3 text-2xl font-semibold text-slate-900">{value}</p>
+                            <p className="mt-3 text-2xl font-semibold text-slate-900">{value ?? "--"}</p>
+                            {value == null ? <p className="mt-1 text-xs text-slate-400">æ•°æ®ä¸è¶³</p> : null}
                           </article>
                         ))}
                       </div>
@@ -1335,7 +1432,10 @@ export default function ReportPage() {
                       <p className="mt-2 text-sm leading-7 text-slate-500">当前视频关键帧不足，或识别稳定性不够，继续展示五项数字容易造成误导。</p>
                     </div>
                   )}
-                  <p className="mt-4 text-sm text-slate-500">数据质量：{DATA_QUALITY_LABELS[reportDataQuality] ?? reportDataQuality}</p>
+                  <p className="mt-4 text-sm text-slate-500">
+                    数据质量：{DATA_QUALITY_LABELS[reportDataQuality] ?? reportDataQuality}
+                    {subscoreSourceLabel ? ` · ${subscoreSourceLabel}` : ""}
+                  </p>
                 </ReportCard>
               ) : null}
             </main>

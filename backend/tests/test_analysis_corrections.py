@@ -187,6 +187,9 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["summary"], long_summary)
             self.assertEqual(payload["question"], long_question)
             self.assertEqual(payload["answer"], long_answer)
+            self.assertEqual(len(payload["timeline_items"]), 1)
+            self.assertEqual(payload["timeline_items"][0]["question"], long_question)
+            self.assertEqual(payload["timeline_items"][0]["answer"], long_answer)
             self.assertIn(long_question, text)
             self.assertIn(long_answer, text)
 

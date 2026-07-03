@@ -109,6 +109,50 @@ def _fallback_subscores() -> dict[str, int]:
     }
 
 
+def valid_subscores(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key in SUBSCORE_KEYS:
+        raw = value.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= numeric <= 100:
+            continue
+        normalized[key] = _clamp_score(numeric)
+    return normalized if len(normalized) == len(SUBSCORE_KEYS) else {}
+
+
+def effective_report_subscores(
+    report: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+) -> tuple[dict[str, int], str]:
+    report_subscores = valid_subscores(report.get("subscores") if isinstance(report, dict) else None)
+    if report_subscores:
+        return report_subscores, "ai_fused"
+
+    bio_subscores = valid_subscores(bio_data.get("bio_subscores") if isinstance(bio_data, dict) else None)
+    if bio_subscores:
+        return bio_subscores, "biomechanics"
+
+    return _fallback_subscores(), "fallback_reference"
+
+
+def ensure_report_subscores(
+    report: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = dict(report) if isinstance(report, dict) else {}
+    subscores, source = effective_report_subscores(normalized, bio_data if isinstance(bio_data, dict) else None)
+    normalized["subscores"] = subscores
+    normalized["subscores_source"] = source
+    return normalized
+
+
 def fuse_subscores(
     ai_subscores: dict[str, Any],
     bio_subscores: dict[str, Any] | None,

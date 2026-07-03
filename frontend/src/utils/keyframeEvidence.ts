@@ -1,6 +1,6 @@
 import type { AnalysisDetail, SelectedSemanticFrame } from "../api/client";
 
-export type KeyframeKey = "T" | "A" | "L";
+export type KeyframeKey = "T" | "A" | "L" | "spin_entry" | "spin_main" | "spin_exit" | "spiral_hold" | "step_sequence";
 export type KeyframeSyncPatch = Partial<Record<KeyframeKey, string>>;
 
 type FrameRef = {
@@ -29,11 +29,36 @@ type EvidenceBuildContext = {
 };
 
 export const KEYFRAME_ORDER: KeyframeKey[] = ["T", "A", "L"];
-export const KEYFRAME_LABELS: Record<KeyframeKey, string> = {
+export const SPIN_KEYFRAME_ORDER: KeyframeKey[] = ["spin_entry", "spin_main", "spin_exit"];
+export const SPIRAL_KEYFRAME_ORDER: KeyframeKey[] = ["spiral_hold"];
+export const STEP_KEYFRAME_ORDER: KeyframeKey[] = ["step_sequence"];
+export const KEYFRAME_LABELS: Record<string, string> = {
   T: "起跳",
   A: "腾空",
   L: "落冰",
 };
+
+Object.assign(KEYFRAME_LABELS, {
+  spin_entry: "入转",
+  spin_main: "主转",
+  spin_exit: "出转",
+  spiral_hold: "姿态保持",
+  step_sequence: "步法区间",
+});
+
+export function keyframeOrderForAnalysis(analysis: AnalysisDetail): KeyframeKey[] {
+  const profile = String(analysis.analysis_profile ?? "").trim().toLowerCase();
+  if (profile === "spin") {
+    return SPIN_KEYFRAME_ORDER;
+  }
+  if (profile === "spiral") {
+    return SPIRAL_KEYFRAME_ORDER;
+  }
+  if (profile === "step" || profile === "step_sequence") {
+    return STEP_KEYFRAME_ORDER;
+  }
+  return KEYFRAME_ORDER;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -148,9 +173,33 @@ function phaseKeyFromRecord(record: Record<string, unknown>, fallbackIndex?: num
     ) {
       return "L";
     }
+    if (value === "spin_entry" || value.includes("entry") || value.includes("入转") || value.includes("旋转入")) {
+      return "spin_entry";
+    }
+    if (value === "spin_main" || value.includes("main") || value.includes("主转") || value.includes("旋转中")) {
+      return "spin_main";
+    }
+    if (value === "spin_exit" || value.includes("exit") || value.includes("出转") || value.includes("旋转出")) {
+      return "spin_exit";
+    }
+    if (value === "spiral_hold" || value.includes("spiral") || value.includes("姿态保持") || value.includes("燕式")) {
+      return "spiral_hold";
+    }
+    if (value === "step_sequence" || value.includes("step") || value.includes("步法")) {
+      return "step_sequence";
+    }
   }
 
   return fallbackIndex != null && fallbackIndex < KEYFRAME_ORDER.length ? KEYFRAME_ORDER[fallbackIndex] : null;
+}
+
+function phaseKeyFromRecordForAnalysis(analysis: AnalysisDetail, record: Record<string, unknown>, fallbackIndex?: number): KeyframeKey | null {
+  const key = phaseKeyFromRecord(record);
+  if (key) {
+    return key;
+  }
+  const order = keyframeOrderForAnalysis(analysis);
+  return fallbackIndex != null && fallbackIndex < order.length ? order[fallbackIndex] : null;
 }
 
 function normalizedFrameKey(value: string | null | undefined) {
@@ -313,10 +362,11 @@ export function buildSemanticKeyframeEvidenceItems(
   source: string,
 ): KeyframeEvidenceItem[] {
   const context = buildContext(analysis);
+  const order = keyframeOrderForAnalysis(analysis);
   const byKey = new Map<KeyframeKey, KeyframeEvidenceItem>();
   records.forEach((item, index) => {
     const record = item as SelectedSemanticFrame & Record<string, unknown>;
-    const key = phaseKeyFromRecord(record, index);
+    const key = phaseKeyFromRecordForAnalysis(analysis, record, index);
     if (!key || byKey.has(key)) {
       return;
     }
@@ -333,7 +383,7 @@ export function buildSemanticKeyframeEvidenceItems(
     );
   });
 
-  return KEYFRAME_ORDER.map((key) => byKey.get(key) ?? emptyItem(analysis, key, source, context));
+  return order.map((key) => byKey.get(key) ?? emptyItem(analysis, key, source, context));
 }
 
 export function buildKeyframeEvidenceItems(
@@ -343,8 +393,9 @@ export function buildKeyframeEvidenceItems(
 ): KeyframeEvidenceItem[] {
   const context = buildContext(analysis);
   const rawFrames = asRecord(keyFramesPayload) ?? {};
+  const order = keyframeOrderForAnalysis(analysis);
 
-  return KEYFRAME_ORDER.map((key) => {
+  return order.map((key) => {
     const value = rawFrames[key];
     const record = asRecord(value);
     const ref = frameRefFromUnknown(value);
@@ -377,7 +428,7 @@ export function buildCurrentKeyframeEvidenceItems(analysis: AnalysisDetail): Key
   const context = buildContext(analysis);
   const bioData = asRecord(analysis.bio_data);
   const keyFrames = asRecord(bioData?.key_frames);
-  return KEYFRAME_ORDER.map((key) => {
+  return keyframeOrderForAnalysis(analysis).map((key) => {
     const ref = frameRefFromUnknown(keyFrames?.[key]);
     const semanticMatch = ref.frameId
       ? context.semanticMatches.byFrame.get(normalizedFrameKey(ref.frameId))
@@ -395,10 +446,10 @@ export function buildCurrentKeyframeEvidenceItems(analysis: AnalysisDetail): Key
 
 export function buildDraftKeyframeEvidenceItems(
   analysis: AnalysisDetail,
-  draftKeyframes: Record<KeyframeKey, string>,
+  draftKeyframes: Partial<Record<KeyframeKey, string>>,
 ): KeyframeEvidenceItem[] {
   const context = buildContext(analysis);
-  return KEYFRAME_ORDER.map((key) => {
+  return keyframeOrderForAnalysis(analysis).map((key) => {
     const ref = frameRefFromUnknown(draftKeyframes[key]);
     const semanticMatch = ref.frameId
       ? context.semanticMatches.byFrame.get(normalizedFrameKey(ref.frameId))

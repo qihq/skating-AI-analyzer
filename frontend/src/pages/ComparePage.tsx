@@ -298,13 +298,6 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
           },
         ]
       : []),
-    {
-      label: "Comments",
-      title: `之前：${normalizeShareText(before.note, "未填写")}`,
-      body: `现在：${normalizeShareText(after.note, "未填写")}`,
-      color: "#EA580C",
-      bg: "#FFF7ED",
-    },
   ];
   return createAdaptiveSharePoster({
     eyebrow: "冰宝对比分享",

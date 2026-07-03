@@ -79,7 +79,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Skating Analyzer",
     description="Skating training analysis system Phase 5",
-    version="0.5.0",
+    version="0.5.1",
     lifespan=lifespan,
 )
 

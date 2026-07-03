@@ -352,6 +352,27 @@ function CorrectionKeyframeTile({
   );
 }
 
+type ChatShareTimelineItem = {
+  index?: number;
+  time?: string | null;
+  question?: string;
+  answer?: string;
+  correction_status?: string;
+};
+
+function chatTimelineItems(payload: AnalysisChatShareResponse["image_payload"], question: string, answer: string): ChatShareTimelineItem[] {
+  const timeline = Array.isArray(payload.timeline_items)
+    ? payload.timeline_items
+        .map((item) => (item && typeof item === "object" ? item as ChatShareTimelineItem : null))
+        .filter((item): item is ChatShareTimelineItem => Boolean(item && (item.question || item.answer)))
+        .slice(-4)
+    : [];
+  if (timeline.length) {
+    return timeline;
+  }
+  return [{ index: 1, question, answer }];
+}
+
 async function createChatShareImage(share: AnalysisChatShareResponse) {
   const canvas = document.createElement("canvas");
   const width = 1080;
@@ -367,6 +388,15 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   const summary = normalizeShareText(String(payload.summary ?? ""), "围绕已完成分析继续追问，并记录人工确认修正。");
   const question = normalizeShareText(String(payload.question ?? ""), "本次追问");
   const answer = normalizeShareText(String(payload.answer ?? ""), "AI 基于已保存证据给出复盘回答。");
+  const timelineItems = chatTimelineItems(payload, question, answer);
+  const timelineText = timelineItems
+    .map((item, index) => {
+      const turn = item.index ?? index + 1;
+      const time = item.time ? ` · ${item.time}` : "";
+      const correction = item.correction_status ? `\n修正：${item.correction_status}` : "";
+      return `第 ${turn} 轮${time}\n问：${normalizeShareText(item.question, "")}\n答：${normalizeShareText(item.answer, "")}${correction}`;
+    })
+    .join("\n\n");
   const applied = Array.isArray(payload.applied_corrections) ? payload.applied_corrections.map((item) => String(item)) : [];
   const pending = Array.isArray(payload.pending_corrections) ? payload.pending_corrections.map((item) => String(item)) : [];
   const correctionText = [...applied.map((item) => `已应用：${item}`), ...pending.map((item) => `待确认：${item}`)].join("  ");
@@ -378,12 +408,12 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   measureCtx.font = "500 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   const summaryHeight = measureWrappedText(measureCtx, summary, contentWidth, 44);
   measureCtx.font = "650 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const questionHeight = measureWrappedText(measureCtx, question, textWidth, 42);
-  const answerHeight = measureWrappedText(measureCtx, answer, textWidth, 42);
+  const questionHeight = measureWrappedText(measureCtx, timelineText, textWidth, 39, 18);
+  const answerHeight = 0;
   measureCtx.font = "600 27px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   const correctionHeight = measureWrappedText(measureCtx, correctionText || "暂无已应用修正。", textWidth, 36);
-  const questionBlockHeight = Math.max(154, 96 + questionHeight + 38);
-  const answerBlockHeight = Math.max(184, 96 + answerHeight + 38);
+  const questionBlockHeight = Math.max(260, 96 + questionHeight + 38);
+  const answerBlockHeight = 0;
   const correctionBlockHeight = Math.max(118, 82 + correctionHeight + 30);
   const height = Math.min(
     6000,
@@ -430,8 +460,7 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   y += drawWrappedText(ctx, summary, 112, y, contentWidth, 44) + 54;
 
   const blocks = [
-    { label: "追问", text: question, bg: "#EFF6FF", color: "#2563EB", height: questionBlockHeight },
-    { label: "回答", text: answer, bg: "#ECFDF5", color: "#059669", height: answerBlockHeight },
+    { label: "多轮时间线", text: timelineText, bg: "#EFF6FF", color: "#2563EB", height: questionBlockHeight },
   ];
   blocks.forEach((block) => {
     ctx.fillStyle = block.bg;

@@ -42,7 +42,7 @@ router = APIRouter(prefix="/api/skaters", tags=["skaters"])
 session_router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 system_router = APIRouter(prefix="/api/system", tags=["system"])
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 
 
 def skater_display_name(skater: Skater) -> str:

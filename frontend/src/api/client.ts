@@ -43,6 +43,7 @@ export interface StructuredReport {
   improvements: ReportImprovement[];
   training_focus: string;
   subscores?: Record<string, number>;
+  subscores_source?: "ai_fused" | "biomechanics" | "fallback_reference" | string;
   data_quality?: "good" | "partial" | "poor" | string;
   user_note?: string | null;
   user_note_response?: string | null;
@@ -261,6 +262,14 @@ export interface AnalysisChatShareResponse {
     summary?: string;
     question?: string;
     answer?: string;
+    timeline_items?: {
+      index?: number;
+      time?: string | null;
+      question?: string;
+      answer?: string;
+      correction_status?: string;
+      [key: string]: unknown;
+    }[];
     applied_corrections?: string[];
     pending_corrections?: string[];
     report_url?: string;
@@ -1000,11 +1009,21 @@ export async function fetchAnalysis(id: string, options?: { isParentRequest?: bo
   return response.data;
 }
 
-export async function retryAnalysis(id: string, options?: { retryFrom?: string | null; resetTargetLock?: boolean }) {
+export async function retryAnalysis(
+  id: string,
+  options?: {
+    retryFrom?: string | null;
+    resetTargetLock?: boolean;
+    manualActionWindowStartSec?: number | null;
+    manualActionWindowEndSec?: number | null;
+  },
+) {
   const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`, undefined, {
     params: {
       retry_from: options?.retryFrom || undefined,
       reset_target_lock: options?.resetTargetLock || undefined,
+      manual_action_window_start_sec: options?.manualActionWindowStartSec ?? undefined,
+      manual_action_window_end_sec: options?.manualActionWindowEndSec ?? undefined,
     },
   });
   return response.data;

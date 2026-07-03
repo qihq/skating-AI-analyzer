@@ -133,7 +133,7 @@ from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.llm_context import build_analysis_prompt_context
-from app.services.report import apply_child_score_floor, calculate_force_score, clean_json_text, generate_report
+from app.services.report import apply_child_score_floor, calculate_force_score, clean_json_text, effective_report_subscores, ensure_report_subscores, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
@@ -5791,7 +5791,10 @@ def _detail_from_analysis(
         vision_path_a=analysis.vision_path_a,
         vision_path_b=analysis.vision_path_b,
         cross_validation=analysis.cross_validation,
-        report=analysis.report,
+        report=ensure_report_subscores(
+            analysis.report if isinstance(analysis.report, dict) else {},
+            analysis.bio_data if isinstance(analysis.bio_data, dict) else {},
+        ),
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
         frame_motion_scores=analysis.frame_motion_scores,
@@ -7330,8 +7333,9 @@ def _build_delta(key: str, label: str, before: object, after: object, unit: str 
 
 def _report_subscores(analysis: Analysis) -> dict[str, Any]:
     report = analysis.report if isinstance(analysis.report, dict) else {}
-    subscores = report.get("subscores")
-    return subscores if isinstance(subscores, dict) else {}
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+    subscores, source = effective_report_subscores(report, bio_data)
+    return {} if source == "fallback_reference" else subscores
 
 
 def _bio_dict(analysis: Analysis) -> dict[str, Any]:
@@ -9442,8 +9446,15 @@ async def retry_analysis(
     background_tasks: BackgroundTasks,
     retry_from: str | None = Query(default=None),
     reset_target_lock: bool = Query(default=False),
+    manual_action_window_start_sec: float | None = Query(default=None),
+    manual_action_window_end_sec: float | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
+    retry_from_value = retry_from if isinstance(retry_from, str) and retry_from.strip() else None
+    reset_target_lock_value = reset_target_lock if isinstance(reset_target_lock, bool) else False
+    manual_window_start = manual_action_window_start_sec if isinstance(manual_action_window_start_sec, (int, float)) else None
+    manual_window_end = manual_action_window_end_sec if isinstance(manual_action_window_end_sec, (int, float)) else None
+
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
@@ -9476,11 +9487,17 @@ async def retry_analysis(
     if analysis.status in {"pending", "processing", "extracting_frames", "awaiting_target_selection", "analyzing", "generating_report"}:
         raise HTTPException(status_code=400, detail="当前分析仍在进行中，请完成或失败后再重试。")
 
-    if retry_from is not None and not _is_retry_stage(retry_from):
+    if retry_from_value is not None and not _is_retry_stage(retry_from_value):
         raise HTTPException(status_code=400, detail="retry_from 必须是 extract_frames / pose / biomechanics / vision / report 之一。")
 
-    should_reset_target_lock = reset_target_lock and retry_from is None
-    retry_from_stage = retry_from or (None if should_reset_target_lock else analysis.retry_from_stage) or _default_retry_stage_for_error(analysis.error_code)
+    has_manual_window_update = manual_window_start is not None or manual_window_end is not None
+    if has_manual_window_update and (manual_window_start is None or manual_window_end is None):
+        raise HTTPException(status_code=400, detail="Manual action window requires both start and end seconds.")
+    if has_manual_window_update and manual_window_end <= manual_window_start:
+        raise HTTPException(status_code=400, detail="Manual action window end must be greater than start.")
+
+    should_reset_target_lock = (reset_target_lock_value and retry_from_value is None) or has_manual_window_update
+    retry_from_stage = retry_from_value or (None if should_reset_target_lock else analysis.retry_from_stage) or _default_retry_stage_for_error(analysis.error_code)
     if should_reset_target_lock:
         retry_from_stage = None
     if retry_from_stage == 'pose' and not isinstance(analysis.frame_motion_scores, dict):
@@ -9518,6 +9535,21 @@ async def retry_analysis(
             current.processing_timings = None
             current.pipeline_version = CURRENT_PIPELINE_VERSION
             current.retry_from_stage = retry_from_stage
+            if has_manual_window_update and manual_window_start is not None and manual_window_end is not None:
+                current.manual_action_window_start = round(float(manual_window_start), 3)
+                current.manual_action_window_end = round(float(manual_window_end), 3)
+                current.frame_motion_scores = None
+                current.pose_data = None
+                current.bio_data = None
+                current.vision_raw = None
+                current.vision_structured = None
+                current.vision_path_a = None
+                current.vision_path_b = None
+                current.cross_validation = None
+                current.report = None
+                current.force_score = None
+                current.action_window_start = None
+                current.action_window_end = None
             if should_reset_target_lock:
                 current.target_lock = None
                 current.target_lock_status = "pending"

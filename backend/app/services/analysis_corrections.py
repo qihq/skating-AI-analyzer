@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Analysis, AnalysisCorrection
+from app.services.report import ensure_report_subscores
 
 
 VALID_CORRECTION_KINDS = {"action_label", "keyframes", "report_note", "report_regeneration", "target_lock"}
@@ -431,6 +432,10 @@ def build_effective_analysis_payload(
             _merge_target_lock_correction(payload, correction.payload if isinstance(correction.payload, dict) else {})
         payload["analysis"]["corrections_applied"].append(item)
         payload["has_applied_corrections"] = True
+    payload["report"] = ensure_report_subscores(
+        payload["report"] if isinstance(payload.get("report"), dict) else {},
+        payload["bio_data"] if isinstance(payload.get("bio_data"), dict) else {},
+    )
     return payload
 
 
@@ -601,6 +606,94 @@ def _correction_share_summary(correction: AnalysisCorrection) -> str:
     return str(correction.rationale or "修正")
 
 
+def _chat_share_message_text(message: Any) -> str:
+    return re.sub(r"\s+", " ", str(getattr(message, "content", "") or "")).strip()
+
+
+def _chat_share_message_time(message: Any) -> datetime | None:
+    value = getattr(message, "created_at", None)
+    return value if isinstance(value, datetime) else None
+
+
+def _chat_share_time_label(value: datetime | None) -> str | None:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if value else None
+
+
+def _correction_status_summary(corrections: list[AnalysisCorrection]) -> str:
+    applied = sum(1 for item in corrections if item.status == "applied")
+    pending = sum(1 for item in corrections if item.status == "proposed")
+    if applied and pending:
+        return f"applied {applied}, pending {pending}"
+    if applied:
+        return f"applied {applied}"
+    if pending:
+        return f"pending {pending}"
+    return "no correction"
+
+
+def _build_chat_timeline_items(
+    messages: list[Any],
+    corrections: list[AnalysisCorrection],
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    pending_user: Any | None = None
+    for message in messages:
+        role = getattr(message, "role", "")
+        if role == "user":
+            if pending_user is not None:
+                turns.append(
+                    {
+                        "question": _chat_share_message_text(pending_user),
+                        "answer": "",
+                        "created_at": _chat_share_message_time(pending_user),
+                    }
+                )
+            pending_user = message
+            continue
+        if role != "assistant":
+            continue
+        if pending_user is not None:
+            turns.append(
+                {
+                    "question": _chat_share_message_text(pending_user),
+                    "answer": _chat_share_message_text(message),
+                    "created_at": _chat_share_message_time(pending_user) or _chat_share_message_time(message),
+                }
+            )
+            pending_user = None
+        else:
+            turns.append(
+                {
+                    "question": "",
+                    "answer": _chat_share_message_text(message),
+                    "created_at": _chat_share_message_time(message),
+                }
+            )
+    if pending_user is not None:
+        turns.append(
+            {
+                "question": _chat_share_message_text(pending_user),
+                "answer": "",
+                "created_at": _chat_share_message_time(pending_user),
+            }
+        )
+
+    correction_status = _correction_status_summary(corrections)
+    return [
+        {
+            "index": index,
+            "time": _chat_share_time_label(item.get("created_at")),
+            "question": item.get("question") or "",
+            "answer": item.get("answer") or "",
+            "correction_status": correction_status,
+        }
+        for index, item in enumerate(turns[-limit:], start=1)
+        if item.get("question") or item.get("answer")
+    ]
+
+
 def build_chat_share_image_payload(
     analysis: Analysis,
     messages: list[Any],
@@ -611,6 +704,7 @@ def build_chat_share_image_payload(
     report = analysis.report if isinstance(analysis.report, dict) else {}
     latest_question = next((message for message in reversed(messages) if getattr(message, "role", "") == "user"), None)
     latest_answer = next((message for message in reversed(messages) if getattr(message, "role", "") == "assistant"), None)
+    timeline_items = _build_chat_timeline_items(messages, corrections)
     return {
         "analysis_id": analysis.id,
         "title": f"{skater_name + ' · ' if skater_name else ''}{analysis.action_subtype or analysis.action_type}",
@@ -618,6 +712,7 @@ def build_chat_share_image_payload(
         "summary": str(report.get("summary") or ""),
         "question": str(getattr(latest_question, "content", "") or ""),
         "answer": str(getattr(latest_answer, "content", "") or ""),
+        "timeline_items": timeline_items,
         "applied_corrections": [_correction_share_summary(item) for item in corrections if item.status == "applied"][:4],
         "pending_corrections": [_correction_share_summary(item) for item in corrections if item.status == "proposed"][:4],
         "report_url": f"/report/{analysis.id}",

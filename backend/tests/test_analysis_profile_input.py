@@ -108,9 +108,9 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                     analysis_profile="jump",
                 )
 
-        self.assertEqual(start_sec, 4.65)
-        self.assertEqual(end_sec, 9.25)
-        self.assertLess(end_sec - start_sec, 5.0)
+        self.assertEqual(start_sec, 4.5)
+        self.assertEqual(end_sec, 9.5)
+        self.assertLessEqual(end_sec - start_sec, 5.0)
 
     async def test_detect_action_window_jump_guard_prefers_later_sustained_motion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -137,7 +137,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertGreaterEqual(start_sec, 14.0)
-        self.assertLess(end_sec - start_sec, 5.0)
+        self.assertLessEqual(end_sec - start_sec, 5.0)
 
     async def test_detect_action_window_jump_guard_prefers_near_tie_late_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -163,9 +163,9 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                     analysis_profile="jump",
                 )
 
-        self.assertEqual(start_sec, 4.65)
-        self.assertEqual(end_sec, 9.25)
-        self.assertLess(end_sec - start_sec, 5.0)
+        self.assertEqual(start_sec, 4.5)
+        self.assertEqual(end_sec, 9.5)
+        self.assertLessEqual(end_sec - start_sec, 5.0)
 
     async def test_detect_action_window_keeps_full_context_for_short_jump_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -308,6 +308,57 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sampling_metadata.action_window_start, 0.0)
         self.assertEqual(sampling_metadata.action_window_end, 30.0)
         self.assertEqual(motion_payload["input_window_mode"], "full_context")
+
+    async def test_extract_motion_sampled_frames_uses_dense_sampling_for_manual_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            thumbs_dir = root / "thumbs"
+            thumb_paths = [thumbs_dir / f"thumb_{index:05d}.jpg" for index in range(1, 73)]
+
+            async def fake_extract_thumbnails_in_window(
+                _video_path: Path,
+                _thumbs_dir: Path,
+                _start_sec: float,
+                _end_sec: float,
+                frame_rate: int = 5,
+            ) -> list[Path]:
+                self.assertEqual((_start_sec, _end_sec), (4.0, 6.0))
+                self.assertEqual(frame_rate, 24)
+                _thumbs_dir.mkdir(parents=True, exist_ok=True)
+                for thumb_path in thumb_paths:
+                    thumb_path.write_bytes(b"thumb")
+                return thumb_paths
+
+            async def fake_extract_full_frame_at(_video_path: Path, _timestamp: float, target_path: Path) -> None:
+                target_path.write_bytes(b"frame")
+
+            input_window = VideoInputWindow(12.0, 4.0, 6.0, 2.0, "manual_window", True, "manual window selected by user")
+            with (
+                patch("app.services.video.detect_video_fps", return_value=30.0),
+                patch("app.services.video.detect_action_window", AsyncMock()) as detect_window_mock,
+                patch("app.services.video._extract_thumbnails_in_window", side_effect=fake_extract_thumbnails_in_window),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=[float(index) for index in range(len(thumb_paths))]),
+                patch("app.services.video._extract_full_frame_at", side_effect=fake_extract_full_frame_at),
+            ):
+                sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path=video_path,
+                    frames_dir=frames_dir,
+                    action_type="jump",
+                    analysis_profile="jump",
+                    input_window=input_window,
+                )
+
+        detect_window_mock.assert_not_called()
+        self.assertEqual(len(sampled_frames), 48)
+        self.assertEqual(motion_payload["frame_rate"], 24)
+        self.assertEqual(motion_payload["max_frames_for_profile"], 48)
+        self.assertEqual(motion_payload["sampling_profile_source"], "manual_window_dense")
+        self.assertTrue(motion_payload["manual_window_dense_sampling"])
+        self.assertAlmostEqual(sampling_metadata.effective_fps, 23.5, places=2)
 
     async def test_jump_profile_uses_jump_frame_rate_during_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

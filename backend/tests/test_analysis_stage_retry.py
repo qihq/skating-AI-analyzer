@@ -595,6 +595,84 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.target_lock_status, "locked")
                 self.assertEqual(saved.retry_from_stage, "report")
 
+    async def test_retry_with_manual_window_restarts_from_extract_and_resets_target_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        retry_from_stage="report",
+                        report={"summary": "saved", "subscores": {"takeoff_power": 80}},
+                        vision_structured={"frame_analysis": []},
+                        bio_data={"key_frames": {}, "bio_subscores": {"takeoff_power": 70}},
+                        pose_data={"frames": []},
+                        frame_motion_scores={"selected": []},
+                        target_lock={"status": "locked"},
+                        target_lock_status="locked",
+                        manual_action_window_start=None,
+                        manual_action_window_end=None,
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from="report",
+                    manual_action_window_start_sec=1.25,
+                    manual_action_window_end_sec=3.75,
+                    session=session,
+                )
+
+            self.assertTrue(response.message)
+            self.assertEqual(queued[0][1], (analysis_id, None))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.retry_from_stage, None)
+                self.assertEqual(saved.manual_action_window_start, 1.25)
+                self.assertEqual(saved.manual_action_window_end, 3.75)
+                self.assertIsNone(saved.target_lock)
+                self.assertEqual(saved.target_lock_status, "pending")
+                self.assertIsNone(saved.frame_motion_scores)
+                self.assertIsNone(saved.report)
+
     async def test_retry_awaiting_target_selection_refreshes_manual_review_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir

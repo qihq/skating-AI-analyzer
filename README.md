@@ -8,12 +8,19 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.307`.
+The current pipeline version is `v5.2.308`.
 
 ## Recent Updates
 
-Current branch updates add a persisted comparison workbench, separate video-capable AI from text-only report AI, and harden training plan generation:
+Current branch updates focus on mobile target selection, action-aware keyframe handling, clearer share cards, and reliable subscores:
 
+- Mobile manual target selection now supports two-finger pinch zoom up to 4x, panning while zoomed, and one-tap view reset while still saving the original normalized bbox expected by the backend.
+- Manual action-window retry can pass `manual_action_window_start_sec` and `manual_action_window_end_sec`; manual windows use denser action-specific sampling for jumps, spins, steps, and spirals, while automatic jump windows keep extra pre-takeoff and landing padding.
+- Keyframe evidence is profile-aware: jumps show T/A/L, spins show entry/main/exit, spirals show the hold frame, and step sequences show coverage frames without forcing jump-style keyframe labels.
+- Report subscores are now normalized server-side from effective report data, biomechanics subscores, or fallback references, and the UI shows valid subscores regardless of `data_quality` with source labels and `--` for unavailable items.
+- Compare pages fall back from report subscores to biomechanics subscores so the "subscore changes" section stays populated when one report lacks fused scores.
+- Report and progress-detail share cards include upload comments, the AI response to those comments, and compact subscore bars; comparison share cards intentionally stay comment-free.
+- Follow-up share cards now render a concise multi-turn timeline with up to four Q&A/correction-state entries instead of only the latest question and answer.
 - Comparison generation now starts as a background task and immediately saves an `analysis_comparisons` record with pending, processing, completed, and failed states.
 - The comparison workbench sends the two full source videos only to the active `vision` provider. When `vision=mimo`, it uses the currently active vision model, such as `mimo-v2.5`; when `vision=qwen`, it uses the configured Qwen video model instead of a hidden hard-coded default.
 - The `report` provider now receives only structured comparison JSON and writes the parent-readable summary from text data. It is not asked to process videos or use multimodal features.
@@ -39,8 +46,9 @@ Current branch updates add a persisted comparison workbench, separate video-capa
 - Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
-The latest release makes review upload less brittle when the exact element name is unknown: users can submit only the broad action category, keep skill category optional, and have free-form comments carried into the earliest video-temporal action-recognition prompt.
+The latest release improves mobile review, manual action-window reruns, action-specific keyframe evidence, share images, and the `SUBSCORES` module.
 
+- `v5.2.308`: mobile target bbox selection supports pinch zoom/pan/reset; manual action windows trigger denser sampling and padded jump coverage; keyframe evidence adapts to jump/spin/step/spiral profiles; subscores are normalized with source labels and compare fallbacks; report/progress share cards add comments and subscore bars while follow-up sharing uses a short multi-turn timeline.
 - `v5.2.307`: comparison generation is persisted in `analysis_comparisons` background tasks; full source videos go only through the active `vision` model while the `report` provider summarizes structured JSON text; comparison result history, retry, sharing, mobile-muted synchronized playback, cleaner compare-page layout, and training-plan fallbacks were hardened.
 - `v5.2.306`: follow-up chat detects multiple questions in user notes and answers each explicitly with what can/cannot be confirmed; training plan generation uses child-safe low-impact prompts with strict JSON schema and `generation_status`; report user-note response parses questions from upload notes into per-question Q&A; KeyframeEvidencePanel logic extracted to `keyframeEvidence.ts` utility with responsive layout; archive page adds aggregate `fetchArchiveSummary` API for parent mode, clickable calendar day detail modal, and jump-to-latest-month navigation; backfill frame tests added.
 - `v5.2.305`: follow-up can run a video-AI-only full-source keyframe rerun that produces a proposed keyframes correction card; it does not reset target lock, rerun pose/biomechanics/visual reports, auto-apply data, or overwrite reports.
