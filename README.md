@@ -8,12 +8,15 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.310`.
+The current pipeline version is `v5.2.311`.
 
 ## Recent Updates
 
-Current branch updates focus on versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
+Current branch updates focus on the Golden labeling workspace, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
 
+- A standalone `/golden` workspace now gives Golden labeling its own parent-mode entry with labeling history, sample status counts, direct sample selection, and new debug sample creation.
+- Golden bbox drawing now works on sampled, semantic, and partial debug frames, disables native image dragging, and uses a natural-aspect overlay coordinate space so target boxes and pose overlays do not drift from the image without stretching portrait or landscape frames.
+- Golden labels remain incremental: reopening a sample loads the existing `golden_label.json`, so users can mark keyframes first, return later to add bbox/notes/review flags, and save back into the same manifest entry.
 - Development rules now require every GitHub update that ships code, docs, or an all-in-one image to bump `CURRENT_PIPELINE_VERSION`, update README release notes, use versioned commit wording, export with the standard all-in-one script, and start/verify the freshly built local image.
 - Debug runs now include a Golden Label tab for marking skater ID, action/profile, stratum, T/A/L or profile-specific keyframes, target bboxes, review flags, and notes from one place.
 - Saving a golden label writes `golden_label.json`, a matching prediction snapshot, and a shared `golden_manifest.json` so future algorithm changes can be compared against the exact prediction that existed when the sample was labeled.
@@ -58,8 +61,9 @@ The previous release focused on mobile target selection, action-aware keyframe h
 - Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
-The latest release documents mandatory versioned GitHub/image handoff rules and includes the repeatable "label -> replay -> evaluate -> fix" loop for training-video accuracy.
+The latest release gives Golden labeling its own workspace and fixes bbox drawing while preserving the repeatable "label -> replay -> evaluate -> fix" loop for training-video accuracy.
 
+- `v5.2.311`: `/golden` adds a standalone parent-mode Golden labeling workspace with history and new sample creation; Golden bbox drawing now works across sampled, semantic, and partial frames with natural-aspect aligned overlays and native image dragging disabled; saved labels can be reopened and completed incrementally without rerunning scripts.
 - `v5.2.310`: development documentation now requires every pushed GitHub update and exported all-in-one image to keep pipeline version, README release notes, commit wording, export filename, and local started image in sync.
 - `v5.2.309`: Debug golden labels now save label/prediction/manifest artifacts; the eval script reports overall and per-stratum metrics, failure lists, quality flags, keyframe deltas, and fixed failure tags; appearance relock is opt-in with fail-closed diagnostics; vertical-extrema keyframe proposals and final T/A/L order guards prevent high-confidence invalid jump keyframes.
 - `v5.2.308`: mobile target bbox selection supports pinch zoom/pan/reset; manual action windows trigger denser sampling and padded jump coverage; keyframe evidence adapts to jump/spin/step/spiral profiles; subscores are normalized with source labels and compare fallbacks; report/progress share cards add comments and subscore bars while follow-up sharing uses a short multi-turn timeline.

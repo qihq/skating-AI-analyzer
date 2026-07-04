@@ -137,6 +137,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />
           <Route path="/debug" element={<DebugPage />} />
+          <Route path="/golden" element={<DebugPage workspace="golden" />} />
         </Route>
         <Route path="/parent/setup" element={<ParentSetupPage />} />
         <Route path="/plan/:plan_id" element={<PlanPage />} />

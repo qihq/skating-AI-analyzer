@@ -12,6 +12,7 @@ export default function TopNav() {
     { to: "/progress", label: "趋势" },
     ...(isParentMode
       ? [
+          { to: "/golden", label: "标注" },
           { to: "/debug", label: "调试" },
           { to: "/settings", label: "设置" },
         ]

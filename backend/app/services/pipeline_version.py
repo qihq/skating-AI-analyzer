@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.310"
+CURRENT_PIPELINE_VERSION = "v5.2.311"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -26,6 +26,7 @@ CURRENT_PIPELINE_VERSION = "v5.2.310"
 # v5.2.308: Add mobile pinch target selection, manual-window dense sampling, profile-aware evidence, share-card comments/timelines, and reliable subscores.
 # v5.2.309: Add golden-label debug workflow, stratum evaluation reports, appearance relock diagnostics, and fail-closed T/A/L resolver guards.
 # v5.2.310: Document mandatory versioned GitHub updates, README release notes, and all-in-one image export/startup discipline.
+# v5.2.311: Add a standalone Golden labeling workspace and fix bbox drawing across sampled, semantic, and partial debug frames.
 # v5.2.301: Treat manual target selection as identity-authoritative by blocking automatic support-anchor recovery and blanking those poses.
 # v5.2.300: Harden manual target locks by rejecting no-overlap initial target binding and same-ID recovery drift instead of switching skeleton identity.
 # v5.2.299: Blank semantic Path B skeleton annotations under manual target lock so auxiliary vision prompts cannot inherit wrong-person pose.

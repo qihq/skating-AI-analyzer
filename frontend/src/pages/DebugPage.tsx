@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -33,6 +33,7 @@ import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
 type DebugTab = "overview" | "frames" | "tracking" | "video" | "label" | "raw";
+type DebugWorkspace = "debug" | "golden";
 type TargetSelectionMode = "candidate" | "manual";
 
 const ACTION_TYPES = ["跳跃", "旋转", "步法", "自由滑"];
@@ -73,7 +74,7 @@ interface LabelFrameRow {
   source: "sampled" | "semantic" | "partial";
   url?: string;
   timestamp: number | null;
-  bboxKey: string | null;
+  bboxKey: string;
   poseFrame?: Record<string, unknown>;
 }
 
@@ -296,6 +297,16 @@ function progressFromSummary(value: unknown) {
   return progress == null ? null : Math.max(0, Math.min(1, progress));
 }
 
+function goldenStatusFromRun(run: DebugRunSummary) {
+  const summary = asRecord(run.summary);
+  return typeof summary.golden_label_status === "string" ? summary.golden_label_status : "unlabeled";
+}
+
+function evalStatusFromRun(run: DebugRunSummary) {
+  const summary = asRecord(run.summary);
+  return typeof summary.eval_status === "string" ? summary.eval_status : goldenStatusFromRun(run);
+}
+
 function keyframeRows(value: unknown, poseFrameById: Map<string, Record<string, unknown>>) {
   const candidates = asRecord(value);
   return ["T", "A", "L"].map((label) => {
@@ -458,7 +469,7 @@ function buildLabelFrames(
       source: "semantic",
       url: typeof frame.url === "string" ? frame.url : undefined,
       timestamp: frameTimestamp(frame),
-      bboxKey: null,
+      bboxKey: `semantic:${id}`,
       poseFrame: poseFrameById.get(id),
     });
   });
@@ -470,7 +481,7 @@ function buildLabelFrames(
       source: "partial",
       url: typeof frame.url === "string" ? frame.url : undefined,
       timestamp: frameTimestamp(frame),
-      bboxKey: null,
+      bboxKey: `partial:${id}`,
       poseFrame: poseFrameById.get(id),
     });
   });
@@ -561,14 +572,40 @@ function InputWindowPanel({ value }: { value: unknown }) {
   );
 }
 
-function DebugFrameImage({ url, alt, className = "h-full w-full object-contain" }: { url?: string; alt: string; className?: string }) {
+function DebugFrameImage({
+  url,
+  alt,
+  className = "h-full w-full object-contain",
+  onImageSize,
+}: {
+  url?: string;
+  alt: string;
+  className?: string;
+  onImageSize?: (size: { width: number; height: number }) => void;
+}) {
   const [failed, setFailed] = useState(false);
 
   if (!url || failed) {
     return <div className="flex h-full items-center justify-center px-3 text-center text-xs text-slate-400">Frame unavailable</div>;
   }
 
-  return <img src={url} alt={alt} loading="lazy" onError={() => setFailed(true)} className={className} />;
+  return (
+    <img
+      src={url}
+      alt={alt}
+      loading="lazy"
+      draggable={false}
+      onDragStart={(event) => event.preventDefault()}
+      onLoad={(event) => {
+        const { naturalWidth, naturalHeight } = event.currentTarget;
+        if (naturalWidth > 0 && naturalHeight > 0) {
+          onImageSize?.({ width: naturalWidth, height: naturalHeight });
+        }
+      }}
+      onError={() => setFailed(true)}
+      className={className}
+    />
+  );
 }
 
 function PoseSkeletonOverlay({
@@ -1001,6 +1038,7 @@ function DebugGoldenLabelPanel({
   partialSemanticFrames,
   poseFrameById,
   connections,
+  onSaved,
 }: {
   run: DebugRunDetail;
   sampledFrames: Record<string, unknown>[];
@@ -1008,6 +1046,7 @@ function DebugGoldenLabelPanel({
   partialSemanticFrames: Record<string, unknown>[];
   poseFrameById: Map<string, Record<string, unknown>>;
   connections: number[][];
+  onSaved?: () => void;
 }) {
   const [frameNode, setFrameNode] = useState<HTMLDivElement | null>(null);
   const [state, setState] = useState<LoadState>("loading");
@@ -1019,15 +1058,20 @@ function DebugGoldenLabelPanel({
   const [selectedFrameKey, setSelectedFrameKey] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
+  const [frameImageSizes, setFrameImageSizes] = useState<Record<string, { width: number; height: number }>>({});
 
   const labelFrames = useMemo(
     () => buildLabelFrames(sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById),
     [sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById],
   );
   const selectedFrame = labelFrames.find((frame) => labelFrameKey(frame) === selectedFrameKey) ?? labelFrames[0] ?? null;
+  const selectedFrameStableKey = selectedFrame ? labelFrameKey(selectedFrame) : null;
+  const selectedImageSize = selectedFrameStableKey ? frameImageSizes[selectedFrameStableKey] : null;
+  const selectedAspectRatio = selectedImageSize && selectedImageSize.height > 0 ? selectedImageSize.width / selectedImageSize.height : 16 / 9;
+  const labelStageStyle: CSSProperties = { aspectRatio: `${selectedAspectRatio}` };
   const labelProfile = profileForLabel(run, draft.analysis_profile);
   const keyframeSpecs = KEYFRAME_SPECS[labelProfile] ?? KEYFRAME_SPECS.jump;
-  const savedBBox = selectedFrame?.bboxKey ? draft.target_bboxes[selectedFrame.bboxKey] : null;
+  const savedBBox = selectedFrame ? draft.target_bboxes[selectedFrame.bboxKey] : null;
   const savedBBoxStyle = bboxStyle(savedBBox);
   const draftBBoxStyle = bboxStyle(draftBBox);
   const poseBBoxStyle = bboxStyle(selectedFrame?.poseFrame?.target_bbox);
@@ -1110,7 +1154,7 @@ function DebugGoldenLabelPanel({
 
   const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
     const rect = frameNode?.getBoundingClientRect();
-    if (!rect) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
       return null;
     }
     return {
@@ -1120,10 +1164,11 @@ function DebugGoldenLabelPanel({
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (!selectedFrame?.bboxKey) {
-      setError("Select a sampled frame before drawing a target bbox.");
+    if (!selectedFrame) {
+      setError("Select a frame before drawing a target bbox.");
       return;
     }
+    event.preventDefault();
     const point = pointFromEvent(event);
     if (!point) {
       return;
@@ -1148,10 +1193,11 @@ function DebugGoldenLabelPanel({
     if (!dragStart) {
       return;
     }
+    event.preventDefault();
     const point = pointFromEvent(event);
     setDragStart(null);
     setDraftBBox(null);
-    if (!point || !selectedFrame?.bboxKey) {
+    if (!point || !selectedFrame) {
       return;
     }
     const bbox = normalizeDragBox(dragStart, point);
@@ -1161,18 +1207,18 @@ function DebugGoldenLabelPanel({
     }
     setDraft((current) => ({
       ...current,
-      target_bboxes: { ...current.target_bboxes, [selectedFrame.bboxKey!]: bbox },
+      target_bboxes: { ...current.target_bboxes, [selectedFrame.bboxKey]: bbox },
     }));
     setError(null);
   };
 
   const clearSelectedBBox = () => {
-    if (!selectedFrame?.bboxKey) {
+    if (!selectedFrame) {
       return;
     }
     setDraft((current) => {
       const next = { ...current.target_bboxes };
-      delete next[selectedFrame.bboxKey!];
+      delete next[selectedFrame.bboxKey];
       return { ...current, target_bboxes: next };
     });
   };
@@ -1212,6 +1258,7 @@ function DebugGoldenLabelPanel({
       setDraft(defaultLabelDraft(run, saved));
       setFlagsText((saved.expected_review_flags ?? []).join(", "));
       setSaveState("ready");
+      onSaved?.();
     } catch {
       setSaveState("error");
       setError("Golden label failed to save.");
@@ -1232,9 +1279,27 @@ function DebugGoldenLabelPanel({
             onPointerMove={handlePointerMove}
             onPointerUp={finishDrag}
             onPointerCancel={finishDrag}
-            className="relative aspect-video min-h-[220px] touch-none overflow-hidden rounded-[20px] border border-slate-200 bg-slate-950 tablet:min-h-[360px] web:min-h-[460px]"
+            style={labelStageStyle}
+            className="relative mx-auto w-full cursor-crosshair touch-none select-none overflow-hidden rounded-[20px] border border-slate-200 bg-slate-950"
           >
-            <DebugFrameImage url={selectedFrame?.url} alt={selectedFrame?.title ?? "label frame"} />
+            <DebugFrameImage
+              url={selectedFrame?.url}
+              alt={selectedFrame?.title ?? "label frame"}
+              className="h-full w-full select-none object-fill"
+              onImageSize={
+                selectedFrameStableKey
+                  ? (size) => {
+                      setFrameImageSizes((current) => {
+                        const previous = current[selectedFrameStableKey];
+                        if (previous?.width === size.width && previous.height === size.height) {
+                          return current;
+                        }
+                        return { ...current, [selectedFrameStableKey]: size };
+                      });
+                    }
+                  : undefined
+              }
+            />
             {poseBBoxStyle ? <div className="pointer-events-none absolute border-2 border-dashed border-cyan-300/80" style={poseBBoxStyle} /> : null}
             {savedBBoxStyle ? <div className="pointer-events-none absolute border-2 border-emerald-300 bg-emerald-300/15" style={savedBBoxStyle} /> : null}
             {draftBBoxStyle ? <div className="pointer-events-none absolute border-2 border-amber-300 bg-amber-300/15" style={draftBBoxStyle} /> : null}
@@ -1253,7 +1318,7 @@ function DebugGoldenLabelPanel({
               <button
                 type="button"
                 onClick={clearSelectedBBox}
-                disabled={!selectedFrame?.bboxKey || !savedBBox}
+                disabled={!selectedFrame || !savedBBox}
                 className="min-h-[36px] rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Clear bbox
@@ -1801,19 +1866,25 @@ function DebugRunDetailPanel({
   activeTab,
   onTabChange,
   onRunRefresh,
+  focusMode = "debug",
 }: {
   run: DebugRunDetail | null;
   activeTab: DebugTab;
   onTabChange: (tab: DebugTab) => void;
   onRunRefresh: (id: string) => Promise<void>;
+  focusMode?: DebugWorkspace;
 }) {
+  const effectiveActiveTab: DebugTab = focusMode === "golden" ? "label" : activeTab;
+
   if (!run) {
     return (
       <section className="app-card flex min-h-[32rem] items-center justify-center p-7 text-center">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Debug Result</p>
-          <h2 className="mt-3 text-2xl font-semibold text-slate-900">选择或创建一个 debug run</h2>
-          <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">运行结果会保存在独立记录里，不会改写正式分析报告。</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">{focusMode === "golden" ? "Golden Label" : "Debug Result"}</p>
+          <h2 className="mt-3 text-2xl font-semibold text-slate-900">{focusMode === "golden" ? "选择一个样本继续标注" : "选择或创建一个 debug run"}</h2>
+          <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
+            {focusMode === "golden" ? "历史样本会保留已保存的关键帧、bbox、标签和备注。" : "运行结果会保存在独立记录里，不会改写正式分析报告。"}
+          </p>
         </div>
       </section>
     );
@@ -1929,14 +2000,17 @@ function DebugRunDetailPanel({
   const progress = progressFromSummary(summary);
   const showProgress = (run.status === "pending" || run.status === "processing") && progress != null;
 
-  const tabs: Array<{ id: DebugTab; label: string }> = [
-    { id: "overview", label: "Overview" },
-    { id: "frames", label: "Frames" },
-    { id: "tracking", label: "Tracking/Pose" },
-    { id: "video", label: "Video AI" },
-    { id: "label", label: "Golden Label" },
-    { id: "raw", label: "Raw JSON" },
-  ];
+  const tabs: Array<{ id: DebugTab; label: string }> =
+    focusMode === "golden"
+      ? [{ id: "label", label: "Golden Label" }]
+      : [
+          { id: "overview", label: "Overview" },
+          { id: "frames", label: "Frames" },
+          { id: "tracking", label: "Tracking/Pose" },
+          { id: "video", label: "Video AI" },
+          { id: "label", label: "Golden Label" },
+          { id: "raw", label: "Raw JSON" },
+        ];
 
   return (
     <section className="app-card min-w-0 overflow-hidden p-6 tablet:p-7">
@@ -1968,23 +2042,25 @@ function DebugRunDetailPanel({
       ) : null}
       {run.status === "awaiting_target_selection" ? <div className="mt-5"><DebugTargetSelectionPanel run={run} onSubmitted={onRunRefresh} /></div> : null}
 
-      <div className="mt-5 flex gap-2 overflow-x-auto rounded-[18px] bg-slate-100 p-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => onTabChange(tab.id)}
-            className={`min-h-[38px] shrink-0 rounded-[14px] px-4 text-sm font-semibold transition ${
-              activeTab === tab.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      {focusMode === "debug" ? (
+        <div className="mt-5 flex gap-2 overflow-x-auto rounded-[18px] bg-slate-100 p-1">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onTabChange(tab.id)}
+              className={`min-h-[38px] shrink-0 rounded-[14px] px-4 text-sm font-semibold transition ${
+                effectiveActiveTab === tab.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-5 min-w-0">
-        {activeTab === "overview" ? (
+        {effectiveActiveTab === "overview" ? (
           <div className="space-y-4">
             <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -2057,7 +2133,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "frames" ? (
+        {effectiveActiveTab === "frames" ? (
           <div className="space-y-5">
             {debugPose ? (
               <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} />
@@ -2075,7 +2151,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "tracking" ? (
+        {effectiveActiveTab === "tracking" ? (
           <div className="space-y-4">
             {debugPose ? <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} /> : null}
             <div className="grid gap-3 lg:grid-cols-3">
@@ -2091,7 +2167,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "video" ? (
+        {effectiveActiveTab === "video" ? (
           <div className="space-y-4">
             <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -2154,7 +2230,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "label" ? (
+        {effectiveActiveTab === "label" ? (
           <DebugGoldenLabelPanel
             run={run}
             sampledFrames={sampledFrames}
@@ -2162,10 +2238,11 @@ function DebugRunDetailPanel({
             partialSemanticFrames={partialSemanticFrames}
             poseFrameById={poseFrameById}
             connections={poseConnections}
+            onSaved={() => void onRunRefresh(run.id)}
           />
         ) : null}
 
-        {activeTab === "raw" ? <JsonBlock value={run.result_json ?? run} /> : null}
+        {effectiveActiveTab === "raw" ? <JsonBlock value={run.result_json ?? run} /> : null}
       </div>
     </section>
   );
@@ -2225,15 +2302,16 @@ function FrameGrid({
   );
 }
 
-export default function DebugPage() {
+export default function DebugPage({ workspace = "debug" }: { workspace?: DebugWorkspace }) {
   const { isParentMode, enterParentMode } = useAppMode();
+  const isGoldenWorkspace = workspace === "golden";
   const [analyses, setAnalyses] = useState<AnalysisListItem[]>([]);
   const [debugRuns, setDebugRuns] = useState<DebugRunSummary[]>([]);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
   const [selectedAnalysisDetail, setSelectedAnalysisDetail] = useState<AnalysisDetail | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<DebugRunDetail | null>(null);
-  const [activeTab, setActiveTab] = useState<DebugTab>("frames");
+  const [activeTab, setActiveTab] = useState<DebugTab>(isGoldenWorkspace ? "label" : "frames");
   const [listState, setListState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -2371,6 +2449,12 @@ export default function DebugPage() {
     };
   }, [isParentMode, selectedRunId, deletingRunId]);
 
+  useEffect(() => {
+    if (isGoldenWorkspace) {
+      setActiveTab("label");
+    }
+  }, [isGoldenWorkspace]);
+
   const selectedAnalysisItem = useMemo(
     () => analyses.find((item) => item.id === selectedAnalysisId) ?? null,
     [analyses, selectedAnalysisId],
@@ -2383,9 +2467,31 @@ export default function DebugPage() {
     }, {});
   }, [debugRuns]);
 
+  const goldenCounts = useMemo(() => {
+    return debugRuns.reduce(
+      (acc, run) => {
+        const status = goldenStatusFromRun(run);
+        if (status === "unlabeled") {
+          acc.unlabeled += 1;
+        } else {
+          acc.labeled += 1;
+        }
+        const evalStatus = evalStatusFromRun(run);
+        if (evalStatus === "passes") {
+          acc.passes += 1;
+        }
+        if (evalStatus === "fails") {
+          acc.fails += 1;
+        }
+        return acc;
+      },
+      { labeled: 0, unlabeled: 0, passes: 0, fails: 0 },
+    );
+  }, [debugRuns]);
+
   const handleCreated = async (id: string, mode?: DebugRunMode) => {
     setSelectedRunId(id);
-    setActiveTab(mode === "video_ai_keyframes" ? "video" : "frames");
+    setActiveTab(isGoldenWorkspace ? "label" : mode === "video_ai_keyframes" ? "video" : "frames");
     const runs = await fetchDebugRuns({ limit: 50 });
     setDebugRuns(runs);
     const detail = await fetchDebugRun(id);
@@ -2444,9 +2550,11 @@ export default function DebugPage() {
   if (!isParentMode) {
     return (
       <section className="app-card mx-auto max-w-3xl p-8 text-center tablet:p-10">
-        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Debug</p>
-        <h1 className="mt-4 text-3xl font-semibold text-slate-900 tablet:text-4xl">调试工作台</h1>
-        <p className="mt-4 text-base leading-8 text-slate-500">进入家长模式后，可以运行测试入口、查看模型评测和每个视频的分析日志。</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">{isGoldenWorkspace ? "Golden" : "Debug"}</p>
+        <h1 className="mt-4 text-3xl font-semibold text-slate-900 tablet:text-4xl">{isGoldenWorkspace ? "Golden 标注工作台" : "调试工作台"}</h1>
+        <p className="mt-4 text-base leading-8 text-slate-500">
+          {isGoldenWorkspace ? "进入家长模式后，可以继续标注 golden 样本和查看标注历史。" : "进入家长模式后，可以运行测试入口、查看模型评测和每个视频的分析日志。"}
+        </p>
         <button
           type="button"
           onClick={() => void enterParentMode()}
@@ -2458,6 +2566,98 @@ export default function DebugPage() {
     );
   }
 
+  if (isGoldenWorkspace) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Golden</p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-900 tablet:text-4xl">Golden 标注工作台</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">从历史样本继续标注关键帧、主人物 bbox、场景分层和错误标签。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link to="/debug" className="app-pill text-sm font-semibold">
+              调试工作台
+            </Link>
+            <Link to="/settings/api" className="app-pill text-sm font-semibold">
+              API 设置
+            </Link>
+          </div>
+        </div>
+
+        {error ? <div className="rounded-[20px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Golden Samples</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">{debugRuns.length}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Labeled</p>
+            <p className="mt-2 text-2xl font-semibold text-blue-600">{goldenCounts.labeled}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Unlabeled</p>
+            <p className="mt-2 text-2xl font-semibold text-amber-600">{goldenCounts.unlabeled}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Eval Fails</p>
+            <p className="mt-2 text-2xl font-semibold text-rose-600">{goldenCounts.fails}</p>
+          </div>
+        </div>
+
+        <div className="grid gap-5 web:grid-cols-[minmax(300px,440px)_minmax(0,1fr)]">
+          <div className="space-y-5">
+            <section className="app-card self-start p-5 tablet:p-6 web:sticky web:top-[112px]">
+              <div className="mb-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">History</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-900">标注历史</h2>
+              </div>
+              {listState === "loading" ? <p className="text-sm text-slate-500">正在加载 debug runs...</p> : null}
+              {!debugRuns.length && listState !== "loading" ? (
+                <div className="rounded-[18px] border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                  暂时没有可标注样本。
+                </div>
+              ) : null}
+              <div className="max-h-[44rem] space-y-3 overflow-y-auto pr-1">
+                {debugRuns.map((run) => (
+                  <DebugRunCard
+                    key={run.id}
+                    run={run}
+                    selected={run.id === selectedRunId}
+                    onSelect={() => {
+                      setSelectedRunId(run.id);
+                      setActiveTab("label");
+                    }}
+                    onDelete={() => void handleDeleteRun(run)}
+                    deleting={deletingRunId === run.id}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="app-card self-start p-5 tablet:p-6">
+              <div className="mb-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">New Sample</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-900">新建标注样本</h2>
+              </div>
+              <div className="space-y-4">
+                <DebugRunForm mode="local_pose_keyframes" analyses={analyses} defaultAnalysisId={selectedAnalysisId} onCreated={(id) => void handleCreated(id, "local_pose_keyframes")} />
+                <DebugRunForm mode="video_ai_keyframes" analyses={analyses} defaultAnalysisId={selectedAnalysisId} onCreated={(id) => void handleCreated(id, "video_ai_keyframes")} />
+              </div>
+            </section>
+          </div>
+
+          <div className="min-w-0">
+            {runState === "loading" ? <div className="mb-3 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">正在加载 debug run...</div> : null}
+            {runState === "error" ? <div className="mb-3 rounded-[18px] border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">Debug run 加载失败。</div> : null}
+            <DebugRunDetailPanel run={selectedRun} activeTab="label" onTabChange={setActiveTab} onRunRefresh={refreshRunDetail} focusMode="golden" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -2466,9 +2666,14 @@ export default function DebugPage() {
           <h1 className="mt-2 text-3xl font-semibold text-slate-900 tablet:text-4xl">调试工作台</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">独立运行测试管线，结果写入 debug runs，不影响正式分析记录。</p>
         </div>
-        <Link to="/settings/api" className="app-pill text-sm font-semibold">
-          API 设置
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link to="/golden" className="app-pill text-sm font-semibold">
+            Golden 标注
+          </Link>
+          <Link to="/settings/api" className="app-pill text-sm font-semibold">
+            API 设置
+          </Link>
+        </div>
       </div>
 
       {error ? <div className="rounded-[20px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}

@@ -8,12 +8,15 @@
 
 Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
 
-当前分析管线版本为 `v5.2.308`。
+当前分析管线版本为 `v5.2.311`。
 
 ## 最近更新
 
-当前分支重点优化手机端目标框选、按动作类型处理关键帧、分享图清晰度，以及分项评分稳定性：
+当前分支重点优化 Golden 标注入口、手机端目标框选、按动作类型处理关键帧、分享图清晰度，以及分项评分稳定性：
 
+- 新增独立 `/golden` 标注工作台，家长模式下可直接查看标注历史、样本状态统计、选择历史样本继续标注，也可以新建 debug 样本进入标注。
+- Golden bbox 现在可在 sampled、semantic、partial 帧上拖拽绘制；图片默认拖拽已禁用，bbox 和骨架 overlay 使用原始画面比例的对齐画布，减少大图错位且不拉伸竖屏/横屏画面。
+- Golden 标注支持分次完成：重新打开样本会读取已有 `golden_label.json`，可以先标关键帧，之后再补 bbox、notes 和 review flags，保存后更新同一条 manifest。
 - 手机端手动框选主滑行者支持双指最高 4x 放大、放大后拖动画面，以及一键重置视图；保存到后端的仍是原图归一化 bbox，接口保持兼容。
 - 分析重试可传入 `manual_action_window_start_sec` 和 `manual_action_window_end_sec`；手动动作区间会按 jump、spin、step、spiral 使用更高密度采样，自动跳跃区间增加起跳前和落冰后的 padding。
 - 关键帧证据会按动作类型展示：跳跃显示 T/A/L，旋转显示入转/主转/出转，燕式显示保持帧，步法显示区间覆盖帧，不再强行套用跳跃关键帧文案。
@@ -46,8 +49,11 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 - Report 主页面聚焦 Force Score、结论、训练重点、问题建议、分项评分、Quality Check 和常用操作；Pose Replay、Evidence、Diagnostics、Follow-up 已迁移到 `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`。
 - Debug 日志会修复已知 mojibake 文本，例如分析流程完成状态。
 
-最新版本集中修复手机端复盘、手动动作区间、动作类型关键帧、分享图和 `SUBSCORES` 分项评分模块。
+最新版本集中优化 Golden 标注工作台和 bbox 拖拽，并保留可重复的 “标注 -> 回放 -> 评测 -> 修正” 闭环。
 
+- `v5.2.311`：新增独立 `/golden` 家长模式标注工作台，包含历史记录和新建样本入口；Golden bbox 可在 sampled/semantic/partial 帧上绘制，overlay 按原始画面比例与大图坐标对齐并禁用图片原生拖拽；已保存标注可再次打开分次补完，不需要额外脚本才生效。
+- `v5.2.310`：开发文档要求每次推送 GitHub 和导出 all-in-one 镜像时同步 pipeline version、README release notes、commit wording、导出文件名和本地启动验证。
+- `v5.2.309`：Debug golden label 会保存 label、prediction snapshot 和 manifest；评测脚本支持 overall/per-stratum 指标、失败列表、quality flags、关键帧误差、bbox IoU identity accuracy、identity switches 和固定错误标签；appearance relock 默认实验开关，关键帧 resolver 增加 vertical extrema proposal 和 T/A/L 顺序 fail-closed。
 - `v5.2.308`：手机端主角框选支持双指放大、平移和重置；手动动作区间启用更高密度采样并补足跳跃窗口；关键帧证据按 jump/spin/step/spiral profile 展示；分项评分统一修正来源和回退逻辑，对比页不再空白；报告/进展分享图加入 comments 与分项条，追问分享改为清晰多轮时间线。
 - `v5.2.307`：对比生成持久化为 `analysis_comparisons` 后台任务；完整源视频只交给激活的 `vision` 模型，`report` provider 只基于结构化 JSON 文本生成总结；新增对比结果历史、重试、分享、手机端全静音同步播放、对比页布局整理，并加强训练计划兜底。
 - `v5.2.306`：追问聊天能识别用户备注中的多个问题并逐一回答，区分能/不能从证据确认的内容；训练计划改用儿童安全低冲击提示词，强制 JSON schema 并记录 `generation_status`；报告自动解析上传备注中的问题并逐条 Q&A；KeyframeEvidencePanel 逻辑抽取到 `keyframeEvidence.ts` 工具模块，支持响应式布局；Archive 新增家长模式聚合 `fetchArchiveSummary` 接口、可点开的日历日详情弹窗和"回到最近记录月份"导航；新增帧回填测试。
