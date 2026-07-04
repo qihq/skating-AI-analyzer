@@ -39,9 +39,13 @@ PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG = "person_tracker_manual_lock_rel
 PERSON_TRACKER_MANUAL_LOCK_FALLBACK_BLOCKED_FLAG = "person_tracker_manual_lock_fallback_blocked"
 PERSON_TRACKER_MANUAL_LOCK_IDENTITY_REJECTED_FLAG = "person_tracker_manual_lock_identity_rejected"
 PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG = "person_tracker_manual_lock_support_anchor_blocked"
+PERSON_TRACKER_APPEARANCE_RELOCK_USED_FLAG = "person_tracker_appearance_relock_used"
+PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG = "person_tracker_appearance_relock_rejected"
 
 _YOLO_MODEL_NAME = "yolov8n.pt"
 _YOLO_MODEL_PATH_ENV = "YOLO_PERSON_MODEL_PATH"
+_APPEARANCE_RELOCK_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK"
+_APPEARANCE_RELOCK_THRESHOLD_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK_THRESHOLD"
 _YOLO_MOUNTED_MODEL_PATH = Path("/models") / _YOLO_MODEL_NAME
 _YOLO_CONF_THRESHOLD = 0.40
 _TRACK_ACTIVATION_THRESHOLD = 0.35
@@ -130,6 +134,10 @@ _DETECTOR_RELOCK_NEAR_SHRINK_HEIGHT_RANGE = (0.10, 0.70)
 _DETECTOR_RELOCK_IDENTITY_DISTANCE_RATIO = 0.35
 _DETECTOR_RELOCK_IDENTITY_REFERENCE_COVERAGE = 0.35
 _DETECTOR_RELOCK_IDENTITY_CANDIDATE_COVERAGE = 0.25
+_APPEARANCE_RELOCK_DEFAULT_THRESHOLD = 0.55
+_APPEARANCE_RELOCK_EMA_ALPHA = 0.25
+_APPEARANCE_RELOCK_H_BINS = 16
+_APPEARANCE_RELOCK_S_BINS = 8
 _LOCAL_ZOOM_TINY_SCALE_RECOVERY_MIN_CONFIDENCE = 0.50
 _LOCAL_ZOOM_TINY_SCALE_RECOVERY_MAX_REFERENCE_AREA = 0.0045
 _LOCAL_ZOOM_TINY_SCALE_RECOVERY_AREA_RANGE = (0.006, 0.045)
@@ -531,6 +539,24 @@ def _clamp_xyxy(xyxy: Sequence[float], frame_w: int, frame_h: int) -> tuple[floa
     return left, top, right, bottom
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on", "enabled"}
+
+
+def _appearance_relock_threshold() -> float:
+    raw = os.getenv(_APPEARANCE_RELOCK_THRESHOLD_ENV, "").strip()
+    if not raw:
+        return _APPEARANCE_RELOCK_DEFAULT_THRESHOLD
+    try:
+        value = float(raw)
+    except ValueError:
+        return _APPEARANCE_RELOCK_DEFAULT_THRESHOLD
+    if value != value:
+        return _APPEARANCE_RELOCK_DEFAULT_THRESHOLD
+    return max(0.0, min(value, 1.0))
+
+
 def _expand_xyxy(xyxy: Sequence[float], frame_w: int, frame_h: int, padding_ratio: float) -> tuple[int, int, int, int]:
     x1, y1, x2, y2 = _clamp_xyxy(xyxy, frame_w, frame_h)
     width = max(1.0, x2 - x1)
@@ -611,6 +637,7 @@ def _rejected_candidate_diagnostic(
     confidence: float | None = None,
     reference_xyxy: Sequence[float] | None = None,
     prediction_xyxy: Sequence[float] | None = None,
+    appearance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     diagnostic: dict[str, Any] = {
         "bbox": _xyxy_to_bbox(candidate_xyxy, frame_w, frame_h),
@@ -622,6 +649,8 @@ def _rejected_candidate_diagnostic(
         diagnostic["source"] = source
     if confidence is not None:
         diagnostic["candidate_confidence"] = round(float(confidence), 4)
+    if isinstance(appearance, dict):
+        diagnostic["appearance"] = appearance
     diagnostic.update(
         _candidate_geometry_diagnostic(
             candidate_xyxy,
@@ -654,6 +683,7 @@ def _frame_diagnostic(
     candidate_confidence: float | None = None,
     candidate_xyxy: Sequence[float] | None = None,
     reference_xyxy: Sequence[float] | None = None,
+    appearance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     diagnostic: dict[str, Any] = {
         "frame_index": frame_index,
@@ -679,6 +709,8 @@ def _frame_diagnostic(
         diagnostic["local_crop_bounds"] = [int(value) for value in local_crop_bounds]
     if candidate_confidence is not None:
         diagnostic["candidate_confidence"] = round(float(candidate_confidence), 4)
+    if isinstance(appearance, dict):
+        diagnostic["appearance"] = appearance
     if candidate_xyxy is not None:
         diagnostic["candidate_bbox"] = _xyxy_to_bbox(candidate_xyxy, frame_w, frame_h)
         candidate_geometry = _candidate_geometry_diagnostic(
@@ -803,6 +835,9 @@ class PersonBBoxTracker:
         self._support_anchor_handoff_frame_index: int | None = None
         self._accepted_xyxy_history: list[tuple[int, tuple[float, float, float, float]]] = []
         self._center_history: dict[int, list[tuple[float, float]]] = {}
+        self._appearance_relock_enabled = _env_flag_enabled(_APPEARANCE_RELOCK_ENV)
+        self._appearance_anchor_hist: np.ndarray | None = None
+        self._pending_detector_relock_appearance: dict[str, Any] | None = None
         self.quality_flags: list[str] = []
 
     def track_sequence(
@@ -1324,6 +1359,7 @@ class PersonBBoxTracker:
 
         self._last_known_xyxy = target_xyxy
         self._record_accepted_bbox(frame_index, target_xyxy)
+        self._update_appearance_anchor(frame_bgr, target_xyxy)
         self._lost_frames = 0
         self._clear_pending_relock()
         self._clear_pending_detector_relock()
@@ -1747,6 +1783,7 @@ class PersonBBoxTracker:
         self._pending_detector_relock_xyxy = None
         self._pending_detector_relock_source = None
         self._pending_detector_relock_count = 0
+        self._pending_detector_relock_appearance = None
 
     def _clear_pending_confirmed_partial_recovery(self) -> None:
         self._pending_confirmed_partial_recovery_tracker_id = None
@@ -1789,6 +1826,77 @@ class PersonBBoxTracker:
         self._accepted_xyxy_history.append((int(frame_index), tuple(float(value) for value in xyxy)))
         if len(self._accepted_xyxy_history) > _ACCEPTED_HISTORY:
             del self._accepted_xyxy_history[:-_ACCEPTED_HISTORY]
+
+    def _appearance_signature(self, frame_bgr: np.ndarray, xyxy: Sequence[float]) -> np.ndarray | None:
+        if not self._appearance_relock_enabled:
+            return None
+        try:
+            import cv2  # type: ignore
+        except Exception:
+            return None
+        frame_h, frame_w = frame_bgr.shape[:2]
+        left, top, right, bottom = _clamp_xyxy(xyxy, frame_w, frame_h)
+        width = max(1, int(round(right - left)))
+        height = max(1, int(round(bottom - top)))
+        if width < 4 or height < 8:
+            return None
+        torso_left = int(round(left + width * 0.18))
+        torso_right = int(round(right - width * 0.18))
+        torso_top = int(round(top + height * 0.18))
+        torso_bottom = int(round(top + height * 0.62))
+        torso_left = max(0, min(torso_left, frame_w))
+        torso_right = max(torso_left + 1, min(torso_right, frame_w))
+        torso_top = max(0, min(torso_top, frame_h))
+        torso_bottom = max(torso_top + 1, min(torso_bottom, frame_h))
+        crop = frame_bgr[torso_top:torso_bottom, torso_left:torso_right]
+        if crop.size <= 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [_APPEARANCE_RELOCK_H_BINS, _APPEARANCE_RELOCK_S_BINS], [0, 180, 0, 256])
+        hist = cv2.normalize(hist, hist).flatten()
+        if hist.size == 0 or not np.isfinite(hist).all():
+            return None
+        norm = float(np.linalg.norm(hist))
+        if norm <= 0.0:
+            return None
+        return hist.astype(np.float32)
+
+    def _update_appearance_anchor(self, frame_bgr: np.ndarray, xyxy: Sequence[float]) -> None:
+        signature = self._appearance_signature(frame_bgr, xyxy)
+        if signature is None:
+            return
+        if self._appearance_anchor_hist is None:
+            self._appearance_anchor_hist = signature
+            return
+        alpha = _APPEARANCE_RELOCK_EMA_ALPHA
+        blended = (self._appearance_anchor_hist * (1.0 - alpha)) + (signature * alpha)
+        norm = float(np.linalg.norm(blended))
+        self._appearance_anchor_hist = (blended / norm).astype(np.float32) if norm > 0.0 else signature
+
+    def _appearance_similarity(self, signature: np.ndarray | None) -> float | None:
+        if signature is None or self._appearance_anchor_hist is None:
+            return None
+        denom = float(np.linalg.norm(signature) * np.linalg.norm(self._appearance_anchor_hist))
+        if denom <= 0.0:
+            return None
+        cosine = float(np.dot(signature, self._appearance_anchor_hist) / denom)
+        if cosine != cosine:
+            return None
+        return max(0.0, min(cosine, 1.0))
+
+    def _appearance_diagnostic(self, similarity: float | None, *, decision: str, reason: str | None = None) -> dict[str, Any]:
+        threshold = _appearance_relock_threshold()
+        diagnostic: dict[str, Any] = {
+            "enabled": bool(self._appearance_relock_enabled),
+            "anchor_available": self._appearance_anchor_hist is not None,
+            "threshold": round(threshold, 4),
+            "decision": decision,
+        }
+        if similarity is not None:
+            diagnostic["similarity"] = round(float(similarity), 4)
+        if reason:
+            diagnostic["reason"] = reason
+        return diagnostic
 
     def _predict_next_xyxy(self, frame_w: int, frame_h: int) -> tuple[float, float, float, float] | None:
         if len(self._accepted_xyxy_history) < 2:
@@ -2768,6 +2876,7 @@ class PersonBBoxTracker:
         self,
         boxes: Sequence[tuple[float, float, float, float, float]],
         *,
+        frame_bgr: np.ndarray,
         reference_xyxy: Sequence[float] | None,
         prediction_xyxy: Sequence[float] | None,
         frame_w: int,
@@ -2781,6 +2890,7 @@ class PersonBBoxTracker:
         rejected: list[dict[str, Any]] = []
         best_xyxy: tuple[float, float, float, float] | None = None
         best_confidence: float | None = None
+        best_appearance: dict[str, Any] | None = None
         best_score = -1.0
         reference = prediction_xyxy or reference_xyxy
         diagonal = (frame_w**2 + frame_h**2) ** 0.5
@@ -2835,6 +2945,51 @@ class PersonBBoxTracker:
                 )
                 continue
 
+            appearance: dict[str, Any] | None = None
+            if self._appearance_relock_enabled:
+                if self._appearance_anchor_hist is None:
+                    appearance = self._appearance_diagnostic(None, decision="skipped", reason="anchor_unavailable")
+                else:
+                    signature = self._appearance_signature(frame_bgr, candidate_xyxy)
+                    similarity = self._appearance_similarity(signature)
+                    threshold = _appearance_relock_threshold()
+                    if similarity is None:
+                        appearance = self._appearance_diagnostic(similarity, decision="skipped", reason="signature_unavailable")
+                    elif similarity < threshold:
+                        appearance = self._appearance_diagnostic(similarity, decision="rejected", reason="below_threshold")
+                        rejected.append(
+                            _rejected_candidate_diagnostic(
+                                candidate_xyxy,
+                                frame_w=frame_w,
+                                frame_h=frame_h,
+                                source=source,
+                                confidence=confidence,
+                                reasons=["appearance_mismatch"],
+                                reference_xyxy=reference_xyxy,
+                                prediction_xyxy=prediction_xyxy,
+                                appearance=appearance,
+                            )
+                        )
+                        _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG)
+                        continue
+                    else:
+                        appearance = self._appearance_diagnostic(similarity, decision="passed")
+                if appearance.get("decision") == "skipped":
+                    rejected.append(
+                        _rejected_candidate_diagnostic(
+                            candidate_xyxy,
+                            frame_w=frame_w,
+                            frame_h=frame_h,
+                            source=source,
+                            confidence=confidence,
+                            reasons=[str(appearance.get("reason") or "appearance_skipped")],
+                            reference_xyxy=reference_xyxy,
+                            prediction_xyxy=prediction_xyxy,
+                            appearance=appearance,
+                        )
+                    )
+                    continue
+
             distance = _center_distance(candidate_xyxy, reference) if reference is not None else 0.0
             score = (
                 _iou(candidate_xyxy, prediction_xyxy)
@@ -2845,7 +3000,11 @@ class PersonBBoxTracker:
             if score > best_score:
                 best_xyxy = candidate_xyxy
                 best_confidence = confidence
+                best_appearance = appearance
                 best_score = score
+        self._pending_detector_relock_appearance = best_appearance
+        if best_appearance is not None:
+            _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_USED_FLAG)
         return best_xyxy, best_confidence, rejected
 
     def _local_zoom_relock_boxes(
@@ -2927,6 +3086,7 @@ class PersonBBoxTracker:
 
     def _confirm_detector_relock(
         self,
+        frame_bgr: np.ndarray,
         candidate_xyxy: tuple[float, float, float, float],
         source: str,
         confidence: float | None,
@@ -2942,10 +3102,12 @@ class PersonBBoxTracker:
     ) -> tuple[tuple[float, float, float, float] | None, dict[str, Any]]:
         if self._is_same_detector_relock_candidate(candidate_xyxy, source):
             self._pending_detector_relock_count += 1
+            appearance = self._pending_detector_relock_appearance
         else:
             self._pending_detector_relock_xyxy = candidate_xyxy
             self._pending_detector_relock_source = source
             self._pending_detector_relock_count = 1
+            appearance = self._pending_detector_relock_appearance
 
         _add_flag(self.quality_flags, PERSON_TRACKER_DETECTOR_RELOCK_PENDING_FLAG)
         pending_state = "local_zoom_yolo_relock_pending" if source == "local_zoom_yolo_relock" else "full_frame_yolo_relock_pending"
@@ -2965,10 +3127,12 @@ class PersonBBoxTracker:
                 relock_source=source,
                 local_crop_bounds=local_crop_bounds,
                 candidate_confidence=confidence,
+                appearance=appearance,
             )
 
         self._last_known_xyxy = candidate_xyxy
         self._record_accepted_bbox(frame_index, candidate_xyxy)
+        self._update_appearance_anchor(frame_bgr, candidate_xyxy)
         self._lost_frames = 0
         self._clear_pending_relock()
         self._clear_pending_detector_relock()
@@ -2991,6 +3155,7 @@ class PersonBBoxTracker:
             candidate_confidence=confidence,
             candidate_xyxy=candidate_xyxy,
             reference_xyxy=fallback_xyxy,
+            appearance=appearance,
         )
 
     def _handle_lost_with_detector_relock(
@@ -3053,6 +3218,7 @@ class PersonBBoxTracker:
         ]
         candidate_xyxy, confidence, rejected = self._select_detector_relock_candidate(
             full_frame_boxes,
+            frame_bgr=frame_bgr,
             reference_xyxy=reference_xyxy,
             prediction_xyxy=prediction_xyxy,
             frame_w=frame_w,
@@ -3063,6 +3229,7 @@ class PersonBBoxTracker:
         rejected_candidates.extend(rejected)
         if candidate_xyxy is not None:
             return self._confirm_detector_relock(
+                frame_bgr,
                 candidate_xyxy,
                 "full_frame_yolo_relock",
                 confidence,
@@ -3088,6 +3255,7 @@ class PersonBBoxTracker:
             )
             candidate_xyxy, confidence, rejected = self._select_detector_relock_candidate(
                 local_boxes,
+                frame_bgr=frame_bgr,
                 reference_xyxy=reference_xyxy,
                 prediction_xyxy=prediction_xyxy,
                 frame_w=frame_w,
@@ -3097,6 +3265,7 @@ class PersonBBoxTracker:
             rejected_candidates.extend(rejected)
             if candidate_xyxy is not None:
                 return self._confirm_detector_relock(
+                    frame_bgr,
                     candidate_xyxy,
                     "local_zoom_yolo_relock",
                     confidence,

@@ -2088,6 +2088,267 @@ def _motion_records_from_scores(motion_scores: dict[str, Any] | None) -> list[di
     return _motion_selected_records(motion_scores)
 
 
+def _vertical_extrema_records(source: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(source, dict):
+        return {}
+    raw = source.get("vertical_extrema")
+    if raw is None:
+        raw = source.get("com_vertical_extrema")
+    if raw is None and isinstance(source.get("key_frame_candidates"), dict):
+        raw = source["key_frame_candidates"].get("vertical_extrema")
+    if not isinstance(raw, dict):
+        return {}
+
+    aliases = {
+        "T": "T",
+        "takeoff": "T",
+        "T_takeoff_sec": "T",
+        "A": "A",
+        "air": "A",
+        "apex": "A",
+        "A_air_sec": "A",
+        "L": "L",
+        "landing": "L",
+        "L_landing_sec": "L",
+    }
+    output: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        label = aliases.get(str(key))
+        if label is None or not isinstance(value, dict):
+            continue
+        timestamp = _candidate_timestamp(value)
+        if timestamp is None:
+            continue
+        output[label] = {
+            **value,
+            "timestamp": timestamp,
+            "confidence": _clamp_confidence(value.get("confidence"), default=0.75),
+            "source": str(value.get("source") or "vertical_extrema"),
+        }
+    return output
+
+
+def _vertical_extrema_from_trajectory(source: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(source, dict):
+        return {}
+    raw = source.get("com_vertical_trajectory")
+    if raw is None:
+        raw = source.get("vertical_trajectory")
+    if raw is None and isinstance(source.get("key_frame_candidates"), dict):
+        raw = source["key_frame_candidates"].get("com_vertical_trajectory")
+    if not isinstance(raw, list):
+        return {}
+
+    records: list[tuple[float, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _to_float(item.get("timestamp") or item.get("timestamp_sec") or item.get("time_sec"))
+        value = _to_float(item.get("y") or item.get("com_y") or item.get("vertical") or item.get("value"))
+        if timestamp is None or value is None:
+            continue
+        records.append((timestamp, value))
+    if len(records) < 3:
+        return {}
+    records.sort(key=lambda item: item[0])
+    apex_ts, apex_value = min(records, key=lambda item: item[1])
+    takeoff_candidates = [(ts, value) for ts, value in records if ts < apex_ts]
+    landing_candidates = [(ts, value) for ts, value in records if ts > apex_ts]
+    output: dict[str, dict[str, Any]] = {
+        "A": {
+            "timestamp": apex_ts,
+            "confidence": 0.70,
+            "source": "com_vertical_trajectory",
+            "vertical_value": round(apex_value, 6),
+        }
+    }
+    if takeoff_candidates:
+        ts, value = max(takeoff_candidates, key=lambda item: item[1])
+        output["T"] = {
+            "timestamp": ts,
+            "confidence": 0.68,
+            "source": "com_vertical_trajectory",
+            "vertical_value": round(value, 6),
+        }
+    if landing_candidates:
+        ts, value = max(landing_candidates, key=lambda item: item[1])
+        output["L"] = {
+            "timestamp": ts,
+            "confidence": 0.68,
+            "source": "com_vertical_trajectory",
+            "vertical_value": round(value, 6),
+        }
+    return output
+
+
+def _vertical_extrema_candidates(
+    skeleton_timestamps: dict[str, Any] | None,
+    motion_scores: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    output = _vertical_extrema_records(skeleton_timestamps)
+    output.update(_vertical_extrema_records(motion_scores))
+    if not output:
+        output = _vertical_extrema_from_trajectory(skeleton_timestamps)
+    if not output:
+        output = _vertical_extrema_from_trajectory(motion_scores)
+    return output
+
+
+def _keyframe_proposal_diagnostics(
+    *,
+    skeleton_candidates: dict[str, dict[str, Any]],
+    vertical_extrema: dict[str, dict[str, Any]],
+    motion_records: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
+    selected_by_phase = {
+        str(item.get("phase_code") or ""): _to_float(item.get("timestamp"))
+        for item in selected
+        if isinstance(item, dict)
+    }
+    for label, phase_code in (("T", "takeoff"), ("A", "air"), ("L", "landing")):
+        skeleton = skeleton_candidates.get(label)
+        if isinstance(skeleton, dict):
+            timestamp = _candidate_timestamp(skeleton)
+            if timestamp is not None:
+                proposals.append(
+                    {
+                        "phase_code": phase_code,
+                        "source": "skeleton_candidate",
+                        "timestamp": round(timestamp, 3),
+                        "confidence": round(_candidate_confidence(skeleton), 4),
+                        "selected": selected_by_phase.get(phase_code) == round(timestamp, 3),
+                    }
+                )
+        vertical = vertical_extrema.get(label)
+        if isinstance(vertical, dict):
+            timestamp = _candidate_timestamp(vertical)
+            if timestamp is not None:
+                proposals.append(
+                    {
+                        "phase_code": phase_code,
+                        "source": str(vertical.get("source") or "vertical_extrema"),
+                        "timestamp": round(timestamp, 3),
+                        "confidence": round(_candidate_confidence(vertical), 4),
+                        "selected": selected_by_phase.get(phase_code) == round(timestamp, 3),
+                    }
+                )
+    for item in sorted(motion_records, key=lambda record: _motion_score_value(record), reverse=True)[:3]:
+        timestamp = _to_float(item.get("timestamp"))
+        if timestamp is None:
+            continue
+        proposals.append(
+            {
+                "phase_code": str(item.get("phase_code") or "motion"),
+                "source": str(item.get("source") or "motion_score"),
+                "timestamp": round(timestamp, 3),
+                "motion_score": round(_motion_score_value(item), 4),
+                "selected": any(value == round(timestamp, 3) for value in selected_by_phase.values()),
+            }
+        )
+    return proposals
+
+
+def _selected_core_tal_timestamps(selected: list[dict[str, Any]]) -> dict[str, float]:
+    anchors: dict[str, float] = {}
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        key = _semantic_key_from_record(item)
+        timestamp = _to_float(item.get("timestamp"))
+        if key in {"T", "A", "L"} and timestamp is not None:
+            anchors[key] = timestamp
+    return anchors
+
+
+def _core_tal_order_valid(anchors: dict[str, float]) -> bool:
+    return (
+        {"T", "A", "L"}.issubset(anchors)
+        and anchors["T"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["A"]
+        and anchors["A"] + SEMANTIC_ORDER_MIN_GAP_SECONDS < anchors["L"]
+    )
+
+
+def _with_core_tal_order_guard(
+    *,
+    selected: list[dict[str, Any]],
+    flags: list[str],
+    source: str,
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    anchors = _selected_core_tal_timestamps(selected)
+    if not {"T", "A", "L"}.issubset(anchors):
+        return selected, flags, source
+    if _core_tal_order_valid(anchors):
+        return selected, flags, source
+    guarded_flags = _merge_flags(
+        flags,
+        [
+            "video_temporal_resolver_core_tal_order_invalid",
+            "semantic_keyframe_refinement_order_rejected",
+            "semantic_keyframes_unreliable_fallback_to_sampled_frames",
+        ],
+    )
+    guarded: list[dict[str, Any]] = []
+    for item in selected:
+        if isinstance(item, dict) and _semantic_key_from_record(item) in {"T", "A", "L"}:
+            copy_item = dict(item)
+            copy_item["selection_status"] = "unreliable_order_rejected"
+            copy_item["confidence"] = min(_candidate_confidence(copy_item), 0.34)
+            guarded.append(copy_item)
+        else:
+            guarded.append(item)
+    return guarded, guarded_flags, "skeleton_fallback" if source == "video_ai_refined" else source
+
+
+def _resolver_output(
+    *,
+    source: str,
+    confidence: float,
+    flags: list[str],
+    selected: list[dict[str, Any]],
+    normalized_video: dict[str, Any] | None,
+    skeleton_candidates: dict[str, dict[str, Any]],
+    vertical_extrema: dict[str, dict[str, Any]],
+    motion_records: list[dict[str, Any]],
+    max_frames: int,
+) -> dict[str, Any]:
+    selected, flags, source = _with_core_tal_order_guard(selected=selected, flags=flags, source=source)
+    trimmed = selected[:max_frames]
+    output_confidence = (
+        min(confidence, 0.34)
+        if "video_temporal_resolver_core_tal_order_invalid" in flags
+        else confidence
+    )
+    output: dict[str, Any] = {
+        "source": source,
+        "confidence": output_confidence,
+        "quality_flags": _merge_flags(flags),
+        "selected": trimmed,
+        "video_ai": normalized_video or {},
+    }
+    proposals = _keyframe_proposal_diagnostics(
+        skeleton_candidates=skeleton_candidates,
+        vertical_extrema=vertical_extrema,
+        motion_records=motion_records,
+        selected=trimmed,
+    )
+    if proposals:
+        output["keyframe_proposals"] = proposals
+    used_vertical = [
+        item
+        for item in trimmed
+        if isinstance(item, dict) and str(item.get("selection_reason") or "").startswith("video_phase_range_vertical_extrema")
+    ]
+    if used_vertical or any(flag.startswith("video_temporal_resolver_vertical_extrema_") for flag in output["quality_flags"]):
+        output["keyframe_resolution_diagnostics"] = {
+            "vertical_extrema_available": sorted(vertical_extrema),
+            "vertical_extrema_used": [str(item.get("phase_code") or "") for item in used_vertical],
+            "decision": "vertical_extrema_preferred" if used_vertical else "vertical_extrema_not_used",
+        }
+    return output
+
+
 def _motion_score_value(record: dict[str, Any]) -> float:
     value = _to_float(record.get("motion_score"))
     return value if value is not None else 0.0
@@ -2166,6 +2427,38 @@ def _resolve_skeleton_candidate_timestamp(
 
     flags.append(f"video_temporal_resolver_skeleton_{label.lower()}_below_anchor_confidence")
     return None, "skeleton_candidate_below_anchor_confidence", flags
+
+
+def _resolve_vertical_extrema_timestamp(
+    *,
+    label: str,
+    candidate: dict[str, Any] | None,
+    start: float,
+    end: float,
+) -> tuple[float | None, str, list[str]]:
+    if not isinstance(candidate, dict):
+        return None, "vertical_extrema_missing", []
+    timestamp = _candidate_timestamp(candidate)
+    if timestamp is None:
+        return None, "vertical_extrema_invalid", ["video_temporal_resolver_vertical_extrema_invalid"]
+    if not (start <= timestamp <= end):
+        return (
+            None,
+            "vertical_extrema_outside_phase_range",
+            [f"video_temporal_resolver_vertical_extrema_{label.lower()}_outside_phase_range"],
+        )
+    confidence = _candidate_confidence(candidate)
+    if confidence < SKELETON_ANCHOR_CONFIDENCE:
+        return (
+            None,
+            "vertical_extrema_below_anchor_confidence",
+            [f"video_temporal_resolver_vertical_extrema_{label.lower()}_below_anchor_confidence"],
+        )
+    return (
+        timestamp,
+        f"video_phase_range_vertical_extrema_{_phase_code_for_skeleton_label(label)}",
+        [f"video_temporal_resolver_vertical_extrema_{label.lower()}_used"],
+    )
 
 
 def _fallback_skeleton_selected(
@@ -4097,6 +4390,7 @@ def _resolve_segment_timestamp(
     video_ai_result: dict[str, Any],
     skeleton_candidates: dict[str, dict[str, Any]],
     motion_records: list[dict[str, Any]],
+    vertical_extrema: dict[str, dict[str, Any]] | None = None,
     prefer_key_moments: bool = False,
     preserve_key_moments: bool = False,
     prefer_key_moments_before_skeleton: bool = False,
@@ -4113,6 +4407,16 @@ def _resolve_segment_timestamp(
     key_moment = PHASE_KEY_MOMENTS.get(phase_code)
     skeleton_label = {"T_takeoff_sec": "T", "A_air_sec": "A", "L_landing_sec": "L"}.get(key_moment or "")
     skeleton_candidate = skeleton_candidates.get(skeleton_label or "")
+    if skeleton_label and phase_code in JUMP_CORE_PHASE_CODES and vertical_extrema:
+        vertical_ts, vertical_reason, vertical_flags = _resolve_vertical_extrema_timestamp(
+            label=skeleton_label,
+            candidate=vertical_extrema.get(skeleton_label),
+            start=start,
+            end=end,
+        )
+        flags.extend(vertical_flags)
+        if vertical_ts is not None:
+            return vertical_ts, vertical_reason, key_moment, flags
     if prefer_key_moments_before_skeleton:
         key_value = _to_float(video_ai_result.get("key_moments", {}).get(key_moment)) if key_moment else None
         if key_value is not None and start <= key_value <= end:
@@ -4379,6 +4683,7 @@ def resolve_semantic_keyframes(
     normalized_video = _valid_video_temporal_for_resolver(video_ai_result, duration) if duration > 0 else None
     skeleton_candidates = _skeleton_candidates(skeleton_timestamps)
     motion_records = _motion_records_from_scores(motion_scores)
+    vertical_extrema = _vertical_extrema_candidates(skeleton_timestamps, motion_scores)
     if isinstance(normalized_video, dict):
         flags.extend(
             flag
@@ -4546,13 +4851,17 @@ def resolve_semantic_keyframes(
             )
             if spin_selected:
                 flags.extend(spin_flags)
-                return {
-                    "source": "blended",
-                    "confidence": confidence,
-                    "quality_flags": _merge_flags(flags),
-                    "selected": spin_selected,
-                    "video_ai": normalized_video or {},
-                }
+                return _resolver_output(
+                    source="blended",
+                    confidence=confidence,
+                    flags=flags,
+                    selected=spin_selected,
+                    normalized_video=normalized_video,
+                    skeleton_candidates=skeleton_candidates,
+                    vertical_extrema=vertical_extrema,
+                    motion_records=motion_records,
+                    max_frames=max_frames,
+                )
         if fallback_selected and not _selected_has_complete_ordered_core_tal(fallback_selected, min_confidence=SKELETON_FALLBACK_CONFIDENCE):
             flags.append("video_temporal_resolver_partial_skeleton_fallback")
         motion_cluster_selected, motion_cluster_flags = _jump_motion_cluster_fallback_selected(
@@ -4568,13 +4877,17 @@ def resolve_semantic_keyframes(
         if motion_cluster_selected:
             fallback_selected = motion_cluster_selected
             flags.extend(motion_cluster_flags)
-        return {
-            "source": "skeleton_fallback",
-            "confidence": confidence,
-            "quality_flags": _merge_flags(flags),
-            "selected": fallback_selected,
-            "video_ai": normalized_video or {},
-        }
+        return _resolver_output(
+            source="skeleton_fallback",
+            confidence=confidence,
+            flags=flags,
+            selected=fallback_selected,
+            normalized_video=normalized_video,
+            skeleton_candidates=skeleton_candidates,
+            vertical_extrema=vertical_extrema,
+            motion_records=motion_records,
+            max_frames=max_frames,
+        )
 
     source = "video_ai_refined" if confidence >= 0.80 else "blended"
     if (
@@ -4696,6 +5009,7 @@ def resolve_semantic_keyframes(
                 video_ai_result=normalized_video,
                 skeleton_candidates=skeleton_candidates,
                 motion_records=motion_records,
+                vertical_extrema=vertical_extrema,
                 prefer_key_moments=allow_core_candidate_phase and explicit_video_fallback,
                 preserve_key_moments=preserve_core_key_moments,
                 prefer_key_moments_before_skeleton=preserve_video_tal_despite_weak_retry_motion_conflict,
@@ -4837,13 +5151,17 @@ def resolve_semantic_keyframes(
                 selected = merged
                 flags.extend(spin_flags)
 
-    return {
-        "source": source,
-        "confidence": confidence,
-        "quality_flags": _merge_flags(flags),
-        "selected": selected[:max_frames],
-        "video_ai": normalized_video,
-    }
+    return _resolver_output(
+        source=source,
+        confidence=confidence,
+        flags=flags,
+        selected=selected,
+        normalized_video=normalized_video,
+        skeleton_candidates=skeleton_candidates,
+        vertical_extrema=vertical_extrema,
+        motion_records=motion_records,
+        max_frames=max_frames,
+    )
 
 
 def _phase_contains_time(segment: dict[str, Any], timestamp: float | None) -> bool:

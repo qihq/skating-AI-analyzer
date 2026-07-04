@@ -26,7 +26,7 @@ from app.routers.analysis import (
     _safe_video_response_path,
     _tracker_debug_summary,
 )
-from app.schemas import DebugRunCreateResponse, DebugRunDetail, DebugRunSummary
+from app.schemas import DebugGoldenLabelRequest, DebugGoldenLabelResponse, DebugRunCreateResponse, DebugRunDetail, DebugRunSummary
 from app.services.action_profiles import (
     infer_analysis_profile,
     infer_profile_from_input,
@@ -88,6 +88,17 @@ DEBUG_VIDEO_AI_STAGE_PROGRESS = {
     "video_temporal_retry_used": 0.9,
     "semantic_frames_resolved": 0.92,
 }
+DEBUG_GOLDEN_LABEL_FILENAME = "golden_label.json"
+DEBUG_GOLDEN_PREDICTION_FILENAME = "prediction.json"
+DEBUG_GOLDEN_MANIFEST_FILENAME = "golden_manifest.json"
+DEBUG_GOLDEN_MANIFEST_SCHEMA_VERSION = 1
+DEBUG_GOLDEN_RECOMMENDED_STRATA = [
+    "single_skater",
+    "multi_skater",
+    "small_target",
+    "occlusion",
+    "known_bad_keyframes",
+]
 
 
 class DebugAwaitingTargetSelection(Exception):
@@ -155,6 +166,20 @@ def _debug_semantic_frames_dir(run_id: str) -> Path:
     frames_dir = _debug_root(run_id) / "semantic_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     return frames_dir
+
+
+def _debug_golden_label_path(run_id: str) -> Path:
+    return _debug_root(run_id) / DEBUG_GOLDEN_LABEL_FILENAME
+
+
+def _debug_golden_prediction_path(run_id: str) -> Path:
+    return _debug_root(run_id) / DEBUG_GOLDEN_PREDICTION_FILENAME
+
+
+def _debug_golden_manifest_path() -> Path:
+    root = UPLOADS_DIR / "_debug"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / DEBUG_GOLDEN_MANIFEST_FILENAME
 
 
 def _sampling_metadata_payload(metadata: VideoSamplingMetadata) -> dict[str, Any]:
@@ -388,6 +413,266 @@ def _frame_records(run_id: str, frame_paths: list[Path], selected: object | None
     return records
 
 
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_as_jsonable(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _relative_debug_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to((UPLOADS_DIR / "_debug").resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _bbox_payload(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    x = _float_or_none(value.get("x"))
+    y = _float_or_none(value.get("y"))
+    width = _float_or_none(value.get("width", value.get("w")))
+    height = _float_or_none(value.get("height", value.get("h")))
+    if x is None or y is None or width is None or height is None:
+        return None
+    return {
+        "x": round(max(0.0, min(1.0, x)), 4),
+        "y": round(max(0.0, min(1.0, y)), 4),
+        "width": round(max(0.0, min(1.0, width)), 4),
+        "height": round(max(0.0, min(1.0, height)), 4),
+    }
+
+
+def _debug_prediction_bboxes(result_json: dict[str, Any]) -> list[dict[str, Any]]:
+    target_lock = result_json.get("target_lock") if isinstance(result_json.get("target_lock"), dict) else {}
+    raw = target_lock.get("bbox_per_frame") if isinstance(target_lock, dict) else None
+    if raw is None:
+        raw = result_json.get("bbox_per_frame")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        bbox = _bbox_payload(item.get("bbox") if isinstance(item, dict) and isinstance(item.get("bbox"), dict) else item)
+        if bbox is None:
+            continue
+        frame_index = index
+        if isinstance(item, dict):
+            raw_index = item.get("frame_index", item.get("index"))
+            parsed_index = _float_or_none(raw_index)
+            if parsed_index is not None:
+                frame_index = int(parsed_index)
+        out.append({"frame_index": frame_index, **bbox})
+    return out
+
+
+def _debug_prediction_payload(run: DebugRun) -> dict[str, Any]:
+    result = run.result_json if isinstance(run.result_json, dict) else {}
+    bio_data = result.get("bio_data") if isinstance(result.get("bio_data"), dict) else {}
+    target_lock = result.get("target_lock") if isinstance(result.get("target_lock"), dict) else {}
+    resolved = result.get("resolved_keyframes") if isinstance(result.get("resolved_keyframes"), dict) else None
+    key_frame_candidates = result.get("key_frame_candidates")
+    if not isinstance(key_frame_candidates, dict) and isinstance(bio_data, dict):
+        key_frame_candidates = bio_data.get("key_frame_candidates")
+    prediction_keyframes = resolved if isinstance(resolved, dict) else key_frame_candidates if isinstance(key_frame_candidates, dict) else {}
+    return {
+        "id": run.id,
+        "debug_run_id": run.id,
+        "debug_run_mode": run.mode,
+        "debug_run_status": run.status,
+        "video_path": run.video_path,
+        "action_type": run.action_type,
+        "action_subtype": run.action_subtype,
+        "analysis_profile": run.analysis_profile,
+        "keyframes": prediction_keyframes,
+        "resolved_keyframes": resolved,
+        "key_frame_candidates": key_frame_candidates if isinstance(key_frame_candidates, dict) else None,
+        "target_bboxes": _debug_prediction_bboxes(result),
+        "bbox_per_frame": _debug_prediction_bboxes(result),
+        "quality_flags": _quality_flags(result, bio_data, target_lock, resolved or {}),
+    }
+
+
+def _debug_label_default_fps(run: DebugRun) -> float | None:
+    result = run.result_json if isinstance(run.result_json, dict) else {}
+    summary = run.summary if isinstance(run.summary, dict) else {}
+    for source in (result.get("sampling_metadata"), summary, result.get("motion_scores")):
+        if not isinstance(source, dict):
+            continue
+        for key in ("effective_fps", "source_fps"):
+            value = _float_or_none(source.get(key))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _debug_label_payload_from_request(
+    run: DebugRun,
+    payload: DebugGoldenLabelRequest | None,
+    *,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _utc_now().isoformat()
+    existing = existing or {}
+    keyframes: dict[str, float | None] = {}
+    raw_keyframes = payload.keyframes if payload is not None else existing.get("keyframes")
+    if isinstance(raw_keyframes, dict):
+        for key, value in raw_keyframes.items():
+            if not str(key).strip():
+                continue
+            timestamp = _float_or_none(value)
+            if timestamp is not None:
+                keyframes[str(key).strip()] = round(timestamp, 3)
+            elif value is None:
+                keyframes[str(key).strip()] = None
+
+    target_bboxes: dict[str, dict[str, float]] = {}
+    raw_bboxes = payload.target_bboxes if payload is not None else existing.get("target_bboxes")
+    if isinstance(raw_bboxes, dict):
+        for key, value in raw_bboxes.items():
+            raw_bbox = value.model_dump() if hasattr(value, "model_dump") else value
+            bbox = _bbox_payload(raw_bbox)
+            if bbox is not None:
+                target_bboxes[str(key)] = bbox
+
+    expected_review_flags = payload.expected_review_flags if payload is not None else existing.get("expected_review_flags", [])
+    if not isinstance(expected_review_flags, list):
+        expected_review_flags = []
+    clean_flags = [str(flag).strip() for flag in expected_review_flags if str(flag).strip()]
+
+    fps = payload.fps if payload is not None else _float_or_none(existing.get("fps"))
+    if fps is None:
+        fps = _debug_label_default_fps(run)
+    action_type = payload.action_type if payload is not None else existing.get("action_type")
+    action_subtype = payload.action_subtype if payload is not None else existing.get("action_subtype")
+    analysis_profile = payload.analysis_profile if payload is not None else existing.get("analysis_profile")
+    prediction_path = _debug_golden_prediction_path(run.id)
+    label_path = _debug_golden_label_path(run.id)
+    completeness_warnings: list[str] = []
+    if not ((payload.skater_id if payload is not None else existing.get("skater_id")) or ""):
+        completeness_warnings.append("golden_label_missing_skater_id")
+    if not (action_type or run.action_type):
+        completeness_warnings.append("golden_label_missing_action_type")
+    if not (analysis_profile if analysis_profile is not None else run.analysis_profile):
+        completeness_warnings.append("golden_label_missing_analysis_profile")
+    if not keyframes:
+        completeness_warnings.append("golden_label_missing_keyframes")
+    if len(target_bboxes) < 3:
+        completeness_warnings.append("golden_label_target_bboxes_below_recommended_count")
+    stratum = (payload.stratum if payload is not None else existing.get("stratum")) or "unspecified"
+    if stratum not in DEBUG_GOLDEN_RECOMMENDED_STRATA:
+        completeness_warnings.append("golden_label_stratum_not_recommended")
+    if not ((payload.notes if payload is not None else existing.get("notes")) or ""):
+        completeness_warnings.append("golden_label_missing_notes")
+
+    return {
+        "id": run.id,
+        "video_path": run.video_path,
+        "prediction_path": _relative_debug_path(prediction_path),
+        "label_path": _relative_debug_path(label_path),
+        "source_type": run.source_type,
+        "source_analysis_id": run.analysis_id,
+        "debug_run_mode": run.mode,
+        "debug_run_status": run.status,
+        "manifest_schema_version": DEBUG_GOLDEN_MANIFEST_SCHEMA_VERSION,
+        "skater_id": (payload.skater_id if payload is not None else existing.get("skater_id")) or "",
+        "action_type": action_type or run.action_type,
+        "action_subtype": action_subtype if action_subtype is not None else run.action_subtype,
+        "analysis_profile": analysis_profile if analysis_profile is not None else run.analysis_profile,
+        "stratum": stratum,
+        "fps": fps,
+        "keyframes": keyframes,
+        "target_bboxes": target_bboxes,
+        "expected_review_flags": clean_flags,
+        "label_quality_flags": completeness_warnings,
+        "notes": (payload.notes if payload is not None else existing.get("notes")) or "",
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+    }
+
+
+def _debug_label_response(payload: dict[str, Any], *, exists: bool) -> DebugGoldenLabelResponse:
+    manifest_path = _debug_golden_manifest_path()
+    return DebugGoldenLabelResponse(
+        **payload,
+        manifest_path=_relative_debug_path(manifest_path),
+        exists=exists,
+    )
+
+
+def _write_debug_golden_manifest_entry(label: dict[str, Any]) -> None:
+    manifest_path = _debug_golden_manifest_path()
+    existing = _read_json_file(manifest_path)
+    samples = existing.get("samples") if isinstance(existing, dict) else []
+    if not isinstance(samples, list):
+        samples = []
+    sample_id = str(label.get("id") or "")
+    next_samples = [sample for sample in samples if isinstance(sample, dict) and str(sample.get("id") or "") != sample_id]
+    manifest_sample = {
+        key: label.get(key)
+        for key in (
+            "id",
+            "video_path",
+            "prediction_path",
+            "label_path",
+            "skater_id",
+            "action_type",
+            "action_subtype",
+            "analysis_profile",
+            "stratum",
+            "fps",
+            "keyframes",
+            "target_bboxes",
+            "expected_review_flags",
+            "notes",
+            "source_type",
+            "source_analysis_id",
+            "debug_run_mode",
+            "debug_run_status",
+            "created_at",
+            "updated_at",
+        )
+    }
+    next_samples.append(manifest_sample)
+    next_samples.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    _write_json_file(
+        manifest_path,
+        {
+            "schema_version": DEBUG_GOLDEN_MANIFEST_SCHEMA_VERSION,
+            "recommended_strata": DEBUG_GOLDEN_RECOMMENDED_STRATA,
+            "updated_at": _utc_now().isoformat(),
+            "samples": next_samples,
+        },
+    )
+
+
+def _remove_debug_golden_manifest_entry(run_id: str) -> None:
+    manifest_path = _debug_golden_manifest_path()
+    existing = _read_json_file(manifest_path)
+    if not isinstance(existing, dict):
+        return
+    samples = existing.get("samples")
+    if not isinstance(samples, list):
+        return
+    next_samples = [sample for sample in samples if not isinstance(sample, dict) or str(sample.get("id") or "") != run_id]
+    if len(next_samples) == len(samples):
+        return
+    _write_json_file(
+        manifest_path,
+        {
+            **existing,
+            "updated_at": _utc_now().isoformat(),
+            "samples": next_samples,
+        },
+    )
+
+
 def _semantic_records(run_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in records:
@@ -576,6 +861,9 @@ async def _video_ai_debug_bio_data(
 
 
 def _debug_summary_from_model(run: DebugRun) -> DebugRunSummary:
+    summary = dict(run.summary) if isinstance(run.summary, dict) else {}
+    if run.status in {"completed", "failed", "awaiting_target_selection"}:
+        summary.setdefault("golden_label_status", "labeled" if _debug_golden_label_path(run.id).exists() else "unlabeled")
     return DebugRunSummary(
         id=run.id,
         mode=run.mode,
@@ -586,7 +874,7 @@ def _debug_summary_from_model(run: DebugRun) -> DebugRunSummary:
         analysis_profile=run.analysis_profile,
         note=run.note,
         status=run.status,
-        summary=run.summary,
+        summary=summary if summary else run.summary,
         error_code=run.error_code,
         created_at=_as_utc_datetime(run.created_at),
         updated_at=_as_utc_datetime(run.updated_at),
@@ -1150,6 +1438,51 @@ async def get_debug_run(run_id: str, session: AsyncSession = Depends(get_session
     return _debug_detail_from_model(run)
 
 
+@router.get("/golden-manifest")
+async def get_debug_golden_manifest() -> dict[str, Any]:
+    manifest = _read_json_file(_debug_golden_manifest_path())
+    if manifest is None:
+        return {
+            "schema_version": DEBUG_GOLDEN_MANIFEST_SCHEMA_VERSION,
+            "recommended_strata": DEBUG_GOLDEN_RECOMMENDED_STRATA,
+            "updated_at": None,
+            "samples": [],
+        }
+    return manifest
+
+
+@router.get("/runs/{run_id}/golden-label", response_model=DebugGoldenLabelResponse)
+async def get_debug_golden_label(run_id: str, session: AsyncSession = Depends(get_session)) -> DebugGoldenLabelResponse:
+    run = await session.get(DebugRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug run not found.")
+    label_path = _debug_golden_label_path(run_id)
+    existing = _read_json_file(label_path)
+    if existing is None:
+        payload = _debug_label_payload_from_request(run, None)
+        return _debug_label_response(payload, exists=False)
+    return _debug_label_response(existing, exists=True)
+
+
+@router.put("/runs/{run_id}/golden-label", response_model=DebugGoldenLabelResponse)
+async def save_debug_golden_label(
+    run_id: str,
+    payload: DebugGoldenLabelRequest,
+    session: AsyncSession = Depends(get_session),
+) -> DebugGoldenLabelResponse:
+    run = await session.get(DebugRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug run not found.")
+    label_path = _debug_golden_label_path(run_id)
+    prediction_path = _debug_golden_prediction_path(run_id)
+    existing = _read_json_file(label_path)
+    label = _debug_label_payload_from_request(run, payload, existing=existing)
+    _write_json_file(prediction_path, _debug_prediction_payload(run))
+    _write_json_file(label_path, label)
+    _write_debug_golden_manifest_entry(label)
+    return _debug_label_response(label, exists=True)
+
+
 @router.delete("/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_debug_run(run_id: str, session: AsyncSession = Depends(get_session)) -> Response:
     run = await session.get(DebugRun, run_id)
@@ -1160,6 +1493,7 @@ async def delete_debug_run(run_id: str, session: AsyncSession = Depends(get_sess
 
     await session.delete(run)
     await session.commit()
+    _remove_debug_golden_manifest_entry(run_id)
     delete_debug_artifacts(run_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

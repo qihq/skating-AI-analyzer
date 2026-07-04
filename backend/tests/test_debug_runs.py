@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -1091,6 +1092,123 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
                 await debug_router.delete_debug_run(run_id, session)
             self.assertIsNotNone(await session.get(models.DebugRun, run_id))
             self.assertTrue(root.exists())
+
+    async def test_debug_golden_label_save_writes_label_prediction_and_manifest(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+        from app.schemas import DebugGoldenLabelRequest, TargetBBox
+
+        run_id = str(uuid4())
+        root = Path(self.tmp.name) / "uploads" / "_debug" / run_id
+        root.mkdir(parents=True, exist_ok=True)
+        source_video = root / "source.mp4"
+        source_video.write_bytes(b"video")
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="video_ai_keyframes",
+                    source_type="upload",
+                    video_path=str(source_video),
+                    action_type="spin",
+                    action_subtype="sit spin",
+                    analysis_profile="spin",
+                    status="completed",
+                    summary={"effective_fps": 25.0},
+                    result_json={
+                        "resolved_keyframes": {
+                            "selected": [
+                                {"phase_code": "spin_entry", "timestamp": 1.0},
+                                {"phase_code": "spin_main", "timestamp": 1.6},
+                                {"phase_code": "spin_exit", "timestamp": 2.2},
+                            ]
+                        },
+                        "target_lock": {
+                            "bbox_per_frame": [
+                                {"x": 0.2, "y": 0.3, "width": 0.2, "height": 0.4},
+                            ],
+                            "quality_flags": ["debug_flag"],
+                        },
+                    },
+                )
+            )
+            await session.commit()
+
+            response = await debug_router.save_debug_golden_label(
+                run_id,
+                DebugGoldenLabelRequest(
+                    skater_id="skater-a",
+                    action_type="spin",
+                    analysis_profile="spin",
+                    stratum="spin_occlusion",
+                    fps=25,
+                    keyframes={"spin_entry": 1.05, "spin_main": 1.55, "spin_exit": 2.25},
+                    target_bboxes={"0": TargetBBox(x=0.2, y=0.3, width=0.2, height=0.4)},
+                    expected_review_flags=["needs_review"],
+                    notes="golden spin sample",
+                ),
+                session,
+            )
+
+            self.assertTrue(response.exists)
+            self.assertEqual(response.keyframes["spin_main"], 1.55)
+
+            loaded = await debug_router.get_debug_golden_label(run_id, session)
+            self.assertTrue(loaded.exists)
+            self.assertEqual(loaded.skater_id, "skater-a")
+
+        label = json.loads((root / "golden_label.json").read_text(encoding="utf-8"))
+        prediction = json.loads((root / "prediction.json").read_text(encoding="utf-8"))
+        manifest = json.loads((Path(self.tmp.name) / "uploads" / "_debug" / "golden_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(label["stratum"], "spin_occlusion")
+        self.assertEqual(prediction["bbox_per_frame"][0]["frame_index"], 0)
+        self.assertEqual(manifest["samples"][0]["id"], run_id)
+        self.assertEqual(manifest["samples"][0]["prediction_path"], f"{run_id}/prediction.json")
+        self.assertIn("single_skater", manifest["recommended_strata"])
+        self.assertIn("golden_label_target_bboxes_below_recommended_count", label["label_quality_flags"])
+        self.assertIn("golden_label_stratum_not_recommended", label["label_quality_flags"])
+
+    async def test_debug_summary_reports_golden_label_status(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+
+        labeled_id = str(uuid4())
+        unlabeled_id = str(uuid4())
+        root = Path(self.tmp.name) / "uploads" / "_debug" / labeled_id
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "golden_label.json").write_text("{}", encoding="utf-8")
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add_all(
+                [
+                    models.DebugRun(
+                        id=labeled_id,
+                        mode="local_pose_keyframes",
+                        source_type="upload",
+                        video_path="labeled.mp4",
+                        action_type="跳跃",
+                        status="completed",
+                        summary={},
+                    ),
+                    models.DebugRun(
+                        id=unlabeled_id,
+                        mode="local_pose_keyframes",
+                        source_type="upload",
+                        video_path="unlabeled.mp4",
+                        action_type="跳跃",
+                        status="completed",
+                        summary={},
+                    ),
+                ]
+            )
+            await session.commit()
+
+            labeled = await session.get(models.DebugRun, labeled_id)
+            unlabeled = await session.get(models.DebugRun, unlabeled_id)
+            self.assertEqual(debug_router._debug_summary_from_model(labeled).summary["golden_label_status"], "labeled")
+            self.assertEqual(debug_router._debug_summary_from_model(unlabeled).summary["golden_label_status"], "unlabeled")
 
     async def test_video_ai_retry_progress_labels_are_user_facing_and_monotonic(self) -> None:
         import app.routers.debug as debug_router

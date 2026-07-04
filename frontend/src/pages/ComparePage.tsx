@@ -364,6 +364,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
   const afterRef = useRef<HTMLVideoElement | null>(null);
   const suppressMediaEventsRef = useRef(false);
   const isPlayingRef = useRef(false);
+  const hasUserPositionedPlaybackRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEED_OPTIONS)[number]>(0.5);
   const videoCompare = data.video_compare;
@@ -381,6 +382,25 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
       return { start, duration: duration && duration > 0 ? duration : null };
     },
     [],
+  );
+
+  const isInsideActionWindow = useCallback(
+    (video: HTMLVideoElement, side: CompareVideoSide) => {
+      if (video.ended) {
+        return false;
+      }
+      const { start, duration } = getActionWindow(side);
+      const current = video.currentTime;
+      if (!Number.isFinite(current)) {
+        return false;
+      }
+      const tolerance = 0.08;
+      if (!duration) {
+        return current >= start - tolerance;
+      }
+      return current >= start - tolerance && current < start + duration - tolerance;
+    },
+    [getActionWindow],
   );
 
   const getPlayableEntries = useCallback((): VideoEntry[] => {
@@ -424,6 +444,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
           seekVideoTo(video, start + relativePosition);
         }
       });
+      hasUserPositionedPlaybackRef.current = true;
       window.setTimeout(() => {
         suppressMediaEventsRef.current = false;
       }, 0);
@@ -450,6 +471,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
           seekVideoTo(video, start);
         }
       });
+      hasUserPositionedPlaybackRef.current = true;
       window.setTimeout(() => {
         suppressMediaEventsRef.current = false;
       }, 0);
@@ -458,18 +480,32 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
   );
 
   const applyProportionalRates = useCallback(
-    (baseSpeed: number) => {
+    (baseSpeed: number, options?: { fromCurrentPosition?: boolean }) => {
       if (!videoCompare) {
         return;
       }
-      const beforeDuration = getActionWindow(videoCompare.before).duration;
-      const afterDuration = getActionWindow(videoCompare.after).duration;
-      const maxDuration = Math.max(beforeDuration ?? 1, afterDuration ?? 1);
+      const entries = getPlayableEntries();
+      const comparableDurations = entries
+        .map(({ video, side }) => {
+          const { start, duration } = getActionWindow(side);
+          if (!duration) {
+            return null;
+          }
+          if (!options?.fromCurrentPosition) {
+            return duration;
+          }
+          return Math.max(0.1, start + duration - Math.max(video.currentTime, start));
+        })
+        .filter((duration): duration is number => typeof duration === "number" && Number.isFinite(duration) && duration > 0);
+      const maxDuration = Math.max(...comparableDurations, 1);
 
-      getPlayableEntries().forEach(({ video, side }) => {
+      entries.forEach(({ video, side }) => {
         prepareVideoForSync(video);
-        const duration = getActionWindow(side).duration;
-        video.playbackRate = duration ? baseSpeed * (duration / maxDuration) : baseSpeed;
+        const { start, duration } = getActionWindow(side);
+        const comparableDuration = options?.fromCurrentPosition && duration
+          ? Math.max(0.1, start + duration - Math.max(video.currentTime, start))
+          : duration;
+        video.playbackRate = comparableDuration ? baseSpeed * (comparableDuration / maxDuration) : baseSpeed;
       });
     },
     [videoCompare, getActionWindow, getPlayableEntries],
@@ -478,7 +514,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
   const setPlaybackRate = useCallback(
     (nextSpeed: (typeof SPEED_OPTIONS)[number]) => {
       setSpeed(nextSpeed);
-      applyProportionalRates(nextSpeed);
+      applyProportionalRates(nextSpeed, { fromCurrentPosition: true });
     },
     [applyProportionalRates],
   );
@@ -494,12 +530,18 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
     }
     suppressMediaEventsRef.current = true;
     await Promise.all(entries.map(({ video }) => waitForVideoMetadata(video)));
-    applyProportionalRates(speed);
+    const shouldRestartFromWindowStart = entries.some(({ video }) => video.ended);
     entries.forEach(({ video, side }) => {
       prepareVideoForSync(video);
-      const { start } = getActionWindow(side);
-      seekVideoTo(video, start);
+      if (shouldRestartFromWindowStart || (!hasUserPositionedPlaybackRef.current && !isInsideActionWindow(video, side))) {
+        const { start } = getActionWindow(side);
+        seekVideoTo(video, start);
+      }
     });
+    if (shouldRestartFromWindowStart) {
+      hasUserPositionedPlaybackRef.current = false;
+    }
+    applyProportionalRates(speed, { fromCurrentPosition: true });
     const results = await Promise.allSettled(entries.map(({ video }) => video.play()));
     suppressMediaEventsRef.current = false;
     const allStarted = results.every((result) => result.status === "fulfilled");
@@ -508,8 +550,9 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
       setIsPlaying(false);
       return;
     }
+    hasUserPositionedPlaybackRef.current = true;
     setIsPlaying(true);
-  }, [applyProportionalRates, getActionWindow, getPlayableEntries, isPlaying, pauseEntries, speed]);
+  }, [applyProportionalRates, getActionWindow, getPlayableEntries, isInsideActionWindow, isPlaying, pauseEntries, speed]);
 
   useEffect(() => {
     const entries = getPlayableEntries();
@@ -539,7 +582,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
   }, [getPlayableEntries, pauseEntries, speed]);
 
   useEffect(() => {
-    applyProportionalRates(speed);
+    applyProportionalRates(speed, { fromCurrentPosition: isPlayingRef.current || hasUserPositionedPlaybackRef.current });
   }, [applyProportionalRates, speed]);
 
   if (!videoCompare) {

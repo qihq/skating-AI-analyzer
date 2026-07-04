@@ -3714,6 +3714,74 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertEqual(plan["selected"][0]["phase_time_start"], 1.0)
         self.assertEqual(plan["selected"][0]["phase_time_end"], 1.4)
 
+    def test_vertical_extrema_preferred_over_motion_peak_for_jump_core_phases(self) -> None:
+        motion_scores = {
+            "selected": [
+                {"frame_id": "frame_0001", "timestamp": 1.3, "motion_score": 0.99},
+                {"frame_id": "frame_0002", "timestamp": 1.95, "motion_score": 0.95},
+            ],
+            "vertical_extrema": {
+                "T": {"timestamp": 1.18, "confidence": 0.86},
+                "A": {"timestamp": 1.58, "confidence": 0.88},
+                "L": {"timestamp": 2.04, "confidence": 0.87},
+            },
+        }
+
+        plan = resolve_semantic_keyframes(
+            _validated_video(0.86),
+            None,
+            motion_scores,
+            video_duration_sec=3.0,
+            analysis_profile="jump",
+        )
+
+        self.assertEqual([item["timestamp"] for item in plan["selected"][:3]], [1.18, 1.58, 2.04])
+        self.assertEqual(
+            [item["selection_reason"] for item in plan["selected"][:3]],
+            [
+                "video_phase_range_vertical_extrema_takeoff",
+                "video_phase_range_vertical_extrema_air",
+                "video_phase_range_vertical_extrema_landing",
+            ],
+        )
+        self.assertIn("video_temporal_resolver_vertical_extrema_t_used", plan["quality_flags"])
+        self.assertEqual(plan["keyframe_resolution_diagnostics"]["decision"], "vertical_extrema_preferred")
+        self.assertTrue(any(item["source"] == "vertical_extrema" for item in plan["keyframe_proposals"]))
+
+    def test_final_core_tal_order_guard_marks_invalid_order_unreliable(self) -> None:
+        video = _validated_video(0.88)
+        video["phase_segments"] = [
+            {"phase_code": "takeoff", "phase_label": "Takeoff", "time_start": 1.0, "time_end": 1.3, "confidence": 0.9},
+            {"phase_code": "air", "phase_label": "Air", "time_start": 1.3, "time_end": 1.7, "confidence": 0.9},
+            {"phase_code": "landing", "phase_label": "Landing", "time_start": 1.3, "time_end": 2.1, "confidence": 0.9},
+        ]
+        motion_scores = {
+            "vertical_extrema": {
+                "T": {"timestamp": 1.2, "confidence": 0.9},
+                "A": {"timestamp": 1.4, "confidence": 0.9},
+                "L": {"timestamp": 1.35, "confidence": 0.9},
+            }
+        }
+
+        plan = resolve_semantic_keyframes(
+            video,
+            None,
+            motion_scores,
+            video_duration_sec=3.0,
+            analysis_profile="jump",
+        )
+
+        self.assertIn("video_temporal_resolver_core_tal_order_invalid", plan["quality_flags"])
+        self.assertIn("semantic_keyframe_refinement_order_rejected", plan["quality_flags"])
+        self.assertLessEqual(plan["confidence"], 0.34)
+        self.assertFalse(semantic_keyframes_are_reliable(plan))
+        self.assertTrue(
+            all(
+                item.get("selection_status") == "unreliable_order_rejected"
+                for item in plan["selected"][:3]
+            )
+        )
+
     def test_high_confidence_takeoff_preserves_key_moment_when_no_near_motion_peak(self) -> None:
         plan = resolve_semantic_keyframes(
             _validated_latest_high_confidence_fallback_video(),

@@ -641,6 +641,36 @@ class TargetLockRequest(BaseModel):
     manual_bbox: TargetBBox | None = None
 
 
+class DebugGoldenLabelRequest(BaseModel):
+    skater_id: str | None = Field(default=None, max_length=120)
+    action_type: str | None = Field(default=None, max_length=40)
+    action_subtype: str | None = Field(default=None, max_length=80)
+    analysis_profile: str | None = Field(default=None, max_length=40)
+    stratum: str = Field(default="unspecified", max_length=80)
+    fps: float | None = None
+    keyframes: dict[str, float | None] = Field(default_factory=dict)
+    target_bboxes: dict[str, TargetBBox] = Field(default_factory=dict)
+    expected_review_flags: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class DebugGoldenLabelResponse(DebugGoldenLabelRequest):
+    id: str
+    video_path: str | None = None
+    prediction_path: str | None = None
+    label_path: str | None = None
+    manifest_path: str | None = None
+    source_type: str | None = None
+    source_analysis_id: str | None = None
+    debug_run_mode: str | None = None
+    debug_run_status: str | None = None
+    manifest_schema_version: int = 1
+    exists: bool = False
+    label_quality_flags: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 class PoseResponse(BaseModel):
     connections: list[list[int]]
     frames: list[PoseFrame]

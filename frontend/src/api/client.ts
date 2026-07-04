@@ -569,6 +569,36 @@ export interface DebugRunCreatePayload {
   note?: string | null;
 }
 
+export interface DebugGoldenLabelPayload {
+  skater_id?: string | null;
+  action_type?: string | null;
+  action_subtype?: string | null;
+  analysis_profile?: string | null;
+  stratum?: string;
+  fps?: number | null;
+  keyframes: Record<string, number | null>;
+  target_bboxes: Record<string, TargetBBox>;
+  expected_review_flags: string[];
+  notes?: string | null;
+}
+
+export interface DebugGoldenLabel extends DebugGoldenLabelPayload {
+  id: string;
+  video_path: string | null;
+  prediction_path: string | null;
+  label_path: string | null;
+  manifest_path: string | null;
+  source_type: string | null;
+  source_analysis_id: string | null;
+  debug_run_mode: string | null;
+  debug_run_status: string | null;
+  manifest_schema_version: number;
+  exists: boolean;
+  label_quality_flags?: string[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface ComparisonChange {
   category: string;
   before_severity: IssueSeverity | null;
@@ -1345,6 +1375,16 @@ export async function fetchDebugRun(id: string) {
 
 export async function deleteDebugRun(id: string) {
   await apiClient.delete(`/debug/runs/${id}`);
+}
+
+export async function fetchDebugGoldenLabel(id: string) {
+  const response = await apiClient.get<DebugGoldenLabel>(`/debug/runs/${id}/golden-label`);
+  return response.data;
+}
+
+export async function saveDebugGoldenLabel(id: string, payload: DebugGoldenLabelPayload) {
+  const response = await apiClient.put<DebugGoldenLabel>(`/debug/runs/${id}/golden-label`, payload);
+  return response.data;
 }
 
 function buildDebugRunFormData(payload: DebugRunCreatePayload) {

@@ -4,6 +4,8 @@ import { Link } from "react-router-dom";
 import {
   AnalysisDetail,
   AnalysisListItem,
+  DebugGoldenLabel,
+  DebugGoldenLabelPayload,
   DebugRunDetail,
   DebugRunMode,
   DebugRunSummary,
@@ -15,8 +17,10 @@ import {
   confirmDebugTargetLock,
   fetchAnalyses,
   fetchAnalysis,
+  fetchDebugGoldenLabel,
   fetchDebugRun,
   fetchDebugRuns,
+  saveDebugGoldenLabel,
 } from "../api/client";
 import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import { useAppMode } from "../components/AppModeContext";
@@ -28,11 +32,50 @@ import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from 
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
-type DebugTab = "overview" | "frames" | "tracking" | "video" | "raw";
+type DebugTab = "overview" | "frames" | "tracking" | "video" | "label" | "raw";
 type TargetSelectionMode = "candidate" | "manual";
 
 const ACTION_TYPES = ["跳跃", "旋转", "步法", "自由滑"];
 const PROFILE_OPTIONS = ["jump", "spin", "step", "spiral"];
+
+const STRATUM_OPTIONS = ["unspecified", "single_skater", "multi_skater", "small_target", "occlusion", "known_bad_keyframes"];
+const REVIEW_FLAG_OPTIONS = [
+  "identity_switch",
+  "target_lost",
+  "takeoff_early",
+  "takeoff_late",
+  "apex_drift",
+  "landing_glideout",
+  "multi_person_motion_pollution",
+];
+const KEYFRAME_SPECS: Record<string, Array<{ key: string; label: string }>> = {
+  jump: [
+    { key: "T", label: "Takeoff" },
+    { key: "A", label: "Apex" },
+    { key: "L", label: "Landing" },
+  ],
+  spin: [
+    { key: "spin_entry", label: "Entry" },
+    { key: "spin_main", label: "Main" },
+    { key: "spin_exit", label: "Exit" },
+  ],
+  step: [{ key: "step_sequence", label: "Sequence" }],
+  spiral: [
+    { key: "spiral_entry", label: "Entry" },
+    { key: "spiral_hold", label: "Hold" },
+    { key: "spiral_exit", label: "Exit" },
+  ],
+};
+
+interface LabelFrameRow {
+  id: string;
+  title: string;
+  source: "sampled" | "semantic" | "partial";
+  url?: string;
+  timestamp: number | null;
+  bboxKey: string | null;
+  poseFrame?: Record<string, unknown>;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -269,6 +312,198 @@ function keyframeRows(value: unknown, poseFrameById: Map<string, Record<string, 
       poseConfidence: asNumber(poseFrame?.tracking_confidence),
     };
   });
+}
+
+function profileForLabel(run: DebugRunDetail, draftProfile?: string | null) {
+  const raw = String(draftProfile || run.analysis_profile || run.action_type || "").toLowerCase();
+  if (raw.includes("spin") || raw.includes("旋")) {
+    return "spin";
+  }
+  if (raw.includes("step") || raw.includes("步")) {
+    return "step";
+  }
+  if (raw.includes("spiral") || raw.includes("燕") || raw.includes("螺旋")) {
+    return "spiral";
+  }
+  return "jump";
+}
+
+function numericInputValue(value: number | null | undefined) {
+  return value == null || Number.isNaN(value) ? "" : String(value);
+}
+
+function parseOptionalNumber(value: string) {
+  if (!value.trim()) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function bboxIou(a: unknown, b: unknown) {
+  const boxA = normalizedBBox(a);
+  const boxB = normalizedBBox(b);
+  if (!boxA || !boxB) {
+    return null;
+  }
+  const ax2 = boxA.x + boxA.width;
+  const ay2 = boxA.y + boxA.height;
+  const bx2 = boxB.x + boxB.width;
+  const by2 = boxB.y + boxB.height;
+  const ix1 = Math.max(boxA.x, boxB.x);
+  const iy1 = Math.max(boxA.y, boxB.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  if (ix2 <= ix1 || iy2 <= iy1) {
+    return 0;
+  }
+  const inter = (ix2 - ix1) * (iy2 - iy1);
+  const union = boxA.width * boxA.height + boxB.width * boxB.height - inter;
+  return union > 0 ? inter / union : null;
+}
+
+function frameTimestamp(frame: Record<string, unknown> | undefined) {
+  return asNumber(frame?.timestamp ?? frame?.timestamp_sec ?? frame?.time_sec);
+}
+
+function normalizeKeyframeKey(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (["T", "takeoff", "T_takeoff_sec"].includes(raw)) {
+    return "T";
+  }
+  if (["A", "air", "apex", "A_air_sec"].includes(raw)) {
+    return "A";
+  }
+  if (["L", "landing", "L_landing_sec"].includes(raw)) {
+    return "L";
+  }
+  return raw;
+}
+
+function predictionKeyframes(run: DebugRunDetail) {
+  const result = asRecord(run.result_json);
+  const resolved = asRecord(result.resolved_keyframes);
+  const keyframes: Record<string, { timestamp: number | null; source: string | null; confidence: number | null }> = {};
+  const selected = asArray(resolved.selected).filter(isRecord);
+  selected.forEach((item) => {
+    const key = normalizeKeyframeKey(item.key ?? item.phase_code ?? item.key_moment);
+    const timestamp = asNumber(item.timestamp ?? item.timestamp_sec);
+    if (key && timestamp != null) {
+      keyframes[key] = {
+        timestamp,
+        source: typeof item.selection_reason === "string" ? item.selection_reason : typeof resolved.source === "string" ? resolved.source : null,
+        confidence: asNumber(item.confidence),
+      };
+    }
+  });
+  const candidates = asRecord(result.key_frame_candidates ?? asRecord(result.bio_data).key_frame_candidates);
+  Object.entries(candidates).forEach(([key, raw]) => {
+    const normalizedKey = normalizeKeyframeKey(key);
+    if (keyframes[normalizedKey]) {
+      return;
+    }
+    const candidate = asRecord(raw);
+    const timestamp = asNumber(candidate.timestamp);
+    if (timestamp != null) {
+      keyframes[normalizedKey] = {
+        timestamp,
+        source: "key_frame_candidates",
+        confidence: asNumber(candidate.confidence),
+      };
+    }
+  });
+  return keyframes;
+}
+
+function predictionBboxes(run: DebugRunDetail) {
+  const result = asRecord(run.result_json);
+  const targetLock = asRecord(result.target_lock);
+  const raw = asArray(targetLock.bbox_per_frame ?? result.bbox_per_frame);
+  const output = new Map<string, TargetBBox>();
+  raw.forEach((item, index) => {
+    const record = asRecord(item);
+    const frameIndex = asNumber(record.frame_index ?? record.index) ?? index;
+    const bbox = normalizedBBox(isRecord(record.bbox) ? record.bbox : record);
+    if (bbox) {
+      output.set(String(frameIndex), bbox);
+    }
+  });
+  return output;
+}
+
+function buildLabelFrames(
+  sampledFrames: Record<string, unknown>[],
+  semanticFrames: Record<string, unknown>[],
+  partialSemanticFrames: Record<string, unknown>[],
+  poseFrameById: Map<string, Record<string, unknown>>,
+) {
+  const rows: LabelFrameRow[] = [];
+  sampledFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `frame_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "sampled",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: String(index),
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  semanticFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `semantic_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "semantic",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: null,
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  partialSemanticFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `partial_semantic_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "partial",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: null,
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      const key = `${row.source}:${row.id}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => (a.timestamp ?? Number.POSITIVE_INFINITY) - (b.timestamp ?? Number.POSITIVE_INFINITY));
+}
+
+function defaultLabelDraft(run: DebugRunDetail, label?: DebugGoldenLabel | null): DebugGoldenLabelPayload {
+  const result = asRecord(run.result_json);
+  const summary = asRecord(run.summary);
+  const samplingMetadata = asRecord(result.sampling_metadata);
+  const fps = asNumber(label?.fps) ?? asNumber(samplingMetadata.effective_fps) ?? asNumber(summary.effective_fps) ?? null;
+  return {
+    skater_id: label?.skater_id ?? "",
+    action_type: label?.action_type ?? run.action_type,
+    action_subtype: label?.action_subtype ?? run.action_subtype,
+    analysis_profile: label?.analysis_profile ?? run.analysis_profile,
+    stratum: label?.stratum ?? "unspecified",
+    fps,
+    keyframes: { ...(label?.keyframes ?? {}) },
+    target_bboxes: { ...(label?.target_bboxes ?? {}) },
+    expected_review_flags: [...(label?.expected_review_flags ?? [])],
+    notes: label?.notes ?? "",
+  };
 }
 
 function selectedAnalysisLabel(analysisId: string | null, analyses: AnalysisListItem[]) {
@@ -667,6 +902,533 @@ function DebugTargetSelectionPanel({
   );
 }
 
+function labelFrameKey(frame: LabelFrameRow) {
+  return `${frame.source}:${frame.id}`;
+}
+
+function DebugPredictionGoldenPanel({
+  run,
+  draft,
+  keyframeSpecs,
+}: {
+  run: DebugRunDetail;
+  draft: DebugGoldenLabelPayload;
+  keyframeSpecs: Array<{ key: string; label: string }>;
+}) {
+  const predictedKeyframes = useMemo(() => predictionKeyframes(run), [run]);
+  const predictedBboxes = useMemo(() => predictionBboxes(run), [run]);
+  const bboxRows = Object.entries(draft.target_bboxes ?? {}).map(([frameIndex, golden]) => {
+    const predicted = predictedBboxes.get(frameIndex);
+    return {
+      frameIndex,
+      golden,
+      predicted,
+      iou: bboxIou(golden, predicted),
+    };
+  });
+
+  return (
+    <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Prediction vs Golden</p>
+          <p className="mt-1 text-xs text-slate-500">Current debug output compared with this draft label.</p>
+        </div>
+      </div>
+
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[520px] text-left text-xs">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="py-2 pr-3 font-semibold">Key</th>
+              <th className="py-2 pr-3 font-semibold">Pred</th>
+              <th className="py-2 pr-3 font-semibold">Golden</th>
+              <th className="py-2 pr-3 font-semibold">Delta</th>
+              <th className="py-2 pr-3 font-semibold">Source</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {keyframeSpecs.map((spec) => {
+              const predicted = predictedKeyframes[spec.key];
+              const golden = draft.keyframes?.[spec.key] ?? null;
+              const delta = predicted?.timestamp != null && golden != null ? predicted.timestamp - golden : null;
+              const ok = delta == null || Math.abs(delta) <= 0.25;
+              return (
+                <tr key={spec.key}>
+                  <td className="py-2 pr-3 font-semibold text-slate-900">{spec.key}</td>
+                  <td className="py-2 pr-3 font-mono text-slate-700">{formatDuration(predicted?.timestamp)}</td>
+                  <td className="py-2 pr-3 font-mono text-slate-700">{formatDuration(golden)}</td>
+                  <td className={`py-2 pr-3 font-mono font-semibold ${ok ? "text-emerald-700" : "text-rose-600"}`}>
+                    {delta == null ? "-" : `${delta >= 0 ? "+" : ""}${delta.toFixed(3)}s`}
+                  </td>
+                  <td className="max-w-[180px] truncate py-2 pr-3 text-slate-500" title={predicted?.source ?? ""}>
+                    {predicted?.source ?? "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 space-y-2">
+        <p className="text-xs font-semibold text-slate-500">Target bbox IoU</p>
+        {bboxRows.length ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {bboxRows.map((row) => (
+              <div key={row.frameIndex} className="rounded-[14px] border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono font-semibold text-slate-800">frame {row.frameIndex}</span>
+                  <span className={`font-semibold ${(row.iou ?? 0) >= 0.3 ? "text-emerald-700" : "text-rose-600"}`}>
+                    {row.iou == null ? "missing" : row.iou.toFixed(3)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500">No golden bboxes yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DebugGoldenLabelPanel({
+  run,
+  sampledFrames,
+  semanticFrames,
+  partialSemanticFrames,
+  poseFrameById,
+  connections,
+}: {
+  run: DebugRunDetail;
+  sampledFrames: Record<string, unknown>[];
+  semanticFrames: Record<string, unknown>[];
+  partialSemanticFrames: Record<string, unknown>[];
+  poseFrameById: Map<string, Record<string, unknown>>;
+  connections: number[][];
+}) {
+  const [frameNode, setFrameNode] = useState<HTMLDivElement | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [saveState, setSaveState] = useState<LoadState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [savedLabel, setSavedLabel] = useState<DebugGoldenLabel | null>(null);
+  const [draft, setDraft] = useState<DebugGoldenLabelPayload>(() => defaultLabelDraft(run, null));
+  const [flagsText, setFlagsText] = useState("");
+  const [selectedFrameKey, setSelectedFrameKey] = useState<string | null>(null);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
+
+  const labelFrames = useMemo(
+    () => buildLabelFrames(sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById),
+    [sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById],
+  );
+  const selectedFrame = labelFrames.find((frame) => labelFrameKey(frame) === selectedFrameKey) ?? labelFrames[0] ?? null;
+  const labelProfile = profileForLabel(run, draft.analysis_profile);
+  const keyframeSpecs = KEYFRAME_SPECS[labelProfile] ?? KEYFRAME_SPECS.jump;
+  const savedBBox = selectedFrame?.bboxKey ? draft.target_bboxes[selectedFrame.bboxKey] : null;
+  const savedBBoxStyle = bboxStyle(savedBBox);
+  const draftBBoxStyle = bboxStyle(draftBBox);
+  const poseBBoxStyle = bboxStyle(selectedFrame?.poseFrame?.target_bbox);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    setError(null);
+    setSaveState("idle");
+    setSavedLabel(null);
+    setDraft(defaultLabelDraft(run, null));
+    setFlagsText("");
+    setDraftBBox(null);
+    const load = async () => {
+      try {
+        const data = await fetchDebugGoldenLabel(run.id);
+        if (cancelled) {
+          return;
+        }
+        setSavedLabel(data.exists ? data : null);
+        setDraft(defaultLabelDraft(run, data));
+        setFlagsText((data.expected_review_flags ?? []).join(", "));
+        setState("ready");
+      } catch {
+        if (!cancelled) {
+          setState("error");
+          setError("Golden label failed to load.");
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [run.id]);
+
+  useEffect(() => {
+    if (!labelFrames.length) {
+      setSelectedFrameKey(null);
+      return;
+    }
+    setSelectedFrameKey((current) => {
+      if (current && labelFrames.some((frame) => labelFrameKey(frame) === current)) {
+        return current;
+      }
+      return labelFrameKey(labelFrames[0]);
+    });
+  }, [labelFrames]);
+
+  const updateDraft = (patch: Partial<DebugGoldenLabelPayload>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const setKeyframeFromSelected = (key: string) => {
+    if (!selectedFrame || selectedFrame.timestamp == null) {
+      setError("Selected frame has no timestamp.");
+      return;
+    }
+    setError(null);
+    setDraft((current) => ({
+      ...current,
+      keyframes: { ...current.keyframes, [key]: Number(selectedFrame.timestamp!.toFixed(3)) },
+    }));
+  };
+
+  const setKeyframeValue = (key: string, value: string) => {
+    setDraft((current) => ({
+      ...current,
+      keyframes: { ...current.keyframes, [key]: parseOptionalNumber(value) },
+    }));
+  };
+
+  const clearKeyframe = (key: string) => {
+    setDraft((current) => {
+      const next = { ...current.keyframes };
+      delete next[key];
+      return { ...current, keyframes: next };
+    });
+  };
+
+  const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
+    const rect = frameNode?.getBoundingClientRect();
+    if (!rect) {
+      return null;
+    }
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (!selectedFrame?.bboxKey) {
+      setError("Select a sampled frame before drawing a target bbox.");
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(point);
+    setDraftBBox({ x: point.x, y: point.y, width: 0, height: 0 });
+    setError(null);
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragStart) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (point) {
+      setDraftBBox(normalizeDragBox(dragStart, point));
+    }
+  };
+
+  const finishDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragStart) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    setDragStart(null);
+    setDraftBBox(null);
+    if (!point || !selectedFrame?.bboxKey) {
+      return;
+    }
+    const bbox = normalizeDragBox(dragStart, point);
+    if (bbox.width < 0.02 || bbox.height < 0.02) {
+      setError("Target bbox is too small.");
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      target_bboxes: { ...current.target_bboxes, [selectedFrame.bboxKey!]: bbox },
+    }));
+    setError(null);
+  };
+
+  const clearSelectedBBox = () => {
+    if (!selectedFrame?.bboxKey) {
+      return;
+    }
+    setDraft((current) => {
+      const next = { ...current.target_bboxes };
+      delete next[selectedFrame.bboxKey!];
+      return { ...current, target_bboxes: next };
+    });
+  };
+
+  const flagValues = useMemo(
+    () =>
+      flagsText
+        .split(",")
+        .map((flag) => flag.trim())
+        .filter(Boolean),
+    [flagsText],
+  );
+
+  const toggleReviewFlag = (flag: string) => {
+    const current = new Set(flagValues);
+    if (current.has(flag)) {
+      current.delete(flag);
+    } else {
+      current.add(flag);
+    }
+    setFlagsText(Array.from(current).join(", "));
+  };
+
+  const handleSave = async () => {
+    setSaveState("loading");
+    setError(null);
+    try {
+      const payload: DebugGoldenLabelPayload = {
+        ...draft,
+        expected_review_flags: flagsText
+          .split(",")
+          .map((flag) => flag.trim())
+          .filter(Boolean),
+      };
+      const saved = await saveDebugGoldenLabel(run.id, payload);
+      setSavedLabel(saved);
+      setDraft(defaultLabelDraft(run, saved));
+      setFlagsText((saved.expected_review_flags ?? []).join(", "));
+      setSaveState("ready");
+    } catch {
+      setSaveState("error");
+      setError("Golden label failed to save.");
+    }
+  };
+
+  if (state === "loading") {
+    return <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">Loading golden label...</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
+        <div className="min-w-0 space-y-4">
+          <div
+            ref={setFrameNode}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={finishDrag}
+            onPointerCancel={finishDrag}
+            className="relative aspect-video min-h-[220px] touch-none overflow-hidden rounded-[20px] border border-slate-200 bg-slate-950 tablet:min-h-[360px] web:min-h-[460px]"
+          >
+            <DebugFrameImage url={selectedFrame?.url} alt={selectedFrame?.title ?? "label frame"} />
+            {poseBBoxStyle ? <div className="pointer-events-none absolute border-2 border-dashed border-cyan-300/80" style={poseBBoxStyle} /> : null}
+            {savedBBoxStyle ? <div className="pointer-events-none absolute border-2 border-emerald-300 bg-emerald-300/15" style={savedBBoxStyle} /> : null}
+            {draftBBoxStyle ? <div className="pointer-events-none absolute border-2 border-amber-300 bg-amber-300/15" style={draftBBoxStyle} /> : null}
+            <PoseSkeletonOverlay frame={selectedFrame?.poseFrame} connections={connections} />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-slate-200 bg-white px-4 py-3 text-sm">
+            <div className="min-w-0">
+              <p className="truncate font-mono font-semibold text-slate-900">{selectedFrame?.title ?? "No frame"}</p>
+              <p className="text-xs text-slate-500">
+                {selectedFrame?.source ?? "-"} · {formatDuration(selectedFrame?.timestamp)}
+                {selectedFrame?.bboxKey ? ` · bbox ${selectedFrame.bboxKey}` : ""}
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={clearSelectedBBox}
+                disabled={!selectedFrame?.bboxKey || !savedBBox}
+                className="min-h-[36px] rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Clear bbox
+              </button>
+            </div>
+          </div>
+
+          <div className="max-h-[26rem] overflow-y-auto rounded-[18px] border border-slate-200 bg-white p-2">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {labelFrames.map((frame) => {
+                const key = labelFrameKey(frame);
+                const active = key === labelFrameKey(selectedFrame ?? frame);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      setSelectedFrameKey(key);
+                      setDraftBBox(null);
+                    }}
+                    className={`min-w-0 rounded-[14px] border px-3 py-2 text-left text-xs transition ${
+                      active ? "border-blue-300 bg-blue-50 text-slate-900" : "border-slate-100 bg-slate-50 text-slate-600 hover:border-blue-100"
+                    }`}
+                  >
+                    <span className="block truncate font-mono font-semibold">{frame.title}</span>
+                    <span className="mt-1 block truncate">
+                      {frame.source} · {formatDuration(frame.timestamp)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="min-w-0 space-y-4">
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Skater ID</span>
+                <input value={draft.skater_id ?? ""} onChange={(event) => updateDraft({ skater_id: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Profile</span>
+                <select value={draft.analysis_profile ?? labelProfile} onChange={(event) => updateDraft({ analysis_profile: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm">
+                  {PROFILE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Action</span>
+                <input value={draft.action_type ?? ""} onChange={(event) => updateDraft({ action_type: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Subtype</span>
+                <input value={draft.action_subtype ?? ""} onChange={(event) => updateDraft({ action_subtype: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Stratum</span>
+                <select value={draft.stratum ?? "unspecified"} onChange={(event) => updateDraft({ stratum: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm">
+                  {STRATUM_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">FPS</span>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={numericInputValue(draft.fps)}
+                  onChange={(event) => updateDraft({ fps: parseOptionalNumber(event.target.value) })}
+                  className="app-input mt-2 rounded-[14px] text-sm"
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <div className="space-y-3">
+              {keyframeSpecs.map((spec) => (
+                <div key={spec.key} className="grid grid-cols-[minmax(72px,0.7fr)_minmax(0,1fr)] gap-2 sm:grid-cols-[minmax(82px,0.7fr)_minmax(0,1fr)_auto]">
+                  <div className="min-w-0 py-2">
+                    <p className="truncate text-sm font-semibold text-slate-900">{spec.key}</p>
+                    <p className="truncate text-xs text-slate-500">{spec.label}</p>
+                  </div>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={numericInputValue(draft.keyframes[spec.key])}
+                    onChange={(event) => setKeyframeValue(spec.key, event.target.value)}
+                    className="app-input min-w-0 rounded-[14px] text-sm"
+                  />
+                  <div className="col-span-2 flex gap-2 sm:col-span-1">
+                    <button
+                      type="button"
+                      onClick={() => setKeyframeFromSelected(spec.key)}
+                      disabled={!selectedFrame || selectedFrame.timestamp == null}
+                      className="min-h-[40px] flex-1 rounded-full bg-blue-500 px-3 text-xs font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+                    >
+                      Set
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => clearKeyframe(spec.key)}
+                      className="min-h-[40px] flex-1 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 sm:flex-none"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <DebugPredictionGoldenPanel run={run} draft={draft} keyframeSpecs={keyframeSpecs} />
+
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-500">Review flags</span>
+              <input value={flagsText} onChange={(event) => setFlagsText(event.target.value)} className="app-input mt-2 rounded-[14px] text-sm" />
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {REVIEW_FLAG_OPTIONS.map((flag) => {
+                const selected = flagValues.includes(flag);
+                return (
+                  <button
+                    key={flag}
+                    type="button"
+                    onClick={() => toggleReviewFlag(flag)}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                      selected ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                    }`}
+                  >
+                    {flag}
+                  </button>
+                );
+              })}
+            </div>
+            <label className="mt-3 block">
+              <span className="text-xs font-semibold text-slate-500">Notes</span>
+              <textarea value={draft.notes ?? ""} onChange={(event) => updateDraft({ notes: event.target.value })} rows={4} className="app-input mt-2 min-h-[96px] resize-y rounded-[14px] text-sm" />
+            </label>
+          </div>
+
+          {error ? <div className="rounded-[18px] border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</div> : null}
+          {saveState === "ready" && savedLabel ? (
+            <div className="rounded-[18px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              Saved · {savedLabel.label_path ?? "golden_label.json"} · {savedLabel.manifest_path ?? "golden_manifest.json"}
+            </div>
+          ) : null}
+          {savedLabel?.label_quality_flags?.length ? (
+            <div className="rounded-[18px] border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+              {savedLabel.label_quality_flags.join(", ")}
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={saveState === "loading"}
+            className="min-h-[46px] w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {saveState === "loading" ? "Saving..." : "Save golden label"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DebugRunCard({
   run,
   selected,
@@ -686,6 +1448,16 @@ function DebugRunCard({
   const stageLabel = stageLabelFromSummary(summary);
   const progress = progressFromSummary(summary);
   const showProgress = (run.status === "pending" || run.status === "processing") && progress != null;
+  const labelStatus = typeof summary.golden_label_status === "string" ? summary.golden_label_status : "unlabeled";
+  const evalStatus = typeof summary.eval_status === "string" ? summary.eval_status : labelStatus;
+  const evalTone =
+    evalStatus === "passes"
+      ? "bg-emerald-50 text-emerald-700"
+      : evalStatus === "fails"
+        ? "bg-rose-50 text-rose-600"
+        : evalStatus === "labeled"
+          ? "bg-blue-50 text-blue-700"
+          : "bg-slate-100 text-slate-500";
 
   return (
     <article
@@ -731,6 +1503,7 @@ function DebugRunCard({
       <div className="mt-3 flex flex-wrap gap-2">
         <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">{formatDate(run.created_at)}</span>
         <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">total {formatDuration(total)}</span>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${evalTone}`}>{evalStatus}</span>
       </div>
       {showProgress ? (
         <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
@@ -1161,6 +1934,7 @@ function DebugRunDetailPanel({
     { id: "frames", label: "Frames" },
     { id: "tracking", label: "Tracking/Pose" },
     { id: "video", label: "Video AI" },
+    { id: "label", label: "Golden Label" },
     { id: "raw", label: "Raw JSON" },
   ];
 
@@ -1378,6 +2152,17 @@ function DebugRunDetailPanel({
             <JsonBlock value={{ window_diagnostics: motionScores.window_diagnostics }} />
             <JsonBlock value={{ ai_clip: result.ai_clip, video_temporal: videoTemporal, resolved_keyframes: resolved, refinement_flags: result.refinement_flags }} />
           </div>
+        ) : null}
+
+        {activeTab === "label" ? (
+          <DebugGoldenLabelPanel
+            run={run}
+            sampledFrames={sampledFrames}
+            semanticFrames={semanticFrames}
+            partialSemanticFrames={partialSemanticFrames}
+            poseFrameById={poseFrameById}
+            connections={poseConnections}
+          />
         ) : null}
 
         {activeTab === "raw" ? <JsonBlock value={run.result_json ?? run} /> : null}

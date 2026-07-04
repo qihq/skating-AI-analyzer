@@ -8,11 +8,22 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.308`.
+The current pipeline version is `v5.2.309`.
 
 ## Recent Updates
 
-Current branch updates focus on mobile target selection, action-aware keyframe handling, clearer share cards, and reliable subscores:
+Current branch updates focus on golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
+
+- Debug runs now include a Golden Label tab for marking skater ID, action/profile, stratum, T/A/L or profile-specific keyframes, target bboxes, review flags, and notes from one place.
+- Saving a golden label writes `golden_label.json`, a matching prediction snapshot, and a shared `golden_manifest.json` so future algorithm changes can be compared against the exact prediction that existed when the sample was labeled.
+- Golden manifests advertise the recommended strata: `single_skater`, `multi_skater`, `small_target`, `occlusion`, and `known_bad_keyframes`; non-recommended or incomplete labels are kept but marked with `label_quality_flags`.
+- `backend/scripts/eval_against_gt.py` evaluates manifests with overall and per-stratum summaries, failures, top quality flags, keyframe deltas, bbox IoU identity accuracy, identity switches, and fixed failure tags such as `identity_switch`, `target_lost`, `takeoff_early`, `apex_drift`, and `landing_glideout`.
+- Person tracker appearance relock remains opt-in through `PERSON_TRACKER_APPEARANCE_RELOCK=1`; when enabled it records similarity, threshold, decision, candidate bbox, and rejection reasons, and fails closed when no appearance anchor or usable signature is available.
+- Jump keyframe resolution now keeps proposal diagnostics across video AI, skeleton candidates, vertical extrema, and motion evidence; vertical extrema are accepted only inside the phase range with enough confidence.
+- Final jump T/A/L output is guarded so invalid ordering cannot remain high-confidence: conflicting T/A/L records are marked unreliable, confidence is lowered, and review flags are preserved for downstream UI/report hints.
+- The Debug page shows Prediction vs Golden keyframe deltas and target bbox IoU, plus fixed review-flag chips for repeatable error triage.
+
+The previous release focused on mobile target selection, action-aware keyframe handling, clearer share cards, and reliable subscores:
 
 - Mobile manual target selection now supports two-finger pinch zoom up to 4x, panning while zoomed, and one-tap view reset while still saving the original normalized bbox expected by the backend.
 - Manual action-window retry can pass `manual_action_window_start_sec` and `manual_action_window_end_sec`; manual windows use denser action-specific sampling for jumps, spins, steps, and spirals, while automatic jump windows keep extra pre-takeoff and landing padding.
@@ -46,8 +57,9 @@ Current branch updates focus on mobile target selection, action-aware keyframe h
 - Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
-The latest release improves mobile review, manual action-window reruns, action-specific keyframe evidence, share images, and the `SUBSCORES` module.
+The latest release adds a repeatable "label -> replay -> evaluate -> fix" loop for training-video accuracy, with safer relock and keyframe fail-closed behavior.
 
+- `v5.2.309`: Debug golden labels now save label/prediction/manifest artifacts; the eval script reports overall and per-stratum metrics, failure lists, quality flags, keyframe deltas, and fixed failure tags; appearance relock is opt-in with fail-closed diagnostics; vertical-extrema keyframe proposals and final T/A/L order guards prevent high-confidence invalid jump keyframes.
 - `v5.2.308`: mobile target bbox selection supports pinch zoom/pan/reset; manual action windows trigger denser sampling and padded jump coverage; keyframe evidence adapts to jump/spin/step/spiral profiles; subscores are normalized with source labels and compare fallbacks; report/progress share cards add comments and subscore bars while follow-up sharing uses a short multi-turn timeline.
 - `v5.2.307`: comparison generation is persisted in `analysis_comparisons` background tasks; full source videos go only through the active `vision` model while the `report` provider summarizes structured JSON text; comparison result history, retry, sharing, mobile-muted synchronized playback, cleaner compare-page layout, and training-plan fallbacks were hardened.
 - `v5.2.306`: follow-up chat detects multiple questions in user notes and answers each explicitly with what can/cannot be confirmed; training plan generation uses child-safe low-impact prompts with strict JSON schema and `generation_status`; report user-note response parses questions from upload notes into per-question Q&A; KeyframeEvidencePanel logic extracted to `keyframeEvidence.ts` utility with responsive layout; archive page adds aggregate `fetchArchiveSummary` API for parent mode, clickable calendar day detail modal, and jump-to-latest-month navigation; backfill frame tests added.
@@ -167,6 +179,11 @@ SECRET_KEY=replace-with-a-random-32-char-secret
 
 # Optional: use a mounted YOLO person detector weight instead of runtime download
 # YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt
+
+# Optional experimental target relock guard. Keep disabled until golden-set
+# A/B evaluation shows identity switches improve without keyframe regression.
+# PERSON_TRACKER_APPEARANCE_RELOCK=0
+# PERSON_TRACKER_APPEARANCE_RELOCK_THRESHOLD=0.55
 ```
 
 Notes:
@@ -178,6 +195,8 @@ Notes:
 - `QWEN_VISION_DAILY_COST_LIMIT_CNY` caps daily vision spend.
 - `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` estimates one video-temporal call.
 - `VIDEO_TEMPORAL_MAX_FRAMES` caps semantic frames sent to image AI.
+- `PERSON_TRACKER_APPEARANCE_RELOCK=1` enables the experimental torso HSV appearance relock check. The default remains off.
+- `PERSON_TRACKER_APPEARANCE_RELOCK_THRESHOLD` defaults to `0.55` and is clamped to `0.0..1.0`.
 - Runtime databases, uploaded videos, extracted frames, backups, Docker tar archives, and local model files are not committed.
 
 ## Dual-Path Report Resilience
@@ -263,10 +282,11 @@ Backend regression tests cover:
 - profile inference from user input
 - broad-category review uploads and user comments in AI prompt context
 - stage retry and pipeline version behavior
-- debug-run persistence and replay flows
+- debug-run persistence, golden label artifacts, manifest cleanup, and replay flows
 - video precheck, precise extraction, and semantic temporal resolution
 - bbox tracking, target lock, person tracking, and pose smoothing
-- keyframe candidates, T/A/L ordering, and biomechanics timing
+- keyframe candidates, proposal diagnostics, vertical extrema, T/A/L ordering, and biomechanics timing
+- golden manifest evaluation by stratum, bbox IoU identity metrics, identity switches, and fixed failure tags
 - dual-path vision, malformed Path A JSON recovery, provider retry, report fusion, and content normalization
 - AI follow-up persistence, prompt context with comments/action confirmation/partial semantic candidates, proposed correction cards, effective correction overlays, and share payload generation
 
