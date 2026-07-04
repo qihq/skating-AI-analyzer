@@ -58,6 +58,18 @@ docker compose up --build
 - Include any new environment variables in `.env.example`
 - Mention if the change affects Docker, nginx, media processing, or AI provider configuration
 
+## Versioned Release Discipline
+
+Every GitHub update must be tied to an explicit pipeline version. Do this even for small fixes when the change will be pushed, used to build an all-in-one image, or handed off as a runnable release.
+
+- Bump `CURRENT_PIPELINE_VERSION` in `backend/app/services/pipeline_version.py`.
+- Add a matching changelog comment in `backend/app/services/pipeline_version.py`.
+- Update the current version and latest release notes in `README.md`.
+- Use the version number in the commit/release wording, for example `v5.2.310 ...`.
+- When exporting an all-in-one image, use the standard export script so the tar filename includes the same version: `scripts/export-allinone-image.ps1`.
+- After exporting, start or replace the local all-in-one container from the freshly built `skating-analyzer-allinone:latest` image and verify the app health endpoint.
+- Do not leave GitHub, README, pipeline version, and exported image filenames out of sync.
+
 ## Coding Notes
 
 - Frontend is React + TypeScript + Vite
