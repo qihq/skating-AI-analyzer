@@ -276,6 +276,32 @@ def _validated_spin_without_exit_video() -> dict[str, object]:
     return payload
 
 
+def _validated_spin_main_only_video(confidence: float = 0.50) -> dict[str, object]:
+    payload = _validated_spin_without_exit_video()
+    payload["valid"] = False
+    payload["confidence"] = confidence
+    payload["fallback_recommendation"] = "manual_review"
+    payload["phase_segments"] = [
+        {"phase_code": "spin_main", "phase_label": "spin main", "time_start": 7.0, "time_end": 9.0, "key_frame_hint": 7.1, "confidence": 0.64, "valid": True},
+    ]
+    payload["quality_flags"] = [
+        "video_temporal_low_confidence",
+        "video_temporal_not_high_confidence",
+        "video_temporal_fallback_recommended",
+    ]
+    payload["validation"] = {
+        "valid": False,
+        "errors": [],
+        "warnings": [
+            "video_temporal_low_confidence",
+            "video_temporal_not_high_confidence",
+            "video_temporal_fallback_recommended",
+        ],
+        "duration_sec": 10.0,
+    }
+    return payload
+
+
 def _validated_latest_weak_jump_late_timestamp_video() -> dict[str, object]:
     payload = _video_payload(0.80)
     payload["fallback_recommendation"] = "use_video_timestamps"
@@ -2011,7 +2037,7 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertEqual(plan["source"], "video_ai_refined")
         self.assertIn("video_temporal_resolver_inferred_spin_exit_phase", plan["quality_flags"])
         self.assertEqual([item["phase_code"] for item in plan["selected"]], ["spin_entry", "spin_main", "spin_exit"])
-        self.assertEqual([item["timestamp"] for item in plan["selected"]], [6.5, 7.8, 9.1])
+        self.assertEqual([item["timestamp"] for item in plan["selected"]], [6.553, 7.8, 9.1])
         self.assertEqual(plan["selected"][2]["selection_reason"], "inferred_spin_exit_after_main")
         self.assertTrue(semantic_keyframes_are_reliable(plan))
 
@@ -2029,6 +2055,51 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertEqual([item["phase_code"] for item in plan["selected"]], ["spin_entry", "spin_main", "spin_exit"])
         self.assertEqual(plan["selected"][2]["timestamp"], 8.761)
         self.assertLess(plan["selected"][2]["timestamp"], 9.101667)
+        self.assertTrue(semantic_keyframes_are_reliable(plan))
+
+    def test_spin_main_uses_stable_motion_peak_instead_of_boundary_hint(self) -> None:
+        plan = resolve_semantic_keyframes(
+            _validated_spin_without_exit_video(),
+            None,
+            {
+                "selected": [
+                    {"frame_id": "edge", "timestamp": 7.12, "motion_score": 0.99},
+                    {"frame_id": "stable_peak", "timestamp": 7.9, "motion_score": 0.80},
+                    {"frame_id": "exit_edge", "timestamp": 8.48, "motion_score": 0.98},
+                ],
+            },
+            video_duration_sec=10.0,
+            analysis_profile="spin",
+        )
+
+        self.assertEqual([item["phase_code"] for item in plan["selected"]], ["spin_entry", "spin_main", "spin_exit"])
+        self.assertEqual(plan["selected"][1]["timestamp"], 7.9)
+        self.assertEqual(plan["selected"][1]["selection_reason"], "video_phase_range_spin_main_motion_peak")
+        self.assertNotIn("T", [item["phase_code"] for item in plan["selected"]])
+        self.assertTrue(semantic_keyframes_are_reliable(plan))
+
+    def test_low_confidence_spin_main_only_uses_spin_coverage_fallback(self) -> None:
+        plan = resolve_semantic_keyframes(
+            _validated_spin_main_only_video(),
+            {
+                "key_frame_candidates": {
+                    "T": {"frame_id": "frame_001", "timestamp": 1.0, "confidence": 0.9},
+                    "A": {"frame_id": "frame_002", "timestamp": 1.4, "confidence": 0.9},
+                    "L": {"frame_id": "frame_003", "timestamp": 1.8, "confidence": 0.9},
+                }
+            },
+            None,
+            video_duration_sec=10.0,
+            analysis_profile="spin",
+        )
+
+        self.assertEqual(plan["source"], "blended")
+        self.assertIn("video_temporal_resolver_spin_phase_coverage_fallback", plan["quality_flags"])
+        self.assertIn("video_temporal_resolver_inferred_spin_entry_phase", plan["quality_flags"])
+        self.assertIn("video_temporal_resolver_inferred_spin_exit_phase", plan["quality_flags"])
+        self.assertEqual([item["phase_code"] for item in plan["selected"]], ["spin_entry", "spin_main", "spin_exit"])
+        self.assertEqual([item["key_moment"] for item in plan["selected"]], [None, None, None])
+        self.assertNotIn("T", [item["phase_code"] for item in plan["selected"]])
         self.assertTrue(semantic_keyframes_are_reliable(plan))
 
     def test_latest_weak_jump_late_timestamps_use_motion_cluster_fallback(self) -> None:
@@ -3642,6 +3713,74 @@ class VideoTemporalResolverTests(unittest.TestCase):
         self.assertEqual(plan["selected"][0]["selection_reason"], "video_phase_range_key_moment")
         self.assertEqual(plan["selected"][0]["phase_time_start"], 1.0)
         self.assertEqual(plan["selected"][0]["phase_time_end"], 1.4)
+
+    def test_vertical_extrema_preferred_over_motion_peak_for_jump_core_phases(self) -> None:
+        motion_scores = {
+            "selected": [
+                {"frame_id": "frame_0001", "timestamp": 1.3, "motion_score": 0.99},
+                {"frame_id": "frame_0002", "timestamp": 1.95, "motion_score": 0.95},
+            ],
+            "vertical_extrema": {
+                "T": {"timestamp": 1.18, "confidence": 0.86},
+                "A": {"timestamp": 1.58, "confidence": 0.88},
+                "L": {"timestamp": 2.04, "confidence": 0.87},
+            },
+        }
+
+        plan = resolve_semantic_keyframes(
+            _validated_video(0.86),
+            None,
+            motion_scores,
+            video_duration_sec=3.0,
+            analysis_profile="jump",
+        )
+
+        self.assertEqual([item["timestamp"] for item in plan["selected"][:3]], [1.18, 1.58, 2.04])
+        self.assertEqual(
+            [item["selection_reason"] for item in plan["selected"][:3]],
+            [
+                "video_phase_range_vertical_extrema_takeoff",
+                "video_phase_range_vertical_extrema_air",
+                "video_phase_range_vertical_extrema_landing",
+            ],
+        )
+        self.assertIn("video_temporal_resolver_vertical_extrema_t_used", plan["quality_flags"])
+        self.assertEqual(plan["keyframe_resolution_diagnostics"]["decision"], "vertical_extrema_preferred")
+        self.assertTrue(any(item["source"] == "vertical_extrema" for item in plan["keyframe_proposals"]))
+
+    def test_final_core_tal_order_guard_marks_invalid_order_unreliable(self) -> None:
+        video = _validated_video(0.88)
+        video["phase_segments"] = [
+            {"phase_code": "takeoff", "phase_label": "Takeoff", "time_start": 1.0, "time_end": 1.3, "confidence": 0.9},
+            {"phase_code": "air", "phase_label": "Air", "time_start": 1.3, "time_end": 1.7, "confidence": 0.9},
+            {"phase_code": "landing", "phase_label": "Landing", "time_start": 1.3, "time_end": 2.1, "confidence": 0.9},
+        ]
+        motion_scores = {
+            "vertical_extrema": {
+                "T": {"timestamp": 1.2, "confidence": 0.9},
+                "A": {"timestamp": 1.4, "confidence": 0.9},
+                "L": {"timestamp": 1.35, "confidence": 0.9},
+            }
+        }
+
+        plan = resolve_semantic_keyframes(
+            video,
+            None,
+            motion_scores,
+            video_duration_sec=3.0,
+            analysis_profile="jump",
+        )
+
+        self.assertIn("video_temporal_resolver_core_tal_order_invalid", plan["quality_flags"])
+        self.assertIn("semantic_keyframe_refinement_order_rejected", plan["quality_flags"])
+        self.assertLessEqual(plan["confidence"], 0.34)
+        self.assertFalse(semantic_keyframes_are_reliable(plan))
+        self.assertTrue(
+            all(
+                item.get("selection_status") == "unreliable_order_rejected"
+                for item in plan["selected"][:3]
+            )
+        )
 
     def test_high_confidence_takeoff_preserves_key_moment_when_no_near_motion_peak(self) -> None:
         plan = resolve_semantic_keyframes(

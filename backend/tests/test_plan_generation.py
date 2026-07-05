@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.plan import PLAN_DAY_THEMES, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
+from app.services.plan import PLAN_DAY_THEMES, PLAN_REQUEST_TIMEOUT_SECONDS, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
 
 
 def _report() -> dict[str, object]:
@@ -100,6 +102,7 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["days"][0]["sessions"][0]["title"], "AI 训练 1")
         self.assertEqual(plan["days"][0]["sessions"][0]["related_issue"], "落冰缓冲不足")
         self.assertEqual(plan["days"][0]["sessions"][0]["parent_tip"], "听落地声音是否变轻")
+        self.assertEqual(plan["generation_status"], "ai")
 
     async def test_generate_training_plan_preserves_ai_personalized_themes(self) -> None:
         with (
@@ -122,17 +125,19 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
             await generate_training_plan("jump", _report(), "昭昭，4岁，初级", "skater-1", variation_key="seed-123")
 
         kwargs = completion.await_args.kwargs
-        self.assertEqual(kwargs["temperature"], 0.55)
-        self.assertEqual(kwargs["timeout"], 120.0)
+        self.assertEqual(kwargs["temperature"], 0.45)
+        self.assertEqual(kwargs["max_tokens"], 1800)
+        self.assertEqual(kwargs["timeout"], PLAN_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
         messages = kwargs["messages"]
-        self.assertIn("3-6岁小朋友", messages[0]["content"])
-        self.assertIn("历史记忆：更喜欢音乐游戏", messages[0]["content"])
-        self.assertIn("家长/教练备注：孩子害怕落冰声音。", messages[1]["content"])
-        self.assertIn("变化种子：seed-123", messages[1]["content"])
-        self.assertIn("不要直接照抄", messages[1]["content"])
-        self.assertIn("每个 session 必须有 related_issue", messages[1]["content"])
-        self.assertIn("家长观察点", messages[1]["content"])
-        self.assertIn("Day 7 所有项目必须 is_office_trainable=false", messages[1]["content"])
+        self.assertIn("child figure-skating coach", messages[0]["content"])
+        payload = json.loads(messages[1]["content"])
+        self.assertEqual(payload["skater"], "昭昭，4岁，初级")
+        self.assertEqual(payload["variation_key"], "seed-123")
+        self.assertIn("历史记忆：更喜欢音乐游戏", payload["memory"])
+        self.assertEqual(payload["report"]["user_note"], "孩子害怕落冰声音。")
+        self.assertTrue(any("related_issue" in rule for rule in payload["rules"]))
+        self.assertTrue(any("Day 7" in rule and "false" in rule for rule in payload["rules"]))
 
     async def test_generate_training_plan_raises_when_provider_setup_fails(self) -> None:
         with patch("app.services.plan.get_active_provider", AsyncMock(side_effect=RuntimeError("missing key"))):
@@ -155,9 +160,9 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
             patch("app.services.plan.build_memory_context", AsyncMock(return_value="")),
             patch("app.services.plan.request_text_completion", completion),
         ):
-            plan = await generate_training_plan("jump", _report(), "儿童滑冰学员", "skater-1")
+            plan = await generate_training_plan("jump", _report(), "kid", "skater-1")
 
-        self.assertEqual(plan["title"], "AI 生成 7 天训练计划")
+        self.assertEqual(plan["title"], json.loads(_ai_plan_json())["title"])
         self.assertEqual(completion.await_count, 2)
         repair_prompt = completion.await_args_list[1].kwargs["messages"][1]["content"]
         self.assertIn("JSON", repair_prompt)
@@ -190,7 +195,6 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = completion.await_args.kwargs
         self.assertEqual(kwargs["temperature"], 0.45)
-        self.assertEqual(kwargs["timeout"], 120.0)
         prompt = kwargs["messages"][1]["content"]
         self.assertIn("练习对象：昭昭，4岁，初级", prompt)
         self.assertIn("膝盖缓冲不够", prompt)
@@ -200,6 +204,145 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("parent_tip", prompt)
         self.assertIn("不要安排负重、Bosu、旋转椅、痛苦拉伸", prompt)
         self.assertIn("Day 7 所有项目必须 is_office_trainable=false", prompt)
+
+    async def test_create_training_plan_ai_failure_does_not_overwrite_existing_ai_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in ["app.database", "app.models", "app.routers.analysis"]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            existing_plan_json = {**_original_plan(), "generation_source": "ai", "generation_status": "ai"}
+            async with database.AsyncSessionLocal() as session:
+                session.add(models.Skater(id="skater-1", name="kid"))
+                session.add(
+                    models.Analysis(
+                        id="analysis-1",
+                        skater_id="skater-1",
+                        action_type="jump",
+                        video_path=str(Path(tmpdir) / "source.mp4"),
+                        status="completed",
+                        report=_report(),
+                    )
+                )
+                session.add(
+                    models.TrainingPlan(
+                        id="plan-1",
+                        analysis_id="analysis-1",
+                        skater_id="skater-1",
+                        plan_json=existing_plan_json,
+                    )
+                )
+                await session.commit()
+
+                with patch("app.routers.analysis.generate_training_plan", AsyncMock(side_effect=PlanGenerationError("ReadTimeout"))):
+                    detail = await analysis_router.create_training_plan("analysis-1", force=True, session=session)
+
+                stored = await session.get(models.TrainingPlan, "plan-1")
+                assert stored is not None
+                self.assertEqual(detail.plan_json.generation_status, "ai")
+                self.assertEqual(stored.plan_json["generation_status"], "ai")
+                self.assertEqual(stored.plan_json["title"], existing_plan_json["title"])
+
+    async def test_create_training_plan_missing_report_uses_minimal_context_and_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in ["app.database", "app.models", "app.routers.analysis"]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            async with database.AsyncSessionLocal() as session:
+                session.add(models.Skater(id="skater-1", name="kid", display_name="昭昭"))
+                session.add(
+                    models.Analysis(
+                        id="analysis-1",
+                        skater_id="skater-1",
+                        action_type="跳跃",
+                        action_subtype="后外点冰跳",
+                        skill_category="单周跳",
+                        note="后外动作落冰怕响",
+                        video_path=str(Path(tmpdir) / "source.mp4"),
+                        status="completed",
+                        force_score=61,
+                        report=None,
+                    )
+                )
+                await session.commit()
+
+                with patch("app.routers.analysis.generate_training_plan", AsyncMock(side_effect=PlanGenerationError("invalid json"))):
+                    detail = await analysis_router.create_training_plan("analysis-1", force=True, session=session)
+
+                stored = await session.get(models.TrainingPlan, detail.id)
+                assert stored is not None
+                self.assertEqual(detail.plan_json.generation_status, "fallback")
+                self.assertIn("安全兜底", detail.plan_json.generation_note or "")
+                self.assertIn("后外点冰跳", detail.plan_json.focus_skill)
+                first_session = detail.plan_json.days[0].sessions[0]
+                self.assertIn("后外点冰跳", first_session.related_issue or "")
+                self.assertEqual(stored.plan_json["generation_status"], "fallback")
+
+    async def test_extend_plan_ai_failure_returns_fallback_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in ["app.database", "app.models", "app.routers.analysis"]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.schemas import ExtendPlanBody
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            original_plan_json = _original_plan()
+            original_plan_json["days"][0]["sessions"][0]["completed"] = True
+            original_title = str(original_plan_json["days"][0]["sessions"][0]["title"])
+            async with database.AsyncSessionLocal() as session:
+                session.add(models.Skater(id="skater-1", name="kid", display_name="昭昭"))
+                session.add(
+                    models.Analysis(
+                        id="analysis-1",
+                        skater_id="skater-1",
+                        action_type="jump",
+                        action_subtype="后外点冰跳",
+                        video_path=str(Path(tmpdir) / "source.mp4"),
+                        status="completed",
+                        report=None,
+                        force_score=63,
+                    )
+                )
+                session.add(
+                    models.TrainingPlan(
+                        id="plan-1",
+                        analysis_id="analysis-1",
+                        skater_id="skater-1",
+                        plan_json=original_plan_json,
+                    )
+                )
+                await session.commit()
+
+                with patch("app.routers.analysis.extend_training_plan", AsyncMock(side_effect=PlanGenerationError("timeout"))):
+                    detail = await analysis_router.extend_plan("plan-1", ExtendPlanBody(completed_days=[1, 2, 3]), session=session)
+
+                stored = await session.get(models.TrainingPlan, "plan-1")
+                assert stored is not None
+                self.assertEqual(detail.plan_json.generation_status, "fallback")
+                self.assertIn("兜底续期", detail.plan_json.generation_note or "")
+                self.assertEqual(detail.plan_json.days[0].sessions[0].title, original_title)
+                self.assertEqual(stored.plan_json["generation_status"], "fallback")
 
 
 if __name__ == "__main__":

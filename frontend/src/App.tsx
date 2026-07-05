@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import AppLayout from "./components/AppLayout";
+import AnalysisChatPage from "./pages/AnalysisChatPage";
 import ApiSettingsPage from "./pages/ApiSettingsPage";
 import ComparePage from "./pages/ComparePage";
 import DebugPage from "./pages/DebugPage";
@@ -11,6 +12,7 @@ import ParentSetupPage from "./pages/ParentSetupPage";
 import PlanPage from "./pages/PlanPage";
 import PoseDebugPage from "./pages/PoseDebugPage";
 import ReportPage from "./pages/ReportPage";
+import ReportWorkspacePage from "./pages/ReportWorkspacePage";
 import ReviewPage from "./pages/ReviewPage";
 import SettingsPage from "./pages/SettingsPage";
 import SkillTreePage from "./pages/SkillTreePage";
@@ -123,15 +125,19 @@ export default function App() {
           <Route path="/path" element={<SkillTreePage />} />
           <Route path="/snowball" element={<SnowballPage />} />
           <Route path="/review" element={<ReviewPage />} />
+          <Route path="/analysis-chat" element={<AnalysisChatPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/compare/results/:comparison_id" element={<ComparePage />} />
           <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
           <Route path="/report/:id" element={<ReportPage />} />
+          <Route path="/report/:id/workspace" element={<ReportWorkspacePage />} />
           <Route path="/report/:id/pose-debug" element={<PoseDebugPage />} />
           <Route path="/report/:id/target" element={<TargetSelectionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/api" element={<ApiSettingsPage />} />
           <Route path="/debug" element={<DebugPage />} />
+          <Route path="/golden" element={<DebugPage workspace="golden" />} />
         </Route>
         <Route path="/parent/setup" element={<ParentSetupPage />} />
         <Route path="/plan/:plan_id" element={<PlanPage />} />

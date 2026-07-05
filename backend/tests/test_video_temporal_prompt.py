@@ -58,16 +58,16 @@ class VideoTemporalPromptTests(unittest.TestCase):
         self.assertIn("第一次触冰", combined)
         self.assertIn("不是落冰后滑出", combined)
 
-    def test_deprecated_model_argument_is_normalized_in_prompt(self) -> None:
+    def test_configured_model_argument_is_preserved_in_prompt(self) -> None:
         _, user_prompt = build_video_temporal_prompts(
             action_type="jump",
             action_subtype=None,
             video_duration_sec=3.0,
             source_fps=24.0,
-            model="qwen-vl-max-latest",
+            model="qwen-configured-video",
         )
 
-        self.assertIn("- model: qwen3.6-plus", user_prompt)
+        self.assertIn("- model: qwen-configured-video", user_prompt)
         self.assertNotIn("- model: qwen-vl-max-latest", user_prompt)
 
     def test_user_note_is_included_in_prompt_context(self) -> None:

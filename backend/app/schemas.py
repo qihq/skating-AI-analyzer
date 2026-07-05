@@ -35,6 +35,8 @@ class StructuredReport(BaseModel):
     score_breakdown: dict[str, Any] | None = None
     data_quality: str = "partial"
     user_note: str | None = None
+    user_note_response: str | None = None
+    action_confirmation: dict[str, Any] | None = None
 
 
 class AnalysisUploadResponse(BaseModel):
@@ -44,6 +46,76 @@ class AnalysisUploadResponse(BaseModel):
 
 class AnalysisRetryResponse(BaseModel):
     message: str
+
+
+class AnalysisChatMessagePublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_id: str
+    role: str
+    content: str
+    created_at: datetime
+    provider_id: str | None = None
+    provider_name: str | None = None
+    model_id: str | None = None
+
+
+class AnalysisChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    provider_id: str | None = None
+
+
+class AnalysisChatResponse(BaseModel):
+    message: AnalysisChatMessagePublic
+    messages: list[AnalysisChatMessagePublic] = Field(default_factory=list)
+    suggested_action: dict[str, Any] | None = None
+
+
+class AnalysisCorrectionPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_id: str
+    kind: str
+    payload: dict[str, Any]
+    rationale: str | None = None
+    source: str
+    status: str
+    original_snapshot: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None = None
+
+
+class AnalysisCorrectionCreateRequest(BaseModel):
+    kind: str = Field(min_length=1, max_length=32)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    rationale: str | None = Field(default=None, max_length=2000)
+    source: str = Field(default="manual", max_length=24)
+    status: str = Field(default="proposed", max_length=16)
+
+
+class AnalysisCorrectionListResponse(BaseModel):
+    corrections: list[AnalysisCorrectionPublic] = Field(default_factory=list)
+    effective: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisCorrectionMutationResponse(BaseModel):
+    correction: AnalysisCorrectionPublic
+    corrections: list[AnalysisCorrectionPublic] = Field(default_factory=list)
+    effective: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalysisChatShareRequest(BaseModel):
+    message_ids: list[str] | None = None
+    include_pending_corrections: bool = True
+
+
+class AnalysisChatShareResponse(BaseModel):
+    title: str
+    text: str
+    image_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisLogEntry(BaseModel):
@@ -199,8 +271,12 @@ class SkaterPublic(BaseModel):
 class ProgressPoint(BaseModel):
     id: str
     created_at: datetime
+    skater_name: str | None = None
     action_type: str
+    action_subtype: str | None = None
     force_score: int
+    note: str | None = None
+    comments: str | None = None
     summary: str
 
 
@@ -294,6 +370,38 @@ class CompareQualityPayload(BaseModel):
     before_flags: list[str] = Field(default_factory=list)
     after_flags: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    subtype_mismatch: bool = False
+    skill_mismatch: bool = False
+
+
+class CompareVideoAiObservation(BaseModel):
+    key: str
+    label: str
+    before: str | None = None
+    after: str | None = None
+
+
+class CompareVideoAiChange(BaseModel):
+    category: str
+    direction: str = "uncertain"
+    description: str
+    confidence: float | None = None
+
+
+class CompareVideoAiReport(BaseModel):
+    status: str
+    provider: str | None = None
+    model: str | None = None
+    before_confidence: float | None = None
+    after_confidence: float | None = None
+    before_data_quality: str | None = None
+    after_data_quality: str | None = None
+    average_confidence: float | None = None
+    summary: str
+    observations: list[CompareVideoAiObservation] = Field(default_factory=list)
+    changes: list[CompareVideoAiChange] = Field(default_factory=list)
+    training_focus: str
+    caveats: list[str] = Field(default_factory=list)
 
 
 class AnalysisCompareResponse(BaseModel):
@@ -307,6 +415,39 @@ class AnalysisCompareResponse(BaseModel):
     video_compare: CompareVideoPayload | None = None
     quality: CompareQualityPayload | None = None
     ai_narrative: str | None = None
+    video_ai_report: CompareVideoAiReport | None = None
+
+
+class AnalysisComparisonCreateRequest(BaseModel):
+    id_a: str
+    id_b: str
+
+
+class AnalysisComparisonSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysis_a_id: str
+    analysis_b_id: str
+    skater_id: str | None = None
+    skater_name: str | None = None
+    action_type: str
+    status: str
+    score_delta: int | None = None
+    ai_narrative: str | None = None
+    error_message: str | None = None
+    video_ai_status: str | None = None
+    before_created_at: datetime | None = None
+    after_created_at: datetime | None = None
+    before_score: int | None = None
+    after_score: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisComparisonDetail(AnalysisComparisonSummary):
+    result: AnalysisCompareResponse | None = None
+    video_ai_json: dict[str, Any] | None = None
 
 
 class TrainingPlanSession(BaseModel):
@@ -331,6 +472,7 @@ class TrainingPlanPayload(BaseModel):
     focus_skill: str
     days: list[TrainingDay]
     generation_source: str | None = None
+    generation_status: str | None = None
     generation_note: str | None = None
 
 
@@ -364,8 +506,14 @@ class ArchiveTimelineEntry(BaseModel):
     created_at: datetime
     entry_type: str
     status: str
+    skater_id: str | None = None
+    skater_name: str | None = None
+    skater_avatar_type: str | None = None
+    skater_avatar_emoji: str | None = None
     skill_category: str | None = None
     action_type: str
+    action_subtype: str | None = None
+    skill_node_id: str | None = None
     force_score: int | None = None
     report_snippet: str
     analysis_id: str
@@ -492,6 +640,36 @@ class TargetLockRequest(BaseModel):
     x: float | None = None
     y: float | None = None
     manual_bbox: TargetBBox | None = None
+
+
+class DebugGoldenLabelRequest(BaseModel):
+    skater_id: str | None = Field(default=None, max_length=120)
+    action_type: str | None = Field(default=None, max_length=40)
+    action_subtype: str | None = Field(default=None, max_length=80)
+    analysis_profile: str | None = Field(default=None, max_length=40)
+    stratum: str = Field(default="unspecified", max_length=80)
+    fps: float | None = None
+    keyframes: dict[str, float | None] = Field(default_factory=dict)
+    target_bboxes: dict[str, TargetBBox] = Field(default_factory=dict)
+    expected_review_flags: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class DebugGoldenLabelResponse(DebugGoldenLabelRequest):
+    id: str
+    video_path: str | None = None
+    prediction_path: str | None = None
+    label_path: str | None = None
+    manifest_path: str | None = None
+    source_type: str | None = None
+    source_analysis_id: str | None = None
+    debug_run_mode: str | None = None
+    debug_run_status: str | None = None
+    manifest_schema_version: int = 1
+    exists: bool = False
+    label_quality_flags: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class PoseResponse(BaseModel):

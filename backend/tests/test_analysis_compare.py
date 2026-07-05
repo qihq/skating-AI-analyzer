@@ -4,10 +4,13 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+
+from fastapi import BackgroundTasks
 
 
 def _reset_app_modules() -> None:
@@ -65,6 +68,42 @@ def _video_identity(sha256: str) -> dict[str, object]:
         "sha256": sha256,
         "size_bytes": 10,
         "filename": "source.mp4",
+    }
+
+
+def _provider(slot: str, provider: str, model_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=f"{slot}-provider",
+        slot=slot,
+        name=f"{provider}-{slot}",
+        provider=provider,
+        base_url="https://example.com/v1",
+        model_id=model_id,
+        vision_model=None,
+        api_key="test-key",
+        notes=None,
+    )
+
+
+def _video_ai_payload(model: str, label: str) -> dict[str, object]:
+    return {
+        "valid": True,
+        "schema_version": "video_temporal_v1",
+        "provider": "mimo",
+        "model": model,
+        "confidence": 0.86,
+        "overall_impression": f"{label} full video looks stable.",
+        "macro_assessment": {
+            "timing_rhythm": "节奏清楚",
+            "speed_flow": "速度稳定",
+            "axis_overall": "轴心可控",
+            "entry_quality": "进入稳定",
+            "exit_or_landing_quality": "落冰稳定",
+            "top_strengths": ["节奏"],
+            "top_issues": [],
+        },
+        "quality_flags": [],
+        "data_quality_hint": "good",
     }
 
 
@@ -219,6 +258,58 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.keyframe_compare[0].before.source, "bio_key_frames")
         self.assertEqual(result.keyframe_compare[0].before.timestamp, 0.1)
         self.assertEqual(result.keyframe_compare[0].before.confidence, 0.8)
+
+    async def test_compare_subscores_fall_back_to_bio_subscores(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=82,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async with self.database.AsyncSessionLocal() as session:
+            older = await session.get(self.models.Analysis, older_id)
+            newer = await session.get(self.models.Analysis, newer_id)
+            assert older is not None and newer is not None
+            older.report = {**_report(70), "subscores": {}}
+            newer.report = {**_report(82), "subscores": {}}
+            older.bio_data = {**_bio(70), "bio_subscores": {
+                "takeoff_power": 70,
+                "rotation_axis": 69,
+                "arm_coordination": 68,
+                "landing_absorption": 67,
+                "core_stability": 66,
+            }}
+            newer.bio_data = {**_bio(82), "bio_subscores": {
+                "takeoff_power": 82,
+                "rotation_axis": 81,
+                "arm_coordination": 80,
+                "landing_absorption": 79,
+                "core_stability": 78,
+            }}
+            await session.commit()
+
+        completion_mock = AsyncMock(return_value="孩子这次动作更稳定。")
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=object())),
+            patch("app.routers.analysis.request_text_completion", completion_mock),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                result = await self.analysis_router.compare_analyses(newer_id, older_id, session=session)
+
+        self.assertTrue(all(item.available for item in result.subscore_deltas))
+        self.assertEqual(result.subscore_deltas[0].before, 70)
+        self.assertEqual(result.subscore_deltas[0].after, 82)
+        self.assertEqual(result.subscore_deltas[0].delta, 12)
         self.assertTrue(result.keyframe_compare[0].before.available)
         self.assertEqual(result.keyframe_compare[0].after.timestamp, 0.1)
         self.assertEqual(result.keyframe_compare[0].delta_seconds, 0.0)
@@ -237,6 +328,299 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.video_compare.before.sync_start, 0.0)
         self.assertEqual(result.video_compare.before.sync_duration, 0.9)
         self.assertEqual(result.ai_narrative, "孩子这次动作更稳定。")
+
+    async def test_comparison_record_processes_full_videos_with_vision_and_report_json_only(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=82,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        background_tasks = BackgroundTasks()
+        async with self.database.AsyncSessionLocal() as session:
+            created = await self.analysis_router.create_analysis_comparison(
+                self.analysis_router.AnalysisComparisonCreateRequest(id_a=newer_id, id_b=older_id),
+                background_tasks,
+                session=session,
+            )
+            self.assertEqual(created.status, "pending")
+            self.assertIsNone(created.result)
+
+        provider_calls: list[tuple[str, object | None]] = []
+        video_calls: list[dict[str, object]] = []
+
+        async def fake_get_active_provider(slot: str, session=None):  # type: ignore[no-untyped-def]
+            provider_calls.append((slot, session))
+            if slot == "vision":
+                return _provider("vision", "mimo", "mimo-v2.5")
+            if slot == "report":
+                return _provider("report", "mimo", "mimo-v2.5-pro")
+            raise AssertionError(slot)
+
+        async def fake_analyze_video_temporal(video_path: Path, **kwargs):  # type: ignore[no-untyped-def]
+            video_calls.append({"video_path": video_path, **kwargs})
+            return _video_ai_payload(str(getattr(kwargs["provider"], "model_id")), Path(video_path).parent.name)
+
+        completion_mock = AsyncMock(
+            side_effect=[
+                (
+                    '{"summary":"视频 AI 看到现在的整体节奏更清楚。",'
+                    '"changes":[{"category":"节奏","direction":"improved","description":"进入到起跳的节奏更连贯。","confidence":0.82}],'
+                    '"training_focus":"下次继续保持稳定节奏和轻柔落冰。","caveats":["视频观察只作辅助参考。"]}'
+                ),
+                "结合两个完整视频和结构化数据，孩子这次更稳定。",
+            ]
+        )
+
+        with (
+            patch("app.routers.analysis.get_active_provider", fake_get_active_provider),
+            patch("app.routers.analysis.analyze_video_temporal", fake_analyze_video_temporal),
+            patch("app.routers.analysis.request_text_completion", completion_mock),
+        ):
+            await self.analysis_router.process_analysis_comparison(created.id)
+
+        self.assertEqual([call[0] for call in provider_calls], ["vision", "report", "report"])
+        self.assertIsNotNone(provider_calls[0][1])
+        self.assertEqual(len(video_calls), 2)
+        self.assertEqual({call["analyzed_video_kind"] for call in video_calls}, {"full_source"})
+        self.assertTrue(all(str(getattr(call["provider"], "slot")) == "vision" for call in video_calls))
+        self.assertTrue(all(str(getattr(call["provider"], "model_id")) == "mimo-v2.5" for call in video_calls))
+
+        self.assertEqual(completion_mock.await_count, 2)
+        video_report_messages = completion_mock.await_args_list[0].kwargs["messages"]
+        self.assertIn("严格 JSON", video_report_messages[0]["content"])
+        messages = completion_mock.await_args_list[1].kwargs["messages"]
+        self.assertIsInstance(messages[1]["content"], str)
+        self.assertIn("你只会收到 JSON 文本，不能接收或分析视频", messages[1]["content"])
+        self.assertIn("mimo-v2.5", messages[1]["content"])
+        self.assertNotIn('"video_url"', messages[1]["content"])
+        self.assertNotIn("file://", messages[1]["content"])
+        self.assertNotIn("data:video", messages[1]["content"])
+
+        async with self.database.AsyncSessionLocal() as session:
+            stored = await session.get(self.models.AnalysisComparison, created.id)
+            assert stored is not None
+            self.assertEqual(stored.status, "completed")
+            self.assertIsInstance(stored.video_ai_json, dict)
+            self.assertEqual(stored.video_ai_json["status"], "completed")
+            self.assertEqual(stored.video_ai_json["model"], "mimo-v2.5")
+            self.assertIsInstance(stored.result_json, dict)
+            detail = await self.analysis_router.get_analysis_comparison(created.id, session=session)
+
+        self.assertEqual(detail.status, "completed")
+        self.assertIsNotNone(detail.result)
+        assert detail.result is not None
+        self.assertEqual(detail.result.analysis_a.id, older_id)
+        self.assertEqual(detail.result.analysis_b.id, newer_id)
+        self.assertEqual(detail.result.ai_narrative, "结合两个完整视频和结构化数据，孩子这次更稳定。")
+        self.assertIsNotNone(detail.result.video_ai_report)
+        assert detail.result.video_ai_report is not None
+        self.assertEqual(detail.result.video_ai_report.status, "completed")
+        self.assertEqual(detail.result.video_ai_report.provider, "mimo")
+        self.assertEqual(detail.result.video_ai_report.model, "mimo-v2.5")
+        self.assertEqual(detail.result.video_ai_report.summary, "视频 AI 看到现在的整体节奏更清楚。")
+        self.assertEqual(detail.result.video_ai_report.changes[0].direction, "improved")
+        self.assertEqual(detail.result.video_ai_report.observations[0].label, "节奏")
+        self.assertEqual(detail.result.video_ai_report.training_focus, "下次继续保持稳定节奏和轻柔落冰。")
+        self.assertTrue(any("vision 槽视频模型 mimo/mimo-v2.5" in warning for warning in (detail.result.quality.warnings if detail.result.quality else [])))
+
+    async def test_comparison_list_detail_retry_and_video_ai_failure_fallback(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=75,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async with self.database.AsyncSessionLocal() as session:
+            create_background_tasks = BackgroundTasks()
+            created = await self.analysis_router.create_analysis_comparison(
+                self.analysis_router.AnalysisComparisonCreateRequest(id_a=older_id, id_b=newer_id),
+                create_background_tasks,
+                session=session,
+            )
+            listed = await self.analysis_router.list_analysis_comparisons(
+                skater_id=None,
+                action_type=None,
+                status_filter=None,
+                limit=24,
+                offset=0,
+                session=session,
+            )
+
+        self.assertTrue(any(item.id == created.id and item.status == "pending" for item in listed))
+
+        async def fake_get_active_provider(slot: str, session=None):  # type: ignore[no-untyped-def]
+            if slot == "vision":
+                return _provider("vision", "mimo", "mimo-v2.5")
+            if slot == "report":
+                return _provider("report", "mimo", "mimo-v2.5-pro")
+            raise AssertionError(slot)
+
+        async def failing_video_temporal(video_path: Path, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("MiMo vision video base64 exceeds 50MB limit")
+
+        with (
+            patch("app.routers.analysis.get_active_provider", fake_get_active_provider),
+            patch("app.routers.analysis.analyze_video_temporal", failing_video_temporal),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="视频 AI 不可用时使用已有数据生成对比。")),
+        ):
+            await self.analysis_router.process_analysis_comparison(created.id)
+
+        async with self.database.AsyncSessionLocal() as session:
+            detail = await self.analysis_router.get_analysis_comparison(created.id, session=session)
+
+        self.assertEqual(detail.status, "completed")
+        self.assertEqual(detail.video_ai_status, "failed")
+        self.assertIsNotNone(detail.result)
+        assert detail.result is not None
+        self.assertIsNone(detail.result.video_ai_report)
+        self.assertTrue(any("未能完成全量视频分析" in warning for warning in (detail.result.quality.warnings if detail.result.quality else [])))
+        self.assertIsInstance(detail.video_ai_json, dict)
+        assert detail.video_ai_json is not None
+        self.assertEqual(detail.video_ai_json["before"]["fallback_reason"], "compare_full_video_ai_failed")
+
+        async with self.database.AsyncSessionLocal() as session:
+            stored = await session.get(self.models.AnalysisComparison, created.id)
+            assert stored is not None
+            stored.status = "failed"
+            stored.error_message = "manual failure"
+            stored.video_ai_json = {"status": "failed"}
+            stored.result_json = {"stale": True}
+            await session.commit()
+
+            retry_background_tasks = BackgroundTasks()
+            retried = await self.analysis_router.retry_analysis_comparison(created.id, retry_background_tasks, session=session)
+
+        self.assertEqual(retried.status, "pending")
+        self.assertIsNone(retried.error_message)
+        self.assertIsNone(retried.video_ai_json)
+        self.assertIsNone(retried.result)
+
+    async def test_video_ai_report_partial_and_invalid_json_uses_fallback(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=76,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        partial_video_ai = {
+            "status": "partial",
+            "provider": "mimo",
+            "model": "mimo-v2.5",
+            "before_analysis_id": older_id,
+            "after_analysis_id": newer_id,
+            "before": _video_ai_payload("mimo-v2.5", "before"),
+            "after": {
+                "valid": False,
+                "provider": "mimo",
+                "model": "mimo-v2.5",
+                "quality_flags": ["compare_full_video_ai_failed"],
+                "fallback_reason": "compare_full_video_ai_failed",
+            },
+        }
+
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=_provider("report", "mimo", "mimo-v2.5-pro"))),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="not json")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                older = await session.get(self.models.Analysis, older_id)
+                newer = await session.get(self.models.Analysis, newer_id)
+                assert older is not None
+                assert newer is not None
+                result = await self.analysis_router._build_analysis_compare_response(
+                    session,
+                    older,
+                    newer,
+                    video_ai_json=partial_video_ai,
+                )
+
+        self.assertIsNotNone(result.video_ai_report)
+        assert result.video_ai_report is not None
+        self.assertEqual(result.video_ai_report.status, "partial")
+        self.assertEqual(result.video_ai_report.before_confidence, 0.86)
+        self.assertIsNone(result.video_ai_report.after_confidence)
+        self.assertTrue(any("部分完整视频分析" in caveat for caveat in result.video_ai_report.caveats))
+        self.assertTrue(any("不参与评分" in caveat for caveat in result.video_ai_report.caveats))
+        self.assertEqual(result.video_ai_report.observations[0].before, "节奏清楚")
+        self.assertIsNone(result.video_ai_report.observations[0].after)
+        self.assertEqual(result.video_ai_report.changes[0].direction, "uncertain")
+
+    async def test_stored_legacy_comparison_result_without_video_ai_report_validates(self) -> None:
+        older_id = str(uuid4())
+        newer_id = str(uuid4())
+        skater_id = str(uuid4())
+        await self._insert_analysis(
+            analysis_id=older_id,
+            skater_id=skater_id,
+            score=70,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await self._insert_analysis(
+            analysis_id=newer_id,
+            skater_id=skater_id,
+            score=74,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=None)),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                older = await session.get(self.models.Analysis, older_id)
+                newer = await session.get(self.models.Analysis, newer_id)
+                assert older is not None
+                assert newer is not None
+                result = await self.analysis_router._build_analysis_compare_response(session, older, newer)
+                payload = result.model_dump(mode="json")
+                payload.pop("video_ai_report", None)
+                comparison = self.models.AnalysisComparison(
+                    analysis_a_id=older_id,
+                    analysis_b_id=newer_id,
+                    skater_id=skater_id,
+                    action_type="跳跃",
+                    status="completed",
+                    result_json=payload,
+                )
+                session.add(comparison)
+                await session.commit()
+                await session.refresh(comparison)
+                detail = await self.analysis_router.get_analysis_comparison(comparison.id, session=session)
+
+        self.assertIsNotNone(detail.result)
+        assert detail.result is not None
+        self.assertIsNone(detail.result.video_ai_report)
 
     async def test_compare_video_sync_uses_final_bio_keyframe_when_semantic_conflicts(self) -> None:
         older_id = str(uuid4())
@@ -670,10 +1054,16 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
             second.action_subtype = "后外点冰跳"
             await session.commit()
 
-        async with self.database.AsyncSessionLocal() as session:
-            with self.assertRaises(Exception) as ctx:
-                await self.analysis_router.compare_analyses(first_id, second_id, session=session)
-        self.assertIn("同一动作小项", str(ctx.exception))
+        with (
+            patch("app.routers.analysis.get_active_provider", AsyncMock(return_value=None)),
+            patch("app.routers.analysis.request_text_completion", AsyncMock(return_value="")),
+        ):
+            async with self.database.AsyncSessionLocal() as session:
+                result = await self.analysis_router.compare_analyses(first_id, second_id, session=session)
+        self.assertIsNotNone(result.quality)
+        assert result.quality is not None
+        self.assertTrue(result.quality.subtype_mismatch)
+        self.assertTrue(any("趋势参考" in warning for warning in result.quality.warnings))
 
     async def test_video_endpoint_rejects_missing_video(self) -> None:
         analysis_id = str(uuid4())
@@ -706,6 +1096,26 @@ class AnalysisCompareTests(unittest.IsolatedAsyncioTestCase):
         flags = self.analysis_router._tiny_target_pose_tracking_risk_flags(target_lock, pose_data)
 
         self.assertEqual(flags, ["person_tracker_tiny_target_low_pose_tracking_risk"])
+
+    async def test_progress_point_preserves_share_fields(self) -> None:
+        point = self.analysis_router._progress_point_from_row(
+            SimpleNamespace(
+                id="analysis-1",
+                created_at=datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
+                skater_display_name="小七",
+                skater_name="Qiqi",
+                action_type="旋转",
+                action_subtype="直立旋转",
+                force_score=88,
+                note="这次入转更稳，出转需要继续压低重心。",
+            )
+        )
+
+        self.assertEqual(point.skater_name, "小七")
+        self.assertEqual(point.action_subtype, "直立旋转")
+        self.assertEqual(point.note, "这次入转更稳，出转需要继续压低重心。")
+        self.assertEqual(point.comments, point.note)
+        self.assertEqual(point.summary, point.note)
 
     async def test_multiperson_relock_instability_risk_flag_helper(self) -> None:
         target_lock = {

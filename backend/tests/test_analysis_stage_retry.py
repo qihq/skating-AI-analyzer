@@ -234,6 +234,445 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.target_lock["selected_bbox"], detected[0]["bbox"])
                 self.assertIn("target_lock_auto_resume_from_preview", saved.target_lock["quality_flags"])
 
+    async def test_full_retry_with_reset_target_lock_clears_existing_target_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        retry_from_stage="vision",
+                        target_lock={
+                            "status": "locked",
+                            "selected_candidate_id": "old_target",
+                            "selected_bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                            "lock_confidence": 0.91,
+                        },
+                        target_lock_status="locked",
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from=None,
+                    reset_target_lock=True,
+                    session=session,
+                )
+
+            self.assertEqual(response.message, "已重新提交分析。")
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0][1], (analysis_id, None))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.status, "pending")
+                self.assertIsNone(saved.retry_from_stage)
+                self.assertIsNone(saved.target_lock)
+                self.assertEqual(saved.target_lock_status, "pending")
+
+    async def test_video_ai_keyframe_rerun_creates_proposed_correction_without_mutating_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+            semantic_sources = []
+            for index in range(1, 4):
+                source = Path(tmpdir) / f"semantic_{index:04d}.jpg"
+                source.write_bytes(b"fake-frame")
+                semantic_sources.append(source)
+
+            target_lock = {"status": "locked", "selected_candidate_id": "target-1"}
+            pose_data = {"frames": [{"frame": "frame_0001.jpg", "keypoints": [{"x": 0.5, "y": 0.5}]}]}
+            bio_data = {
+                "key_frames": {"T": "frame_0001", "A": "frame_0002", "L": "frame_0003"},
+                "key_frame_candidates": {
+                    "T": {"frame_id": "frame_0001", "timestamp": 1.0, "confidence": 0.8},
+                    "A": {"frame_id": "frame_0002", "timestamp": 1.4, "confidence": 0.8},
+                    "L": {"frame_id": "frame_0003", "timestamp": 1.9, "confidence": 0.8},
+                },
+            }
+            motion_scores = {
+                "selected": [{"frame_id": "frame_0001", "timestamp": 1.0}],
+                "resolved_keyframes": {"source": "existing_skeleton", "selected": []},
+            }
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="Toe Loop",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        report={"summary": "saved"},
+                        vision_structured={"frame_analysis": []},
+                        pose_data=pose_data,
+                        bio_data=bio_data,
+                        frame_motion_scores=motion_scores,
+                        target_lock=target_lock,
+                        target_lock_status="locked",
+                        manual_action_window_start=1.2,
+                        manual_action_window_end=2.4,
+                    )
+                )
+                await session.commit()
+
+            semantic_records = [
+                {
+                    "frame_id": "semantic_0001",
+                    "timestamp": 0.9,
+                    "phase_code": "takeoff",
+                    "phase_label": "Takeoff",
+                    "key_moment": "T_takeoff",
+                    "confidence": 0.88,
+                    "selection_reason": "video_temporal_core",
+                },
+                {
+                    "frame_id": "semantic_0002",
+                    "timestamp": 1.35,
+                    "phase_code": "air",
+                    "phase_label": "Apex",
+                    "key_moment": "A_apex",
+                    "confidence": 0.86,
+                    "selection_reason": "video_temporal_core",
+                },
+                {
+                    "frame_id": "semantic_0003",
+                    "timestamp": 2.25,
+                    "phase_code": "landing",
+                    "phase_label": "Landing",
+                    "key_moment": "L_landing",
+                    "confidence": 0.84,
+                    "selection_reason": "video_temporal_core",
+                },
+            ]
+            pipeline_result = analysis_router.SemanticKeyframePipelineResult(
+                ai_clip={"path": "clip.mp4"},
+                video_temporal={"confidence": 0.87, "quality_flags": ["video_full_context"]},
+                resolved_keyframes={
+                    "confidence": 0.85,
+                    "quality_flags": ["semantic_ok"],
+                    "source": "video_temporal",
+                    "selected": semantic_records,
+                },
+                effective_source="semantic_frames",
+                semantic_frames=semantic_sources,
+                semantic_records=semantic_records,
+                quality_flags=["semantic_ok"],
+                used_semantic_frames=True,
+                has_semantic_moments=True,
+            )
+            rerun = AsyncMock(return_value=pipeline_result)
+            full_window = analysis_router.VideoInputWindow(
+                source_duration_sec=3.0,
+                input_window_start_sec=0.0,
+                input_window_end_sec=3.0,
+                input_window_duration_sec=3.0,
+                input_window_mode="full_context",
+                input_window_truncated=False,
+                input_window_reason="full_context",
+            )
+
+            with (
+                patch("app.routers.analysis.build_video_input_window", return_value=full_window) as input_window_mock,
+                patch("app.routers.analysis.run_semantic_keyframe_pipeline", rerun),
+            ):
+                async with database.AsyncSessionLocal() as session:
+                    response = await analysis_router.rerun_video_ai_keyframes(analysis_id, session=session)
+
+            input_window_mock.assert_called_once_with(upload_dir / "source.mp4")
+            rerun.assert_awaited_once()
+            call_kwargs = rerun.await_args.kwargs
+            self.assertEqual(call_kwargs["analyzed_video_kind"], "full_video_keyframe_rerun")
+            self.assertEqual(call_kwargs["input_window"].input_window_mode, "full_context")
+            self.assertEqual(call_kwargs["input_window"].input_window_start_sec, 0.0)
+            self.assertEqual(response.correction.kind, "keyframes")
+            self.assertEqual(response.correction.source, "video_ai_keyframe_rerun")
+            self.assertEqual(response.correction.status, "proposed")
+            payload = response.correction.payload
+            self.assertEqual(payload["source"], "video_ai_full_video_keyframe_rerun")
+            self.assertEqual(set(payload["key_frames"].keys()), {"T", "A", "L"})
+            self.assertEqual(payload["key_frames"]["T"]["phase_code"], "takeoff")
+            self.assertIn("diagnostics", payload)
+            self.assertEqual(payload["diagnostics"]["video_ai_confidence"], 0.87)
+            self.assertTrue(payload["diagnostics"]["conflicts"])
+            persisted_frame = upload_dir / "semantic_frames" / f"{payload['key_frames']['T']['frame_id']}.jpg"
+            self.assertTrue(persisted_frame.exists())
+
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.target_lock, target_lock)
+                self.assertEqual(saved.pose_data, pose_data)
+                self.assertEqual(saved.bio_data, bio_data)
+                self.assertEqual(saved.frame_motion_scores, motion_scores)
+
+    async def test_video_ai_keyframe_rerun_requires_completed_analysis_and_source_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from fastapi import HTTPException
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            missing_video_id = str(uuid4())
+            processing_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / processing_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+            async with database.AsyncSessionLocal() as session:
+                session.add_all(
+                    [
+                        models.Analysis(
+                            id=missing_video_id,
+                            action_type="jump",
+                            video_path=str(Path(tmpdir) / "missing.mp4"),
+                            status="completed",
+                            report={"summary": "saved"},
+                            vision_structured={"frame_analysis": []},
+                        ),
+                        models.Analysis(
+                            id=processing_id,
+                            action_type="jump",
+                            video_path=str(upload_dir / "source.mp4"),
+                            status="processing",
+                        ),
+                    ]
+                )
+                await session.commit()
+
+            async with database.AsyncSessionLocal() as session:
+                with self.assertRaises(HTTPException) as missing_ctx:
+                    await analysis_router.rerun_video_ai_keyframes(missing_video_id, session=session)
+                self.assertEqual(missing_ctx.exception.status_code, 404)
+
+            async with database.AsyncSessionLocal() as session:
+                with self.assertRaises(HTTPException) as status_ctx:
+                    await analysis_router.rerun_video_ai_keyframes(processing_id, session=session)
+                self.assertEqual(status_ctx.exception.status_code, 400)
+
+    async def test_report_retry_does_not_reset_target_lock_even_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            target_lock = {
+                "status": "locked",
+                "selected_candidate_id": "old_target",
+                "selected_bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                "lock_confidence": 0.91,
+            }
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        report={"summary": "saved"},
+                        vision_structured={"frame_analysis": []},
+                        bio_data={"key_frames": {}},
+                        target_lock=target_lock,
+                        target_lock_status="locked",
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from="report",
+                    reset_target_lock=True,
+                    session=session,
+                )
+
+            self.assertIn("report", response.message)
+            self.assertEqual(queued[0][1], (analysis_id, "report"))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.target_lock, target_lock)
+                self.assertEqual(saved.target_lock_status, "locked")
+                self.assertEqual(saved.retry_from_stage, "report")
+
+    async def test_retry_with_manual_window_restarts_from_extract_and_resets_target_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+
+            analysis_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            (upload_dir / "source.mp4").write_bytes(b"fake-video")
+
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        action_subtype="single",
+                        analysis_profile="jump",
+                        video_path=str(upload_dir / "source.mp4"),
+                        status="completed",
+                        retry_from_stage="report",
+                        report={"summary": "saved", "subscores": {"takeoff_power": 80}},
+                        vision_structured={"frame_analysis": []},
+                        bio_data={"key_frames": {}, "bio_subscores": {"takeoff_power": 70}},
+                        pose_data={"frames": []},
+                        frame_motion_scores={"selected": []},
+                        target_lock={"status": "locked"},
+                        target_lock_status="locked",
+                        manual_action_window_start=None,
+                        manual_action_window_end=None,
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.retry_analysis(
+                    analysis_id,
+                    _Tasks(),
+                    retry_from="report",
+                    manual_action_window_start_sec=1.25,
+                    manual_action_window_end_sec=3.75,
+                    session=session,
+                )
+
+            self.assertTrue(response.message)
+            self.assertEqual(queued[0][1], (analysis_id, None))
+            async with database.AsyncSessionLocal() as session:
+                saved = await session.get(models.Analysis, analysis_id)
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved.retry_from_stage, None)
+                self.assertEqual(saved.manual_action_window_start, 1.25)
+                self.assertEqual(saved.manual_action_window_end, 3.75)
+                self.assertIsNone(saved.target_lock)
+                self.assertEqual(saved.target_lock_status, "pending")
+                self.assertIsNone(saved.frame_motion_scores)
+                self.assertIsNone(saved.report)
+
     async def test_retry_awaiting_target_selection_refreshes_manual_review_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir

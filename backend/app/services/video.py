@@ -80,6 +80,18 @@ DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
     "spiral": 16,
     "step": 20,
 }
+MANUAL_WINDOW_PROFILE_FRAME_RATES: dict[str, int] = {
+    "jump": 24,
+    "spin": 14,
+    "spiral": 12,
+    "step": 10,
+}
+MANUAL_WINDOW_PROFILE_MAX_FRAMES: dict[str, int] = {
+    "jump": 48,
+    "spin": 36,
+    "spiral": 28,
+    "step": 36,
+}
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
     "cannot allocate memory",
@@ -185,6 +197,31 @@ def _profile_sampling_config(profile: str | None) -> dict[str, Any]:
     if not profile:
         return {}
     return _load_action_profile_config().get(profile.strip().lower(), {})
+
+
+def _normalized_profile(profile: str | None) -> str:
+    return str(profile or "").strip().lower()
+
+
+def _manual_window_dense_sampling(input_window: VideoInputWindow | None) -> bool:
+    return input_window is not None and input_window.input_window_mode == "manual_window"
+
+
+def _sampling_config_for_window(
+    profile: str | None,
+    input_window: VideoInputWindow | None,
+) -> tuple[int, int, str]:
+    base_frame_rate = get_frame_rate_for_profile(profile)
+    base_sample_count = get_max_frames_for_profile(profile)
+    if not _manual_window_dense_sampling(input_window):
+        return base_frame_rate, base_sample_count, "profile_default"
+
+    normalized = _normalized_profile(profile)
+    return (
+        MANUAL_WINDOW_PROFILE_FRAME_RATES.get(normalized, base_frame_rate),
+        MANUAL_WINDOW_PROFILE_MAX_FRAMES.get(normalized, base_sample_count),
+        "manual_window_dense",
+    )
 
 
 def get_slow_motion_scale(source_fps: float) -> float:
@@ -667,7 +704,7 @@ def _short_jump_full_context_duration(video_path: Path, analysis_profile: str | 
 def _action_window_padding(analysis_profile: str | None) -> tuple[float, float]:
     profile = (analysis_profile or "").strip().lower()
     if profile == "jump":
-        return 0.35, 0.75
+        return 0.5, 1.0
     return 1.0, 1.0
 
 
@@ -1425,6 +1462,10 @@ async def _extract_full_frame_at(video_path: Path, timestamp: float, target_path
     )
 
 
+async def extract_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
+    await _extract_full_frame_at(video_path, timestamp, target_path)
+
+
 async def _extract_precise_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
     width, height = _frame_dimensions()
     scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
@@ -1919,8 +1960,7 @@ async def extract_motion_sampled_frames(
     source_fps = detect_video_fps(video_path)
     is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
     slow_motion_scale = get_slow_motion_scale(source_fps) if is_slow_motion else 1.0
-    frame_rate = get_frame_rate_for_profile(analysis_profile)
-    sample_count = get_max_frames_for_profile(analysis_profile)
+    frame_rate, sample_count, sampling_profile_source = _sampling_config_for_window(analysis_profile, input_window)
     if input_window is not None:
         start_sec = input_window.input_window_start_sec
         end_sec = input_window.input_window_end_sec
@@ -2057,7 +2097,9 @@ async def extract_motion_sampled_frames(
         "sample_count": len(output_paths),
         "max_frames_for_profile": sample_count,
         "selection_strategy": "dense_peak_bursts" if dense_peak_bursts else "motion_weighted",
-        "window_strategy": "full_video_debug" if full_video_window else "detected_action_window",
+        "window_strategy": input_window.input_window_mode if input_window is not None else ("full_video_debug" if full_video_window else "detected_action_window"),
+        "sampling_profile_source": sampling_profile_source,
+        "manual_window_dense_sampling": _manual_window_dense_sampling(input_window),
         "window_diagnostics": window_diagnostics,
         "top_motion_peaks": [
             {**record, "timestamp": round(start_sec + float(record["timestamp_offset"]), 3)}

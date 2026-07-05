@@ -43,14 +43,18 @@ export interface StructuredReport {
   improvements: ReportImprovement[];
   training_focus: string;
   subscores?: Record<string, number>;
-  score_breakdown?: {
-    training_score?: number | null;
-    technical_score?: number | null;
-    raw_technical_score?: number | null;
-    score_version?: string | null;
-    calibration_reason?: string | null;
-  } | null;
+  subscores_source?: "ai_fused" | "biomechanics" | "fallback_reference" | string;
   data_quality?: "good" | "partial" | "poor" | string;
+  user_note?: string | null;
+  user_note_response?: string | null;
+  action_confirmation?: {
+    action_family?: string | null;
+    confirmed_action?: string | null;
+    jump_type?: string | null;
+    confidence?: number | null;
+    notes?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface BioData {
@@ -195,6 +199,84 @@ export interface AnalysisDetail extends AnalysisListItem {
   error_code: AnalysisErrorCode | null;
   error_detail: string | null;
   error_message: string | null;
+}
+
+export interface AnalysisChatMessage {
+  id: string;
+  analysis_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  created_at: string;
+  provider_id?: string | null;
+  provider_name?: string | null;
+  model_id?: string | null;
+}
+
+export interface AnalysisChatResponse {
+  message: AnalysisChatMessage;
+  messages: AnalysisChatMessage[];
+  suggested_action?: {
+    kind: "full_video_reanalysis" | string;
+    label: string;
+    reset_target_lock?: boolean;
+    [key: string]: unknown;
+  } | null;
+}
+
+export interface AnalysisCorrection {
+  id: string;
+  analysis_id: string;
+  kind: "action_label" | "keyframes" | "report_note" | "report_regeneration" | "target_lock" | string;
+  payload: Record<string, unknown>;
+  rationale: string | null;
+  source: "manual" | "chat_suggestion" | string;
+  status: "proposed" | "applied" | "dismissed" | string;
+  original_snapshot: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  applied_at: string | null;
+}
+
+export interface AnalysisCorrectionListResponse {
+  corrections: AnalysisCorrection[];
+  effective: Record<string, unknown>;
+}
+
+export interface AnalysisCorrectionMutationResponse extends AnalysisCorrectionListResponse {
+  correction: AnalysisCorrection;
+}
+
+export interface AnalysisCorrectionCreatePayload {
+  kind: string;
+  payload: Record<string, unknown>;
+  rationale?: string | null;
+  source?: string;
+  status?: string;
+}
+
+export interface AnalysisChatShareResponse {
+  title: string;
+  text: string;
+  image_payload: {
+    analysis_id?: string;
+    title?: string;
+    score?: number | null;
+    summary?: string;
+    question?: string;
+    answer?: string;
+    timeline_items?: {
+      index?: number;
+      time?: string | null;
+      question?: string;
+      answer?: string;
+      correction_status?: string;
+      [key: string]: unknown;
+    }[];
+    applied_corrections?: string[];
+    pending_corrections?: string[];
+    report_url?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface SelectedSemanticFrame {
@@ -489,6 +571,36 @@ export interface DebugRunCreatePayload {
   note?: string | null;
 }
 
+export interface DebugGoldenLabelPayload {
+  skater_id?: string | null;
+  action_type?: string | null;
+  action_subtype?: string | null;
+  analysis_profile?: string | null;
+  stratum?: string;
+  fps?: number | null;
+  keyframes: Record<string, number | null>;
+  target_bboxes: Record<string, TargetBBox>;
+  expected_review_flags: string[];
+  notes?: string | null;
+}
+
+export interface DebugGoldenLabel extends DebugGoldenLabelPayload {
+  id: string;
+  video_path: string | null;
+  prediction_path: string | null;
+  label_path: string | null;
+  manifest_path: string | null;
+  source_type: string | null;
+  source_analysis_id: string | null;
+  debug_run_mode: string | null;
+  debug_run_status: string | null;
+  manifest_schema_version: number;
+  exists: boolean;
+  label_quality_flags?: string[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface ComparisonChange {
   category: string;
   before_severity: IssueSeverity | null;
@@ -555,12 +667,44 @@ export interface CompareVideoPayload {
   sync_anchor_key?: string | null;
 }
 
+export interface CompareVideoAiObservation {
+  key: string;
+  label: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface CompareVideoAiChange {
+  category: string;
+  direction: "improved" | "regressed" | "unchanged" | "uncertain" | string;
+  description: string;
+  confidence: number | null;
+}
+
+export interface CompareVideoAiReport {
+  status: string;
+  provider: string | null;
+  model: string | null;
+  before_confidence: number | null;
+  after_confidence: number | null;
+  before_data_quality: string | null;
+  after_data_quality: string | null;
+  average_confidence: number | null;
+  summary: string;
+  observations: CompareVideoAiObservation[];
+  changes: CompareVideoAiChange[];
+  training_focus: string;
+  caveats: string[];
+}
+
 export interface CompareQualityPayload {
   before_data_quality: string | null;
   after_data_quality: string | null;
   before_flags: string[];
   after_flags: string[];
   warnings: string[];
+  subtype_mismatch?: boolean;
+  skill_mismatch?: boolean;
 }
 
 export interface AnalysisCompareResponse {
@@ -578,13 +722,43 @@ export interface AnalysisCompareResponse {
   video_compare: CompareVideoPayload | null;
   quality: CompareQualityPayload | null;
   ai_narrative: string | null;
+  video_ai_report: CompareVideoAiReport | null;
+}
+
+export interface AnalysisComparisonSummary {
+  id: string;
+  analysis_a_id: string;
+  analysis_b_id: string;
+  skater_id: string | null;
+  skater_name: string | null;
+  action_type: string;
+  status: "pending" | "processing" | "completed" | "failed" | string;
+  score_delta: number | null;
+  ai_narrative: string | null;
+  error_message: string | null;
+  video_ai_status: string | null;
+  before_created_at: string | null;
+  after_created_at: string | null;
+  before_score: number | null;
+  after_score: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnalysisComparisonDetail extends AnalysisComparisonSummary {
+  result: AnalysisCompareResponse | null;
+  video_ai_json: Record<string, unknown> | null;
 }
 
 export interface ProgressPoint {
   id: string;
   created_at: string;
+  skater_name?: string | null;
   action_type: string;
+  action_subtype?: string | null;
   force_score: number;
+  note?: string | null;
+  comments?: string | null;
   summary: string;
 }
 
@@ -620,6 +794,7 @@ export interface TrainingPlanPayload {
   focus_skill: string;
   days: TrainingDay[];
   generation_source?: "ai" | "fallback" | string | null;
+  generation_status?: "ai" | "fallback" | "generating" | string | null;
   generation_note?: string | null;
 }
 
@@ -642,9 +817,15 @@ export interface ArchiveResponse {
     id: string;
     created_at: string;
     status: AnalysisStatus;
+    skater_id?: string | null;
+    skater_name?: string | null;
+    skater_avatar_type?: Skater["avatar_type"] | null;
+    skater_avatar_emoji?: Skater["avatar_emoji"] | null;
     entry_type: string;
     skill_category: string | null;
     action_type: string;
+    action_subtype?: string | null;
+    skill_node_id?: string | null;
     force_score: number | null;
     report_snippet: string;
     analysis_id: string;
@@ -860,10 +1041,28 @@ export async function fetchAnalysis(id: string, options?: { isParentRequest?: bo
   return response.data;
 }
 
-export async function retryAnalysis(id: string, options?: { retryFrom?: string | null }) {
+export async function retryAnalysis(
+  id: string,
+  options?: {
+    retryFrom?: string | null;
+    resetTargetLock?: boolean;
+    manualActionWindowStartSec?: number | null;
+    manualActionWindowEndSec?: number | null;
+  },
+) {
   const response = await apiClient.post<RetryAnalysisResponse>(`/analysis/${id}/retry`, undefined, {
-    params: options?.retryFrom ? { retry_from: options.retryFrom } : undefined,
+    params: {
+      retry_from: options?.retryFrom || undefined,
+      reset_target_lock: options?.resetTargetLock || undefined,
+      manual_action_window_start_sec: options?.manualActionWindowStartSec ?? undefined,
+      manual_action_window_end_sec: options?.manualActionWindowEndSec ?? undefined,
+    },
   });
+  return response.data;
+}
+
+export async function rerunVideoAIKeyframes(id: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/chat/video-keyframes-rerun`);
   return response.data;
 }
 
@@ -889,6 +1088,49 @@ export async function fetchAnalysisPose(id: string) {
   return response.data;
 }
 
+export async function fetchAnalysisChatMessages(id: string) {
+  const response = await apiClient.get<AnalysisChatMessage[]>(`/analysis/${id}/chat/messages`);
+  return response.data;
+}
+
+export async function sendAnalysisChatMessage(id: string, message: string, providerId?: string | null) {
+  const response = await apiClient.post<AnalysisChatResponse>(`/analysis/${id}/chat`, {
+    message,
+    provider_id: providerId || null,
+  });
+  return response.data;
+}
+
+export async function fetchAnalysisCorrections(id: string) {
+  const response = await apiClient.get<AnalysisCorrectionListResponse>(`/analysis/${id}/corrections`);
+  return response.data;
+}
+
+export async function createAnalysisCorrection(id: string, payload: AnalysisCorrectionCreatePayload) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections`, payload);
+  return response.data;
+}
+
+export async function applyAnalysisCorrection(id: string, correctionId: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/${correctionId}/apply`);
+  return response.data;
+}
+
+export async function dismissAnalysisCorrection(id: string, correctionId: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/${correctionId}/dismiss`);
+  return response.data;
+}
+
+export async function regenerateReportFromCorrections(id: string) {
+  const response = await apiClient.post<AnalysisCorrectionMutationResponse>(`/analysis/${id}/corrections/regenerate-report`);
+  return response.data;
+}
+
+export async function shareAnalysisChat(id: string, options?: { message_ids?: string[]; include_pending_corrections?: boolean }) {
+  const response = await apiClient.post<AnalysisChatShareResponse>(`/analysis/${id}/chat/share`, options ?? {});
+  return response.data;
+}
+
 export async function fetchTargetPreview(id: string) {
   const response = await apiClient.get<TargetPreviewResponse>(`/analysis/${id}/target-preview`);
   return response.data;
@@ -902,15 +1144,50 @@ export async function confirmTargetLock(
   return response.data;
 }
 
-export async function fetchAnalyses(params?: { action_type?: string; skater_id?: string }) {
-  const response = await apiClient.get<AnalysisListItem[]>("/analysis/", { params });
-  return response.data;
+export async function fetchAnalyses(params?: { action_type?: string; skater_id?: string; limit?: number; offset?: number }) {
+  const response = await apiClient.get<AnalysisListItem[] | { value?: AnalysisListItem[]; items?: AnalysisListItem[]; analyses?: AnalysisListItem[] }>("/analysis/", { params });
+  const data = response.data;
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return data.value ?? data.items ?? data.analyses ?? [];
 }
 
 export async function fetchAnalysisCompare(idA: string, idB: string) {
   const response = await apiClient.get<AnalysisCompareResponse>("/analysis/compare", {
     params: { id_a: idA, id_b: idB, _ts: Date.now() },
   });
+  return response.data;
+}
+
+export async function createAnalysisComparison(idA: string, idB: string) {
+  const response = await apiClient.post<AnalysisComparisonDetail>("/analysis/comparisons", {
+    id_a: idA,
+    id_b: idB,
+  });
+  return response.data;
+}
+
+export async function fetchAnalysisComparisons(params?: {
+  skater_id?: string;
+  action_type?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const response = await apiClient.get<AnalysisComparisonSummary[]>("/analysis/comparisons", { params });
+  return response.data;
+}
+
+export async function fetchAnalysisComparison(id: string) {
+  const response = await apiClient.get<AnalysisComparisonDetail>(`/analysis/comparisons/${id}`, {
+    params: { _ts: Date.now() },
+  });
+  return response.data;
+}
+
+export async function retryAnalysisComparison(id: string) {
+  const response = await apiClient.post<AnalysisComparisonDetail>(`/analysis/comparisons/${id}/retry`);
   return response.data;
 }
 
@@ -962,6 +1239,11 @@ export async function fetchSkaters() {
 
 export async function fetchArchive(skaterId: string, params?: { limit?: number; offset?: number }) {
   const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`, { params });
+  return response.data;
+}
+
+export async function fetchArchiveSummary(params?: { limit?: number; offset?: number; skater_id?: string | null }) {
+  const response = await apiClient.get<ArchiveResponse>("/skaters/archive", { params });
   return response.data;
 }
 
@@ -1095,6 +1377,16 @@ export async function fetchDebugRun(id: string) {
 
 export async function deleteDebugRun(id: string) {
   await apiClient.delete(`/debug/runs/${id}`);
+}
+
+export async function fetchDebugGoldenLabel(id: string) {
+  const response = await apiClient.get<DebugGoldenLabel>(`/debug/runs/${id}/golden-label`);
+  return response.data;
+}
+
+export async function saveDebugGoldenLabel(id: string, payload: DebugGoldenLabelPayload) {
+  const response = await apiClient.put<DebugGoldenLabel>(`/debug/runs/${id}/golden-label`, payload);
+  return response.data;
 }
 
 function buildDebugRunFormData(payload: DebugRunCreatePayload) {

@@ -9,7 +9,7 @@ from app.schemas import Severity
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
-from app.services.llm_context import AnalysisPromptContext, render_prompt_context
+from app.services.llm_context import AnalysisPromptContext, render_prompt_context, split_user_note_questions
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,50 @@ def _fallback_subscores() -> dict[str, int]:
         "landing_absorption": 75,
         "core_stability": 75,
     }
+
+
+def valid_subscores(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key in SUBSCORE_KEYS:
+        raw = value.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= numeric <= 100:
+            continue
+        normalized[key] = _clamp_score(numeric)
+    return normalized if len(normalized) == len(SUBSCORE_KEYS) else {}
+
+
+def effective_report_subscores(
+    report: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+) -> tuple[dict[str, int], str]:
+    report_subscores = valid_subscores(report.get("subscores") if isinstance(report, dict) else None)
+    if report_subscores:
+        return report_subscores, "ai_fused"
+
+    bio_subscores = valid_subscores(bio_data.get("bio_subscores") if isinstance(bio_data, dict) else None)
+    if bio_subscores:
+        return bio_subscores, "biomechanics"
+
+    return _fallback_subscores(), "fallback_reference"
+
+
+def ensure_report_subscores(
+    report: dict[str, Any] | None,
+    bio_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = dict(report) if isinstance(report, dict) else {}
+    subscores, source = effective_report_subscores(normalized, bio_data if isinstance(bio_data, dict) else None)
+    normalized["subscores"] = subscores
+    normalized["subscores_source"] = source
+    return normalized
 
 
 def fuse_subscores(
@@ -248,6 +292,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
     user_note = payload.get("user_note")
     if user_note is None:
         user_note = payload.get("note")
+    action_confirmation = payload.get("action_confirmation")
 
     normalized = {
         "summary": str(payload.get("summary", "")).strip(),
@@ -261,6 +306,12 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         ),
         "data_quality": str(payload.get("data_quality", "partial")).strip() or "partial",
         "user_note": str(user_note).strip() if isinstance(user_note, str) and user_note.strip() else None,
+        "user_note_response": (
+            str(payload.get("user_note_response")).strip()
+            if isinstance(payload.get("user_note_response"), str) and str(payload.get("user_note_response")).strip()
+            else None
+        ),
+        "action_confirmation": action_confirmation if isinstance(action_confirmation, dict) else None,
     }
     return attach_score_breakdown(normalized)
 
@@ -384,6 +435,135 @@ def _video_temporal_evidence(dual_path_meta: dict[str, Any] | None) -> dict[str,
     meta = dual_path_meta if isinstance(dual_path_meta, dict) else {}
     temporal = meta.get("video_temporal")
     return temporal if isinstance(temporal, dict) else {}
+
+
+def _action_confirmation_from_meta(dual_path_meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    temporal = _video_temporal_evidence(dual_path_meta)
+    action = temporal.get("action_confirmation")
+    if not isinstance(action, dict):
+        return None
+    confirmed = _text(action.get("confirmed_action") or action.get("jump_type"))
+    family = _text(action.get("action_family"))
+    notes = _text(action.get("notes"))
+    confidence_raw = action.get("confidence")
+    try:
+        confidence = max(0.0, min(1.0, float(confidence_raw)))
+    except (TypeError, ValueError):
+        confidence = None
+    if not any((confirmed, family, notes, confidence is not None)):
+        return None
+    return {
+        "action_family": family or None,
+        "confirmed_action": confirmed or "不可分析",
+        "jump_type": _text(action.get("jump_type")) or None,
+        "confidence": confidence,
+        "notes": notes or None,
+    }
+
+
+def _action_confirmation_text(action_confirmation: dict[str, Any] | None, action_type: str) -> str:
+    if not isinstance(action_confirmation, dict):
+        return f"只能确认大类为{action_type}，暂不能可靠确认具体细项。"
+    confirmed = _text(action_confirmation.get("confirmed_action") or action_confirmation.get("jump_type"))
+    if not confirmed or confirmed == "不可分析":
+        return f"只能确认大类为{action_type}，暂不能可靠确认具体细项。"
+    confidence = action_confirmation.get("confidence")
+    try:
+        percent = round(float(confidence) * 100)
+    except (TypeError, ValueError):
+        percent = None
+    confidence_text = f"，置信度约 {percent}%" if percent is not None else ""
+    notes = _text(action_confirmation.get("notes"))
+    note_text = f"；{notes}" if notes else ""
+    return f"视频语义更倾向识别为 {confirmed}{confidence_text}{note_text}"
+
+
+def _landing_explanation_from_report(report: dict[str, Any]) -> str:
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    landing_related: list[str] = []
+    fallback: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        description = _text(issue.get("description"))
+        if not description:
+            continue
+        text = f"{issue.get('category', '')} {issue.get('phase', '')} {description}"
+        if any(token in text for token in ("落冰", "滑出", "轴心", "前倾", "侧倾", "失衡", "不稳")):
+            landing_related.append(description)
+        else:
+            fallback.append(description)
+    chosen = landing_related[:2] or fallback[:2]
+    if not chosen:
+        return "落冰不稳的原因需要结合画面和骨架继续复核。"
+    return "落冰不稳主要和" + "；".join(chosen) + "有关。"
+
+
+def _user_note_response(
+    *,
+    report: dict[str, Any],
+    action_type: str,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None,
+) -> str | None:
+    note = _text(prompt_context.user_note if prompt_context is not None else None)
+    if not note:
+        return None
+    existing = _text(report.get("user_note_response"))
+    if existing and note in existing:
+        return existing
+
+    parts = [f"家长/学员备注提到：{note}"]
+    if any(token in note for token in ("哪个动作", "什么动作", "具体", "跳种", "动作")):
+        parts.append(_action_confirmation_text(report.get("action_confirmation"), action_type))
+    if any(token in note for token in ("落冰", "不稳", "为什么", "原因")):
+        parts.append(_landing_explanation_from_report(report))
+    if len(parts) == 1:
+        focus = _text(report.get("training_focus") or report.get("summary"))
+        if focus:
+            parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
+    return " ".join(parts)
+
+
+def _answer_single_user_note_question(question: str, report: dict[str, Any], action_type: str) -> str:
+    if any(token in question for token in ("哪个动作", "哪一个动作", "什么动作", "具体", "跳种", "动作名", "动作")):
+        action_text = _action_confirmation_text(report.get("action_confirmation"), action_type)
+        return f"{question}：能确认的是，{action_text}；不能确认的是，当前证据不足以稳定支持的更细动作名称不应强行判定。"
+    if any(token in question for token in ("落冰", "不稳", "为什么", "为何", "原因", "怎么回事")):
+        landing_text = _landing_explanation_from_report(report)
+        return f"{question}：能确认的是，{landing_text}；不能确认的是，单靠当前证据无法排除拍摄角度、遮挡或关键帧偏差带来的影响。"
+    focus = _text(report.get("training_focus") or report.get("summary"))
+    if focus:
+        return f"{question}：能确认的是，本次报告已把这个问题纳入关注，当前训练重点是{focus}；不能确认的是，证据里没有直接覆盖的细节需要结合原视频或现场观察复核。"
+    return f"{question}：能确认的是，当前报告只能基于已保存的动作识别、关键帧和生物力学证据回答；不能确认的是，证据未覆盖的细节不能写成确定结论。"
+
+
+def _user_note_response(
+    *,
+    report: dict[str, Any],
+    action_type: str,
+    prompt_context: AnalysisPromptContext | None,
+    dual_path_meta: dict[str, Any] | None,
+) -> str | None:
+    note = _text(prompt_context.user_note if prompt_context is not None else None)
+    if not note:
+        return None
+    existing = _text(report.get("user_note_response"))
+    if existing and note in existing and all(question in existing for question in split_user_note_questions(note)):
+        return existing
+
+    questions = split_user_note_questions(note)
+    if questions:
+        answers = [_answer_single_user_note_question(question, report, action_type) for question in questions]
+        return " 家长/学员备注提到：" + note + " " + " ".join(answers)
+
+    parts = [f"家长/学员备注提到：{note}"]
+    focus = _text(report.get("training_focus") or report.get("summary"))
+    if focus:
+        parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
+    else:
+        parts.append("当前报告已把这条备注作为观察线索；证据不足的部分不会写成确定结论。")
+    return " ".join(parts)
 
 
 def _collect_path_b_issue_texts(dual_path_meta: dict[str, Any] | None) -> list[str]:
@@ -555,6 +735,12 @@ def _refine_report_with_structured_evidence(
     prompt_context: AnalysisPromptContext | None,
 ) -> dict[str, Any]:
     refined = dict(report)
+    action_confirmation = _action_confirmation_from_meta(dual_path_meta)
+    if action_confirmation and not isinstance(refined.get("action_confirmation"), dict):
+        refined["action_confirmation"] = action_confirmation
+    if prompt_context is not None and prompt_context.user_note:
+        refined["user_note"] = prompt_context.user_note
+
     existing_issues = _meaningful_report_issues(refined)
     evidence_issues = _synthesize_issues_from_evidence(action_type, vision_summary, dual_path_meta, prompt_context)
 
@@ -603,6 +789,15 @@ def _refine_report_with_structured_evidence(
         target_names = "、".join(item["target"] for item in improvements[:2] if item.get("target"))
         if target_names:
             refined["training_focus"] = f"本阶段优先训练{target_names}，每次只挑一个目标复盘。"
+
+    note_response = _user_note_response(
+        report=refined,
+        action_type=action_type,
+        prompt_context=prompt_context,
+        dual_path_meta=dual_path_meta,
+    )
+    if note_response:
+        refined["user_note_response"] = note_response
 
     return refined
 
@@ -970,6 +1165,19 @@ def _fallback_report(
         "subscores": _fallback_subscores(),
         "data_quality": "partial",
     }
+    action_confirmation = _action_confirmation_from_meta(dual_path_meta)
+    if action_confirmation:
+        payload["action_confirmation"] = action_confirmation
+    if prompt_context is not None and prompt_context.user_note:
+        payload["user_note"] = prompt_context.user_note
+    note_response = _user_note_response(
+        report=payload,
+        action_type=action_type,
+        prompt_context=prompt_context,
+        dual_path_meta=dual_path_meta,
+    )
+    if note_response:
+        payload["user_note_response"] = note_response
     return _apply_low_confidence_notice(normalize_report(payload, bio_data), vision_summary)
 
 
@@ -1138,7 +1346,9 @@ async def generate_report(
         '  "improvements": [{"target":"针对的问题","action":"具体改进动作"}],\n'
         '  "training_focus": "本阶段训练重点",\n'
         '  "subscores": {"takeoff_power":0,"rotation_axis":0,"arm_coordination":0,"landing_absorption":0,"core_stability":0},\n'
-        '  "data_quality": "good|partial|poor"\n'
+        '  "data_quality": "good|partial|poor",\n'
+        '  "action_confirmation": {"action_family":"jump|spin|spiral|step|unknown","confirmed_action":"具体动作名或不可分析","confidence":0.0,"notes":"证据说明"},\n'
+        '  "user_note_response": "如用户备注/comments 提问，必须用 1-2 句直接回应；若证据不足，明确说明只能确认到哪一层级。"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
         "视觉评分参考：视觉摘要中的 pure_vision_subscores（0-1 小数）是纯视觉分析的评分，"
@@ -1162,7 +1372,9 @@ async def generate_report(
         "请使用动作大类和阶段来描述问题，不要编造具体细项。"
         "只有在视觉摘要、视频时序或 profile_evidence 明确支持时，才把 Lutz/Flip/Axel 等具体名称写进 summary/issues。\n"
         "用户备注/comments 要体现在关注点和训练建议中，但必须标注为“家长/学员备注提到...”或只作为训练重点线索，"
-        "不要把备注里的感受写成已验证技术事实。\n\n"
+        "不要把备注里的感受写成已验证技术事实。"
+        "如果 comments 是问题（例如“具体是哪个动作”“为什么落冰不稳”），必须在 user_note_response 中逐条直接回答；"
+        "具体动作名必须优先参考视频时序的 action_confirmation，证据不足时写“只能确认大类/不可可靠确认具体细项”。\n\n"
         "问题与建议质量要求：issues 必须至少 2 条可执行技术问题，优先引用 Path B top_issues 或帧级 issues；"
         "不要只写“数据质量有限”。improvements 必须逐条对应具体问题，写成可以当天训练的动作或分段练习；"
         "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段、次数和儿童安全边界。"

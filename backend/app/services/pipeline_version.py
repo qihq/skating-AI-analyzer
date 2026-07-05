@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.303"
+CURRENT_PIPELINE_VERSION = "v5.2.313"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -19,6 +19,16 @@ CURRENT_PIPELINE_VERSION = "v5.2.303"
 # v5.2.0: Align debug replay with the formal sampling pipeline and exclude unreliable pose frames from keyframe scoring.
 # v5.2.302: Fail closed when manual target locks lack tracker diagnostics so pose backfills cannot redraw wrong-person skeletons.
 # v5.2.303: Allow review uploads with only a broad action category and pass user comments into video-temporal action recognition.
+# v5.2.304: Let follow-up chat queue full-video reanalysis with target-lock reset and make report/chat share images adapt to long text.
+# v5.2.305: Add follow-up video-AI-only full-source keyframe rerun cards without resetting target lock or overwriting reports.
+# v5.2.306: Answer multiple user-note questions, harden child-safe training-plan JSON, and add responsive archive summary day details.
+# v5.2.307: Persist background analysis comparisons, split vision/report AI roles, add comparison sharing, and harden plan fallbacks.
+# v5.2.308: Add mobile pinch target selection, manual-window dense sampling, profile-aware evidence, share-card comments/timelines, and reliable subscores.
+# v5.2.309: Add golden-label debug workflow, stratum evaluation reports, appearance relock diagnostics, and fail-closed T/A/L resolver guards.
+# v5.2.310: Document mandatory versioned GitHub updates, README release notes, and all-in-one image export/startup discipline.
+# v5.2.311: Add a standalone Golden labeling workspace and fix bbox drawing across sampled, semantic, and partial debug frames.
+# v5.2.312: Merge Golden workspace into master and preserve compact JSON training-plan hardening with one repair pass.
+# v5.2.313: Add progress/archive Golden entry points, URL-selected Golden analysis loading, and manual keyframe window controls with responsive cards.
 # v5.2.301: Treat manual target selection as identity-authoritative by blocking automatic support-anchor recovery and blanking those poses.
 # v5.2.300: Harden manual target locks by rejecting no-overlap initial target binding and same-ID recovery drift instead of switching skeleton identity.
 # v5.2.299: Blank semantic Path B skeleton annotations under manual target lock so auxiliary vision prompts cannot inherit wrong-person pose.

@@ -10,10 +10,12 @@ const TAB_MATCHERS: Array<{ tab: PrimaryTab; paths: string[] }> = [
   { tab: "path", paths: ["/path"] },
   { tab: "snowball", paths: ["/snowball"] },
   { tab: "review", paths: ["/review", "/report"] },
+  { tab: "chat", paths: ["/analysis-chat"] },
   { tab: "archive", paths: ["/archive"] },
   { tab: "history", paths: ["/history"] },
   { tab: "settings", paths: ["/settings"] },
   { tab: "debug", paths: ["/debug"] },
+  { tab: "golden", paths: ["/golden"] },
 ];
 
 const MODERN_NAV_ITEMS = [

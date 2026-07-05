@@ -387,6 +387,9 @@ async def _run_migrations(conn) -> None:
     await run_migrations_patch_h(conn)
     await run_migrations_patch_i(conn)
     await run_migrations_debug_runs(conn)
+    await run_migrations_analysis_chat(conn)
+    await run_migrations_analysis_corrections(conn)
+    await run_migrations_analysis_comparisons(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -624,7 +627,128 @@ async def _apply_patch_i(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_created_at ON analyses(created_at DESC)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_id ON analyses(skater_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_skater_created_at ON analyses(skater_id, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_action_created_at ON analyses(action_type, created_at DESC)"))
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_analyses_action_skater_created_at "
+            "ON analyses(action_type, skater_id, created_at DESC)"
+        )
+    )
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_status_created_at ON analyses(status, created_at DESC)"))
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_list_items (
+                analysis_id TEXT PRIMARY KEY,
+                skater_id TEXT,
+                session_id TEXT,
+                skill_node_id TEXT,
+                skill_category TEXT,
+                action_type TEXT NOT NULL,
+                action_subtype TEXT,
+                analysis_profile TEXT,
+                pipeline_version TEXT,
+                status TEXT NOT NULL,
+                force_score INTEGER,
+                report_summary TEXT,
+                note TEXT,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    list_item_columns_result = await conn.execute(text("PRAGMA table_info(analysis_list_items)"))
+    list_item_columns = {row[1] for row in list_item_columns_result.fetchall()}
+    if "skill_node_id" not in list_item_columns:
+        await conn.execute(text("ALTER TABLE analysis_list_items ADD COLUMN skill_node_id TEXT"))
+    if "report_summary" not in list_item_columns:
+        await conn.execute(text("ALTER TABLE analysis_list_items ADD COLUMN report_summary TEXT"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_list_items_created_at ON analysis_list_items(created_at DESC)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_list_items_skater_created_at ON analysis_list_items(skater_id, created_at DESC)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_list_items_action_created_at ON analysis_list_items(action_type, created_at DESC)")
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_analysis_list_items_action_skater_created_at "
+            "ON analysis_list_items(action_type, skater_id, created_at DESC)"
+        )
+    )
+    await conn.execute(text("DROP TRIGGER IF EXISTS trg_analysis_list_items_insert"))
+    await conn.execute(text("DROP TRIGGER IF EXISTS trg_analysis_list_items_update"))
+    await conn.execute(text("DROP TRIGGER IF EXISTS trg_analysis_list_items_delete"))
+    await conn.execute(
+        text(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_analysis_list_items_insert
+            AFTER INSERT ON analyses
+            BEGIN
+                INSERT OR REPLACE INTO analysis_list_items (
+                    analysis_id, skater_id, session_id, skill_node_id, skill_category, action_type, action_subtype,
+                    analysis_profile, pipeline_version, status, force_score, report_summary, note, created_at, updated_at
+                )
+                VALUES (
+                    NEW.id, NEW.skater_id, NEW.session_id, NEW.skill_node_id, NEW.skill_category, NEW.action_type, NEW.action_subtype,
+                    NEW.analysis_profile, NEW.pipeline_version, NEW.status, NEW.force_score, json_extract(NEW.report, '$.summary'), NEW.note,
+                    NEW.created_at, NEW.updated_at
+                );
+            END
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_analysis_list_items_update
+            AFTER UPDATE OF skater_id, session_id, skill_node_id, skill_category, action_type, action_subtype,
+                analysis_profile, pipeline_version, status, force_score, report, note, created_at, updated_at ON analyses
+            BEGIN
+                INSERT OR REPLACE INTO analysis_list_items (
+                    analysis_id, skater_id, session_id, skill_node_id, skill_category, action_type, action_subtype,
+                    analysis_profile, pipeline_version, status, force_score, report_summary, note, created_at, updated_at
+                )
+                VALUES (
+                    NEW.id, NEW.skater_id, NEW.session_id, NEW.skill_node_id, NEW.skill_category, NEW.action_type, NEW.action_subtype,
+                    NEW.analysis_profile, NEW.pipeline_version, NEW.status, NEW.force_score, json_extract(NEW.report, '$.summary'), NEW.note,
+                    NEW.created_at, NEW.updated_at
+                );
+            END
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_analysis_list_items_delete
+            AFTER DELETE ON analyses
+            BEGIN
+                DELETE FROM analysis_list_items WHERE analysis_id = OLD.id;
+            END
+            """
+        )
+    )
+    analysis_count_result = await conn.execute(text("SELECT COUNT(*) FROM analyses"))
+    analysis_count = int(analysis_count_result.scalar_one())
+    list_count_result = await conn.execute(text("SELECT COUNT(*) FROM analysis_list_items"))
+    list_count = int(list_count_result.scalar_one())
+    if list_count != analysis_count:
+        await conn.execute(
+            text(
+                """
+                INSERT OR REPLACE INTO analysis_list_items (
+                    analysis_id, skater_id, session_id, skill_node_id, skill_category, action_type, action_subtype,
+                    analysis_profile, pipeline_version, status, force_score, report_summary, note, created_at, updated_at
+                )
+                SELECT
+                    id, skater_id, session_id, skill_node_id, skill_category, action_type, action_subtype,
+                    analysis_profile, pipeline_version, status, force_score, json_extract(report, '$.summary'), note, created_at, updated_at
+                FROM analyses
+                """
+            )
+        )
 
 
 async def run_migrations_debug_runs(engine) -> None:
@@ -670,6 +794,113 @@ async def _create_debug_run_tables(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_status_created_at ON debug_runs(status, created_at DESC)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_analysis_id ON debug_runs(analysis_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_debug_runs_mode ON debug_runs(mode)"))
+
+
+async def run_migrations_analysis_chat(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_analysis_chat_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_analysis_chat_tables(conn)
+
+
+async def _create_analysis_chat_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_chat_messages (
+                id TEXT PRIMARY KEY,
+                analysis_id TEXT NOT NULL REFERENCES analyses(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                context_snapshot JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_chat_messages_analysis_id ON analysis_chat_messages(analysis_id)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_chat_messages_analysis_created_at ON analysis_chat_messages(analysis_id, created_at)")
+    )
+
+
+async def run_migrations_analysis_corrections(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_analysis_correction_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_analysis_correction_tables(conn)
+
+
+async def _create_analysis_correction_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_corrections (
+                id TEXT PRIMARY KEY,
+                analysis_id TEXT NOT NULL REFERENCES analyses(id),
+                kind TEXT NOT NULL,
+                payload JSON NOT NULL,
+                rationale TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                status TEXT NOT NULL DEFAULT 'proposed',
+                original_snapshot JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                applied_at TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_id ON analysis_corrections(analysis_id)"))
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_status ON analysis_corrections(analysis_id, status)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_analysis_corrections_analysis_created_at ON analysis_corrections(analysis_id, created_at)")
+    )
+
+
+async def run_migrations_analysis_comparisons(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_analysis_comparison_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_analysis_comparison_tables(conn)
+
+
+async def _create_analysis_comparison_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_comparisons (
+                id TEXT PRIMARY KEY,
+                analysis_a_id TEXT NOT NULL REFERENCES analyses(id),
+                analysis_b_id TEXT NOT NULL REFERENCES analyses(id),
+                skater_id TEXT,
+                action_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                video_ai_json JSON,
+                result_json JSON,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_comparisons_skater_created_at ON analysis_comparisons(skater_id, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_comparisons_action_created_at ON analysis_comparisons(action_type, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_comparisons_status_created_at ON analysis_comparisons(status, created_at DESC)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_comparisons_analysis_a ON analysis_comparisons(analysis_a_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analysis_comparisons_analysis_b ON analysis_comparisons(analysis_b_id)"))
 
 
 async def _create_phase6_tables(conn) -> None:

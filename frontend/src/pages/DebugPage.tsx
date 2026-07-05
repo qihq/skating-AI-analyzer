@@ -1,9 +1,11 @@
-import { ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { CSSProperties, ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import {
   AnalysisDetail,
   AnalysisListItem,
+  DebugGoldenLabel,
+  DebugGoldenLabelPayload,
   DebugRunDetail,
   DebugRunMode,
   DebugRunSummary,
@@ -15,8 +17,10 @@ import {
   confirmDebugTargetLock,
   fetchAnalyses,
   fetchAnalysis,
+  fetchDebugGoldenLabel,
   fetchDebugRun,
   fetchDebugRuns,
+  saveDebugGoldenLabel,
 } from "../api/client";
 import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import { useAppMode } from "../components/AppModeContext";
@@ -28,11 +32,51 @@ import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from 
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
-type DebugTab = "overview" | "frames" | "tracking" | "video" | "raw";
+type DebugTab = "overview" | "frames" | "tracking" | "video" | "label" | "raw";
+type DebugWorkspace = "debug" | "golden";
 type TargetSelectionMode = "candidate" | "manual";
 
 const ACTION_TYPES = ["跳跃", "旋转", "步法", "自由滑"];
 const PROFILE_OPTIONS = ["jump", "spin", "step", "spiral"];
+
+const STRATUM_OPTIONS = ["unspecified", "single_skater", "multi_skater", "small_target", "occlusion", "known_bad_keyframes"];
+const REVIEW_FLAG_OPTIONS = [
+  "identity_switch",
+  "target_lost",
+  "takeoff_early",
+  "takeoff_late",
+  "apex_drift",
+  "landing_glideout",
+  "multi_person_motion_pollution",
+];
+const KEYFRAME_SPECS: Record<string, Array<{ key: string; label: string }>> = {
+  jump: [
+    { key: "T", label: "Takeoff" },
+    { key: "A", label: "Apex" },
+    { key: "L", label: "Landing" },
+  ],
+  spin: [
+    { key: "spin_entry", label: "Entry" },
+    { key: "spin_main", label: "Main" },
+    { key: "spin_exit", label: "Exit" },
+  ],
+  step: [{ key: "step_sequence", label: "Sequence" }],
+  spiral: [
+    { key: "spiral_entry", label: "Entry" },
+    { key: "spiral_hold", label: "Hold" },
+    { key: "spiral_exit", label: "Exit" },
+  ],
+};
+
+interface LabelFrameRow {
+  id: string;
+  title: string;
+  source: "sampled" | "semantic" | "partial";
+  url?: string;
+  timestamp: number | null;
+  bboxKey: string;
+  poseFrame?: Record<string, unknown>;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -253,6 +297,16 @@ function progressFromSummary(value: unknown) {
   return progress == null ? null : Math.max(0, Math.min(1, progress));
 }
 
+function goldenStatusFromRun(run: DebugRunSummary) {
+  const summary = asRecord(run.summary);
+  return typeof summary.golden_label_status === "string" ? summary.golden_label_status : "unlabeled";
+}
+
+function evalStatusFromRun(run: DebugRunSummary) {
+  const summary = asRecord(run.summary);
+  return typeof summary.eval_status === "string" ? summary.eval_status : goldenStatusFromRun(run);
+}
+
 function keyframeRows(value: unknown, poseFrameById: Map<string, Record<string, unknown>>) {
   const candidates = asRecord(value);
   return ["T", "A", "L"].map((label) => {
@@ -271,9 +325,210 @@ function keyframeRows(value: unknown, poseFrameById: Map<string, Record<string, 
   });
 }
 
+function profileForLabel(run: DebugRunDetail, draftProfile?: string | null) {
+  const raw = String(draftProfile || run.analysis_profile || run.action_type || "").toLowerCase();
+  if (raw.includes("spin") || raw.includes("旋")) {
+    return "spin";
+  }
+  if (raw.includes("step") || raw.includes("步")) {
+    return "step";
+  }
+  if (raw.includes("spiral") || raw.includes("燕") || raw.includes("螺旋")) {
+    return "spiral";
+  }
+  return "jump";
+}
+
+function numericInputValue(value: number | null | undefined) {
+  return value == null || Number.isNaN(value) ? "" : String(value);
+}
+
+function parseOptionalNumber(value: string) {
+  if (!value.trim()) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function bboxIou(a: unknown, b: unknown) {
+  const boxA = normalizedBBox(a);
+  const boxB = normalizedBBox(b);
+  if (!boxA || !boxB) {
+    return null;
+  }
+  const ax2 = boxA.x + boxA.width;
+  const ay2 = boxA.y + boxA.height;
+  const bx2 = boxB.x + boxB.width;
+  const by2 = boxB.y + boxB.height;
+  const ix1 = Math.max(boxA.x, boxB.x);
+  const iy1 = Math.max(boxA.y, boxB.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  if (ix2 <= ix1 || iy2 <= iy1) {
+    return 0;
+  }
+  const inter = (ix2 - ix1) * (iy2 - iy1);
+  const union = boxA.width * boxA.height + boxB.width * boxB.height - inter;
+  return union > 0 ? inter / union : null;
+}
+
+function frameTimestamp(frame: Record<string, unknown> | undefined) {
+  return asNumber(frame?.timestamp ?? frame?.timestamp_sec ?? frame?.time_sec);
+}
+
+function normalizeKeyframeKey(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (["T", "takeoff", "T_takeoff_sec"].includes(raw)) {
+    return "T";
+  }
+  if (["A", "air", "apex", "A_air_sec"].includes(raw)) {
+    return "A";
+  }
+  if (["L", "landing", "L_landing_sec"].includes(raw)) {
+    return "L";
+  }
+  return raw;
+}
+
+function predictionKeyframes(run: DebugRunDetail) {
+  const result = asRecord(run.result_json);
+  const resolved = asRecord(result.resolved_keyframes);
+  const keyframes: Record<string, { timestamp: number | null; source: string | null; confidence: number | null }> = {};
+  const selected = asArray(resolved.selected).filter(isRecord);
+  selected.forEach((item) => {
+    const key = normalizeKeyframeKey(item.key ?? item.phase_code ?? item.key_moment);
+    const timestamp = asNumber(item.timestamp ?? item.timestamp_sec);
+    if (key && timestamp != null) {
+      keyframes[key] = {
+        timestamp,
+        source: typeof item.selection_reason === "string" ? item.selection_reason : typeof resolved.source === "string" ? resolved.source : null,
+        confidence: asNumber(item.confidence),
+      };
+    }
+  });
+  const candidates = asRecord(result.key_frame_candidates ?? asRecord(result.bio_data).key_frame_candidates);
+  Object.entries(candidates).forEach(([key, raw]) => {
+    const normalizedKey = normalizeKeyframeKey(key);
+    if (keyframes[normalizedKey]) {
+      return;
+    }
+    const candidate = asRecord(raw);
+    const timestamp = asNumber(candidate.timestamp);
+    if (timestamp != null) {
+      keyframes[normalizedKey] = {
+        timestamp,
+        source: "key_frame_candidates",
+        confidence: asNumber(candidate.confidence),
+      };
+    }
+  });
+  return keyframes;
+}
+
+function predictionBboxes(run: DebugRunDetail) {
+  const result = asRecord(run.result_json);
+  const targetLock = asRecord(result.target_lock);
+  const raw = asArray(targetLock.bbox_per_frame ?? result.bbox_per_frame);
+  const output = new Map<string, TargetBBox>();
+  raw.forEach((item, index) => {
+    const record = asRecord(item);
+    const frameIndex = asNumber(record.frame_index ?? record.index) ?? index;
+    const bbox = normalizedBBox(isRecord(record.bbox) ? record.bbox : record);
+    if (bbox) {
+      output.set(String(frameIndex), bbox);
+    }
+  });
+  return output;
+}
+
+function buildLabelFrames(
+  sampledFrames: Record<string, unknown>[],
+  semanticFrames: Record<string, unknown>[],
+  partialSemanticFrames: Record<string, unknown>[],
+  poseFrameById: Map<string, Record<string, unknown>>,
+) {
+  const rows: LabelFrameRow[] = [];
+  sampledFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `frame_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "sampled",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: String(index),
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  semanticFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `semantic_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "semantic",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: `semantic:${id}`,
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  partialSemanticFrames.forEach((frame, index) => {
+    const id = String(frame.frame_id ?? frameIdFromName(frame.filename) ?? `partial_semantic_${String(index + 1).padStart(4, "0")}`);
+    rows.push({
+      id,
+      title: id,
+      source: "partial",
+      url: typeof frame.url === "string" ? frame.url : undefined,
+      timestamp: frameTimestamp(frame),
+      bboxKey: `partial:${id}`,
+      poseFrame: poseFrameById.get(id),
+    });
+  });
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      const key = `${row.source}:${row.id}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => (a.timestamp ?? Number.POSITIVE_INFINITY) - (b.timestamp ?? Number.POSITIVE_INFINITY));
+}
+
+function defaultLabelDraft(run: DebugRunDetail, label?: DebugGoldenLabel | null): DebugGoldenLabelPayload {
+  const result = asRecord(run.result_json);
+  const summary = asRecord(run.summary);
+  const samplingMetadata = asRecord(result.sampling_metadata);
+  const fps = asNumber(label?.fps) ?? asNumber(samplingMetadata.effective_fps) ?? asNumber(summary.effective_fps) ?? null;
+  return {
+    skater_id: label?.skater_id ?? "",
+    action_type: label?.action_type ?? run.action_type,
+    action_subtype: label?.action_subtype ?? run.action_subtype,
+    analysis_profile: label?.analysis_profile ?? run.analysis_profile,
+    stratum: label?.stratum ?? "unspecified",
+    fps,
+    keyframes: { ...(label?.keyframes ?? {}) },
+    target_bboxes: { ...(label?.target_bboxes ?? {}) },
+    expected_review_flags: [...(label?.expected_review_flags ?? [])],
+    notes: label?.notes ?? "",
+  };
+}
+
 function selectedAnalysisLabel(analysisId: string | null, analyses: AnalysisListItem[]) {
   const item = analyses.find((analysis) => analysis.id === analysisId);
   return item ? buildTitle(item) : "选择正式分析记录";
+}
+
+function defaultManualWindowFromAnalysis(analysis: AnalysisDetail | null | undefined) {
+  const start = analysis?.manual_action_window_start ?? analysis?.action_window_start;
+  const end = analysis?.manual_action_window_end ?? analysis?.action_window_end;
+  return {
+    start: start == null || Number.isNaN(start) ? "" : String(Number(start.toFixed(3))),
+    end: end == null || Number.isNaN(end) ? "" : String(Number(end.toFixed(3))),
+  };
 }
 
 function JsonBlock({ value }: { value: unknown }) {
@@ -326,14 +581,40 @@ function InputWindowPanel({ value }: { value: unknown }) {
   );
 }
 
-function DebugFrameImage({ url, alt, className = "h-full w-full object-contain" }: { url?: string; alt: string; className?: string }) {
+function DebugFrameImage({
+  url,
+  alt,
+  className = "h-full w-full object-contain",
+  onImageSize,
+}: {
+  url?: string;
+  alt: string;
+  className?: string;
+  onImageSize?: (size: { width: number; height: number }) => void;
+}) {
   const [failed, setFailed] = useState(false);
 
   if (!url || failed) {
     return <div className="flex h-full items-center justify-center px-3 text-center text-xs text-slate-400">Frame unavailable</div>;
   }
 
-  return <img src={url} alt={alt} loading="lazy" onError={() => setFailed(true)} className={className} />;
+  return (
+    <img
+      src={url}
+      alt={alt}
+      loading="lazy"
+      draggable={false}
+      onDragStart={(event) => event.preventDefault()}
+      onLoad={(event) => {
+        const { naturalWidth, naturalHeight } = event.currentTarget;
+        if (naturalWidth > 0 && naturalHeight > 0) {
+          onImageSize?.({ width: naturalWidth, height: naturalHeight });
+        }
+      }}
+      onError={() => setFailed(true)}
+      className={className}
+    />
+  );
 }
 
 function PoseSkeletonOverlay({
@@ -667,6 +948,561 @@ function DebugTargetSelectionPanel({
   );
 }
 
+function labelFrameKey(frame: LabelFrameRow) {
+  return `${frame.source}:${frame.id}`;
+}
+
+function DebugPredictionGoldenPanel({
+  run,
+  draft,
+  keyframeSpecs,
+}: {
+  run: DebugRunDetail;
+  draft: DebugGoldenLabelPayload;
+  keyframeSpecs: Array<{ key: string; label: string }>;
+}) {
+  const predictedKeyframes = useMemo(() => predictionKeyframes(run), [run]);
+  const predictedBboxes = useMemo(() => predictionBboxes(run), [run]);
+  const bboxRows = Object.entries(draft.target_bboxes ?? {}).map(([frameIndex, golden]) => {
+    const predicted = predictedBboxes.get(frameIndex);
+    return {
+      frameIndex,
+      golden,
+      predicted,
+      iou: bboxIou(golden, predicted),
+    };
+  });
+
+  return (
+    <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Prediction vs Golden</p>
+          <p className="mt-1 text-xs text-slate-500">Current debug output compared with this draft label.</p>
+        </div>
+      </div>
+
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[520px] text-left text-xs">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="py-2 pr-3 font-semibold">Key</th>
+              <th className="py-2 pr-3 font-semibold">Pred</th>
+              <th className="py-2 pr-3 font-semibold">Golden</th>
+              <th className="py-2 pr-3 font-semibold">Delta</th>
+              <th className="py-2 pr-3 font-semibold">Source</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {keyframeSpecs.map((spec) => {
+              const predicted = predictedKeyframes[spec.key];
+              const golden = draft.keyframes?.[spec.key] ?? null;
+              const delta = predicted?.timestamp != null && golden != null ? predicted.timestamp - golden : null;
+              const ok = delta == null || Math.abs(delta) <= 0.25;
+              return (
+                <tr key={spec.key}>
+                  <td className="py-2 pr-3 font-semibold text-slate-900">{spec.key}</td>
+                  <td className="py-2 pr-3 font-mono text-slate-700">{formatDuration(predicted?.timestamp)}</td>
+                  <td className="py-2 pr-3 font-mono text-slate-700">{formatDuration(golden)}</td>
+                  <td className={`py-2 pr-3 font-mono font-semibold ${ok ? "text-emerald-700" : "text-rose-600"}`}>
+                    {delta == null ? "-" : `${delta >= 0 ? "+" : ""}${delta.toFixed(3)}s`}
+                  </td>
+                  <td className="max-w-[180px] truncate py-2 pr-3 text-slate-500" title={predicted?.source ?? ""}>
+                    {predicted?.source ?? "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 space-y-2">
+        <p className="text-xs font-semibold text-slate-500">Target bbox IoU</p>
+        {bboxRows.length ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {bboxRows.map((row) => (
+              <div key={row.frameIndex} className="rounded-[14px] border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono font-semibold text-slate-800">frame {row.frameIndex}</span>
+                  <span className={`font-semibold ${(row.iou ?? 0) >= 0.3 ? "text-emerald-700" : "text-rose-600"}`}>
+                    {row.iou == null ? "missing" : row.iou.toFixed(3)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500">No golden bboxes yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DebugGoldenLabelPanel({
+  run,
+  sampledFrames,
+  semanticFrames,
+  partialSemanticFrames,
+  poseFrameById,
+  connections,
+  onSaved,
+}: {
+  run: DebugRunDetail;
+  sampledFrames: Record<string, unknown>[];
+  semanticFrames: Record<string, unknown>[];
+  partialSemanticFrames: Record<string, unknown>[];
+  poseFrameById: Map<string, Record<string, unknown>>;
+  connections: number[][];
+  onSaved?: () => void;
+}) {
+  const [frameNode, setFrameNode] = useState<HTMLDivElement | null>(null);
+  const [state, setState] = useState<LoadState>("loading");
+  const [saveState, setSaveState] = useState<LoadState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [savedLabel, setSavedLabel] = useState<DebugGoldenLabel | null>(null);
+  const [draft, setDraft] = useState<DebugGoldenLabelPayload>(() => defaultLabelDraft(run, null));
+  const [flagsText, setFlagsText] = useState("");
+  const [selectedFrameKey, setSelectedFrameKey] = useState<string | null>(null);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
+  const [frameImageSizes, setFrameImageSizes] = useState<Record<string, { width: number; height: number }>>({});
+
+  const labelFrames = useMemo(
+    () => buildLabelFrames(sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById),
+    [sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById],
+  );
+  const selectedFrame = labelFrames.find((frame) => labelFrameKey(frame) === selectedFrameKey) ?? labelFrames[0] ?? null;
+  const selectedFrameStableKey = selectedFrame ? labelFrameKey(selectedFrame) : null;
+  const selectedImageSize = selectedFrameStableKey ? frameImageSizes[selectedFrameStableKey] : null;
+  const selectedAspectRatio = selectedImageSize && selectedImageSize.height > 0 ? selectedImageSize.width / selectedImageSize.height : 16 / 9;
+  const labelStageStyle: CSSProperties = { aspectRatio: `${selectedAspectRatio}` };
+  const labelProfile = profileForLabel(run, draft.analysis_profile);
+  const keyframeSpecs = KEYFRAME_SPECS[labelProfile] ?? KEYFRAME_SPECS.jump;
+  const savedBBox = selectedFrame ? draft.target_bboxes[selectedFrame.bboxKey] : null;
+  const savedBBoxStyle = bboxStyle(savedBBox);
+  const draftBBoxStyle = bboxStyle(draftBBox);
+  const poseBBoxStyle = bboxStyle(selectedFrame?.poseFrame?.target_bbox);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    setError(null);
+    setSaveState("idle");
+    setSavedLabel(null);
+    setDraft(defaultLabelDraft(run, null));
+    setFlagsText("");
+    setDraftBBox(null);
+    const load = async () => {
+      try {
+        const data = await fetchDebugGoldenLabel(run.id);
+        if (cancelled) {
+          return;
+        }
+        setSavedLabel(data.exists ? data : null);
+        setDraft(defaultLabelDraft(run, data));
+        setFlagsText((data.expected_review_flags ?? []).join(", "));
+        setState("ready");
+      } catch {
+        if (!cancelled) {
+          setState("error");
+          setError("Golden label failed to load.");
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [run.id]);
+
+  useEffect(() => {
+    if (!labelFrames.length) {
+      setSelectedFrameKey(null);
+      return;
+    }
+    setSelectedFrameKey((current) => {
+      if (current && labelFrames.some((frame) => labelFrameKey(frame) === current)) {
+        return current;
+      }
+      return labelFrameKey(labelFrames[0]);
+    });
+  }, [labelFrames]);
+
+  const updateDraft = (patch: Partial<DebugGoldenLabelPayload>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const setKeyframeFromSelected = (key: string) => {
+    if (!selectedFrame || selectedFrame.timestamp == null) {
+      setError("Selected frame has no timestamp.");
+      return;
+    }
+    setError(null);
+    setDraft((current) => ({
+      ...current,
+      keyframes: { ...current.keyframes, [key]: Number(selectedFrame.timestamp!.toFixed(3)) },
+    }));
+  };
+
+  const setKeyframeValue = (key: string, value: string) => {
+    setDraft((current) => ({
+      ...current,
+      keyframes: { ...current.keyframes, [key]: parseOptionalNumber(value) },
+    }));
+  };
+
+  const clearKeyframe = (key: string) => {
+    setDraft((current) => {
+      const next = { ...current.keyframes };
+      delete next[key];
+      return { ...current, keyframes: next };
+    });
+  };
+
+  const pointFromEvent = (event: PointerEvent<HTMLDivElement>) => {
+    const rect = frameNode?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (!selectedFrame) {
+      setError("Select a frame before drawing a target bbox.");
+      return;
+    }
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(point);
+    setDraftBBox({ x: point.x, y: point.y, width: 0, height: 0 });
+    setError(null);
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragStart) {
+      return;
+    }
+    const point = pointFromEvent(event);
+    if (point) {
+      setDraftBBox(normalizeDragBox(dragStart, point));
+    }
+  };
+
+  const finishDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragStart) {
+      return;
+    }
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    setDragStart(null);
+    setDraftBBox(null);
+    if (!point || !selectedFrame) {
+      return;
+    }
+    const bbox = normalizeDragBox(dragStart, point);
+    if (bbox.width < 0.02 || bbox.height < 0.02) {
+      setError("Target bbox is too small.");
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      target_bboxes: { ...current.target_bboxes, [selectedFrame.bboxKey]: bbox },
+    }));
+    setError(null);
+  };
+
+  const clearSelectedBBox = () => {
+    if (!selectedFrame) {
+      return;
+    }
+    setDraft((current) => {
+      const next = { ...current.target_bboxes };
+      delete next[selectedFrame.bboxKey];
+      return { ...current, target_bboxes: next };
+    });
+  };
+
+  const flagValues = useMemo(
+    () =>
+      flagsText
+        .split(",")
+        .map((flag) => flag.trim())
+        .filter(Boolean),
+    [flagsText],
+  );
+
+  const toggleReviewFlag = (flag: string) => {
+    const current = new Set(flagValues);
+    if (current.has(flag)) {
+      current.delete(flag);
+    } else {
+      current.add(flag);
+    }
+    setFlagsText(Array.from(current).join(", "));
+  };
+
+  const handleSave = async () => {
+    setSaveState("loading");
+    setError(null);
+    try {
+      const payload: DebugGoldenLabelPayload = {
+        ...draft,
+        expected_review_flags: flagsText
+          .split(",")
+          .map((flag) => flag.trim())
+          .filter(Boolean),
+      };
+      const saved = await saveDebugGoldenLabel(run.id, payload);
+      setSavedLabel(saved);
+      setDraft(defaultLabelDraft(run, saved));
+      setFlagsText((saved.expected_review_flags ?? []).join(", "));
+      setSaveState("ready");
+      onSaved?.();
+    } catch {
+      setSaveState("error");
+      setError("Golden label failed to save.");
+    }
+  };
+
+  if (state === "loading") {
+    return <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">Loading golden label...</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
+        <div className="min-w-0 space-y-4">
+          <div
+            ref={setFrameNode}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={finishDrag}
+            onPointerCancel={finishDrag}
+            style={labelStageStyle}
+            className="relative mx-auto w-full cursor-crosshair touch-none select-none overflow-hidden rounded-[20px] border border-slate-200 bg-slate-950"
+          >
+            <DebugFrameImage
+              url={selectedFrame?.url}
+              alt={selectedFrame?.title ?? "label frame"}
+              className="h-full w-full select-none object-fill"
+              onImageSize={
+                selectedFrameStableKey
+                  ? (size) => {
+                      setFrameImageSizes((current) => {
+                        const previous = current[selectedFrameStableKey];
+                        if (previous?.width === size.width && previous.height === size.height) {
+                          return current;
+                        }
+                        return { ...current, [selectedFrameStableKey]: size };
+                      });
+                    }
+                  : undefined
+              }
+            />
+            {poseBBoxStyle ? <div className="pointer-events-none absolute border-2 border-dashed border-cyan-300/80" style={poseBBoxStyle} /> : null}
+            {savedBBoxStyle ? <div className="pointer-events-none absolute border-2 border-emerald-300 bg-emerald-300/15" style={savedBBoxStyle} /> : null}
+            {draftBBoxStyle ? <div className="pointer-events-none absolute border-2 border-amber-300 bg-amber-300/15" style={draftBBoxStyle} /> : null}
+            <PoseSkeletonOverlay frame={selectedFrame?.poseFrame} connections={connections} />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-slate-200 bg-white px-4 py-3 text-sm">
+            <div className="min-w-0">
+              <p className="truncate font-mono font-semibold text-slate-900">{selectedFrame?.title ?? "No frame"}</p>
+              <p className="text-xs text-slate-500">
+                {selectedFrame?.source ?? "-"} · {formatDuration(selectedFrame?.timestamp)}
+                {selectedFrame?.bboxKey ? ` · bbox ${selectedFrame.bboxKey}` : ""}
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={clearSelectedBBox}
+                disabled={!selectedFrame || !savedBBox}
+                className="min-h-[36px] rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Clear bbox
+              </button>
+            </div>
+          </div>
+
+          <div className="max-h-[26rem] overflow-y-auto rounded-[18px] border border-slate-200 bg-white p-2">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {labelFrames.map((frame) => {
+                const key = labelFrameKey(frame);
+                const active = key === labelFrameKey(selectedFrame ?? frame);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      setSelectedFrameKey(key);
+                      setDraftBBox(null);
+                    }}
+                    className={`min-w-0 rounded-[14px] border px-3 py-2 text-left text-xs transition ${
+                      active ? "border-blue-300 bg-blue-50 text-slate-900" : "border-slate-100 bg-slate-50 text-slate-600 hover:border-blue-100"
+                    }`}
+                  >
+                    <span className="block truncate font-mono font-semibold">{frame.title}</span>
+                    <span className="mt-1 block truncate">
+                      {frame.source} · {formatDuration(frame.timestamp)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="min-w-0 space-y-4">
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Skater ID</span>
+                <input value={draft.skater_id ?? ""} onChange={(event) => updateDraft({ skater_id: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Profile</span>
+                <select value={draft.analysis_profile ?? labelProfile} onChange={(event) => updateDraft({ analysis_profile: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm">
+                  {PROFILE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Action</span>
+                <input value={draft.action_type ?? ""} onChange={(event) => updateDraft({ action_type: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Subtype</span>
+                <input value={draft.action_subtype ?? ""} onChange={(event) => updateDraft({ action_subtype: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">Stratum</span>
+                <select value={draft.stratum ?? "unspecified"} onChange={(event) => updateDraft({ stratum: event.target.value })} className="app-input mt-2 rounded-[14px] text-sm">
+                  {STRATUM_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-500">FPS</span>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={numericInputValue(draft.fps)}
+                  onChange={(event) => updateDraft({ fps: parseOptionalNumber(event.target.value) })}
+                  className="app-input mt-2 rounded-[14px] text-sm"
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <div className="space-y-3">
+              {keyframeSpecs.map((spec) => (
+                <div key={spec.key} className="grid grid-cols-[minmax(72px,0.7fr)_minmax(0,1fr)] gap-2 sm:grid-cols-[minmax(82px,0.7fr)_minmax(0,1fr)_auto]">
+                  <div className="min-w-0 py-2">
+                    <p className="truncate text-sm font-semibold text-slate-900">{spec.key}</p>
+                    <p className="truncate text-xs text-slate-500">{spec.label}</p>
+                  </div>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={numericInputValue(draft.keyframes[spec.key])}
+                    onChange={(event) => setKeyframeValue(spec.key, event.target.value)}
+                    className="app-input min-w-0 rounded-[14px] text-sm"
+                  />
+                  <div className="col-span-2 flex gap-2 sm:col-span-1">
+                    <button
+                      type="button"
+                      onClick={() => setKeyframeFromSelected(spec.key)}
+                      disabled={!selectedFrame || selectedFrame.timestamp == null}
+                      className="min-h-[40px] flex-1 rounded-full bg-blue-500 px-3 text-xs font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+                    >
+                      Set
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => clearKeyframe(spec.key)}
+                      className="min-h-[40px] flex-1 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 sm:flex-none"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <DebugPredictionGoldenPanel run={run} draft={draft} keyframeSpecs={keyframeSpecs} />
+
+          <div className="rounded-[18px] border border-slate-200 bg-white p-4">
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-500">Review flags</span>
+              <input value={flagsText} onChange={(event) => setFlagsText(event.target.value)} className="app-input mt-2 rounded-[14px] text-sm" />
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {REVIEW_FLAG_OPTIONS.map((flag) => {
+                const selected = flagValues.includes(flag);
+                return (
+                  <button
+                    key={flag}
+                    type="button"
+                    onClick={() => toggleReviewFlag(flag)}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                      selected ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                    }`}
+                  >
+                    {flag}
+                  </button>
+                );
+              })}
+            </div>
+            <label className="mt-3 block">
+              <span className="text-xs font-semibold text-slate-500">Notes</span>
+              <textarea value={draft.notes ?? ""} onChange={(event) => updateDraft({ notes: event.target.value })} rows={4} className="app-input mt-2 min-h-[96px] resize-y rounded-[14px] text-sm" />
+            </label>
+          </div>
+
+          {error ? <div className="rounded-[18px] border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</div> : null}
+          {saveState === "ready" && savedLabel ? (
+            <div className="rounded-[18px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              Saved · {savedLabel.label_path ?? "golden_label.json"} · {savedLabel.manifest_path ?? "golden_manifest.json"}
+            </div>
+          ) : null}
+          {savedLabel?.label_quality_flags?.length ? (
+            <div className="rounded-[18px] border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+              {savedLabel.label_quality_flags.join(", ")}
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={saveState === "loading"}
+            className="min-h-[46px] w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {saveState === "loading" ? "Saving..." : "Save golden label"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DebugRunCard({
   run,
   selected,
@@ -686,6 +1522,16 @@ function DebugRunCard({
   const stageLabel = stageLabelFromSummary(summary);
   const progress = progressFromSummary(summary);
   const showProgress = (run.status === "pending" || run.status === "processing") && progress != null;
+  const labelStatus = typeof summary.golden_label_status === "string" ? summary.golden_label_status : "unlabeled";
+  const evalStatus = typeof summary.eval_status === "string" ? summary.eval_status : labelStatus;
+  const evalTone =
+    evalStatus === "passes"
+      ? "bg-emerald-50 text-emerald-700"
+      : evalStatus === "fails"
+        ? "bg-rose-50 text-rose-600"
+        : evalStatus === "labeled"
+          ? "bg-blue-50 text-blue-700"
+          : "bg-slate-100 text-slate-500";
 
   return (
     <article
@@ -698,20 +1544,20 @@ function DebugRunCard({
           onSelect();
         }
       }}
-      className={`w-full rounded-[20px] border px-4 py-4 text-left transition ${
+      className={`w-full min-w-0 max-w-full overflow-hidden rounded-[20px] border px-4 py-4 text-left transition ${
         selected ? "border-blue-200 bg-blue-50" : "border-slate-200 bg-white hover:border-blue-100 hover:bg-slate-50"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="flex min-w-0 flex-col gap-3 phone:flex-row phone:items-start phone:justify-between">
+        <div className="min-w-0 max-w-full">
           <p className="truncate text-sm font-semibold text-slate-900">{modeLabel(run.mode)}</p>
           <p className="mt-1 text-xs text-slate-500">
             {sourceLabel(run.source_type)} · {run.action_subtype || run.action_type}
           </p>
           {stageLabel && (run.status === "pending" || run.status === "processing") ? <p className="mt-2 text-xs font-semibold text-blue-600">{stageLabel}</p> : null}
-          {run.note ? <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">{run.note}</p> : null}
+          {run.note ? <p className="mt-2 max-w-full break-words text-sm leading-6 text-slate-600">{run.note}</p> : null}
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone(run.status)}`}>{run.status}</span>
           <button
             type="button"
@@ -731,6 +1577,7 @@ function DebugRunCard({
       <div className="mt-3 flex flex-wrap gap-2">
         <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">{formatDate(run.created_at)}</span>
         <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">total {formatDuration(total)}</span>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${evalTone}`}>{evalStatus}</span>
       </div>
       {showProgress ? (
         <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
@@ -740,7 +1587,7 @@ function DebugRunCard({
       {flags.length ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {flags.map((flag) => (
-            <span key={flag} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+            <span key={flag} className="max-w-full break-words rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
               {flag}
             </span>
           ))}
@@ -817,11 +1664,15 @@ function DebugRunForm({
   mode,
   analyses,
   defaultAnalysisId,
+  selectedAnalysisDetail,
+  onAnalysisChange,
   onCreated,
 }: {
   mode: DebugRunMode;
   analyses: AnalysisListItem[];
   defaultAnalysisId: string | null;
+  selectedAnalysisDetail?: AnalysisDetail | null;
+  onAnalysisChange?: (id: string | null) => void;
   onCreated: (id: string) => void;
 }) {
   const [source, setSource] = useState<DebugSource>("analysis");
@@ -842,6 +1693,15 @@ function DebugRunForm({
       setAnalysisId(defaultAnalysisId);
     }
   }, [analysisId, defaultAnalysisId]);
+
+  useEffect(() => {
+    if (source !== "analysis" || selectedAnalysisDetail?.id !== analysisId) {
+      return;
+    }
+    const nextWindow = defaultManualWindowFromAnalysis(selectedAnalysisDetail);
+    setManualWindowStart((current) => current || nextWindow.start);
+    setManualWindowEnd((current) => current || nextWindow.end);
+  }, [analysisId, selectedAnalysisDetail, source]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
@@ -875,11 +1735,15 @@ function DebugRunForm({
       if (source === "upload" && !payload.file) {
         throw new Error("请选择要调试的视频文件。");
       }
-      const windowError = source === "upload" ? validateManualWindow(manualWindowStart, manualWindowEnd, videoDurationSec) : null;
+      const windowError = validateManualWindow(
+        manualWindowStart,
+        manualWindowEnd,
+        source === "upload" ? videoDurationSec : selectedAnalysisDetail?.source_duration_sec ?? null,
+      );
       if (windowError) {
         throw new Error(windowError);
       }
-      if (source === "upload" && manualWindowStart.trim() && manualWindowEnd.trim()) {
+      if (manualWindowStart.trim() && manualWindowEnd.trim()) {
         payload.manualActionWindowStartSec = manualWindowStart.trim();
         payload.manualActionWindowEndSec = manualWindowEnd.trim();
       }
@@ -923,17 +1787,57 @@ function DebugRunForm({
 
       <div className="mt-4 space-y-3">
         {source === "analysis" ? (
-          <label className="block">
-            <span className="text-xs font-semibold text-slate-500">正式分析记录</span>
-            <select value={analysisId} onChange={(event) => setAnalysisId(event.target.value)} className="app-select mt-2 rounded-[18px] text-sm">
-              <option value="">{selectedAnalysisLabel(null, analyses)}</option>
-              {analyses.map((analysis) => (
-                <option key={analysis.id} value={analysis.id}>
-                  {buildTitle(analysis)}
-                </option>
-              ))}
-            </select>
-          </label>
+          <>
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-500">正式分析记录</span>
+              <select
+                value={analysisId}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  setAnalysisId(nextId);
+                  onAnalysisChange?.(nextId || null);
+                  setManualWindowStart("");
+                  setManualWindowEnd("");
+                }}
+                className="app-select mt-2 rounded-[18px] text-sm"
+              >
+                <option value="">{selectedAnalysisLabel(null, analyses)}</option>
+                {analyses.map((analysis) => (
+                  <option key={analysis.id} value={analysis.id}>
+                    {buildTitle(analysis)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="rounded-[18px] border border-amber-100 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-slate-600">AI 输入片段</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">默认复用这条分析的动作窗口，也可以手动改成要标注的关键帧区间。</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-xs font-semibold text-slate-500">开始秒数</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={manualWindowStart}
+                    onChange={(event) => setManualWindowStart(event.target.value)}
+                    className="app-input mt-1 rounded-[14px] text-sm"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold text-slate-500">结束秒数</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={manualWindowEnd}
+                    onChange={(event) => setManualWindowEnd(event.target.value)}
+                    className="app-input mt-1 rounded-[14px] text-sm"
+                  />
+                </label>
+              </div>
+            </div>
+          </>
         ) : (
           <>
             <label className="block">
@@ -1028,19 +1932,25 @@ function DebugRunDetailPanel({
   activeTab,
   onTabChange,
   onRunRefresh,
+  focusMode = "debug",
 }: {
   run: DebugRunDetail | null;
   activeTab: DebugTab;
   onTabChange: (tab: DebugTab) => void;
   onRunRefresh: (id: string) => Promise<void>;
+  focusMode?: DebugWorkspace;
 }) {
+  const effectiveActiveTab: DebugTab = focusMode === "golden" ? "label" : activeTab;
+
   if (!run) {
     return (
       <section className="app-card flex min-h-[32rem] items-center justify-center p-7 text-center">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Debug Result</p>
-          <h2 className="mt-3 text-2xl font-semibold text-slate-900">选择或创建一个 debug run</h2>
-          <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">运行结果会保存在独立记录里，不会改写正式分析报告。</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">{focusMode === "golden" ? "Golden Label" : "Debug Result"}</p>
+          <h2 className="mt-3 text-2xl font-semibold text-slate-900">{focusMode === "golden" ? "选择一个样本继续标注" : "选择或创建一个 debug run"}</h2>
+          <p className="mt-3 max-w-md text-sm leading-6 text-slate-500">
+            {focusMode === "golden" ? "历史样本会保留已保存的关键帧、bbox、标签和备注。" : "运行结果会保存在独立记录里，不会改写正式分析报告。"}
+          </p>
         </div>
       </section>
     );
@@ -1156,13 +2066,17 @@ function DebugRunDetailPanel({
   const progress = progressFromSummary(summary);
   const showProgress = (run.status === "pending" || run.status === "processing") && progress != null;
 
-  const tabs: Array<{ id: DebugTab; label: string }> = [
-    { id: "overview", label: "Overview" },
-    { id: "frames", label: "Frames" },
-    { id: "tracking", label: "Tracking/Pose" },
-    { id: "video", label: "Video AI" },
-    { id: "raw", label: "Raw JSON" },
-  ];
+  const tabs: Array<{ id: DebugTab; label: string }> =
+    focusMode === "golden"
+      ? [{ id: "label", label: "Golden Label" }]
+      : [
+          { id: "overview", label: "Overview" },
+          { id: "frames", label: "Frames" },
+          { id: "tracking", label: "Tracking/Pose" },
+          { id: "video", label: "Video AI" },
+          { id: "label", label: "Golden Label" },
+          { id: "raw", label: "Raw JSON" },
+        ];
 
   return (
     <section className="app-card min-w-0 overflow-hidden p-6 tablet:p-7">
@@ -1194,23 +2108,25 @@ function DebugRunDetailPanel({
       ) : null}
       {run.status === "awaiting_target_selection" ? <div className="mt-5"><DebugTargetSelectionPanel run={run} onSubmitted={onRunRefresh} /></div> : null}
 
-      <div className="mt-5 flex gap-2 overflow-x-auto rounded-[18px] bg-slate-100 p-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => onTabChange(tab.id)}
-            className={`min-h-[38px] shrink-0 rounded-[14px] px-4 text-sm font-semibold transition ${
-              activeTab === tab.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      {focusMode === "debug" ? (
+        <div className="mt-5 flex gap-2 overflow-x-auto rounded-[18px] bg-slate-100 p-1">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onTabChange(tab.id)}
+              className={`min-h-[38px] shrink-0 rounded-[14px] px-4 text-sm font-semibold transition ${
+                effectiveActiveTab === tab.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-5 min-w-0">
-        {activeTab === "overview" ? (
+        {effectiveActiveTab === "overview" ? (
           <div className="space-y-4">
             <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1283,7 +2199,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "frames" ? (
+        {effectiveActiveTab === "frames" ? (
           <div className="space-y-5">
             {debugPose ? (
               <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} />
@@ -1301,7 +2217,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "tracking" ? (
+        {effectiveActiveTab === "tracking" ? (
           <div className="space-y-4">
             {debugPose ? <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} /> : null}
             <div className="grid gap-3 lg:grid-cols-3">
@@ -1317,7 +2233,7 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "video" ? (
+        {effectiveActiveTab === "video" ? (
           <div className="space-y-4">
             <InputWindowPanel value={inputWindow} />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1380,7 +2296,19 @@ function DebugRunDetailPanel({
           </div>
         ) : null}
 
-        {activeTab === "raw" ? <JsonBlock value={run.result_json ?? run} /> : null}
+        {effectiveActiveTab === "label" ? (
+          <DebugGoldenLabelPanel
+            run={run}
+            sampledFrames={sampledFrames}
+            semanticFrames={semanticFrames}
+            partialSemanticFrames={partialSemanticFrames}
+            poseFrameById={poseFrameById}
+            connections={poseConnections}
+            onSaved={() => void onRunRefresh(run.id)}
+          />
+        ) : null}
+
+        {effectiveActiveTab === "raw" ? <JsonBlock value={run.result_json ?? run} /> : null}
       </div>
     </section>
   );
@@ -1440,15 +2368,21 @@ function FrameGrid({
   );
 }
 
-export default function DebugPage() {
+export default function DebugPage({ workspace = "debug" }: { workspace?: DebugWorkspace }) {
+  const location = useLocation();
   const { isParentMode, enterParentMode } = useAppMode();
+  const isGoldenWorkspace = workspace === "golden";
+  const requestedAnalysisId = useMemo(() => {
+    const raw = new URLSearchParams(location.search).get("analysis_id");
+    return raw?.trim() || null;
+  }, [location.search]);
   const [analyses, setAnalyses] = useState<AnalysisListItem[]>([]);
   const [debugRuns, setDebugRuns] = useState<DebugRunSummary[]>([]);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
   const [selectedAnalysisDetail, setSelectedAnalysisDetail] = useState<AnalysisDetail | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<DebugRunDetail | null>(null);
-  const [activeTab, setActiveTab] = useState<DebugTab>("frames");
+  const [activeTab, setActiveTab] = useState<DebugTab>(isGoldenWorkspace ? "label" : "frames");
   const [listState, setListState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -1471,8 +2405,19 @@ export default function DebugPage() {
         }
         setAnalyses(analysisData);
         setDebugRuns(runData);
-        setSelectedAnalysisId((current) => current ?? analysisData[0]?.id ?? null);
-        setSelectedRunId((current) => current ?? runData[0]?.id ?? null);
+        setSelectedAnalysisId((current) => {
+          if (requestedAnalysisId && analysisData.some((analysis) => analysis.id === requestedAnalysisId)) {
+            return requestedAnalysisId;
+          }
+          return current ?? analysisData[0]?.id ?? null;
+        });
+        setSelectedRunId((current) => {
+          const matchingRun = requestedAnalysisId ? runData.find((run) => run.analysis_id === requestedAnalysisId) : null;
+          if (requestedAnalysisId) {
+            return matchingRun?.id ?? null;
+          }
+          return current ?? runData[0]?.id ?? null;
+        });
         setListState("ready");
       } catch {
         if (!cancelled) {
@@ -1486,7 +2431,7 @@ export default function DebugPage() {
     return () => {
       cancelled = true;
     };
-  }, [isParentMode]);
+  }, [isParentMode, requestedAnalysisId]);
 
   useEffect(() => {
     if (!isParentMode || !selectedAnalysisId) {
@@ -1559,8 +2504,14 @@ export default function DebugPage() {
           return;
         }
         setDebugRuns(runs);
-        const activeId = selectedRunId && runs.some((run) => run.id === selectedRunId) ? selectedRunId : runs[0]?.id ?? null;
-        if (activeId && activeId !== selectedRunId) {
+        const requestedRunId = requestedAnalysisId ? runs.find((run) => run.analysis_id === requestedAnalysisId)?.id ?? null : null;
+        const activeId =
+          requestedAnalysisId
+            ? requestedRunId
+            : selectedRunId && runs.some((run) => run.id === selectedRunId)
+              ? selectedRunId
+              : runs[0]?.id ?? null;
+        if (activeId !== selectedRunId) {
           setSelectedRunId(activeId);
         }
         if (activeId) {
@@ -1584,7 +2535,13 @@ export default function DebugPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [isParentMode, selectedRunId, deletingRunId]);
+  }, [isParentMode, selectedRunId, deletingRunId, requestedAnalysisId]);
+
+  useEffect(() => {
+    if (isGoldenWorkspace) {
+      setActiveTab("label");
+    }
+  }, [isGoldenWorkspace]);
 
   const selectedAnalysisItem = useMemo(
     () => analyses.find((item) => item.id === selectedAnalysisId) ?? null,
@@ -1598,9 +2555,31 @@ export default function DebugPage() {
     }, {});
   }, [debugRuns]);
 
+  const goldenCounts = useMemo(() => {
+    return debugRuns.reduce(
+      (acc, run) => {
+        const status = goldenStatusFromRun(run);
+        if (status === "unlabeled") {
+          acc.unlabeled += 1;
+        } else {
+          acc.labeled += 1;
+        }
+        const evalStatus = evalStatusFromRun(run);
+        if (evalStatus === "passes") {
+          acc.passes += 1;
+        }
+        if (evalStatus === "fails") {
+          acc.fails += 1;
+        }
+        return acc;
+      },
+      { labeled: 0, unlabeled: 0, passes: 0, fails: 0 },
+    );
+  }, [debugRuns]);
+
   const handleCreated = async (id: string, mode?: DebugRunMode) => {
     setSelectedRunId(id);
-    setActiveTab(mode === "video_ai_keyframes" ? "video" : "frames");
+    setActiveTab(isGoldenWorkspace ? "label" : mode === "video_ai_keyframes" ? "video" : "frames");
     const runs = await fetchDebugRuns({ limit: 50 });
     setDebugRuns(runs);
     const detail = await fetchDebugRun(id);
@@ -1659,9 +2638,11 @@ export default function DebugPage() {
   if (!isParentMode) {
     return (
       <section className="app-card mx-auto max-w-3xl p-8 text-center tablet:p-10">
-        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Debug</p>
-        <h1 className="mt-4 text-3xl font-semibold text-slate-900 tablet:text-4xl">调试工作台</h1>
-        <p className="mt-4 text-base leading-8 text-slate-500">进入家长模式后，可以运行测试入口、查看模型评测和每个视频的分析日志。</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">{isGoldenWorkspace ? "Golden" : "Debug"}</p>
+        <h1 className="mt-4 text-3xl font-semibold text-slate-900 tablet:text-4xl">{isGoldenWorkspace ? "Golden 标注工作台" : "调试工作台"}</h1>
+        <p className="mt-4 text-base leading-8 text-slate-500">
+          {isGoldenWorkspace ? "进入家长模式后，可以继续标注 golden 样本和查看标注历史。" : "进入家长模式后，可以运行测试入口、查看模型评测和每个视频的分析日志。"}
+        </p>
         <button
           type="button"
           onClick={() => void enterParentMode()}
@@ -1673,6 +2654,112 @@ export default function DebugPage() {
     );
   }
 
+  if (isGoldenWorkspace) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Golden</p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-900 tablet:text-4xl">Golden 标注工作台</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">从历史样本继续标注关键帧、主人物 bbox、场景分层和错误标签。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link to="/debug" className="app-pill text-sm font-semibold">
+              调试工作台
+            </Link>
+            <Link to="/settings/api" className="app-pill text-sm font-semibold">
+              API 设置
+            </Link>
+          </div>
+        </div>
+
+        {error ? <div className="rounded-[20px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Golden Samples</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">{debugRuns.length}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Labeled</p>
+            <p className="mt-2 text-2xl font-semibold text-blue-600">{goldenCounts.labeled}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Unlabeled</p>
+            <p className="mt-2 text-2xl font-semibold text-amber-600">{goldenCounts.unlabeled}</p>
+          </div>
+          <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Eval Fails</p>
+            <p className="mt-2 text-2xl font-semibold text-rose-600">{goldenCounts.fails}</p>
+          </div>
+        </div>
+
+        <div className="grid min-w-0 gap-5 web:grid-cols-[minmax(300px,440px)_minmax(0,1fr)]">
+          <div className="min-w-0 space-y-5 overflow-x-hidden">
+            <section className="app-card min-w-0 self-start overflow-hidden p-5 tablet:p-6 web:sticky web:top-[112px]">
+              <div className="mb-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">History</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-900">标注历史</h2>
+              </div>
+              {listState === "loading" ? <p className="text-sm text-slate-500">正在加载 debug runs...</p> : null}
+              {!debugRuns.length && listState !== "loading" ? (
+                <div className="rounded-[18px] border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                  暂时没有可标注样本。
+                </div>
+              ) : null}
+              <div className="max-h-[44rem] min-w-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1">
+                {debugRuns.map((run) => (
+                  <DebugRunCard
+                    key={run.id}
+                    run={run}
+                    selected={run.id === selectedRunId}
+                    onSelect={() => {
+                      setSelectedRunId(run.id);
+                      setActiveTab("label");
+                    }}
+                    onDelete={() => void handleDeleteRun(run)}
+                    deleting={deletingRunId === run.id}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="app-card min-w-0 self-start overflow-hidden p-5 tablet:p-6">
+              <div className="mb-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">New Sample</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-900">新建标注样本</h2>
+              </div>
+              <div className="space-y-4">
+                <DebugRunForm
+                  mode="local_pose_keyframes"
+                  analyses={analyses}
+                  defaultAnalysisId={selectedAnalysisId}
+                  selectedAnalysisDetail={selectedAnalysisDetail}
+                  onAnalysisChange={setSelectedAnalysisId}
+                  onCreated={(id) => void handleCreated(id, "local_pose_keyframes")}
+                />
+                <DebugRunForm
+                  mode="video_ai_keyframes"
+                  analyses={analyses}
+                  defaultAnalysisId={selectedAnalysisId}
+                  selectedAnalysisDetail={selectedAnalysisDetail}
+                  onAnalysisChange={setSelectedAnalysisId}
+                  onCreated={(id) => void handleCreated(id, "video_ai_keyframes")}
+                />
+              </div>
+            </section>
+          </div>
+
+          <div className="min-w-0">
+            {runState === "loading" ? <div className="mb-3 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">正在加载 debug run...</div> : null}
+            {runState === "error" ? <div className="mb-3 rounded-[18px] border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">Debug run 加载失败。</div> : null}
+            <DebugRunDetailPanel run={selectedRun} activeTab="label" onTabChange={setActiveTab} onRunRefresh={refreshRunDetail} focusMode="golden" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1681,9 +2768,14 @@ export default function DebugPage() {
           <h1 className="mt-2 text-3xl font-semibold text-slate-900 tablet:text-4xl">调试工作台</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">独立运行测试管线，结果写入 debug runs，不影响正式分析记录。</p>
         </div>
-        <Link to="/settings/api" className="app-pill text-sm font-semibold">
-          API 设置
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link to="/golden" className="app-pill text-sm font-semibold">
+            Golden 标注
+          </Link>
+          <Link to="/settings/api" className="app-pill text-sm font-semibold">
+            API 设置
+          </Link>
+        </div>
       </div>
 
       {error ? <div className="rounded-[20px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
@@ -1714,8 +2806,22 @@ export default function DebugPage() {
             <h2 className="mt-2 text-xl font-semibold text-slate-900">新建调试</h2>
           </div>
           <div className="space-y-4">
-            <DebugRunForm mode="local_pose_keyframes" analyses={analyses} defaultAnalysisId={selectedAnalysisId} onCreated={(id) => void handleCreated(id, "local_pose_keyframes")} />
-            <DebugRunForm mode="video_ai_keyframes" analyses={analyses} defaultAnalysisId={selectedAnalysisId} onCreated={(id) => void handleCreated(id, "video_ai_keyframes")} />
+            <DebugRunForm
+              mode="local_pose_keyframes"
+              analyses={analyses}
+              defaultAnalysisId={selectedAnalysisId}
+              selectedAnalysisDetail={selectedAnalysisDetail}
+              onAnalysisChange={setSelectedAnalysisId}
+              onCreated={(id) => void handleCreated(id, "local_pose_keyframes")}
+            />
+            <DebugRunForm
+              mode="video_ai_keyframes"
+              analyses={analyses}
+              defaultAnalysisId={selectedAnalysisId}
+              selectedAnalysisDetail={selectedAnalysisDetail}
+              onAnalysisChange={setSelectedAnalysisId}
+              onCreated={(id) => void handleCreated(id, "video_ai_keyframes")}
+            />
           </div>
         </section>
 

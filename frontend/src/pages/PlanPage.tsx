@@ -1,4 +1,4 @@
-import axios from "axios";
+﻿import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
@@ -18,6 +18,29 @@ function sessionTypeLabel(isOfficeTrainable: boolean) {
 
 function sessionTypeTone(isOfficeTrainable: boolean) {
   return isOfficeTrainable ? "bg-emerald-50 text-emerald-600" : "bg-sky-50 text-sky-600";
+}
+
+function generationStatus(plan: TrainingPlanDetail | null) {
+  const status = plan?.plan_json.generation_status ?? plan?.plan_json.generation_source ?? null;
+  if (status === "fallback") {
+    return {
+      label: "使用兜底",
+      tone: "bg-amber-100 text-amber-700",
+      note: "AI 训练计划暂不可用，当前显示安全兜底计划。可稍后重试个性化生成。",
+    };
+  }
+  if (status === "generating") {
+    return {
+      label: "生成中",
+      tone: "bg-sky-100 text-sky-700",
+      note: "训练计划正在生成中，请稍后刷新查看。",
+    };
+  }
+  return {
+    label: "AI 已生成",
+    tone: "bg-emerald-50 text-emerald-600",
+    note: null,
+  };
 }
 
 export default function PlanPage() {
@@ -138,7 +161,8 @@ export default function PlanPage() {
   }, [plan]);
 
   const canExtendPlan = completedDays.length >= 3;
-  const isFallbackPlan = plan?.plan_json.generation_source === "fallback";
+  const statusMeta = generationStatus(plan);
+  const isFallbackPlan = (plan?.plan_json.generation_status ?? plan?.plan_json.generation_source) === "fallback";
 
   const toggleDay = (day: number) => {
     setExpandedDays((current) => (current.includes(day) ? current.filter((item) => item !== day) : [...current, day]));
@@ -250,22 +274,22 @@ export default function PlanPage() {
     <main className="app-shell page-scroll-container page-content min-h-screen">
       <section className="page-content safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
         <div className="space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link to={plan ? `/report/${plan.analysis_id}` : "/review"} className="app-pill">
+          <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
+            <Link to={plan ? `/report/${plan.analysis_id}` : "/review"} className="app-pill w-full justify-center tablet:w-auto">
               ← 返回诊断详情
             </Link>
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex w-full flex-col gap-3 phone:flex-row phone:flex-wrap tablet:w-auto tablet:items-center">
               {plan ? (
                 <button
                   type="button"
                   onClick={handleRegeneratePlan}
                   disabled={isRegenerating || isExtending}
-                  className="min-h-[44px] rounded-full border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-600 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="min-h-[44px] w-full rounded-full border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-600 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60 phone:w-auto"
                 >
                   {isRegenerating ? "重新生成中..." : "重新生成"}
                 </button>
               ) : null}
-              <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm">
+              <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-center text-sm font-medium text-slate-600 shadow-sm">
                 整体进度 {progress.completed}/{progress.total}
               </div>
             </div>
@@ -279,7 +303,7 @@ export default function PlanPage() {
               {isFallbackPlan ? (
                 <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-7 text-amber-800">
                   <p className="font-semibold text-amber-900">当前显示的是安全兜底训练计划</p>
-                  <p className="mt-1">{plan.plan_json.generation_note ?? "AI 训练计划暂不可用，系统已按本次报告问题生成低冲击、安全优先的临时安排。"}</p>
+                  <p className="mt-1">{statusMeta.note}</p>
                 </div>
               ) : null}
 
@@ -289,11 +313,9 @@ export default function PlanPage() {
                     <div className="flex flex-wrap items-center gap-3">
                       <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">7-Day Plan</p>
                       <span
-                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          isFallbackPlan ? "bg-amber-100 text-amber-700" : "bg-emerald-50 text-emerald-600"
-                        }`}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${statusMeta.tone}`}
                       >
-                        {isFallbackPlan ? "兜底计划" : "AI 生成"}
+                        {statusMeta.label}
                       </span>
                     </div>
                     <h1 className="mt-3 text-3xl font-semibold text-slate-900 tablet:text-4xl">{plan.plan_json.title}</h1>

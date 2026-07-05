@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import copy
 import json
 import shutil
 import time
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, PlainTextResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -28,8 +29,20 @@ from app.database import (
     run_db_read_with_retry,
     run_db_write_with_retry,
 )
-from app.models import Analysis, Skater, TrainingPlan, TrainingSession
+from app.models import Analysis, AnalysisComparison, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
+    AnalysisChatShareRequest,
+    AnalysisChatShareResponse,
+    AnalysisChatRequest,
+    AnalysisChatResponse,
+    AnalysisChatMessagePublic,
+    AnalysisComparisonCreateRequest,
+    AnalysisComparisonDetail,
+    AnalysisComparisonSummary,
+    AnalysisCorrectionCreateRequest,
+    AnalysisCorrectionListResponse,
+    AnalysisCorrectionMutationResponse,
+    AnalysisCorrectionPublic,
     AnalysisCompareResponse,
     AnalysisAutoEvalSnapshot,
     AnalysisDetail,
@@ -42,6 +55,9 @@ from app.schemas import (
     CompareKeyframeSide,
     CompareQualityPayload,
     CompareSummary,
+    CompareVideoAiChange,
+    CompareVideoAiObservation,
+    CompareVideoAiReport,
     CompareVideoPayload,
     CompareVideoSide,
     ComparisonChange,
@@ -55,6 +71,23 @@ from app.schemas import (
     TargetPreviewResponse,
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
+)
+from app.services.analysis_corrections import (
+    AnalysisCorrectionError,
+    apply_analysis_correction,
+    build_chat_share_image_payload,
+    build_chat_share_text,
+    create_analysis_correction,
+    dismiss_analysis_correction,
+    effective_analysis_for_read,
+    effective_payload_for_analysis,
+    list_analysis_corrections,
+)
+from app.services.analysis_chat import (
+    AnalysisChatError,
+    create_analysis_chat_reply,
+    list_analysis_chat_messages,
+    serialize_chat_message,
 )
 from app.services.action_profiles import (
     infer_analysis_profile,
@@ -100,10 +133,11 @@ from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.llm_context import build_analysis_prompt_context
-from app.services.report import apply_child_score_floor, attach_score_breakdown, calculate_force_score, generate_report
+from app.services.report import apply_child_score_floor, calculate_force_score, clean_json_text, effective_report_subscores, ensure_report_subscores, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
+    TargetPreview,
     build_target_lock_payload,
     build_target_preview,
     candidate_matches_target_anchor,
@@ -123,8 +157,10 @@ from app.services.video import (
     cleanup_processing_dir,
     compute_video_sha256,
     cut_action_window_ai_clip,
+    detect_video_fps,
     encode_frames,
     extract_motion_sampled_frames,
+    extract_full_frame_at,
     extract_precise_frames_at_timestamps,
     precheck_video,
     persist_frames,
@@ -137,6 +173,7 @@ from app.services.semantic_keyframe_pipeline import (
     merge_frame_motion_payload,
     resolve_semantic_keyframe_pipeline,
     retry_video_temporal_if_needed,
+    run_semantic_keyframe_pipeline,
     start_video_temporal_task,
     validate_semantic_keyframes_against_current_evidence,
 )
@@ -146,6 +183,14 @@ from app.services.video_temporal import (
 )
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
 from app.services.providers import get_active_provider, request_text_completion
+from app.services.video_temporal import analyze_video_temporal
+
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+except Exception:  # noqa: BLE001
+    cv2 = None
+    np = None
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -174,6 +219,14 @@ NON_JUMP_METRIC_LABELS = {
     "hip_shoulder_alignment": ("髋肩对齐", "分"),
     "trunk_pitch_degrees": ("躯干倾角", "°"),
 }
+VIDEO_AI_OBSERVATION_LABELS = {
+    "timing_rhythm": "节奏",
+    "speed_flow": "速度流动",
+    "axis_overall": "轴心",
+    "entry_quality": "进入质量",
+    "exit_or_landing_quality": "落冰/滑出质量",
+}
+VIDEO_AI_CHANGE_DIRECTIONS = {"improved", "regressed", "unchanged", "uncertain"}
 COMPARE_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 COMPARE_SAME_VIDEO_KEYFRAME_STABILITY_SECONDS = 0.10
 COMPARE_SAME_VIDEO_SCORE_STABILITY_DELTA = 1.0
@@ -272,6 +325,11 @@ COMPARE_NARRATIVE_SYSTEM_PROMPT = (
     "你是儿童花样滑冰复盘助手。用中文给家长解释两次同动作对比，只输出自然语言，不要 Markdown。"
     "必须温和、具体、可执行；不要夸大进步，不要把低质量或低置信数据说成确定事实。"
     "如果动作子类型未知或两次细项不完全一致，请用动作大类/阶段描述，不要编造具体动作名。"
+)
+VIDEO_AI_COMPARE_REPORT_SYSTEM_PROMPT = (
+    "你是儿童花样滑冰视频级对比助手。你只会收到两个视频 AI 的结构化观察 JSON，"
+    "不能声称自己重新观看或分析了视频。请输出严格 JSON 对象，不要 Markdown。"
+    "结论必须保守、具体、面向家长，只能作为辅助证据，不要改写评分结论。"
 )
 MAX_ANALYSIS_LOG_ENTRIES = 200
 CONFIRMED_TARGET_LOCK_STATUSES = {"auto_locked", "locked", "manual"}
@@ -1297,6 +1355,243 @@ def _apply_resolved_video_ai_profile_override_to_bio_data(
         target_lock=target_lock,
     )
     return resolved_profile, rebuilt_bio_data, next_evidence
+
+
+VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE = 0.82
+VIDEO_AI_ACTION_SUGGESTION_MIN_CONFIDENCE = 0.50
+PROFILE_TO_ACTION_TYPE = {
+    "jump": "跳跃",
+    "spin": "旋转",
+    "step": "步法",
+    "spiral": "步法",
+}
+PROFILE_DEFAULT_SUBTYPE = {
+    "spin": "未指定",
+    "step": "步法序列",
+    "spiral": "燕式滑行",
+}
+AUTO_APPLY_NEUTRAL_ACTION_TYPES = {"", "自由滑"}
+
+
+def _video_ai_auto_apply_has_strong_label_conflict(
+    current_action_type: str,
+    current_action_subtype: str | None,
+    family: str,
+) -> bool:
+    current_type = str(current_action_type or "").strip()
+    if current_type in AUTO_APPLY_NEUTRAL_ACTION_TYPES:
+        return False
+    current_profile = infer_profile_from_input(current_type, current_action_subtype)
+    if current_profile is None:
+        return False
+    return current_profile != family
+
+
+def _video_ai_action_label_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    selected_video_temporal, selected_source = _select_mixed_action_video_ai_profile_payload(video_temporal)
+    family = _video_ai_action_family(selected_video_temporal)
+    if family not in SUPPORTED_VIDEO_AI_PROFILES:
+        return None
+    confidence = _video_ai_action_confidence_from_payload(selected_video_temporal)
+    if confidence < VIDEO_AI_ACTION_SUGGESTION_MIN_CONFIDENCE:
+        return None
+    confirmation = (
+        selected_video_temporal.get("action_confirmation")
+        if isinstance(selected_video_temporal, dict) and isinstance(selected_video_temporal.get("action_confirmation"), dict)
+        else {}
+    )
+    confirmed_action = str(confirmation.get("confirmed_action") or confirmation.get("jump_type") or "").strip()
+    if confirmed_action in {"", "不可分析", "unknown"}:
+        confirmed_action = ""
+    next_action_type = PROFILE_TO_ACTION_TYPE.get(family)
+    if not next_action_type:
+        return None
+    if family == "jump":
+        next_subtype = "单跳" if current_action_type in {"自由滑", "jump"} else normalize_action_subtype(next_action_type, current_action_subtype)
+    elif family == "spin":
+        next_subtype = (
+            confirmed_action
+            if confirmed_action in {"直立旋转", "蹲转", "燕式旋转", "联合旋转", "飞旋"}
+            else PROFILE_DEFAULT_SUBTYPE[family]
+        )
+    else:
+        next_subtype = PROFILE_DEFAULT_SUBTYPE.get(family)
+    payload: dict[str, Any] = {
+        "action_type": next_action_type,
+        "action_subtype": next_subtype,
+        "analysis_profile": family,
+        "action_confirmation": {
+            **confirmation,
+            "action_family": family,
+            "confidence": confidence,
+            "source": f"video_ai_{selected_source or 'primary'}",
+        },
+    }
+    return payload
+
+
+def _video_ai_auto_action_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    analysis_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = _video_ai_action_label_payload(
+        current_action_type=current_action_type,
+        current_action_subtype=current_action_subtype,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        return None
+    family = str(payload.get("analysis_profile") or "").strip().lower()
+    confidence = _video_ai_action_confidence(video_temporal)
+    if confidence < VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE:
+        return None
+    normalized_profile = str(analysis_profile or "").strip().lower()
+    if normalized_profile and normalized_profile != family:
+        return None
+    if not normalized_profile and _video_ai_auto_apply_has_strong_label_conflict(current_action_type, current_action_subtype, family):
+        return None
+    confirmation = payload.get("action_confirmation")
+    if isinstance(confirmation, dict):
+        payload["action_confirmation"] = {
+            **confirmation,
+            "auto_applied": True,
+        }
+    return payload
+
+
+def _video_ai_pending_action_suggestion_payload(
+    *,
+    current_action_type: str,
+    current_action_subtype: str | None,
+    analysis_profile: str | None,
+    video_temporal: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = _video_ai_action_label_payload(
+        current_action_type=current_action_type,
+        current_action_subtype=current_action_subtype,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        return None
+    family = str(payload.get("analysis_profile") or "").strip().lower()
+    confidence = _video_ai_action_confidence(video_temporal)
+    normalized_profile = str(analysis_profile or "").strip().lower()
+    strong_conflict = _video_ai_auto_apply_has_strong_label_conflict(current_action_type, current_action_subtype, family)
+    should_suggest = (
+        confidence < VIDEO_AI_AUTO_APPLY_MIN_CONFIDENCE
+        or (normalized_profile and normalized_profile != family)
+        or (not normalized_profile and strong_conflict)
+    )
+    if not should_suggest:
+        return None
+    confirmation = payload.get("action_confirmation")
+    if isinstance(confirmation, dict):
+        payload["action_confirmation"] = {
+            **confirmation,
+            "auto_applied": False,
+            "pending_confirmation": True,
+        }
+    return payload
+
+
+def _action_payload_changes_analysis(analysis: Analysis, payload: dict[str, Any]) -> bool:
+    return any(
+        [
+            analysis.action_type != payload.get("action_type"),
+            (analysis.action_subtype or None) != (payload.get("action_subtype") or None),
+            (analysis.analysis_profile or None) != (payload.get("analysis_profile") or None),
+        ]
+    )
+
+
+async def _has_active_video_ai_action_correction(session: AsyncSession, analysis_id: str) -> bool:
+    corrections = await list_analysis_corrections(session, analysis_id)
+    return any(
+        correction.kind == "action_label"
+        and correction.source == "video_ai_auto"
+        and correction.status in {"proposed", "applied"}
+        for correction in corrections
+    )
+
+
+async def _auto_apply_video_ai_action_if_confident(
+    session: AsyncSession,
+    analysis: Analysis,
+    *,
+    video_temporal: dict[str, Any] | None,
+    analysis_profile: str | None,
+) -> None:
+    payload = _video_ai_auto_action_payload(
+        current_action_type=analysis.action_type,
+        current_action_subtype=analysis.action_subtype,
+        analysis_profile=analysis_profile,
+        video_temporal=video_temporal,
+    )
+    if payload is None:
+        suggestion = _video_ai_pending_action_suggestion_payload(
+            current_action_type=analysis.action_type,
+            current_action_subtype=analysis.action_subtype,
+            analysis_profile=analysis_profile,
+            video_temporal=video_temporal,
+        )
+        if suggestion is None or not _action_payload_changes_analysis(analysis, suggestion):
+            return
+        if await _has_active_video_ai_action_correction(session, analysis.id):
+            return
+        try:
+            await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload=suggestion,
+                rationale="Video AI action judgment needs confirmation before updating the system label.",
+                source="video_ai_auto",
+                status="proposed",
+            )
+        except AnalysisCorrectionError:
+            return
+        return
+    if not _action_payload_changes_analysis(analysis, payload):
+        return
+    if await _has_active_video_ai_action_correction(session, analysis.id):
+        return
+    try:
+        await create_analysis_correction(
+            session,
+            analysis,
+            kind="action_label",
+            payload=payload,
+            rationale="High-confidence video AI action judgment auto-applied.",
+            source="video_ai_auto",
+            status="applied",
+        )
+    except AnalysisCorrectionError:
+        return
+    analysis.action_type = str(payload["action_type"])
+    analysis.action_subtype = str(payload["action_subtype"]) if payload.get("action_subtype") is not None else None
+    analysis.analysis_profile = str(payload["analysis_profile"])
+    report = analysis.report if isinstance(analysis.report, dict) else {}
+    report["action_confirmation"] = {
+        **(report.get("action_confirmation") if isinstance(report.get("action_confirmation"), dict) else {}),
+        **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
+    }
+    analysis.report = report
+    motion = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
+    video_payload = motion.setdefault("video_temporal", {})
+    if isinstance(video_payload, dict):
+        video_payload["action_confirmation"] = {
+            **(video_payload.get("action_confirmation") if isinstance(video_payload.get("action_confirmation"), dict) else {}),
+            **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
+        }
+    analysis.frame_motion_scores = motion
 
 
 def _mixed_action_profile_reuse_allowed_by_video_ai(
@@ -3745,7 +4040,6 @@ async def _regenerate_report_from_saved_analysis(
             ),
         )
         force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
-        report = attach_score_breakdown(report, training_score=force_score)
         timings["report_s"] = _elapsed_seconds(report_start)
         timings["total_s"] = _elapsed_seconds(total_start)
 
@@ -5106,7 +5400,6 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 ),
             )
             force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
-            report = attach_score_breakdown(report, training_score=force_score)
             timings['report_s'] = _elapsed_seconds(report_start)
             timings['total_s'] = _elapsed_seconds(total_start)
         except Exception as exc:  # noqa: BLE001
@@ -5162,6 +5455,12 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     analysis.source_fps = sampling_metadata.source_fps
                     analysis.is_slow_motion = sampling_metadata.is_slow_motion
                     analysis.force_score = force_score
+                    await _auto_apply_video_ai_action_if_confident(
+                        session,
+                        analysis,
+                        video_temporal=video_temporal_result,
+                        analysis_profile=analysis_profile,
+                    )
                     analysis.status = 'completed'
                     analysis.error_code = None
                     analysis.error_detail = None
@@ -5492,7 +5791,10 @@ def _detail_from_analysis(
         vision_path_a=analysis.vision_path_a,
         vision_path_b=analysis.vision_path_b,
         cross_validation=analysis.cross_validation,
-        report=analysis.report,
+        report=ensure_report_subscores(
+            analysis.report if isinstance(analysis.report, dict) else {},
+            analysis.bio_data if isinstance(analysis.bio_data, dict) else {},
+        ),
         pose_data=analysis.pose_data,
         bio_data=analysis.bio_data,
         frame_motion_scores=analysis.frame_motion_scores,
@@ -5525,6 +5827,40 @@ def _detail_from_analysis(
         note=analysis.note,
         created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
         updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
+    )
+
+
+def _correction_public_list(corrections: Sequence[Any]) -> list[AnalysisCorrectionPublic]:
+    return [AnalysisCorrectionPublic.model_validate(correction) for correction in corrections]
+
+
+def _chat_message_public(message: Any) -> AnalysisChatMessagePublic:
+    return AnalysisChatMessagePublic.model_validate(serialize_chat_message(message))
+
+
+async def _correction_list_response(
+    session: AsyncSession,
+    analysis: Analysis,
+) -> AnalysisCorrectionListResponse:
+    corrections = await list_analysis_corrections(session, analysis.id)
+    effective = await effective_payload_for_analysis(session, analysis)
+    return AnalysisCorrectionListResponse(
+        corrections=_correction_public_list(corrections),
+        effective=effective,
+    )
+
+
+async def _correction_mutation_response(
+    session: AsyncSession,
+    analysis: Analysis,
+    correction: Any,
+) -> AnalysisCorrectionMutationResponse:
+    corrections = await list_analysis_corrections(session, analysis.id)
+    effective = await effective_payload_for_analysis(session, analysis)
+    return AnalysisCorrectionMutationResponse(
+        correction=AnalysisCorrectionPublic.model_validate(correction),
+        corrections=_correction_public_list(corrections),
+        effective=effective,
     )
 
 
@@ -5562,30 +5898,17 @@ def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSna
     )
 
 
-def _build_pose_response(
-    analysis_id: str,
-    pose_data: dict[str, object] | None,
-    frame_motion_scores: dict[str, object] | None = None,
-) -> PoseResponse:
+def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
     safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
     frame_urls = {
         frame.get("frame", ""): f"/api/frames/{analysis_id}/{frame.get('frame', '')}"
         for frame in safe_pose_data.get("frames", [])
         if isinstance(frame, dict) and frame.get("frame")
     }
-    timestamp_by_stem = build_timestamp_map(frame_motion_scores)
-    frame_timestamps = {
-        frame_name: timestamp
-        for frame_name in frame_urls
-        if (timestamp := timestamp_by_stem.get(str(frame_name).replace(".jpg", ""))) is not None
-    }
-    effective_fps = frame_motion_scores.get("effective_fps") if isinstance(frame_motion_scores, dict) else None
     return PoseResponse(
         connections=safe_pose_data.get("connections", []),
         frames=safe_pose_data.get("frames", []),
         frame_urls=frame_urls,
-        frame_timestamps=frame_timestamps,
-        effective_fps=float(effective_fps) if isinstance(effective_fps, (int, float)) else None,
         pose_diagnostics=safe_pose_data.get("pose_diagnostics") if isinstance(safe_pose_data.get("pose_diagnostics"), dict) else None,
     )
 
@@ -5660,6 +5983,49 @@ def _target_preview_detected_candidates_from_frames(
     if not sampled_frames:
         return []
     return _formal_target_preview_candidates(sampled_frames, motion_scores or {})
+
+
+def _target_preview_from_saved_lock(
+    analysis_id: str,
+    status: str,
+    existing_target_lock: dict[str, Any] | None,
+    frame_names: list[str],
+) -> TargetPreview | None:
+    if not isinstance(existing_target_lock, dict):
+        return None
+    candidates = [dict(item) for item in existing_target_lock.get("candidates", []) if isinstance(item, dict)]
+    preview_frame = str(existing_target_lock.get("preview_frame") or "").strip()
+    if not candidates or not preview_frame or preview_frame not in frame_names:
+        return None
+    try:
+        lock_confidence = float(existing_target_lock.get("lock_confidence") or 0.0)
+    except (TypeError, ValueError):
+        lock_confidence = 0.0
+    return TargetPreview(
+        preview_frame=preview_frame,
+        preview_frame_url=f"/api/frames/{analysis_id}/{preview_frame}",
+        preview_frame_index=frame_names.index(preview_frame),
+        auto_candidate_id=str(existing_target_lock.get("selected_candidate_id") or "") or None,
+        lock_confidence=round(lock_confidence, 4),
+        candidates=candidates,
+        target_lock_status=str(existing_target_lock.get("status") or status or "awaiting_manual"),
+    )
+
+
+def _build_target_preview_cached_first(analysis: Analysis, frame_names: list[str], motion_scores: dict[str, Any] | None) -> TargetPreview:
+    saved_preview = _target_preview_from_saved_lock(analysis.id, analysis.target_lock_status or analysis.status, analysis.target_lock, frame_names)
+    if saved_preview is not None:
+        return saved_preview
+
+    frames_dir = _frames_dir_for_analysis(analysis)
+    return build_target_preview(
+        analysis.id,
+        frame_names,
+        existing_target_lock=analysis.target_lock,
+        motion_scores=motion_scores,
+        analysis_profile=analysis.analysis_profile,
+        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
+    )
 
 
 async def _resume_auto_target_lock_if_available(analysis: Analysis, session: AsyncSession) -> bool:
@@ -6256,6 +6622,205 @@ def _video_media_type(path: Path) -> str:
     return "video/mp4"
 
 
+def _full_video_sampling_metadata(video_path: Path, input_window: VideoInputWindow) -> VideoSamplingMetadata:
+    from app.services.video import MAX_SAMPLED_FRAMES, NORMAL_PLAYBACK_FPS, SLOW_MOTION_THRESHOLD_FPS
+
+    source_fps = detect_video_fps(video_path)
+    is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
+    slow_motion_scale = max(source_fps / NORMAL_PLAYBACK_FPS, 1.0) if is_slow_motion and source_fps > 0 else 1.0
+    duration = max(input_window.input_window_end_sec - input_window.input_window_start_sec, 1e-6)
+    effective_duration = duration / slow_motion_scale
+    effective_fps = (max(MAX_SAMPLED_FRAMES, 2) - 1) / max(effective_duration, 1e-6)
+    window_start_sec = input_window.input_window_start_sec / slow_motion_scale
+    return VideoSamplingMetadata(
+        action_window_start=round(input_window.input_window_start_sec, 3),
+        action_window_end=round(input_window.input_window_end_sec, 3),
+        window_start_sec=round(window_start_sec, 3),
+        window_end_sec=round(window_start_sec + effective_duration, 3),
+        effective_fps=round(effective_fps, 3),
+        source_fps=round(source_fps, 3),
+        is_slow_motion=is_slow_motion,
+    )
+
+
+def _semantic_tal_key(record: dict[str, Any]) -> str | None:
+    key_moment = str(record.get("key_moment") or "").strip().upper()
+    if key_moment.startswith("T"):
+        return "T"
+    if key_moment.startswith("A"):
+        return "A"
+    if key_moment.startswith("L"):
+        return "L"
+    phase_code = str(record.get("phase_code") or "").strip().lower()
+    if phase_code in {"t", "takeoff"}:
+        return "T"
+    if phase_code in {"a", "air", "apex"}:
+        return "A"
+    if phase_code in {"l", "landing"}:
+        return "L"
+    return None
+
+
+def _phase_code_for_key(key: str, record: dict[str, Any]) -> str:
+    phase_code = str(record.get("phase_code") or "").strip()
+    if phase_code:
+        return phase_code
+    return {"T": "takeoff", "A": "air", "L": "landing"}.get(key, key)
+
+
+def _phase_label_for_key(key: str, record: dict[str, Any]) -> str:
+    label = str(record.get("phase_label") or "").strip()
+    if label:
+        return label
+    return {"T": "Takeoff", "A": "Apex", "L": "Landing"}.get(key, key)
+
+
+def _key_moment_for_key(key: str, record: dict[str, Any]) -> str:
+    key_moment = str(record.get("key_moment") or "").strip()
+    if key_moment:
+        return key_moment
+    return {"T": "T_takeoff", "A": "A_apex", "L": "L_landing"}.get(key, key)
+
+
+def _video_keyframe_rerun_keyframes(selected: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    key_frames: dict[str, dict[str, Any]] = {}
+    for record in selected:
+        key = _semantic_tal_key(record)
+        if key is None or key in key_frames:
+            continue
+        normalized: dict[str, Any] = {
+            "frame_id": str(record.get("frame_id") or "").strip(),
+            "phase_code": _phase_code_for_key(key, record),
+            "phase_label": _phase_label_for_key(key, record),
+            "key_moment": _key_moment_for_key(key, record),
+            "selection_reason": str(record.get("selection_reason") or "video_ai_full_video_keyframe_rerun"),
+        }
+        timestamp = _to_number(record.get("timestamp"))
+        if timestamp is not None:
+            normalized["timestamp"] = round(timestamp, 3)
+        confidence = _to_number(record.get("confidence"))
+        if confidence is not None:
+            normalized["confidence"] = round(confidence, 3)
+        key_frames[key] = {key: value for key, value in normalized.items() if value not in (None, "", [], {})}
+    return key_frames
+
+
+def _candidate_timestamp_map(bio_data: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(bio_data, dict):
+        return {}
+    candidates = bio_data.get("key_frame_candidates")
+    if isinstance(candidates, dict):
+        source = candidates
+    elif isinstance(bio_data.get("key_frame_timestamps"), dict):
+        source = bio_data.get("key_frame_timestamps")
+    else:
+        source = {}
+    output: dict[str, float] = {}
+    if isinstance(source, dict):
+        for key in ("T", "A", "L"):
+            value = source.get(key)
+            timestamp = _to_number(value.get("timestamp") if isinstance(value, dict) else value)
+            if timestamp is not None:
+                output[key] = timestamp
+    return output
+
+
+def _video_keyframe_rerun_diagnostics(
+    result: SemanticKeyframePipelineResult,
+    *,
+    selected: list[dict[str, Any]],
+    bio_data: dict[str, Any] | None,
+    motion_scores: dict[str, Any] | None,
+) -> dict[str, Any]:
+    resolved = result.resolved_keyframes if isinstance(result.resolved_keyframes, dict) else {}
+    video_temporal = result.video_temporal if isinstance(result.video_temporal, dict) else {}
+    key_frames = _video_keyframe_rerun_keyframes(selected)
+    video_timestamps = {
+        key: value
+        for key, value in (
+            (key, _to_number(frame.get("timestamp")) if isinstance(frame, dict) else None)
+            for key, frame in key_frames.items()
+        )
+        if value is not None
+    }
+    skeleton_timestamps = _candidate_timestamp_map(bio_data)
+    conflicts = []
+    for key in ("T", "A", "L"):
+        video_ts = video_timestamps.get(key)
+        skeleton_ts = skeleton_timestamps.get(key)
+        if video_ts is None or skeleton_ts is None:
+            continue
+        delta = round(video_ts - skeleton_ts, 3)
+        if abs(delta) >= 0.15:
+            conflicts.append(
+                {
+                    "key": key,
+                    "video_ai_timestamp": round(video_ts, 3),
+                    "skeleton_timestamp": round(skeleton_ts, 3),
+                    "delta_sec": delta,
+                }
+            )
+    return {
+        "video_ai_confidence": video_temporal.get("confidence") or resolved.get("confidence"),
+        "resolved_confidence": resolved.get("confidence"),
+        "quality_flags": _merge_quality_flags(result.quality_flags, video_temporal, resolved),
+        "used_semantic_frames": result.used_semantic_frames,
+        "effective_source": result.effective_source,
+        "selected_count": len(selected),
+        "missing_tal": [key for key in ("T", "A", "L") if key not in key_frames],
+        "conflicts": conflicts,
+        "conflict_summary": (
+            "video_ai_keyframes_conflict_with_skeleton_candidates"
+            if conflicts
+            else "no_timestamp_conflict_with_available_skeleton_candidates"
+        ),
+        "existing_resolved_source": (
+            motion_scores.get("resolved_keyframes", {}).get("source")
+            if isinstance(motion_scores, dict) and isinstance(motion_scores.get("resolved_keyframes"), dict)
+            else None
+        ),
+    }
+
+
+def _persist_video_keyframe_rerun_semantic_records(
+    analysis_id: str,
+    result: SemanticKeyframePipelineResult,
+) -> list[dict[str, Any]]:
+    selected = result.semantic_records if isinstance(result.semantic_records, list) else []
+    if not selected:
+        resolved = result.resolved_keyframes if isinstance(result.resolved_keyframes, dict) else {}
+        selected = resolved.get("selected") if isinstance(resolved.get("selected"), list) else []
+    selected_records = [dict(item) for item in selected if isinstance(item, dict)]
+    if not selected_records:
+        return []
+
+    target_dir = UPLOADS_DIR / analysis_id / "semantic_frames"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_token = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    paths_by_stem = {path.stem: path for path in result.semantic_frames if isinstance(path, Path)}
+    persisted: list[dict[str, Any]] = []
+    for index, record in enumerate(selected_records, start=1):
+        old_frame_id = str(record.get("frame_id") or "").strip()
+        source_path = paths_by_stem.get(old_frame_id)
+        if source_path is None and index <= len(result.semantic_frames):
+            source_path = result.semantic_frames[index - 1]
+        new_frame_id = f"semantic_video_ai_rerun_{timestamp_token}_{index:04d}"
+        if isinstance(source_path, Path) and source_path.exists():
+            shutil.copy2(source_path, target_dir / f"{new_frame_id}.jpg")
+            frame_id = new_frame_id
+        else:
+            frame_id = old_frame_id
+        persisted.append(
+            {
+                **record,
+                "frame_id": frame_id,
+                "source_frame_id": old_frame_id or None,
+                "selection_source": "video_ai_keyframe_rerun",
+            }
+        )
+    return persisted
+
+
 def _can_backfill_artifacts(status_value: str | None) -> bool:
     return status_value in {"completed", "failed"}
 
@@ -6367,6 +6932,100 @@ async def _restore_missing_analysis_frames(session: AsyncSession, analysis: Anal
         logger.info("Analysis %s restored %s frame images from saved timestamps", analysis.id, len(restored_paths))
 
     return analysis, frames_dir
+
+
+def _frame_backfill_reason(path: Path) -> str | None:
+    if not path.exists():
+        return "missing"
+    if path.stat().st_size <= 0:
+        return "empty"
+    if cv2 is None or np is None:
+        return None
+    try:
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None or image.size <= 0:
+            return "unreadable"
+        mean_value = float(np.mean(image))
+        variance = float(np.var(image))
+        return "blank" if mean_value < 6.0 or variance < 2.0 else None
+    except Exception:  # noqa: BLE001
+        logger.info("Could not inspect frame image quality: %s", path, exc_info=True)
+        return None
+
+
+def _frame_image_is_blank(path: Path) -> bool:
+    return _frame_backfill_reason(path) in {"missing", "empty", "blank"}
+
+
+def _normalized_frame_stem(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text.removesuffix(".jpg")
+
+
+def _add_frame_timestamp(mapping: dict[str, float], frame_id: Any, timestamp: Any) -> None:
+    stem = _normalized_frame_stem(frame_id)
+    if not stem:
+        return
+    try:
+        value = float(timestamp)
+    except (TypeError, ValueError):
+        return
+    if value < 0:
+        return
+    mapping.setdefault(stem, value)
+
+
+def _frame_timestamp_map_for_backfill(analysis: Analysis) -> dict[str, float]:
+    mapping: dict[str, float] = {}
+    motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
+    for item in motion_scores.get("selected", []) if isinstance(motion_scores.get("selected"), list) else []:
+        if isinstance(item, dict):
+            _add_frame_timestamp(mapping, item.get("frame_id"), item.get("timestamp"))
+
+    resolved = motion_scores.get("resolved_keyframes") if isinstance(motion_scores.get("resolved_keyframes"), dict) else {}
+    for key in ("selected", "partial_selected"):
+        for item in resolved.get(key, []) if isinstance(resolved.get(key), list) else []:
+            if isinstance(item, dict):
+                _add_frame_timestamp(mapping, item.get("frame_id"), item.get("timestamp"))
+
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+    candidates = bio_data.get("key_frame_candidates") if isinstance(bio_data.get("key_frame_candidates"), dict) else {}
+    for item in candidates.values():
+        if isinstance(item, dict):
+            _add_frame_timestamp(mapping, item.get("frame_id") or item.get("frame"), item.get("timestamp"))
+    key_frames = bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {}
+    timestamps = bio_data.get("key_frame_timestamps") if isinstance(bio_data.get("key_frame_timestamps"), dict) else {}
+    for key, frame_id in key_frames.items():
+        timestamp = timestamps.get(key)
+        if isinstance(timestamp, dict):
+            timestamp = timestamp.get("timestamp")
+        _add_frame_timestamp(mapping, frame_id, timestamp)
+    return mapping
+
+
+async def _backfill_frame_if_needed(analysis: Analysis, frame_path: Path, filename: str) -> tuple[Path, bool]:
+    backfill_reason = _frame_backfill_reason(frame_path)
+    if backfill_reason is None:
+        return frame_path, False
+
+    timestamp = _frame_timestamp_map_for_backfill(analysis).get(filename.removesuffix(".jpg"))
+    if timestamp is None:
+        return frame_path, False
+    video_path = _video_path_if_available(analysis)
+    if video_path is None:
+        if backfill_reason == "unreadable" and frame_path.exists() and frame_path.stat().st_size > 0:
+            return frame_path, False
+        raise HTTPException(status_code=404, detail="原视频已清理，无法补帧。")
+
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await extract_full_frame_at(video_path, timestamp, frame_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Analysis %s failed to backfill frame %s at %.3fs: %s", analysis.id, filename, timestamp, exc)
+        return frame_path, False
+    return frame_path, True
 
 
 async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) -> Analysis:
@@ -6493,6 +7152,46 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
         note=analysis.note,
         created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
         updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
+    )
+
+
+def _list_item_from_row(row: Any) -> AnalysisListItem:
+    skater_name = str(row.skater_display_name or row.skater_name or "").strip() or None
+    created_at = _parse_log_timestamp(row.created_at) if isinstance(row.created_at, str) else _coerce_utc_datetime(row.created_at)
+    updated_at = _parse_log_timestamp(row.updated_at) if isinstance(row.updated_at, str) else _coerce_utc_datetime(row.updated_at)
+    return AnalysisListItem(
+        id=row.id,
+        skater_id=row.skater_id,
+        session_id=row.session_id,
+        skater_name=skater_name,
+        skill_category=row.skill_category,
+        action_type=row.action_type,
+        action_subtype=row.action_subtype,
+        analysis_profile=row.analysis_profile,
+        pipeline_version=row.pipeline_version,
+        status=row.status,
+        force_score=row.force_score,
+        note=row.note,
+        created_at=created_at or row.created_at,
+        updated_at=updated_at or row.updated_at,
+    )
+
+
+def _progress_point_from_row(row: Any) -> ProgressPoint:
+    created_at = _parse_log_timestamp(row.created_at) if isinstance(row.created_at, str) else _coerce_utc_datetime(row.created_at)
+    summary = str(row.note or "").strip() or "暂无训练备注。"
+    skater_name = str(getattr(row, "skater_display_name", None) or getattr(row, "skater_name", None) or "").strip() or None
+    note = str(row.note or "").strip() or None
+    return ProgressPoint(
+        id=row.id,
+        created_at=created_at or row.created_at,
+        skater_name=skater_name,
+        action_type=row.action_type,
+        action_subtype=row.action_subtype,
+        force_score=int(row.force_score or 0),
+        note=note,
+        comments=note,
+        summary=summary,
     )
 
 
@@ -6634,8 +7333,9 @@ def _build_delta(key: str, label: str, before: object, after: object, unit: str 
 
 def _report_subscores(analysis: Analysis) -> dict[str, Any]:
     report = analysis.report if isinstance(analysis.report, dict) else {}
-    subscores = report.get("subscores")
-    return subscores if isinstance(subscores, dict) else {}
+    bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
+    subscores, source = effective_report_subscores(report, bio_data)
+    return {} if source == "fallback_reference" else subscores
 
 
 def _bio_dict(analysis: Analysis) -> dict[str, Any]:
@@ -6738,9 +7438,9 @@ def _semantic_key_for_record(record: dict[str, Any]) -> str | None:
         return "L"
     phase_code = str(record.get("phase_code") or "").strip()
     profile_phase_labels = {
-        "spin_entry": "旋转入",
-        "spin_main": "旋转中",
-        "spin_exit": "旋转出",
+        "spin_entry": "spin_entry",
+        "spin_main": "spin_main",
+        "spin_exit": "spin_exit",
         "spiral_hold": "峰值",
         "step_sequence": "步法序列",
     }
@@ -6891,7 +7591,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
 def _keyframe_labels_for_profile(profile: str | None) -> list[tuple[str, str]]:
     normalized_profile = str(profile or "").strip().lower()
     if normalized_profile == "spin":
-        return [("旋转入", "旋转入"), ("旋转中", "旋转中"), ("旋转出", "旋转出")]
+        return [("spin_entry", "入转"), ("spin_main", "旋转中"), ("spin_exit", "出转")]
     if normalized_profile == "spiral":
         return [("峰值", "姿态峰值")]
     if normalized_profile in {"step", "step_sequence"}:
@@ -7112,16 +7812,22 @@ def _build_compare_quality(analysis_a: Analysis, analysis_b: Analysis) -> Compar
     before_flags = _quality_flags(analysis_a)
     after_flags = _quality_flags(analysis_b)
     warnings: list[str] = []
+    subtype_mismatch = _normalize_optional_text(analysis_a.action_subtype) != _normalize_optional_text(analysis_b.action_subtype)
+    skill_mismatch = _normalize_optional_text(analysis_a.skill_node_id) != _normalize_optional_text(analysis_b.skill_node_id)
     if _report_data_quality(analysis_a) == "poor" or _report_data_quality(analysis_b) == "poor":
         warnings.append("存在数据质量较弱的记录，变化结论需要保守解读。")
     if before_flags or after_flags:
         warnings.append("部分姿态或目标追踪信号存在不确定性，建议结合原视频复核。")
+    if subtype_mismatch or skill_mismatch:
+        warnings.append("两次记录属于同一动作大类，但动作小项或技能节点不同，结论仅作趋势参考。")
     return CompareQualityPayload(
         before_data_quality=_report_data_quality(analysis_a),
         after_data_quality=_report_data_quality(analysis_b),
         before_flags=before_flags,
         after_flags=after_flags,
         warnings=warnings,
+        subtype_mismatch=subtype_mismatch,
+        skill_mismatch=skill_mismatch,
     )
 
 
@@ -7167,6 +7873,7 @@ async def _build_ai_compare_narrative(
     summary: CompareSummary,
     quality: CompareQualityPayload,
     local_only: bool = False,
+    video_ai_json: dict[str, Any] | None = None,
 ) -> str:
     fallback = _fallback_compare_narrative(
         analysis_a=analysis_a,
@@ -7188,6 +7895,7 @@ async def _build_ai_compare_narrative(
             "metrics": [item.model_dump() for item in metric_deltas],
             "summary": summary.model_dump(),
             "quality": quality.model_dump(),
+            "video_ai": _compact_video_ai_for_narrative(video_ai_json),
         }
         raw = await request_text_completion(
             provider,
@@ -7200,7 +7908,8 @@ async def _build_ai_compare_narrative(
                     "role": "user",
                     "content": (
                         "请基于以下结构化差异，写3-5句家长可读的进步解读。"
-                        "不要夸大低质量数据；不要声称重新看过视频；包含一个下一次训练重点。"
+                        "你只会收到 JSON 文本，不能接收或分析视频；video_ai 字段是 vision 槽多模态模型已生成的结构化结果。"
+                        "不要夸大低质量数据；不要声称你自己重新看过视频；包含一个下一次训练重点。"
                         "如果 score_delta 很小或 quality.needs_human_review=true，请把结论写成谨慎观察。\n"
                         f"{json.dumps(payload, ensure_ascii=False)}"
                     ),
@@ -7231,13 +7940,100 @@ def _ordered_compare_pair(analysis_a: Analysis, analysis_b: Analysis) -> tuple[A
 
 
 def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
+    raw_plan = dict(plan.plan_json) if isinstance(plan.plan_json, dict) else {}
+    if raw_plan.get("generation_status") is None:
+        raw_plan["generation_status"] = raw_plan.get("generation_source") or "ai"
     return TrainingPlanDetail(
         id=plan.id,
         analysis_id=plan.analysis_id,
         skater_id=plan.skater_id,
-        plan_json=plan.plan_json,
+        plan_json=raw_plan,
         created_at=plan.created_at,
     )
+
+
+def _plan_generation_source(plan_json: Any) -> str:
+    if not isinstance(plan_json, dict):
+        return ""
+    return str(plan_json.get("generation_status") or plan_json.get("generation_source") or "").strip().lower()
+
+
+def _fallback_plan_after_ai_failure(action_type: str, report: dict[str, Any], skater_context: str) -> dict[str, Any]:
+    plan_json = build_fallback_plan(action_type, report, skater_context)
+    plan_json["generation_source"] = "fallback"
+    plan_json["generation_status"] = "fallback"
+    plan_json["generation_note"] = "AI 训练计划暂不可用，已生成安全兜底计划。可稍后重试个性化生成。"
+    return plan_json
+
+
+def _minimal_report_context_for_plan(analysis: Analysis) -> dict[str, Any]:
+    if isinstance(analysis.report, dict):
+        report = dict(analysis.report)
+    else:
+        action_label = " · ".join(
+            item
+            for item in (analysis.action_type, analysis.action_subtype, analysis.skill_category)
+            if isinstance(item, str) and item.strip()
+        )
+        score_text = f"当前评分 {analysis.force_score} 分。" if analysis.force_score is not None else ""
+        note_text = f"训练备注：{analysis.note}" if analysis.note else ""
+        summary = " ".join(item for item in (action_label, score_text, note_text) if item).strip()
+        report = {
+            "summary": summary or f"{analysis.action_type}训练复盘。",
+            "issues": [
+                {
+                    "category": analysis.action_subtype or analysis.skill_category or analysis.action_type,
+                    "description": "结构化报告缺失，请先做低冲击、稳定性和基础节奏训练。",
+                    "severity": "medium",
+                }
+            ],
+            "improvements": [],
+            "training_focus": analysis.action_subtype or analysis.skill_category or f"{analysis.action_type}基础稳定",
+            "data_quality": "partial",
+        }
+
+    if not str(report.get("training_focus") or "").strip():
+        report["training_focus"] = analysis.action_subtype or analysis.skill_category or f"{analysis.action_type}基础稳定"
+    if not str(report.get("summary") or "").strip():
+        report["summary"] = f"{analysis.action_subtype or analysis.action_type}训练复盘。"
+    if not isinstance(report.get("issues"), list):
+        report["issues"] = []
+    if analysis.note and not report.get("user_note"):
+        report["user_note"] = analysis.note
+    return report
+
+
+def _fallback_extended_plan_after_ai_failure(
+    *,
+    original_plan: dict[str, Any],
+    completed_days: list[int],
+    action_type: str,
+    report: dict[str, Any],
+    skater_context: str | None,
+) -> dict[str, Any]:
+    fallback = build_fallback_plan(action_type, report, skater_context)
+    original_days = original_plan.get("days", []) if isinstance(original_plan, dict) else []
+    original_by_day = {
+        int(day.get("day", 0)): day
+        for day in original_days
+        if isinstance(day, dict) and int(day.get("day", 0) or 0)
+    }
+    completed_day_set = set(completed_days)
+    days: list[dict[str, Any]] = []
+    for fallback_day in fallback.get("days", []):
+        if not isinstance(fallback_day, dict):
+            continue
+        day_number = int(fallback_day.get("day", 0) or 0)
+        days.append(original_by_day.get(day_number) if day_number in completed_day_set and day_number in original_by_day else fallback_day)
+
+    return {
+        "title": str(original_plan.get("title") or fallback.get("title") or "7天亲子滑冰小练习").strip(),
+        "focus_skill": str(original_plan.get("focus_skill") or fallback.get("focus_skill") or report.get("training_focus") or action_type).strip(),
+        "days": days,
+        "generation_source": "fallback",
+        "generation_status": "fallback",
+        "generation_note": "AI 训练计划续期暂不可用，已保留已完成内容并生成安全兜底续期。",
+    }
 
 
 def _skater_context(skater: Skater) -> str:
@@ -7351,8 +8147,21 @@ async def upload_analysis(
         retry_from_stage=None,
         target_lock_status="pending",
     )
-    session.add(analysis)
-    await session.commit()
+    async def _create_analysis_record() -> None:
+        session.add(analysis)
+        await session.commit()
+
+    try:
+        await run_db_write_with_retry(
+            _create_analysis_record,
+            context=f"upload_analysis_create:{analysis_id}",
+            attempts=5,
+            base_delay_seconds=0.3,
+        )
+    except Exception:
+        await session.rollback()
+        video_path.unlink(missing_ok=True)
+        raise
 
     background_tasks.add_task(process_analysis, analysis_id)
     return AnalysisUploadResponse(id=analysis_id, status="pending")
@@ -7397,57 +8206,50 @@ async def list_analyses(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnalysisListItem]:
-    query = (
-        select(Analysis)
-        .options(
-            load_only(
-                Analysis.id,
-                Analysis.skater_id,
-                Analysis.session_id,
-                Analysis.skill_category,
-                Analysis.action_type,
-                Analysis.action_subtype,
-                Analysis.analysis_profile,
-                Analysis.pipeline_version,
-                Analysis.status,
-                Analysis.force_score,
-                Analysis.note,
-                Analysis.created_at,
-                Analysis.updated_at,
-                Analysis.retry_from_stage,
-                Analysis.processing_logs,
-            )
-        )
-        .order_by(Analysis.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    where_clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit, "offset": offset}
     if action_type:
-        query = query.where(Analysis.action_type == action_type)
+        where_clauses.append("ali.action_type = :action_type")
+        params["action_type"] = action_type
     if skater_id:
-        query = query.where(Analysis.skater_id == skater_id)
+        where_clauses.append("ali.skater_id = :skater_id")
+        params["skater_id"] = skater_id
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.skater_id,
+            ali.session_id,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.analysis_profile,
+            ali.pipeline_version,
+            ali.status,
+            ali.force_score,
+            ali.note,
+            ali.created_at,
+            ali.updated_at,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name
+        FROM analysis_list_items AS ali
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
+        {where_sql}
+        ORDER BY ali.created_at DESC
+        LIMIT :limit OFFSET :offset
+        """
+    )
 
     result = await run_db_read_with_retry(
-        lambda: session.execute(query),
+        lambda: session.execute(query, params),
         context="list_analyses",
     )
-    analyses = await _recover_stale_analyses(session, list(result.scalars().all()))
-    skater_map = await _get_skater_map(session, {analysis.skater_id for analysis in analyses if analysis.skater_id})
-    return [
-        _list_item_from_analysis(
-            analysis,
-            _skater_display_name(skater_map[analysis.skater_id]) if analysis.skater_id in skater_map else None,
-        )
-        for analysis in analyses
-    ]
+    return [_list_item_from_row(row) for row in result.all()]
 
 
-@router.get("/compare", response_model=AnalysisCompareResponse)
-async def compare_analyses(
-    id_a: str = Query(...),
-    id_b: str = Query(...),
-    session: AsyncSession = Depends(get_session),
-) -> AnalysisCompareResponse:
+async def _load_compare_pair(session: AsyncSession, id_a: str, id_b: str) -> tuple[Analysis, Analysis]:
     analysis_a = await session.get(Analysis, id_a)
     analysis_b = await session.get(Analysis, id_b)
 
@@ -7459,9 +8261,317 @@ async def compare_analyses(
         raise HTTPException(status_code=400, detail="只能比较同一位小朋友的训练记录。")
     if analysis_a.action_type != analysis_b.action_type:
         raise HTTPException(status_code=400, detail="仅支持同动作类型的复盘记录对比。")
-    if not _can_compare_same_subtype(analysis_a, analysis_b):
-        raise HTTPException(status_code=400, detail="请只选择同一动作小项或同一技能节点的记录进行对比。")
+    return _ordered_compare_pair(analysis_a, analysis_b)
 
+
+def _compact_video_ai_side_for_narrative(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "valid": payload.get("valid"),
+        "provider": payload.get("provider"),
+        "model": payload.get("model"),
+        "confidence": payload.get("confidence"),
+        "data_quality_hint": payload.get("data_quality_hint"),
+        "overall_impression": str(payload.get("overall_impression") or "")[:500],
+        "macro_assessment": payload.get("macro_assessment") if isinstance(payload.get("macro_assessment"), dict) else None,
+        "action_confirmation": payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else None,
+        "quality_flags": payload.get("quality_flags") if isinstance(payload.get("quality_flags"), list) else [],
+        "fallback_reason": payload.get("fallback_reason"),
+        "fallback_recommendation": payload.get("fallback_recommendation"),
+    }
+
+
+def _compact_video_ai_for_narrative(video_ai_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    return {
+        "status": video_ai_json.get("status"),
+        "provider": video_ai_json.get("provider"),
+        "model": video_ai_json.get("model"),
+        "before": _compact_video_ai_side_for_narrative(video_ai_json.get("before") if isinstance(video_ai_json.get("before"), dict) else None),
+        "after": _compact_video_ai_side_for_narrative(video_ai_json.get("after") if isinstance(video_ai_json.get("after"), dict) else None),
+    }
+
+
+def _append_video_ai_quality_warning(quality: CompareQualityPayload, video_ai_json: dict[str, Any] | None) -> None:
+    if not isinstance(video_ai_json, dict):
+        return
+    provider = str(video_ai_json.get("provider") or "vision").strip()
+    model = str(video_ai_json.get("model") or "").strip()
+    label = f"{provider}/{model}" if model else provider
+    status_value = str(video_ai_json.get("status") or "").strip().lower()
+    if status_value == "completed":
+        quality.warnings.append(f"已使用 vision 槽视频模型 {label} 分别分析两段完整原视频，并结合结构化数据生成结论。")
+        return
+    if status_value == "partial":
+        quality.warnings.append(f"vision 槽视频模型 {label} 只完成了部分全量视频分析，本页结论已降级为视频与数据混合参考。")
+        return
+    if status_value:
+        quality.warnings.append(f"vision 槽视频模型 {label} 未能完成全量视频分析，本页主要基于已保存数据对比。")
+
+
+def _video_ai_side_payload(video_ai_json: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    payload = video_ai_json.get(key)
+    return payload if isinstance(payload, dict) else None
+
+
+def _video_ai_side_is_valid(payload: dict[str, Any] | None) -> bool:
+    return bool(isinstance(payload, dict) and payload.get("valid"))
+
+
+def _clean_video_ai_text(value: object, limit: int = 220) -> str | None:
+    text = str(value or "").replace("\n", " ").strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _video_ai_confidence(payload: dict[str, Any] | None) -> float | None:
+    confidence = _to_number(payload.get("confidence") if isinstance(payload, dict) else None)
+    if confidence is None:
+        return None
+    return max(0.0, min(1.0, round(confidence, 3)))
+
+
+def _video_ai_average_confidence(before: dict[str, Any] | None, after: dict[str, Any] | None) -> float | None:
+    values = [value for value in (_video_ai_confidence(before), _video_ai_confidence(after)) if value is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 3)
+
+
+def _video_ai_macro_assessment(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    macro = payload.get("macro_assessment")
+    return macro if isinstance(macro, dict) else {}
+
+
+def _build_video_ai_observations(
+    before_payload: dict[str, Any] | None,
+    after_payload: dict[str, Any] | None,
+) -> list[CompareVideoAiObservation]:
+    before_macro = _video_ai_macro_assessment(before_payload)
+    after_macro = _video_ai_macro_assessment(after_payload)
+    return [
+        CompareVideoAiObservation(
+            key=key,
+            label=label,
+            before=_clean_video_ai_text(before_macro.get(key), 140),
+            after=_clean_video_ai_text(after_macro.get(key), 140),
+        )
+        for key, label in VIDEO_AI_OBSERVATION_LABELS.items()
+    ]
+
+
+def _video_ai_list_text(payload: dict[str, Any] | None, key: str) -> list[str]:
+    macro = _video_ai_macro_assessment(payload)
+    values = macro.get(key)
+    if not isinstance(values, list):
+        return []
+    cleaned = [_clean_video_ai_text(value, 80) for value in values]
+    return [value for value in cleaned if value]
+
+
+def _video_ai_side_label(payload: dict[str, Any] | None, fallback: str) -> str:
+    if _video_ai_side_is_valid(payload):
+        return fallback
+    return f"{fallback}（未完成）"
+
+
+def _fallback_video_ai_change_description(before_payload: dict[str, Any] | None, after_payload: dict[str, Any] | None) -> str:
+    before_text = _clean_video_ai_text(before_payload.get("overall_impression") if before_payload else None, 180)
+    after_text = _clean_video_ai_text(after_payload.get("overall_impression") if after_payload else None, 180)
+    if before_text and after_text:
+        return f"之前：{before_text}；现在：{after_text}"
+    if after_text:
+        return f"本次视频 AI 观察：{after_text}"
+    if before_text:
+        return f"之前视频 AI 观察：{before_text}"
+    return "视频 AI 已产出宏观观察，但可直接比较的信息有限。"
+
+
+def _fallback_video_ai_training_focus(after_payload: dict[str, Any] | None) -> str:
+    issues = _video_ai_list_text(after_payload, "top_issues")
+    if issues:
+        return f"下一次训练优先复核：{issues[0]}。"
+    return "下一次训练优先结合节奏、轴心和落冰/滑出质量继续复核。"
+
+
+def _video_ai_caveats(video_ai_json: dict[str, Any], before_payload: dict[str, Any] | None, after_payload: dict[str, Any] | None) -> list[str]:
+    caveats: list[str] = []
+    status_value = str(video_ai_json.get("status") or "").strip().lower()
+    if status_value == "partial":
+        caveats.append("视频 AI 只完成了部分完整视频分析，未完成的一侧已按已有数据保守展示。")
+    if not _video_ai_side_is_valid(before_payload):
+        reason = _clean_video_ai_text((before_payload or {}).get("fallback_reason"), 80)
+        caveats.append(f"之前视频未形成可靠视频 AI 观察{f'：{reason}' if reason else '。'}")
+    if not _video_ai_side_is_valid(after_payload):
+        reason = _clean_video_ai_text((after_payload or {}).get("fallback_reason"), 80)
+        caveats.append(f"现在视频未形成可靠视频 AI 观察{f'：{reason}' if reason else '。'}")
+    for label, payload in (("之前", before_payload), ("现在", after_payload)):
+        data_quality = str((payload or {}).get("data_quality_hint") or "").strip().lower()
+        if data_quality in {"partial", "poor"}:
+            caveats.append(f"{label}视频 AI 数据质量为 {data_quality}，结论需保守解读。")
+        flags = (payload or {}).get("quality_flags")
+        if isinstance(flags, list) and flags:
+            caveats.append(f"{label}视频 AI 标记了质量提示：{', '.join(str(value) for value in flags[:3] if value)}。")
+    caveats.append("视频 AI 观察仅作为辅助证据，不参与评分、关键帧或生物力学指标计算。")
+    return list(dict.fromkeys(value for value in caveats if value))
+
+
+def _fallback_video_ai_compare_report(video_ai_json: dict[str, Any]) -> CompareVideoAiReport | None:
+    before_payload = _video_ai_side_payload(video_ai_json, "before")
+    after_payload = _video_ai_side_payload(video_ai_json, "after")
+    if not (_video_ai_side_is_valid(before_payload) or _video_ai_side_is_valid(after_payload)):
+        return None
+
+    observations = _build_video_ai_observations(before_payload, after_payload)
+    average_confidence = _video_ai_average_confidence(before_payload, after_payload)
+    summary = (
+        f"视频 AI 已生成{_video_ai_side_label(before_payload, '之前')}和"
+        f"{_video_ai_side_label(after_payload, '现在')}的宏观观察，可作为评分与关键帧之外的辅助参考。"
+    )
+    changes = [
+        CompareVideoAiChange(
+            category="整体观感",
+            direction="uncertain",
+            description=_fallback_video_ai_change_description(before_payload, after_payload),
+            confidence=average_confidence,
+        )
+    ]
+    strengths = _video_ai_list_text(after_payload, "top_strengths")
+    issues = _video_ai_list_text(after_payload, "top_issues")
+    if strengths or issues:
+        parts = []
+        if strengths:
+            parts.append(f"现在的优势：{'、'.join(strengths[:2])}")
+        if issues:
+            parts.append(f"仍需观察：{'、'.join(issues[:2])}")
+        changes.append(
+            CompareVideoAiChange(
+                category="当前重点",
+                direction="uncertain",
+                description="；".join(parts),
+                confidence=_video_ai_confidence(after_payload) or average_confidence,
+            )
+        )
+    return CompareVideoAiReport(
+        status=str(video_ai_json.get("status") or "completed"),
+        provider=_clean_video_ai_text(video_ai_json.get("provider"), 80),
+        model=_clean_video_ai_text(video_ai_json.get("model"), 120),
+        before_confidence=_video_ai_confidence(before_payload),
+        after_confidence=_video_ai_confidence(after_payload),
+        before_data_quality=_clean_video_ai_text((before_payload or {}).get("data_quality_hint"), 40),
+        after_data_quality=_clean_video_ai_text((after_payload or {}).get("data_quality_hint"), 40),
+        average_confidence=average_confidence,
+        summary=summary,
+        observations=observations,
+        changes=changes[:4],
+        training_focus=_fallback_video_ai_training_focus(after_payload),
+        caveats=_video_ai_caveats(video_ai_json, before_payload, after_payload),
+    )
+
+
+def _normalize_video_ai_direction(value: object) -> str:
+    direction = str(value or "uncertain").strip().lower()
+    return direction if direction in VIDEO_AI_CHANGE_DIRECTIONS else "uncertain"
+
+
+def _normalize_video_ai_changes(payload: object, fallback: CompareVideoAiReport) -> list[CompareVideoAiChange]:
+    if not isinstance(payload, list):
+        return fallback.changes
+    changes: list[CompareVideoAiChange] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        description = _clean_video_ai_text(item.get("description"), 260)
+        if not description:
+            continue
+        confidence = _to_number(item.get("confidence"))
+        changes.append(
+            CompareVideoAiChange(
+                category=_clean_video_ai_text(item.get("category"), 40) or "视频级变化",
+                direction=_normalize_video_ai_direction(item.get("direction")),
+                description=description,
+                confidence=max(0.0, min(1.0, round(confidence, 3))) if confidence is not None else None,
+            )
+        )
+    return (changes or fallback.changes)[:4]
+
+
+def _normalize_video_ai_compare_report(payload: dict[str, Any], fallback: CompareVideoAiReport) -> CompareVideoAiReport:
+    summary = _clean_video_ai_text(payload.get("summary"), 360) or fallback.summary
+    training_focus = _clean_video_ai_text(payload.get("training_focus"), 220) or fallback.training_focus
+    raw_caveats = payload.get("caveats")
+    model_caveats = [_clean_video_ai_text(value, 180) for value in raw_caveats] if isinstance(raw_caveats, list) else []
+    caveats = list(dict.fromkeys([*(value for value in model_caveats if value), *fallback.caveats]))
+    return CompareVideoAiReport(
+        status=fallback.status,
+        provider=fallback.provider,
+        model=fallback.model,
+        before_confidence=fallback.before_confidence,
+        after_confidence=fallback.after_confidence,
+        before_data_quality=fallback.before_data_quality,
+        after_data_quality=fallback.after_data_quality,
+        average_confidence=fallback.average_confidence,
+        summary=summary,
+        observations=fallback.observations,
+        changes=_normalize_video_ai_changes(payload.get("changes"), fallback),
+        training_focus=training_focus,
+        caveats=caveats[:6],
+    )
+
+
+async def _build_video_ai_compare_report(video_ai_json: dict[str, Any] | None) -> CompareVideoAiReport | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    fallback = _fallback_video_ai_compare_report(video_ai_json)
+    if fallback is None:
+        return None
+
+    try:
+        provider = await get_active_provider("report")
+        request_payload = _compact_video_ai_for_narrative(video_ai_json)
+        raw = await request_text_completion(
+            provider,
+            temperature=0.1,
+            max_tokens=700,
+            timeout=35,
+            messages=[
+                {"role": "system", "content": VIDEO_AI_COMPARE_REPORT_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "请把 before/after 两段视频 AI 结构化观察整理成一个短 JSON："
+                        '{"summary":"一句总览","changes":[{"category":"节奏/速度/轴心/进入/落冰滑出/整体",'
+                        '"direction":"improved|regressed|unchanged|uncertain","description":"家长可读变化","confidence":0.0}],'
+                        '"training_focus":"一句下次训练重点","caveats":["必要的保守提示"]}。'
+                        "changes 返回 2-4 条；不要声称你重新看过视频；不要改变评分或关键帧结论。\n"
+                        f"{json.dumps(request_payload, ensure_ascii=False)}"
+                    ),
+                },
+            ],
+        )
+        parsed = json.loads(clean_json_text(raw))
+        if not isinstance(parsed, dict):
+            return fallback
+        return _normalize_video_ai_compare_report(parsed, fallback)
+    except Exception:  # noqa: BLE001
+        logger.info("Compare video AI report unavailable, using fallback.", exc_info=True)
+        return fallback
+
+
+async def _build_analysis_compare_response(
+    session: AsyncSession,
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    *,
+    video_ai_json: dict[str, Any] | None = None,
+) -> AnalysisCompareResponse:
     analysis_a, analysis_b = _ordered_compare_pair(analysis_a, analysis_b)
 
     skater_map = await _get_skater_map(
@@ -7474,6 +8584,7 @@ async def compare_analyses(
     keyframe_compare = _build_keyframe_compare(analysis_a, analysis_b)
     video_compare = _build_video_compare(analysis_a, analysis_b)
     quality = _build_compare_quality(analysis_a, analysis_b)
+    _append_video_ai_quality_warning(quality, video_ai_json)
     summary = _compare_reports(
         analysis_a.report if isinstance(analysis_a.report, dict) else None,
         analysis_b.report if isinstance(analysis_b.report, dict) else None,
@@ -7489,6 +8600,7 @@ async def compare_analyses(
     if same_video_core_stable:
         summary = _stabilize_same_video_compare_summary(summary)
         quality.warnings.append("同一原视频重复分析的关键帧和评分稳定；报告问题分类差异已按重复分析噪声处理。")
+    video_ai_report = await _build_video_ai_compare_report(video_ai_json)
     ai_narrative = await _build_ai_compare_narrative(
         analysis_a=analysis_a,
         analysis_b=analysis_b,
@@ -7498,6 +8610,7 @@ async def compare_analyses(
         summary=summary,
         quality=quality,
         local_only=same_video_core_stable,
+        video_ai_json=video_ai_json,
     )
 
     return AnalysisCompareResponse(
@@ -7517,43 +8630,356 @@ async def compare_analyses(
         video_compare=video_compare,
         quality=quality,
         ai_narrative=ai_narrative,
+        video_ai_report=video_ai_report,
     )
+
+
+def _comparison_result_from_model(comparison: AnalysisComparison) -> AnalysisCompareResponse | None:
+    if not isinstance(comparison.result_json, dict):
+        return None
+    try:
+        return AnalysisCompareResponse.model_validate(comparison.result_json)
+    except Exception:  # noqa: BLE001
+        logger.warning("Invalid stored comparison result for %s", comparison.id, exc_info=True)
+        return None
+
+
+def _comparison_video_ai_status(video_ai_json: dict[str, Any] | None) -> str | None:
+    if not isinstance(video_ai_json, dict):
+        return None
+    status_value = str(video_ai_json.get("status") or "").strip()
+    return status_value or None
+
+
+def _comparison_summary_from_model(
+    comparison: AnalysisComparison,
+    *,
+    analysis_a: Analysis | None = None,
+    analysis_b: Analysis | None = None,
+    skater: Skater | None = None,
+) -> AnalysisComparisonSummary:
+    result = _comparison_result_from_model(comparison)
+    before_created_at = result.analysis_a.created_at if result else (_coerce_utc_datetime(analysis_a.created_at) if analysis_a else None)
+    after_created_at = result.analysis_b.created_at if result else (_coerce_utc_datetime(analysis_b.created_at) if analysis_b else None)
+    before_score = result.analysis_a.force_score if result else (analysis_a.force_score if analysis_a else None)
+    after_score = result.analysis_b.force_score if result else (analysis_b.force_score if analysis_b else None)
+    return AnalysisComparisonSummary(
+        id=comparison.id,
+        analysis_a_id=comparison.analysis_a_id,
+        analysis_b_id=comparison.analysis_b_id,
+        skater_id=comparison.skater_id,
+        skater_name=_skater_display_name(skater) if skater else None,
+        action_type=comparison.action_type,
+        status=comparison.status,
+        score_delta=result.score_delta if result else None,
+        ai_narrative=result.ai_narrative if result else None,
+        error_message=comparison.error_message,
+        video_ai_status=_comparison_video_ai_status(comparison.video_ai_json),
+        before_created_at=before_created_at,
+        after_created_at=after_created_at,
+        before_score=before_score,
+        after_score=after_score,
+        created_at=_coerce_utc_datetime(comparison.created_at) or comparison.created_at,
+        updated_at=_coerce_utc_datetime(comparison.updated_at) or comparison.updated_at,
+    )
+
+
+def _comparison_detail_from_model(
+    comparison: AnalysisComparison,
+    *,
+    analysis_a: Analysis | None = None,
+    analysis_b: Analysis | None = None,
+    skater: Skater | None = None,
+) -> AnalysisComparisonDetail:
+    summary = _comparison_summary_from_model(
+        comparison,
+        analysis_a=analysis_a,
+        analysis_b=analysis_b,
+        skater=skater,
+    )
+    return AnalysisComparisonDetail(
+        **summary.model_dump(),
+        result=_comparison_result_from_model(comparison),
+        video_ai_json=comparison.video_ai_json if isinstance(comparison.video_ai_json, dict) else None,
+    )
+
+
+async def _run_full_video_ai_for_compare_side(
+    analysis: Analysis,
+    *,
+    provider: Any,
+) -> dict[str, Any]:
+    video_path = _safe_video_response_path(analysis)
+    if video_path is None:
+        return {
+            "valid": False,
+            "provider": str(getattr(provider, "provider", "unknown")),
+            "model": str(getattr(provider, "model_id", "")),
+            "quality_flags": ["compare_full_video_source_unavailable"],
+            "fallback_reason": "source_video_unavailable",
+            "fallback_recommendation": "use_saved_analysis_data",
+        }
+
+    input_window = _input_window_payload_for_saved_analysis(analysis)
+    source_duration = _to_number(input_window.get("source_duration_sec"))
+    source_fps = _to_number(analysis.source_fps)
+    if source_fps is None:
+        try:
+            source_fps = detect_video_fps(video_path)
+        except Exception:  # noqa: BLE001
+            source_fps = None
+    try:
+        return await analyze_video_temporal(
+            video_path,
+            action_type=analysis.action_type,
+            action_subtype=analysis.action_subtype,
+            user_note=analysis.note,
+            video_duration_sec=source_duration,
+            source_video_duration_sec=source_duration,
+            source_fps=source_fps,
+            analyzed_video_kind="full_source",
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "valid": False,
+            "provider": str(getattr(provider, "provider", "unknown")),
+            "model": str(getattr(provider, "model_id", "")),
+            "quality_flags": ["compare_full_video_ai_failed"],
+            "fallback_reason": "compare_full_video_ai_failed",
+            "fallback_recommendation": "use_saved_analysis_data",
+            "error": str(exc),
+        }
+
+
+async def _run_full_video_ai_for_compare(analysis_a: Analysis, analysis_b: Analysis, session: AsyncSession) -> dict[str, Any]:
+    try:
+        provider = await get_active_provider("vision", session)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "provider": "unknown",
+            "model": None,
+            "error": str(exc),
+            "before": {"valid": False, "quality_flags": ["compare_video_ai_provider_unavailable"]},
+            "after": {"valid": False, "quality_flags": ["compare_video_ai_provider_unavailable"]},
+        }
+
+    before_payload = await _run_full_video_ai_for_compare_side(analysis_a, provider=provider)
+    after_payload = await _run_full_video_ai_for_compare_side(analysis_b, provider=provider)
+    valid_count = sum(1 for payload in (before_payload, after_payload) if isinstance(payload, dict) and payload.get("valid"))
+    status_value = "completed" if valid_count == 2 else "partial" if valid_count == 1 else "failed"
+    return {
+        "status": status_value,
+        "provider": str(getattr(provider, "provider", "")),
+        "model": str(getattr(provider, "model_id", "")),
+        "before_analysis_id": analysis_a.id,
+        "after_analysis_id": analysis_b.id,
+        "before": before_payload,
+        "after": after_payload,
+    }
+
+
+async def process_analysis_comparison(comparison_id: str) -> None:
+    async with AsyncSessionLocal() as session:
+        comparison = await session.get(AnalysisComparison, comparison_id)
+        if comparison is None:
+            return
+        try:
+            comparison.status = "processing"
+            comparison.error_message = None
+            comparison.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            analysis_a, analysis_b = await _load_compare_pair(session, comparison.analysis_a_id, comparison.analysis_b_id)
+            video_ai_json = await _run_full_video_ai_for_compare(analysis_a, analysis_b, session)
+            result = await _build_analysis_compare_response(
+                session,
+                analysis_a,
+                analysis_b,
+                video_ai_json=video_ai_json,
+            )
+
+            comparison.video_ai_json = video_ai_json
+            comparison.result_json = result.model_dump(mode="json")
+            comparison.status = "completed"
+            comparison.error_message = None
+            comparison.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+        except HTTPException as exc:
+            await session.rollback()
+            comparison = await session.get(AnalysisComparison, comparison_id)
+            if comparison is not None:
+                comparison.status = "failed"
+                comparison.error_message = str(exc.detail)
+                comparison.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Comparison %s failed", comparison_id, exc_info=True)
+            await session.rollback()
+            comparison = await session.get(AnalysisComparison, comparison_id)
+            if comparison is not None:
+                comparison.status = "failed"
+                comparison.error_message = str(exc)
+                comparison.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
+@router.post("/comparisons", response_model=AnalysisComparisonDetail)
+async def create_analysis_comparison(
+    payload: AnalysisComparisonCreateRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    analysis_a, analysis_b = await _load_compare_pair(session, payload.id_a, payload.id_b)
+    comparison = AnalysisComparison(
+        analysis_a_id=analysis_a.id,
+        analysis_b_id=analysis_b.id,
+        skater_id=analysis_b.skater_id,
+        action_type=analysis_b.action_type,
+        status="pending",
+    )
+    session.add(comparison)
+    await session.commit()
+    await session.refresh(comparison)
+
+    background_tasks.add_task(process_analysis_comparison, comparison.id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.get("/comparisons", response_model=list[AnalysisComparisonSummary])
+async def list_analysis_comparisons(
+    skater_id: str | None = Query(default=None),
+    action_type: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=24, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisComparisonSummary]:
+    query = select(AnalysisComparison).order_by(AnalysisComparison.created_at.desc()).offset(offset).limit(limit)
+    if skater_id:
+        query = query.where(AnalysisComparison.skater_id == skater_id)
+    if action_type:
+        query = query.where(AnalysisComparison.action_type == action_type)
+    if status_filter:
+        query = query.where(AnalysisComparison.status == status_filter)
+    result = await session.execute(query)
+    comparisons = list(result.scalars().all())
+    analysis_ids = {comparison.analysis_a_id for comparison in comparisons} | {comparison.analysis_b_id for comparison in comparisons}
+    skater_ids = {comparison.skater_id for comparison in comparisons if comparison.skater_id}
+    analyses: dict[str, Analysis] = {}
+    if analysis_ids:
+        analysis_result = await session.execute(select(Analysis).where(Analysis.id.in_(analysis_ids)))
+        analyses = {analysis.id: analysis for analysis in analysis_result.scalars().all()}
+    skater_map = await _get_skater_map(session, skater_ids)
+    return [
+        _comparison_summary_from_model(
+            comparison,
+            analysis_a=analyses.get(comparison.analysis_a_id),
+            analysis_b=analyses.get(comparison.analysis_b_id),
+            skater=skater_map.get(comparison.skater_id or ""),
+        )
+        for comparison in comparisons
+    ]
+
+
+@router.get("/comparisons/{comparison_id}", response_model=AnalysisComparisonDetail)
+async def get_analysis_comparison(
+    comparison_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    comparison = await session.get(AnalysisComparison, comparison_id)
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="未找到该对比记录。")
+    analysis_a = await session.get(Analysis, comparison.analysis_a_id)
+    analysis_b = await session.get(Analysis, comparison.analysis_b_id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.post("/comparisons/{comparison_id}/retry", response_model=AnalysisComparisonDetail)
+async def retry_analysis_comparison(
+    comparison_id: str,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisComparisonDetail:
+    comparison = await session.get(AnalysisComparison, comparison_id)
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="未找到该对比记录。")
+    if comparison.status in {"pending", "processing"}:
+        raise HTTPException(status_code=400, detail="当前对比仍在生成中，请稍后查看。")
+    comparison.status = "pending"
+    comparison.error_message = None
+    comparison.video_ai_json = None
+    comparison.result_json = None
+    comparison.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(comparison)
+    background_tasks.add_task(process_analysis_comparison, comparison.id)
+    analysis_a = await session.get(Analysis, comparison.analysis_a_id)
+    analysis_b = await session.get(Analysis, comparison.analysis_b_id)
+    skater = await session.get(Skater, comparison.skater_id) if comparison.skater_id else None
+    return _comparison_detail_from_model(comparison, analysis_a=analysis_a, analysis_b=analysis_b, skater=skater)
+
+
+@router.get("/compare", response_model=AnalysisCompareResponse)
+async def compare_analyses(
+    id_a: str = Query(...),
+    id_b: str = Query(...),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCompareResponse:
+    analysis_a, analysis_b = await _load_compare_pair(session, id_a, id_b)
+    return await _build_analysis_compare_response(session, analysis_a, analysis_b)
 
 
 @router.get("/progress", response_model=ProgressResponse)
 async def get_progress(
     action_type: str | None = Query(default=None),
     skater_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
     session: AsyncSession = Depends(get_session),
 ) -> ProgressResponse:
-    query = (
-        select(Analysis)
-        .where(Analysis.status == "completed", Analysis.force_score.is_not(None))
-        .order_by(Analysis.created_at.asc())
-    )
+    where_clauses = ["ali.status = 'completed'", "ali.force_score IS NOT NULL"]
+    params: dict[str, object] = {}
     if action_type:
-        query = query.where(Analysis.action_type == action_type)
+        where_clauses.append("ali.action_type = :action_type")
+        params["action_type"] = action_type
     if skater_id:
-        query = query.where(Analysis.skater_id == skater_id)
+        where_clauses.append("ali.skater_id = :skater_id")
+        params["skater_id"] = skater_id
 
-    result = await session.execute(query)
-    analyses = list(result.scalars().all())
+    query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.note,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name
+        FROM analysis_list_items AS ali
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY ali.created_at DESC
+        LIMIT :limit
+        """
+    )
+    params["limit"] = limit
 
-    points = [
-        ProgressPoint(
-            id=analysis.id,
-            created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
-            action_type=analysis.action_type,
-            force_score=analysis.force_score or 0,
-            summary=_report_summary(analysis),
-        )
-        for analysis in analyses
-    ]
-    recent_scores = [analysis.force_score or 0 for analysis in analyses[-5:]]
+    result = await run_db_read_with_retry(
+        lambda: session.execute(query, params),
+        context="progress:list",
+    )
+    points = list(reversed([_progress_point_from_row(row) for row in result.all()]))
+    scores = [point.force_score for point in points]
+    recent_scores = scores[-5:]
     stats = ProgressStats(
-        total_count=len(analyses),
-        latest_score=analyses[-1].force_score if analyses else None,
-        best_score=max((analysis.force_score or 0 for analysis in analyses), default=None),
+        total_count=len(points),
+        latest_score=scores[-1] if scores else None,
+        best_score=max(scores, default=None),
         recent_five_average=round(mean(recent_scores), 1) if recent_scores else None,
     )
     return ProgressResponse(points=points, stats=stats)
@@ -7593,8 +9019,7 @@ async def create_training_plan(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
-    if not isinstance(analysis.report, dict):
-        raise HTTPException(status_code=400, detail="当前分析缺少结构化报告，无法生成训练计划。")
+    report_context = _minimal_report_context_for_plan(analysis)
 
     existing_plan = await _get_plan_by_analysis(session, analysis_id)
     if existing_plan is not None and not force:
@@ -7610,16 +9035,16 @@ async def create_training_plan(
     try:
         plan_json = await generate_training_plan(
             analysis.action_type,
-            analysis.report,
+            report_context,
             _skater_context(skater),
             skater.id,
             variation_key=f"{analysis.id}:{datetime.now(timezone.utc).isoformat()}",
         )
     except PlanGenerationError as exc:
         logger.warning("Analysis %s training plan AI failed, using fallback plan: %s", analysis_id, exc)
-        plan_json = build_fallback_plan(analysis.action_type, analysis.report, _skater_context(skater))
-        plan_json["generation_source"] = "fallback"
-        plan_json["generation_note"] = f"AI 训练计划暂不可用，已生成安全兜底计划：{exc}"
+        if existing_plan is not None and _plan_generation_source(existing_plan.plan_json) == "ai":
+            return _plan_detail_from_model(existing_plan)
+        plan_json = _fallback_plan_after_ai_failure(analysis.action_type, report_context, _skater_context(skater))
 
     if existing_plan is not None:
         existing_plan.plan_json = plan_json
@@ -7646,6 +9071,306 @@ async def get_analysis_plan(analysis_id: str, session: AsyncSession = Depends(ge
     return _plan_detail_from_model(plan)
 
 
+@router.get("/{analysis_id}/chat/messages", response_model=list[AnalysisChatMessagePublic])
+async def get_analysis_chat_messages(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[AnalysisChatMessagePublic]:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    messages = await list_analysis_chat_messages(session, analysis_id)
+    return [_chat_message_public(message) for message in messages]
+
+
+@router.post("/{analysis_id}/chat", response_model=AnalysisChatResponse)
+async def post_analysis_chat(
+    analysis_id: str,
+    payload: AnalysisChatRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisChatResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+
+    try:
+        assistant_message, messages, suggested_action = await create_analysis_chat_reply(
+            session,
+            analysis,
+            message=payload.message,
+            provider_id=payload.provider_id,
+        )
+    except AnalysisChatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Analysis %s chat failed: %s", analysis_id, exc)
+        raise HTTPException(status_code=502, detail="AI 追问暂时没有顺利回复，请稍后再试。") from exc
+
+    return AnalysisChatResponse(
+        message=_chat_message_public(assistant_message),
+        messages=[_chat_message_public(message) for message in messages],
+        suggested_action=suggested_action,
+    )
+
+
+@router.post("/{analysis_id}/chat/video-keyframes-rerun", response_model=AnalysisCorrectionMutationResponse)
+async def rerun_video_ai_keyframes(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能重新识别关键帧。")
+
+    video_path = _video_path_if_available(analysis)
+    if video_path is None:
+        raise HTTPException(status_code=404, detail="原始视频已清理或不可用，无法重新识别关键帧。")
+
+    original_target_lock = copy.deepcopy(analysis.target_lock)
+    original_pose_data = copy.deepcopy(analysis.pose_data)
+    original_bio_data = copy.deepcopy(analysis.bio_data)
+    original_motion_scores = copy.deepcopy(analysis.frame_motion_scores)
+    motion_scores = copy.deepcopy(analysis.frame_motion_scores) if isinstance(analysis.frame_motion_scores, dict) else {}
+    bio_data = copy.deepcopy(analysis.bio_data) if isinstance(analysis.bio_data, dict) else None
+    processing_dir, processing_frames_dir = build_processing_frames_dir(analysis.id)
+    try:
+        input_window = build_video_input_window(video_path)
+        sampling_metadata = _full_video_sampling_metadata(video_path, input_window)
+        semantic_pipeline = await run_semantic_keyframe_pipeline(
+            video_path=video_path,
+            work_dir=processing_dir,
+            semantic_frames_dir=processing_frames_dir.parent / "semantic_frames",
+            sampling_metadata=sampling_metadata,
+            action_type=analysis.action_type,
+            action_subtype=analysis.action_subtype,
+            motion_scores=motion_scores,
+            analysis_profile=analysis.analysis_profile,
+            bio_data=bio_data,
+            user_note=analysis.note,
+            analyzed_video_kind="full_video_keyframe_rerun",
+            input_window=input_window,
+            precheck=False,
+        )
+        selected = _persist_video_keyframe_rerun_semantic_records(analysis.id, semantic_pipeline)
+        key_frames = _video_keyframe_rerun_keyframes(selected)
+        if not key_frames and not selected:
+            raise HTTPException(status_code=502, detail="视频 AI 没有返回可用的关键帧结果，请稍后重试。")
+        diagnostics = _video_keyframe_rerun_diagnostics(
+            semantic_pipeline,
+            selected=selected,
+            bio_data=bio_data,
+            motion_scores=motion_scores,
+        )
+        try:
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                payload={
+                    "key_frames": key_frames,
+                    "selected_semantic_frames": selected,
+                    "source": "video_ai_full_video_keyframe_rerun",
+                    "diagnostics": diagnostics,
+                },
+                rationale="Video AI reran full source video keyframe localization. Review before applying.",
+                source="video_ai_keyframe_rerun",
+                status="proposed",
+            )
+        except AnalysisCorrectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.refresh(analysis)
+        if (
+            analysis.target_lock != original_target_lock
+            or analysis.pose_data != original_pose_data
+            or analysis.bio_data != original_bio_data
+            or analysis.frame_motion_scores != original_motion_scores
+        ):
+            raise HTTPException(status_code=500, detail="关键帧重识别不应修改原分析数据。")
+        return await _correction_mutation_response(session, analysis, correction)
+    finally:
+        cleanup_processing_dir(analysis.id)
+
+
+@router.get("/{analysis_id}/corrections", response_model=AnalysisCorrectionListResponse)
+async def get_analysis_corrections(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionListResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    return await _correction_list_response(session, analysis)
+
+
+@router.post("/{analysis_id}/corrections", response_model=AnalysisCorrectionMutationResponse)
+async def post_analysis_correction(
+    analysis_id: str,
+    payload: AnalysisCorrectionCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能修正。")
+    try:
+        correction = await create_analysis_correction(
+            session,
+            analysis,
+            kind=payload.kind,
+            payload=payload.payload,
+            rationale=payload.rationale,
+            source=payload.source,
+            status=payload.status,
+        )
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/{correction_id}/apply", response_model=AnalysisCorrectionMutationResponse)
+async def apply_analysis_correction_route(
+    analysis_id: str,
+    correction_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    try:
+        correction = await apply_analysis_correction(session, analysis, correction_id)
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/{correction_id}/dismiss", response_model=AnalysisCorrectionMutationResponse)
+async def dismiss_analysis_correction_route(
+    analysis_id: str,
+    correction_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    try:
+        correction = await dismiss_analysis_correction(session, analysis, correction_id)
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/corrections/regenerate-report", response_model=AnalysisCorrectionMutationResponse)
+async def regenerate_report_from_corrections(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisCorrectionMutationResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    if analysis.status != "completed":
+        raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能重新生成报告。")
+
+    effective_analysis = await effective_analysis_for_read(session, analysis)
+    if not isinstance(effective_analysis.vision_structured, dict):
+        raise HTTPException(status_code=400, detail="当前分析缺少视觉结构化数据。")
+    if not isinstance(effective_analysis.bio_data, dict):
+        raise HTTPException(status_code=400, detail="当前分析缺少生物力学数据。")
+
+    frame_motion_scores = effective_analysis.frame_motion_scores if isinstance(effective_analysis.frame_motion_scores, dict) else None
+    dual_path_meta = _merge_video_temporal_cross_validation(
+        effective_analysis.cross_validation if isinstance(effective_analysis.cross_validation, dict) else None,
+        frame_motion_scores=frame_motion_scores,
+    )
+    dual_path_meta = _attach_path_b_report_evidence(
+        dual_path_meta,
+        effective_analysis.vision_path_b if isinstance(effective_analysis.vision_path_b, dict) else None,
+    )
+    profile_evidence = (
+        effective_analysis.bio_data.get("profile_evidence")
+        if isinstance(effective_analysis.bio_data.get("profile_evidence"), dict)
+        else None
+    )
+    report = await generate_report(
+        effective_analysis.action_type,
+        effective_analysis.vision_structured,
+        effective_analysis.bio_data,
+        effective_analysis.skater_id,
+        dual_path_meta=dual_path_meta,
+        prompt_context=await build_analysis_prompt_context(
+            action_type=effective_analysis.action_type,
+            action_subtype=effective_analysis.action_subtype,
+            skill_category=effective_analysis.skill_category,
+            analysis_profile=effective_analysis.analysis_profile,
+            profile_evidence=profile_evidence,
+            motion_features=frame_motion_scores,
+            bio_data=effective_analysis.bio_data,
+            skater_id=effective_analysis.skater_id,
+            user_note=effective_analysis.note,
+        ),
+    )
+    force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
+    try:
+        correction = await create_analysis_correction(
+            session,
+            analysis,
+            kind="report_regeneration",
+            payload={
+                "report": report,
+                "force_score": force_score,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            rationale="Regenerated report from applied corrections.",
+            source="manual",
+            status="applied",
+        )
+    except AnalysisCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _correction_mutation_response(session, analysis, correction)
+
+
+@router.post("/{analysis_id}/chat/share", response_model=AnalysisChatShareResponse)
+async def share_analysis_chat(
+    analysis_id: str,
+    payload: AnalysisChatShareRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisChatShareResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    effective_analysis = await effective_analysis_for_read(session, analysis)
+    messages = await list_analysis_chat_messages(session, analysis_id)
+    selected_ids = set(payload.message_ids or []) if payload and payload.message_ids else set()
+    if selected_ids:
+        messages = [message for message in messages if message.id in selected_ids]
+    corrections = await list_analysis_corrections(session, analysis_id)
+    skater_name = None
+    if analysis.skater_id:
+        skater = await session.get(Skater, analysis.skater_id)
+        skater_name = _skater_display_name(skater) if skater else None
+    include_pending = True if payload is None else payload.include_pending_corrections
+    title = f"{skater_name + ' · ' if skater_name else ''}{effective_analysis.action_subtype or effective_analysis.action_type}"
+    return AnalysisChatShareResponse(
+        title=title,
+        text=build_chat_share_text(
+            effective_analysis,
+            messages,
+            corrections,
+            skater_name=skater_name,
+            include_pending_corrections=include_pending,
+        ),
+        image_payload=build_chat_share_image_payload(
+            effective_analysis,
+            messages,
+            corrections,
+            skater_name=skater_name,
+        ),
+    )
+
+
 @router.get("/{analysis_id}/pose", response_model=PoseResponse)
 async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(get_session)) -> PoseResponse:
     analysis = await session.get(Analysis, analysis_id)
@@ -7655,11 +9380,7 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
-    return _build_pose_response(
-        analysis_id,
-        analysis.pose_data,
-        analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
-    )
+    return _build_pose_response(analysis_id, analysis.pose_data)
 
 
 @router.get("/{analysis_id}/video")
@@ -7691,6 +9412,8 @@ async def get_analysis(
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
+    if analysis.status == "completed":
+        analysis = await effective_analysis_for_read(session, analysis)
     skater_name = None
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
@@ -7706,6 +9429,7 @@ async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能导出报告。")
 
+    effective_analysis = await effective_analysis_for_read(session, analysis)
     skater_name = None
     if analysis.skater_id:
         skater = await session.get(Skater, analysis.skater_id)
@@ -7713,7 +9437,7 @@ async def export_analysis_text(analysis_id: str, session: AsyncSession = Depends
 
     training_session = await session.get(TrainingSession, analysis.session_id) if analysis.session_id else None
     session_date = training_session.session_date.isoformat() if training_session else None
-    return PlainTextResponse(_build_export_text(analysis, skater_name, session_date))
+    return PlainTextResponse(_build_export_text(effective_analysis, skater_name, session_date))
 
 
 @router.post("/{analysis_id}/retry", response_model=AnalysisRetryResponse)
@@ -7721,21 +9445,40 @@ async def retry_analysis(
     analysis_id: str,
     background_tasks: BackgroundTasks,
     retry_from: str | None = Query(default=None),
+    reset_target_lock: bool = Query(default=False),
+    manual_action_window_start_sec: float | None = Query(default=None),
+    manual_action_window_end_sec: float | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
+    retry_from_value = retry_from if isinstance(retry_from, str) and retry_from.strip() else None
+    reset_target_lock_value = reset_target_lock if isinstance(reset_target_lock, bool) else False
+    manual_window_start = manual_action_window_start_sec if isinstance(manual_action_window_start_sec, (int, float)) else None
+    manual_window_end = manual_action_window_end_sec if isinstance(manual_action_window_end_sec, (int, float)) else None
+
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     stale_snapshot = _build_stale_analysis_snapshot(analysis)
     if stale_snapshot is not None:
-        analysis.status = "failed"
-        analysis.retry_from_stage = stale_snapshot.retry_from_stage
-        analysis.error_code = stale_snapshot.error_code
-        analysis.error_message = stale_snapshot.error_message
-        analysis.error_detail = stale_snapshot.error_detail
-        analysis.processing_logs = stale_snapshot.processing_logs
-        await session.commit()
+        async def _save_stale_snapshot() -> Analysis | None:
+            async with AsyncSessionLocal() as write_session:
+                current = await write_session.get(Analysis, analysis_id)
+                if current is None:
+                    return None
+                current.status = "failed"
+                current.retry_from_stage = stale_snapshot.retry_from_stage
+                current.error_code = stale_snapshot.error_code
+                current.error_message = stale_snapshot.error_message
+                current.error_detail = stale_snapshot.error_detail
+                current.processing_logs = stale_snapshot.processing_logs
+                await write_session.commit()
+                await write_session.refresh(current)
+                return current
+
+        refreshed = await run_db_write_with_retry(_save_stale_snapshot, context=f"retry_analysis_stale_snapshot:{analysis_id}")
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="未找到该分析记录。")
         await session.refresh(analysis)
 
     if analysis.status == "awaiting_target_selection":
@@ -7744,10 +9487,19 @@ async def retry_analysis(
     if analysis.status in {"pending", "processing", "extracting_frames", "awaiting_target_selection", "analyzing", "generating_report"}:
         raise HTTPException(status_code=400, detail="当前分析仍在进行中，请完成或失败后再重试。")
 
-    if retry_from is not None and not _is_retry_stage(retry_from):
+    if retry_from_value is not None and not _is_retry_stage(retry_from_value):
         raise HTTPException(status_code=400, detail="retry_from 必须是 extract_frames / pose / biomechanics / vision / report 之一。")
 
-    retry_from_stage = retry_from or analysis.retry_from_stage or _default_retry_stage_for_error(analysis.error_code)
+    has_manual_window_update = manual_window_start is not None or manual_window_end is not None
+    if has_manual_window_update and (manual_window_start is None or manual_window_end is None):
+        raise HTTPException(status_code=400, detail="Manual action window requires both start and end seconds.")
+    if has_manual_window_update and manual_window_end <= manual_window_start:
+        raise HTTPException(status_code=400, detail="Manual action window end must be greater than start.")
+
+    should_reset_target_lock = (reset_target_lock_value and retry_from_value is None) or has_manual_window_update
+    retry_from_stage = retry_from_value or (None if should_reset_target_lock else analysis.retry_from_stage) or _default_retry_stage_for_error(analysis.error_code)
+    if should_reset_target_lock:
+        retry_from_stage = None
     if retry_from_stage == 'pose' and not isinstance(analysis.frame_motion_scores, dict):
         retry_from_stage = None
     if retry_from_stage == 'biomechanics' and not isinstance(analysis.pose_data, dict):
@@ -7771,17 +9523,46 @@ async def retry_analysis(
     if source_video_path is None and retry_from_stage != 'report':
         raise HTTPException(status_code=404, detail="原始视频已清理或不可用，无法重新分析。")
 
-    analysis.status = "pending"
-    analysis.error_code = None
-    analysis.error_detail = None
-    analysis.error_message = None
-    analysis.processing_timings = None
-    analysis.pipeline_version = CURRENT_PIPELINE_VERSION
-    analysis.retry_from_stage = retry_from_stage
-    if retry_from_stage in {None, 'extract_frames', 'pose'} and not _is_confirmed_target_lock(analysis.target_lock):
-        analysis.target_lock_status = 'pending'
-    analysis.updated_at = datetime.now(timezone.utc)
-    await session.commit()
+    async def _mark_retry_pending() -> Analysis | None:
+        async with AsyncSessionLocal() as write_session:
+            current = await write_session.get(Analysis, analysis_id)
+            if current is None:
+                return None
+            current.status = "pending"
+            current.error_code = None
+            current.error_detail = None
+            current.error_message = None
+            current.processing_timings = None
+            current.pipeline_version = CURRENT_PIPELINE_VERSION
+            current.retry_from_stage = retry_from_stage
+            if has_manual_window_update and manual_window_start is not None and manual_window_end is not None:
+                current.manual_action_window_start = round(float(manual_window_start), 3)
+                current.manual_action_window_end = round(float(manual_window_end), 3)
+                current.frame_motion_scores = None
+                current.pose_data = None
+                current.bio_data = None
+                current.vision_raw = None
+                current.vision_structured = None
+                current.vision_path_a = None
+                current.vision_path_b = None
+                current.cross_validation = None
+                current.report = None
+                current.force_score = None
+                current.action_window_start = None
+                current.action_window_end = None
+            if should_reset_target_lock:
+                current.target_lock = None
+                current.target_lock_status = "pending"
+            if retry_from_stage in {None, "extract_frames", "pose"} and not _is_confirmed_target_lock(current.target_lock):
+                current.target_lock_status = "pending"
+            current.updated_at = datetime.now(timezone.utc)
+            await write_session.commit()
+            await write_session.refresh(current)
+            return current
+
+    refreshed = await run_db_write_with_retry(_mark_retry_pending, context=f"retry_analysis_pending:{analysis_id}")
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
     if retry_from_stage:
@@ -7799,14 +9580,7 @@ async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(g
     frames_dir = _frames_dir_for_analysis(analysis)
     frame_names = frame_names_from_dir(frames_dir)
     motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-    preview = build_target_preview(
-        analysis_id,
-        frame_names,
-        existing_target_lock=analysis.target_lock,
-        motion_scores=motion_scores,
-        analysis_profile=analysis.analysis_profile,
-        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
-    )
+    preview = _build_target_preview_cached_first(analysis, frame_names, motion_scores)
     return TargetPreviewResponse(
         analysis_id=analysis.id,
         status=analysis.status,
@@ -7835,14 +9609,7 @@ async def confirm_target_lock(
     frames_dir = _frames_dir_for_analysis(analysis)
     frame_names = frame_names_from_dir(frames_dir)
     motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-    preview = build_target_preview(
-        analysis_id,
-        frame_names,
-        existing_target_lock=analysis.target_lock,
-        motion_scores=motion_scores,
-        analysis_profile=analysis.analysis_profile,
-        detected_candidates=_target_preview_detected_candidates_from_frames(frames_dir, frame_names, motion_scores),
-    )
+    preview = _build_target_preview_cached_first(analysis, frame_names, motion_scores)
     try:
         selected = None if payload.manual_bbox is not None else resolve_manual_candidate(preview.candidates, payload.candidate_id, payload.x, payload.y)
         if selected is None and payload.manual_bbox is None:
@@ -7997,10 +9764,11 @@ async def extend_plan(
         raise HTTPException(status_code=404, detail="未找到该训练计划。")
 
     analysis = await session.get(Analysis, plan.analysis_id)
-    if analysis is None or not isinstance(analysis.report, dict):
+    if analysis is None:
         raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
 
     skater = await session.get(Skater, plan.skater_id)
+    report_context = _minimal_report_context_for_plan(analysis)
     completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
     if len(completed_days) < 3:
         raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
@@ -8010,12 +9778,19 @@ async def extend_plan(
             original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
             completed_days=completed_days,
             action_type=analysis.action_type,
-            report=analysis.report,
+            report=report_context,
             skater_context=_skater_context(skater) if skater else None,
             skater_id=skater.id if skater else None,
         )
     except PlanGenerationError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.warning("Training plan %s extension AI failed, using fallback extension: %s", plan_id, exc)
+        plan.plan_json = _fallback_extended_plan_after_ai_failure(
+            original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
+            completed_days=completed_days,
+            action_type=analysis.action_type,
+            report=report_context,
+            skater_context=_skater_context(skater) if skater else None,
+        )
 
     await session.commit()
     await session.refresh(plan)
@@ -8027,6 +9802,7 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     if not (
         filename.startswith("frame_")
         or filename.startswith("semantic_")
+        or filename.startswith("semantic_video_ai_rerun_")
         or filename.startswith("partial_semantic_")
     ) or not filename.endswith(".jpg"):
         raise HTTPException(status_code=400, detail="无效的帧文件名。")
@@ -8040,10 +9816,20 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     semantic_dir = (UPLOADS_DIR / analysis_id / "semantic_frames").resolve()
     frames_root = (
         semantic_dir
-        if (filename.startswith("semantic_") or filename.startswith("partial_semantic_")) and semantic_dir.exists()
+        if (
+            filename.startswith("semantic_")
+            or filename.startswith("semantic_video_ai_rerun_")
+            or filename.startswith("partial_semantic_")
+        )
+        and semantic_dir.exists()
         else frames_dir
     )
     frame_path = (frames_root / filename).resolve()
+    if filename.startswith("semantic_") or filename.startswith("semantic_video_ai_rerun_") or filename.startswith("partial_semantic_"):
+        frames_root = semantic_dir
+        frame_path = (frames_root / filename).resolve()
+    if frames_root in frame_path.parents:
+        frame_path, _ = await _backfill_frame_if_needed(analysis, frame_path, filename)
     if frames_root not in frame_path.parents or not frame_path.exists():
         raise HTTPException(status_code=404, detail="未找到该视频帧。")
 

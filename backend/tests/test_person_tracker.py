@@ -21,6 +21,8 @@ from app.services.person_tracker import (
     PERSON_TRACKER_MANUAL_LOCK_IDENTITY_REJECTED_FLAG,
     PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG,
     PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG,
+    PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG,
+    PERSON_TRACKER_APPEARANCE_RELOCK_USED_FLAG,
     PERSON_TRACKER_RELOCK_PENDING_FLAG,
     PERSON_TRACKER_RELOCK_REJECTED_FLAG,
     PERSON_TRACKER_RELOCKED_FLAG,
@@ -34,6 +36,7 @@ from app.services.person_tracker import (
     _YOLO_MODEL_NAME,
     _loss_recovery_summary,
     _YOLO_MODEL_PATH_ENV,
+    _APPEARANCE_RELOCK_ENV,
     _resolve_yolo_model_path,
     _zoomed_content_crop_bounds,
     _xyxy_to_bbox,
@@ -177,6 +180,81 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(tracker._target_tracker_id, 1)
         self.assertIn(PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG, tracker.quality_flags)
         self.assertNotIn(PERSON_TRACKER_RELOCKED_FLAG, tracker.quality_flags)
+
+    def test_detector_relock_appearance_mismatch_rejects_candidate_when_flag_enabled(self) -> None:
+        with patch.dict("os.environ", {_APPEARANCE_RELOCK_ENV: "1"}):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        anchor_frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        anchor_frame[20:110, 20:70] = (255, 0, 0)
+        tracker._update_appearance_anchor(anchor_frame, tracker._last_known_xyxy)
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (0, 0, 255)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostic["state"], "lost_reused")
+        self.assertIn(PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG, tracker.quality_flags)
+        self.assertEqual(diagnostic["rejected_candidates"][0]["reasons"], ["appearance_mismatch"])
+        self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["decision"], "rejected")
+
+    def test_detector_relock_appearance_match_allows_pending_candidate_when_flag_enabled(self) -> None:
+        with patch.dict("os.environ", {_APPEARANCE_RELOCK_ENV: "1"}):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        anchor_frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        anchor_frame[20:110, 20:70] = (255, 0, 0)
+        tracker._update_appearance_anchor(anchor_frame, tracker._last_known_xyxy)
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (255, 0, 0)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostic["state"], "full_frame_yolo_relock_pending")
+        self.assertIn(PERSON_TRACKER_APPEARANCE_RELOCK_USED_FLAG, tracker.quality_flags)
+        self.assertEqual(diagnostic["appearance"]["decision"], "passed")
+        self.assertGreaterEqual(diagnostic["appearance"]["similarity"], 0.9)
+
+    def test_detector_relock_appearance_anchor_unavailable_fails_closed_when_flag_enabled(self) -> None:
+        with patch.dict("os.environ", {_APPEARANCE_RELOCK_ENV: "1"}):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (255, 0, 0)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostic["state"], "lost_reused")
+        self.assertEqual(diagnostic["rejected_candidates"][0]["reasons"], ["anchor_unavailable"])
+        self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["decision"], "skipped")
+        self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["reason"], "anchor_unavailable")
 
     def test_manual_lock_initial_target_selection_requires_identity_overlap(self) -> None:
         tracker = PersonBBoxTracker(

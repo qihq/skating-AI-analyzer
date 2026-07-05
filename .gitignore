@@ -2,6 +2,9 @@
 data/
 .env
 backups/*.db
+backups/*.db-*
+backups/*.tmp-journal
+backups/*.journal
 models/*.task
 models/*.pt
 *.pt

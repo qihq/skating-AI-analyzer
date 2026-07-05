@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import Load
 
 from app.database import DATA_DIR, UPLOADS_DIR, get_session, run_db_read_with_retry
 from app.models import Analysis, Skater, TrainingSession
@@ -42,7 +42,7 @@ router = APIRouter(prefix="/api/skaters", tags=["skaters"])
 session_router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 system_router = APIRouter(prefix="/api/system", tags=["system"])
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 
 
 def skater_display_name(skater: Skater) -> str:
@@ -69,6 +69,63 @@ def build_report_snippet(analysis: Analysis) -> str:
     return "暂无报告摘要。"
 
 
+def archive_timeline_entry(
+    analysis: Analysis,
+    training_session: TrainingSession | None = None,
+    skater: Skater | None = None,
+) -> ArchiveTimelineEntry:
+    return ArchiveTimelineEntry(
+        id=analysis.id,
+        created_at=analysis.created_at,
+        status=analysis.status,
+        entry_type="冰宝（IceBuddy）诊断",
+        skater_id=analysis.skater_id,
+        skater_name=skater_display_name(skater) if skater else None,
+        skater_avatar_type=skater.avatar_type if skater else None,
+        skater_avatar_emoji=skater.avatar_emoji if skater else None,
+        skill_category=analysis.skill_category or "未分类",
+        action_type=analysis.action_type,
+        action_subtype=analysis.action_subtype,
+        skill_node_id=analysis.skill_node_id,
+        force_score=analysis.force_score,
+        report_snippet=build_report_snippet(analysis),
+        analysis_id=analysis.id,
+        session_id=analysis.session_id,
+        session_date=training_session.session_date if training_session else None,
+        session_location=training_session.location if training_session else None,
+        session_type=training_session.session_type if training_session else None,
+        session_duration_minutes=training_session.duration_minutes if training_session else None,
+    )
+
+
+def archive_timeline_entry_from_row(row: Any) -> ArchiveTimelineEntry:
+    report_snippet = str(row.report_summary or row.note or "").strip()
+    if not report_snippet:
+        report_snippet = "分析进行中，请稍后查看报告。" if row.status != "completed" else "暂无训练备注。"
+    return ArchiveTimelineEntry(
+        id=row.id,
+        created_at=row.created_at,
+        status=row.status,
+        entry_type="冰宝（IceBuddy）诊断",
+        skater_id=row.skater_id,
+        skater_name=str(row.skater_display_name or row.skater_name or "").strip() or None,
+        skater_avatar_type=row.skater_avatar_type,
+        skater_avatar_emoji=row.skater_avatar_emoji,
+        skill_category=row.skill_category or "未分类",
+        action_type=row.action_type,
+        action_subtype=row.action_subtype,
+        skill_node_id=row.skill_node_id,
+        force_score=row.force_score,
+        report_snippet=report_snippet[:120],
+        analysis_id=row.id,
+        session_id=row.session_id,
+        session_date=row.session_date,
+        session_location=row.session_location,
+        session_type=row.session_type,
+        session_duration_minutes=row.session_duration_minutes,
+    )
+
+
 def as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -80,10 +137,14 @@ def calculate_current_streak(records: list[Analysis]) -> int:
 
 
 def calculate_current_streak_from_datetimes(values: list[datetime]) -> int:
+    return calculate_current_streak_from_dates([as_utc(value).date() for value in values])
+
+
+def calculate_current_streak_from_dates(values: list[date]) -> int:
     if not values:
         return 0
 
-    dates = sorted({as_utc(value).date() for value in values}, reverse=True)
+    dates = sorted(set(values), reverse=True)
     today = datetime.now(timezone.utc).date()
     if dates[0] < today - timedelta(days=1):
         return 0
@@ -97,6 +158,70 @@ def calculate_current_streak_from_datetimes(values: list[datetime]) -> int:
         else:
             break
     return streak
+
+
+def normalize_archive_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return as_utc(value).date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+async def build_archive_stats(session: AsyncSession, skater_id: str | None = None) -> ArchiveStats:
+    now = datetime.now(timezone.utc)
+    where_clauses: list[str] = []
+    params: dict[str, object] = {"recent_cutoff": now - timedelta(days=7)}
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_sessions_query = select(func.count(TrainingSession.id)).where(
+        TrainingSession.session_date >= month_start.date(),
+    )
+    if skater_id:
+        where_clauses.append("skater_id = :skater_id")
+        params["skater_id"] = skater_id
+        monthly_sessions_query = monthly_sessions_query.where(TrainingSession.skater_id == skater_id)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    recent_where_sql = f"{where_sql} AND created_at >= :recent_cutoff" if where_sql else "WHERE created_at >= :recent_cutoff"
+    total_result = await run_db_read_with_retry(
+        lambda: session.execute(text(f"SELECT COUNT(*) FROM analysis_list_items {where_sql}"), params),
+        context="archive_stats:total",
+    )
+    recent_result = await run_db_read_with_retry(
+        lambda: session.execute(text(f"SELECT COUNT(*) FROM analysis_list_items {recent_where_sql}"), params),
+        context="archive_stats:recent",
+    )
+    dates_result = await run_db_read_with_retry(
+        lambda: session.execute(
+            text(
+                f"""
+                SELECT DISTINCT date(created_at) AS archive_date
+                FROM analysis_list_items
+                {where_sql}
+                ORDER BY archive_date DESC
+                LIMIT 90
+                """
+            ),
+            {key: value for key, value in params.items() if key == "skater_id"},
+        ),
+        context="archive_stats:dates",
+    )
+    active_dates = [
+        archive_date
+        for archive_date in (normalize_archive_date(value) for value in dates_result.scalars().all())
+        if archive_date is not None
+    ]
+    return ArchiveStats(
+        total_records=int(total_result.scalar_one() or 0),
+        recent_7days=int(recent_result.scalar_one() or 0),
+        current_streak=calculate_current_streak_from_dates(active_dates),
+        monthly_sessions=int(await session.scalar(monthly_sessions_query) or 0),
+    )
 
 
 def normalize_optional_text(value: str | None) -> str | None:
@@ -270,6 +395,77 @@ async def get_learning_path(skater_id: str, session: AsyncSession = Depends(get_
     return LearningPathResponse(**payload)
 
 
+@router.get("/archive", response_model=ArchiveResponse)
+async def get_archive(
+    limit: Annotated[int, Query(ge=1, le=500)] = 24,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    skater_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> ArchiveResponse:
+    skater_id = skater_id if isinstance(skater_id, str) and skater_id.strip() else None
+    if skater_id and await session.get(Skater, skater_id) is None:
+        raise HTTPException(status_code=404, detail="未找到该练习档案对应的选手。")
+
+    where_sql = ""
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+    if skater_id:
+        where_sql = "WHERE ali.skater_id = :skater_id"
+        params["skater_id"] = skater_id
+
+    list_query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.status,
+            ali.skater_id,
+            s.display_name AS skater_display_name,
+            s.name AS skater_name,
+            s.avatar_type AS skater_avatar_type,
+            s.avatar_emoji AS skater_avatar_emoji,
+            ali.skill_node_id,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.report_summary,
+            ali.note,
+            ali.session_id,
+            ts.session_date,
+            ts.location AS session_location,
+            ts.session_type,
+            ts.duration_minutes AS session_duration_minutes
+        FROM analysis_list_items AS ali
+        LEFT JOIN training_sessions AS ts ON ts.id = ali.session_id
+        LEFT JOIN skaters AS s ON s.id = ali.skater_id
+        {where_sql}
+        ORDER BY ali.created_at DESC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    count_query = text(f"SELECT COUNT(*) FROM analysis_list_items AS ali {where_sql}")
+
+    result = await run_db_read_with_retry(
+        lambda: session.execute(list_query, params),
+        context="archive:list",
+    )
+    rows = list(result.all())
+    total_result = await run_db_read_with_retry(
+        lambda: session.execute(count_query, {key: value for key, value in params.items() if key == "skater_id"}),
+        context="archive:count",
+    )
+    total_records = int(total_result.scalar_one() or 0)
+    stats = await build_archive_stats(session, skater_id)
+
+    return ArchiveResponse(
+        stats=stats,
+        timeline=[archive_timeline_entry_from_row(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        has_more=offset + len(rows) < total_records,
+    )
+
+
 @router.get("/{skater_id}/archive", response_model=ArchiveResponse)
 async def get_skater_archive(
     skater_id: str,
@@ -281,84 +477,65 @@ async def get_skater_archive(
     if skater is None:
         raise HTTPException(status_code=404, detail="未找到该练习档案对应的选手。")
 
-    base_query = (
-        select(Analysis, TrainingSession)
-        .options(
-            load_only(
-                Analysis.id,
-                Analysis.skater_id,
-                Analysis.session_id,
-                Analysis.skill_category,
-                Analysis.action_type,
-                Analysis.force_score,
-                Analysis.status,
-                Analysis.report,
-                Analysis.error_message,
-                Analysis.note,
-                Analysis.created_at,
-                Analysis.updated_at,
-                Analysis.retry_from_stage,
-            )
-        )
-        .outerjoin(TrainingSession, Analysis.session_id == TrainingSession.id)
-        .where(Analysis.skater_id == skater_id)
-        .order_by(Analysis.created_at.desc())
-    )
-
-    paged_query = base_query.offset(offset)
+    params: dict[str, object] = {"skater_id": skater_id, "offset": offset}
+    limit_sql = ""
     if limit is not None:
-        paged_query = paged_query.limit(limit)
+        params["limit"] = limit
+        limit_sql = "LIMIT :limit"
 
-    result = await session.execute(paged_query)
+    list_query = text(
+        f"""
+        SELECT
+            ali.analysis_id AS id,
+            ali.created_at,
+            ali.status,
+            ali.skater_id,
+            :skater_display_name AS skater_display_name,
+            :skater_name AS skater_name,
+            :skater_avatar_type AS skater_avatar_type,
+            :skater_avatar_emoji AS skater_avatar_emoji,
+            ali.skill_node_id,
+            ali.skill_category,
+            ali.action_type,
+            ali.action_subtype,
+            ali.force_score,
+            ali.report_summary,
+            ali.note,
+            ali.session_id,
+            ts.session_date,
+            ts.location AS session_location,
+            ts.session_type,
+            ts.duration_minutes AS session_duration_minutes
+        FROM analysis_list_items AS ali
+        LEFT JOIN training_sessions AS ts ON ts.id = ali.session_id
+        WHERE ali.skater_id = :skater_id
+        ORDER BY ali.created_at DESC
+        {limit_sql}
+        {"" if limit is None else "OFFSET :offset"}
+        """
+    )
+    params.update(
+        {
+            "skater_display_name": skater.display_name,
+            "skater_name": skater.name,
+            "skater_avatar_type": skater.avatar_type,
+            "skater_avatar_emoji": skater.avatar_emoji,
+        }
+    )
+
+    result = await run_db_read_with_retry(
+        lambda: session.execute(list_query, params),
+        context="skater_archive:list",
+    )
     rows = list(result.all())
-    total_records = int(
-        await session.scalar(select(func.count(Analysis.id)).where(Analysis.skater_id == skater_id))
-        or 0
+    count_result = await run_db_read_with_retry(
+        lambda: session.execute(text("SELECT COUNT(*) FROM analysis_list_items WHERE skater_id = :skater_id"), {"skater_id": skater_id}),
+        context="skater_archive:count",
     )
+    total_records = int(count_result.scalar_one() or 0)
 
-    stats_result = await session.execute(
-        select(Analysis.created_at)
-        .where(Analysis.skater_id == skater_id)
-        .order_by(Analysis.created_at.desc())
-    )
-    record_dates = list(stats_result.scalars().all())
-
-    now = datetime.now(timezone.utc)
-    recent_7days = sum(1 for created_at in record_dates if now - as_utc(created_at) <= timedelta(days=7))
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    monthly_sessions = await session.scalar(
-        select(func.count(TrainingSession.id)).where(
-            TrainingSession.skater_id == skater_id,
-            TrainingSession.session_date >= month_start.date(),
-        )
-    )
-
-    stats = ArchiveStats(
-        total_records=total_records,
-        recent_7days=recent_7days,
-        current_streak=calculate_current_streak_from_datetimes(record_dates),
-        monthly_sessions=int(monthly_sessions or 0),
-    )
-
-    timeline = [
-        ArchiveTimelineEntry(
-            id=analysis.id,
-            created_at=analysis.created_at,
-            status=analysis.status,
-            entry_type="冰宝（IceBuddy）诊断",
-            skill_category=analysis.skill_category or "未分类",
-            action_type=analysis.action_type,
-            force_score=analysis.force_score,
-            report_snippet=build_report_snippet(analysis),
-            analysis_id=analysis.id,
-            session_id=analysis.session_id,
-            session_date=training_session.session_date if training_session else None,
-            session_location=training_session.location if training_session else None,
-            session_type=training_session.session_type if training_session else None,
-            session_duration_minutes=training_session.duration_minutes if training_session else None,
-        )
-        for analysis, training_session in rows
-    ]
+    stats = await build_archive_stats(session, skater_id)
+    timeline = [archive_timeline_entry_from_row(row) for row in rows]
 
     return ArchiveResponse(
         stats=stats,

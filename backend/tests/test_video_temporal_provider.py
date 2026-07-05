@@ -13,7 +13,7 @@ from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineErro
 from app.services.video_temporal import VIDEO_TEMPORAL_MAX_TOKENS, analyze_video_temporal
 
 
-def _qwen_provider(model_id: str = "qwen-vl-max-latest") -> SimpleNamespace:
+def _qwen_provider(model_id: str = "qwen-video-configured", vision_model: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         id="vision-provider",
         slot="vision",
@@ -21,7 +21,7 @@ def _qwen_provider(model_id: str = "qwen-vl-max-latest") -> SimpleNamespace:
         provider="qwen",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         model_id=model_id,
-        vision_model=None,
+        vision_model=vision_model,
         api_key="test-key",
         notes=None,
     )
@@ -76,7 +76,7 @@ def _valid_temporal_response() -> dict[str, object]:
 
 
 class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_analyze_video_temporal_uses_qwen_36_plus_and_normalizes_response(self) -> None:
+    async def test_analyze_video_temporal_uses_configured_qwen_model_and_normalizes_response(self) -> None:
         request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
 
         with patch("app.services.video_temporal.request_dashscope_video_completion", request_mock):
@@ -91,16 +91,34 @@ class VideoTemporalProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["valid"])
         self.assertEqual(result["provider"], "qwen")
-        self.assertEqual(result["model"], "qwen3.6-plus")
+        self.assertEqual(result["model"], "qwen-video-configured")
         self.assertEqual(result["action_confirmation"]["confirmed_action"], "Axel")
         kwargs = request_mock.await_args.kwargs
-        self.assertEqual(request_mock.await_args.args[0].model_id, "qwen3.6-plus")
+        self.assertEqual(request_mock.await_args.args[0].model_id, "qwen-video-configured")
         self.assertEqual(kwargs["temperature"], 0.0)
         self.assertEqual(kwargs["max_tokens"], VIDEO_TEMPORAL_MAX_TOKENS)
         self.assertGreaterEqual(kwargs["max_tokens"], 3200)
         self.assertIn("video_temporal_v1", kwargs["user_prompt"])
-        self.assertIn("qwen3.6-plus", kwargs["user_prompt"])
+        self.assertIn("qwen-video-configured", kwargs["user_prompt"])
         self.assertIn("只输出一个合法 JSON 对象", kwargs["system_prompt"])
+
+    async def test_analyze_video_temporal_prefers_qwen_vision_model_when_configured(self) -> None:
+        request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))
+
+        with patch("app.services.video_temporal.request_dashscope_video_completion", request_mock):
+            result = await analyze_video_temporal(
+                Path("clip.mp4"),
+                action_type="jump",
+                action_subtype="Axel",
+                video_duration_sec=3.0,
+                source_fps=30.0,
+                provider=_qwen_provider("qwen-chat-model", vision_model="qwen-video-model"),
+            )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["model"], "qwen-video-model")
+        self.assertEqual(request_mock.await_args.args[0].model_id, "qwen-video-model")
+        self.assertIn("qwen-video-model", request_mock.await_args.kwargs["user_prompt"])
 
     async def test_analyze_video_temporal_fetches_active_provider_when_not_supplied(self) -> None:
         request_mock = AsyncMock(return_value=json.dumps(_valid_temporal_response(), ensure_ascii=False))

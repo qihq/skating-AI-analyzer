@@ -106,6 +106,14 @@ PLAN_SYSTEM_PROMPT = (
 )
 
 
+PLAN_SYSTEM_PROMPT = (
+    "You are a child figure-skating coach. Return only valid JSON for a safe personalized 7-day plan. "
+    "Use low-impact, short, playful drills for a young skater. Avoid adult conditioning, weights, Bosu, spin chairs, long planks, or painful stretching. "
+    "Each day has 2 sessions. Every session must include related_issue and parent_tip. Day 7 must be on-ice only."
+)
+PLAN_REQUEST_TIMEOUT_SECONDS = float(os.getenv("PLAN_AI_TIMEOUT_SECONDS", "45"))
+
+
 def _clean_plan_json_text(raw_text: str) -> str:
     cleaned = clean_json_text(raw_text)
     stripped = raw_text.strip()
@@ -263,6 +271,7 @@ def build_fallback_plan(
         "focus_skill": focus_skill,
         "days": days,
         "generation_source": "fallback",
+        "generation_status": "fallback",
         "generation_note": "AI 训练计划暂不可用，已按报告问题生成安全兜底计划。",
     }
 
@@ -322,6 +331,7 @@ def normalize_plan(
         "focus_skill": str(payload.get("focus_skill", fallback["focus_skill"])).strip() or fallback["focus_skill"],
         "days": normalized_days,
         "generation_source": str(payload.get("generation_source") or "ai").strip() or "ai",
+        "generation_status": str(payload.get("generation_status") or payload.get("generation_source") or "ai").strip() or "ai",
         "generation_note": str(payload.get("generation_note") or "").strip() or None,
     }
 
@@ -445,7 +455,7 @@ def merge_extended_plan(
     }
 
 
-async def generate_training_plan(
+async def _legacy_generate_training_plan_full_prompt(
     action_type: str,
     report: dict[str, Any],
     skater_context: str | None = None,
@@ -643,3 +653,117 @@ async def extend_training_plan(
 
     merged = merge_extended_plan(normalized_original, normalized_regenerated, valid_completed_days)
     return normalize_plan(merged, action_type, report, skater_context)
+
+
+def _plan_response_format(provider: Any) -> dict[str, str] | None:
+    if str(getattr(provider, "provider", "")).lower() in {"claude_compatible"}:
+        return None
+    return {"type": "json_object"}
+
+
+def _compact_report_for_plan(report: dict[str, Any]) -> dict[str, Any]:
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    return {
+        "summary": str(report.get("summary") or "")[:360],
+        "training_focus": str(report.get("training_focus") or "")[:160],
+        "user_note": str(report.get("user_note") or report.get("note") or report.get("analysis_note") or "")[:240],
+        "issues": [
+            {
+                "category": str(issue.get("category") or "")[:30],
+                "description": str(issue.get("description") or "")[:120],
+                "severity": str(issue.get("severity") or "low")[:16],
+            }
+            for issue in issues[:4]
+            if isinstance(issue, dict)
+        ],
+    }
+
+
+def _plan_schema_hint() -> dict[str, Any]:
+    return {
+        "title": "7天亲子滑冰小练习",
+        "focus_skill": "具体训练重点",
+        "days": [
+            {
+                "day": 1,
+                "theme": "当天主题",
+                "sessions": [
+                    {
+                        "id": "d1s1",
+                        "title": "游戏化训练名",
+                        "duration": "6分钟",
+                        "description": "45字内的儿童练习玩法",
+                        "related_issue": "对应报告问题",
+                        "parent_tip": "家长观察点",
+                        "is_office_trainable": True,
+                        "completed": False,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+async def generate_training_plan(
+    action_type: str,
+    report: dict[str, Any],
+    skater_context: str | None = None,
+    skater_id: str | None = None,
+    variation_key: str | None = None,
+) -> dict[str, Any]:
+    try:
+        provider = await get_active_provider("report")
+        memory_context = await build_memory_context(skater_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Training plan provider setup failed: %s", exc)
+        raise PlanGenerationError(f"训练计划 AI 供应商不可用：{exc}") from exc
+
+    compact_input = {
+        "skater": (skater_context or "儿童滑冰学员")[:420],
+        "action_type": action_type,
+        "report": _compact_report_for_plan(report),
+        "memory": memory_context[:900] if memory_context else "",
+        "variation_key": variation_key or "initial",
+        "rules": [
+            "Return exactly one JSON object.",
+            "Produce days 1-7, each with exactly 2 sessions.",
+            "Each description <=45 Chinese chars; each session has related_issue and parent_tip.",
+            "Day 7 sessions must have is_office_trainable=false.",
+            "Keep drills low-impact, short, playful, parent-supervised.",
+        ],
+        "schema": _plan_schema_hint(),
+    }
+
+    try:
+        raw_content = await request_text_completion(
+            provider,
+            temperature=0.45,
+            max_tokens=1800,
+            timeout=PLAN_REQUEST_TIMEOUT_SECONDS,
+            response_format=_plan_response_format(provider),
+            messages=[
+                {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(compact_input, ensure_ascii=False)},
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Training plan completion failed: %s", exc)
+        raise PlanGenerationError(f"训练计划 AI 调用失败：{exc}") from exc
+
+    cleaned = _clean_plan_json_text(raw_content)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        logger.warning("Training plan JSON parse failed: %s | raw: %s", exc, cleaned[:500])
+        parsed = await _repair_training_plan_json(
+            provider,
+            system_prompt=PLAN_SYSTEM_PROMPT,
+            raw_content=raw_content,
+            error=exc,
+        )
+
+    plan = normalize_plan(_require_complete_plan_payload(parsed), action_type, report, skater_context)
+    plan["generation_source"] = "ai"
+    plan["generation_status"] = "ai"
+    plan["generation_note"] = plan.get("generation_note") or None
+    return plan

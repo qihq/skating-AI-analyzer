@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from uuid import uuid4
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.models import Analysis
+from app.routers.analysis import _auto_apply_video_ai_action_if_confident, _video_ai_auto_action_payload
+from app.services.analysis_corrections import (
+    apply_analysis_correction,
+    build_chat_share_image_payload,
+    build_chat_share_text,
+    create_analysis_correction,
+    dismiss_analysis_correction,
+    effective_payload_for_analysis,
+    list_analysis_corrections,
+)
+
+
+def _analysis() -> Analysis:
+    return Analysis(
+        id=str(uuid4()),
+        action_type="jump",
+        action_subtype="Toe Loop",
+        analysis_profile="jump",
+        video_path="/tmp/source.mp4",
+        status="completed",
+        note="comments: looks like Salchow",
+        force_score=74,
+        report={
+            "summary": "Original report",
+            "issues": [],
+            "improvements": [],
+            "training_focus": "landing",
+            "action_confirmation": {"confirmed_action": "Toe Loop", "confidence": 0.55},
+        },
+        bio_data={"key_frames": {"T": "frame_001", "A": "frame_002", "L": "frame_003"}},
+        frame_motion_scores={
+            "video_temporal": {"action_confirmation": {"confirmed_action": "Toe Loop"}},
+            "resolved_keyframes": {
+                "selected": [{"frame_id": "semantic_001", "phase_code": "T"}],
+                "partial_selected": [{"frame_id": "partial_001", "phase_code": "T"}],
+            },
+        },
+        vision_structured={"frame_analysis": []},
+    )
+
+
+class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.database import Base
+
+        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.Session = async_sessionmaker(self.engine, expire_on_commit=False)
+
+    async def asyncTearDown(self) -> None:
+        await self.engine.dispose()
+
+    async def test_create_apply_and_effective_overlay(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload={
+                    "action_subtype": "Salchow",
+                    "action_confirmation": {"confirmed_action": "Salchow", "confidence": 0.9},
+                },
+                rationale="Manual review",
+            )
+            await apply_analysis_correction(session, analysis, correction.id)
+
+            effective = await effective_payload_for_analysis(session, analysis)
+            self.assertTrue(effective["has_applied_corrections"])
+            self.assertEqual(effective["analysis"]["action_subtype"], "Salchow")
+            self.assertEqual(effective["report"]["action_confirmation"]["confirmed_action"], "Salchow")
+
+    async def test_keyframe_dismissed_correction_is_not_effective(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                payload={"key_frames": {"T": "partial_001"}},
+                rationale="Use partial candidate",
+            )
+            await dismiss_analysis_correction(session, analysis, correction.id)
+
+            effective = await effective_payload_for_analysis(session, analysis)
+            self.assertFalse(effective["has_applied_corrections"])
+            self.assertEqual(effective["bio_data"]["key_frames"]["T"], "frame_001")
+
+    async def test_keyframe_payload_preserves_video_ai_diagnostics(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                source="video_ai_keyframe_rerun",
+                payload={
+                    "key_frames": {"T": {"frame_id": "semantic_video_ai_rerun_0001", "timestamp": 1.2}},
+                    "selected_semantic_frames": [{"frame_id": "semantic_video_ai_rerun_0001", "phase_code": "takeoff"}],
+                    "source": "video_ai_full_video_keyframe_rerun",
+                    "diagnostics": {"video_ai_confidence": 0.82, "conflicts": []},
+                },
+                rationale="Video AI rerun",
+            )
+
+            self.assertEqual(correction.source, "video_ai_keyframe_rerun")
+            self.assertEqual(correction.payload["diagnostics"]["video_ai_confidence"], 0.82)
+            self.assertEqual(correction.payload["source"], "video_ai_full_video_keyframe_rerun")
+
+    async def test_share_text_includes_applied_and_pending_corrections(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            applied = await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload={"action_subtype": "Salchow"},
+                rationale="Manual review",
+            )
+            await apply_analysis_correction(session, analysis, applied.id)
+            await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                payload={"key_frames": {"T": "partial_001"}},
+                rationale="Use partial candidate",
+            )
+            corrections = await list_analysis_corrections(session, analysis.id)
+
+            text = build_chat_share_text(analysis, [], corrections, skater_name="Tantan")
+            self.assertIn("已应用修正", text)
+            self.assertIn("待确认修正", text)
+            self.assertIn("Salchow", text)
+            self.assertIn("partial_001", text)
+
+    async def test_chat_share_payload_preserves_full_summary_question_and_answer(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            long_summary = "总结" * 180
+            analysis.report = {**analysis.report, "summary": long_summary}
+            session.add(analysis)
+            await session.commit()
+
+            class _Message:
+                def __init__(self, role: str, content: str) -> None:
+                    self.role = role
+                    self.content = content
+
+            long_question = "重新解释这个关键帧为什么这样选。" * 40
+            long_answer = "这里需要完整说明证据链和不确定性。" * 60
+            payload = build_chat_share_image_payload(
+                analysis,
+                [_Message("user", long_question), _Message("assistant", long_answer)],
+                [],
+            )
+            text = build_chat_share_text(
+                analysis,
+                [_Message("user", long_question), _Message("assistant", long_answer)],
+                [],
+            )
+
+            self.assertEqual(payload["summary"], long_summary)
+            self.assertEqual(payload["question"], long_question)
+            self.assertEqual(payload["answer"], long_answer)
+            self.assertEqual(len(payload["timeline_items"]), 1)
+            self.assertEqual(payload["timeline_items"][0]["question"], long_question)
+            self.assertEqual(payload["timeline_items"][0]["answer"], long_answer)
+            self.assertIn(long_question, text)
+            self.assertIn(long_answer, text)
+
+    async def test_low_confidence_video_ai_action_creates_pending_correction(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            analysis.action_type = "自由滑"
+            analysis.action_subtype = "节目片段"
+            analysis.analysis_profile = None
+            session.add(analysis)
+            await session.commit()
+
+            await _auto_apply_video_ai_action_if_confident(
+                session,
+                analysis,
+                video_temporal={
+                    "confidence": 0.7,
+                    "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.7},
+                },
+                analysis_profile=None,
+            )
+
+            corrections = await list_analysis_corrections(session, analysis.id)
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0].source, "video_ai_auto")
+            self.assertEqual(corrections[0].status, "proposed")
+            self.assertEqual(corrections[0].payload["analysis_profile"], "spin")
+            self.assertEqual(analysis.action_type, "自由滑")
+
+    async def test_high_confidence_video_ai_action_applies_correction(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            analysis.action_type = "自由滑"
+            analysis.action_subtype = "节目片段"
+            analysis.analysis_profile = None
+            session.add(analysis)
+            await session.commit()
+
+            await _auto_apply_video_ai_action_if_confident(
+                session,
+                analysis,
+                video_temporal={
+                    "confidence": 0.9,
+                    "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.9},
+                },
+                analysis_profile=None,
+            )
+
+            corrections = await list_analysis_corrections(session, analysis.id)
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(corrections[0].status, "applied")
+            self.assertEqual(analysis.action_type, "旋转")
+            self.assertEqual(analysis.action_subtype, "直立旋转")
+            self.assertEqual(analysis.analysis_profile, "spin")
+
+
+class VideoAiAutoActionPayloadTests(unittest.TestCase):
+    def test_high_confidence_spin_payload_auto_applies_neutral_input(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="自由滑",
+            current_action_subtype="节目片段",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.9,
+                "action_confirmation": {
+                    "action_family": "spin",
+                    "confirmed_action": "直立旋转",
+                    "confidence": 0.88,
+                },
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["action_type"], "旋转")
+        self.assertEqual(payload["action_subtype"], "直立旋转")
+        self.assertEqual(payload["analysis_profile"], "spin")
+        self.assertTrue(payload["action_confirmation"]["auto_applied"])
+
+    def test_low_confidence_video_ai_payload_is_not_auto_applied(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="自由滑",
+            current_action_subtype="节目片段",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.6,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.6},
+            },
+        )
+
+        self.assertIsNone(payload)
+
+    def test_strong_existing_action_conflict_is_not_auto_applied(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="跳跃",
+            current_action_subtype="单跳",
+            analysis_profile=None,
+            video_temporal={
+                "confidence": 0.92,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.92},
+            },
+        )
+
+        self.assertIsNone(payload)
+
+    def test_final_profile_match_allows_auto_apply_from_old_label(self) -> None:
+        payload = _video_ai_auto_action_payload(
+            current_action_type="跳跃",
+            current_action_subtype="单跳",
+            analysis_profile="spin",
+            video_temporal={
+                "confidence": 0.92,
+                "action_confirmation": {"action_family": "spin", "confirmed_action": "直立旋转", "confidence": 0.92},
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["action_type"], "旋转")
+        self.assertEqual(payload["analysis_profile"], "spin")
+
+
+if __name__ == "__main__":
+    unittest.main()
