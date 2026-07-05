@@ -14,6 +14,7 @@ import {
   createLocalDebugRun,
   createVideoAiDebugRun,
   deleteDebugRun,
+  ensureGoldenAnalysisDebugRun,
   confirmDebugTargetLock,
   fetchAnalyses,
   fetchAnalysis,
@@ -2386,6 +2387,7 @@ export default function DebugPage({ workspace = "debug" }: { workspace?: DebugWo
   const [listState, setListState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
+  const [autoGoldenState, setAutoGoldenState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
 
@@ -2543,6 +2545,57 @@ export default function DebugPage({ workspace = "debug" }: { workspace?: DebugWo
     }
   }, [isGoldenWorkspace]);
 
+  useEffect(() => {
+    if (!isParentMode || !isGoldenWorkspace || !requestedAnalysisId) {
+      setAutoGoldenState("idle");
+      return;
+    }
+    if (listState !== "ready") {
+      return;
+    }
+    if (!analyses.some((analysis) => analysis.id === requestedAnalysisId)) {
+      return;
+    }
+    const existingRun = debugRuns.find((run) => run.analysis_id === requestedAnalysisId && run.mode === "local_pose_keyframes");
+    if (existingRun) {
+      if (selectedRunId !== existingRun.id) {
+        setSelectedRunId(existingRun.id);
+      }
+      setAutoGoldenState("ready");
+      return;
+    }
+
+    let cancelled = false;
+    const createRun = async () => {
+      setAutoGoldenState("loading");
+      setError(null);
+      try {
+        const response = await ensureGoldenAnalysisDebugRun(requestedAnalysisId);
+        if (cancelled) {
+          return;
+        }
+        setSelectedRunId(response.id);
+        setActiveTab("label");
+        const [runs, detail] = await Promise.all([fetchDebugRuns({ limit: 50 }), fetchDebugRun(response.id)]);
+        if (!cancelled) {
+          setDebugRuns(runs);
+          setSelectedRun(detail);
+          setRunState("ready");
+          setAutoGoldenState("ready");
+        }
+      } catch {
+        if (!cancelled) {
+          setAutoGoldenState("error");
+          setError("Golden 标注样本准备失败，请稍后重试。");
+        }
+      }
+    };
+    void createRun();
+    return () => {
+      cancelled = true;
+    };
+  }, [analyses, debugRuns, isGoldenWorkspace, isParentMode, listState, requestedAnalysisId, selectedRunId]);
+
   const selectedAnalysisItem = useMemo(
     () => analyses.find((item) => item.id === selectedAnalysisId) ?? null,
     [analyses, selectedAnalysisId],
@@ -2674,6 +2727,11 @@ export default function DebugPage({ workspace = "debug" }: { workspace?: DebugWo
         </div>
 
         {error ? <div className="rounded-[20px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
+        {autoGoldenState === "loading" ? (
+          <div className="rounded-[20px] border border-amber-100 bg-amber-50 px-5 py-4 text-sm font-semibold text-amber-700">
+            正在准备这条分析的 Golden 标注样本，完成后会自动打开标注面板。
+          </div>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-[20px] border border-slate-200 bg-white p-4">

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.313"
+CURRENT_PIPELINE_VERSION = "v5.2.314"
 
 # v1.1.1: Add manual target bbox lock and per-frame bbox tracking for pose extraction.
 # v1.1.2: Pass effective sampling fps into biomechanics to correct slow-motion jump metrics.
@@ -29,6 +29,7 @@ CURRENT_PIPELINE_VERSION = "v5.2.313"
 # v5.2.311: Add a standalone Golden labeling workspace and fix bbox drawing across sampled, semantic, and partial debug frames.
 # v5.2.312: Merge Golden workspace into master and preserve compact JSON training-plan hardening with one repair pass.
 # v5.2.313: Add progress/archive Golden entry points, URL-selected Golden analysis loading, and manual keyframe window controls with responsive cards.
+# v5.2.314: Make progress/archive Golden links create or reuse a labelable local-pose debug run automatically.
 # v5.2.301: Treat manual target selection as identity-authoritative by blocking automatic support-anchor recovery and blanking those poses.
 # v5.2.300: Harden manual target locks by rejecting no-overlap initial target binding and same-ID recovery drift instead of switching skeleton identity.
 # v5.2.299: Blank semantic Path B skeleton annotations under manual target lock so auxiliary vision prompts cannot inherit wrong-person pose.

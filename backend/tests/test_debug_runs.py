@@ -44,6 +44,43 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.tmp.cleanup()
 
+    async def test_golden_analysis_entry_creates_one_reusable_local_debug_run(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+        from fastapi import BackgroundTasks
+        from sqlalchemy import select
+
+        analysis_id = str(uuid4())
+        upload_dir = Path(self.tmp.name) / "uploads" / analysis_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        source_video = upload_dir / "source.mp4"
+        source_video.write_bytes(b"fake-video")
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.Analysis(
+                    id=analysis_id,
+                    action_type="跳跃",
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    video_path=str(source_video),
+                    status="completed",
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            first = await debug_router.ensure_golden_analysis_debug_run(analysis_id, BackgroundTasks(), session=session)
+            second = await debug_router.ensure_golden_analysis_debug_run(analysis_id, BackgroundTasks(), session=session)
+            result = await session.execute(select(models.DebugRun).where(models.DebugRun.analysis_id == analysis_id))
+            runs = result.scalars().all()
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.status, "pending")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].mode, "local_pose_keyframes")
+        self.assertEqual(runs[0].source_type, "analysis")
+
     async def test_local_debug_run_from_analysis_does_not_modify_formal_analysis(self) -> None:
         import app.models as models
         import app.routers.debug as debug_router

@@ -1389,6 +1389,11 @@ export async function saveDebugGoldenLabel(id: string, payload: DebugGoldenLabel
   return response.data;
 }
 
+export async function ensureGoldenAnalysisDebugRun(analysisId: string) {
+  const response = await apiClient.post<DebugRunCreateResponse>(`/debug/golden/analyses/${analysisId}/debug-run`);
+  return response.data;
+}
+
 function buildDebugRunFormData(payload: DebugRunCreatePayload) {
   const formData = new FormData();
   if (payload.analysisId) {

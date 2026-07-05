@@ -8,13 +8,14 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.313`.
+The current pipeline version is `v5.2.314`.
 
 ## Recent Updates
 
 Current branch updates focus on the Golden labeling workspace, direct progress/archive labeling entry points, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
 
 - Completed archive/progress records now expose a direct Golden labeling action that opens `/golden?analysis_id=...`, preselects the matching analysis, and leaves the debug-run panel empty when no replay exists yet.
+- Golden entry links now prepare a labelable local-pose debug run automatically: existing runs are reused, and missing runs are created once so parents land directly in the Golden Label panel instead of a setup form.
 - Golden sample creation from a historical analysis can now manually override the AI input/keyframe time range; the form preloads the saved manual or detected action window and validates it against the source duration.
 - Golden/debug history cards and action controls were tightened for phone, tablet, and desktop so long notes, flags, status chips, and the new labeling entry do not overflow compact screens.
 - A standalone `/golden` workspace now gives Golden labeling its own parent-mode entry with labeling history, sample status counts, direct sample selection, and new debug sample creation.
@@ -66,6 +67,7 @@ The previous release focused on mobile target selection, action-aware keyframe h
 
 The latest release makes Golden labeling reachable directly from completed analysis history and lets parents choose the exact keyframe window before creating a labelable sample.
 
+- `v5.2.314`: progress/archive Golden links now call an idempotent backend entry that finds or creates one local-pose debug run for the selected analysis, then opens the Golden Label panel automatically; repeated clicks reuse the same run instead of creating duplicates.
 - `v5.2.313`: completed archive/progress records now link straight into `/golden?analysis_id=...`; the Golden workspace preselects URL-requested analyses without forcing an unrelated debug run; historical-analysis sample creation exposes manual AI input/keyframe start/end controls prefilled from the saved action window; Golden/debug cards were adjusted for phone, tablet, and desktop overflow safety.
 - `v5.2.312`: merged the Golden labeling workspace into `master`, kept the compact JSON-object training-plan prompt, and restored the one-pass malformed-JSON repair guard so AI plan generation remains robust after the merge.
 - `v5.2.311`: `/golden` adds a standalone parent-mode Golden labeling workspace with history and new sample creation; Golden bbox drawing now works across sampled, semantic, and partial frames with natural-aspect aligned overlays and native image dragging disabled; saved labels can be reopened and completed incrementally without rerunning scripts.

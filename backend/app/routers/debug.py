@@ -1430,6 +1430,41 @@ async def list_debug_runs(
     return [_debug_summary_from_model(run) for run in result.scalars().all()]
 
 
+@router.post("/golden/analyses/{analysis_id}/debug-run", response_model=DebugRunCreateResponse)
+async def ensure_golden_analysis_debug_run(
+    analysis_id: str,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> DebugRunCreateResponse:
+    result = await session.execute(
+        select(DebugRun)
+        .where(
+            DebugRun.analysis_id == analysis_id,
+            DebugRun.source_type == "analysis",
+            DebugRun.mode == "local_pose_keyframes",
+        )
+        .order_by(DebugRun.created_at.desc())
+        .limit(1)
+    )
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        return DebugRunCreateResponse(id=existing.id, status=existing.status)
+
+    return await _create_debug_run(
+        mode="local_pose_keyframes",
+        background_tasks=background_tasks,
+        analysis_id=analysis_id,
+        file=None,
+        action_type=None,
+        action_subtype=None,
+        analysis_profile=None,
+        note="Golden labeling entry",
+        manual_action_window_start_sec=None,
+        manual_action_window_end_sec=None,
+        session=session,
+    )
+
+
 @router.get("/runs/{run_id}", response_model=DebugRunDetail)
 async def get_debug_run(run_id: str, session: AsyncSession = Depends(get_session)) -> DebugRunDetail:
     run = await session.get(DebugRun, run_id)
