@@ -25,6 +25,8 @@ tmp-test/
 !.claude/skills/**
 deliverables/
 backend/tests/__pycache__/
+.worktrees
+.worktrees/
 
 # Python
 __pycache__/
