@@ -8,7 +8,7 @@
 
 Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
 
-当前分析管线版本为 `v5.2.316`。
+当前分析管线版本为 `v5.2.317`。
 
 ## 最近更新
 
@@ -17,7 +17,7 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 - 动作识别修正和关键帧修正确认应用后，现在会把有效修正数据写回分析记录本身，档案/历史列表、报告、导出和重新打开工作台都会直接显示确认后的内容，不再需要重新分析才更新。
 - 后端启动时会自动回填旧的已应用修正卡，把历史上只存在于有效覆盖层里的动作和关键帧修正同步回分析记录。
 - 报告追问面板和独立 `/analysis-chat` 工作台会在修正确认后等待分析详情刷新，并先更新当前页面和选中记录缓存，再显示成功提示。
-- 从 `codex/face-identity-target-lock` 导出 all-in-one Docker 镜像，包含人脸身份模型层、滑行者人脸档案 API、目标诊断、父级 UI 及档案删除功能。
+- 重新从 `codex/face-identity-target-lock` 导出 all-in-one Docker 镜像，包含最新人脸身份功能并修复 CRLF 换行符以兼容 Linux 容器。
 
 - 已完成的进展/档案记录现在提供直达 Golden 标注的入口，会打开 `/golden?analysis_id=...`，自动选中对应正式分析；如果还没有 debug replay，右侧调试样本区会保持为空，方便直接新建标注样本。
 - Golden 入口现在会自动准备可标注的本地 pose debug 样本：已有样本会复用，没有样本会只创建一次，并直接打开 Golden Label 面板，不再停在新建表单。
@@ -344,7 +344,7 @@ docker run -d \
 .\scripts\export-allinone-image.ps1
 ```
 
-导出脚本会重新构建 `skating-analyzer-allinone:latest`，从 `backend/app/services/pipeline_version.py` 读取当前管线版本，并在 `./deliverables` 下生成带时间戳的 tar 文件。
+导出脚本会重新构建 `skating-analyzer-allinone:latest`，从 `backend/app/services/pipeline_version.py` 读取当前管线版本，并在 `./deliverables` 下生成带时间戳的 tar 文件。脚本还会复制一份稳定文件名 `./deliverables/skating-analyzer-allinone-latest.tar`，群晖导入时优先选这个文件，避免版本号或时间戳写错导致 `no such file`。
 
 all-in-one 说明：
 

@@ -8,13 +8,14 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.316`.
+The current pipeline version is `v5.2.317`.
 
 ## Recent Updates
 
 Current branch updates focus on correction confirmation staying visible immediately in the current workspace, while preserving the Golden labeling workspace, direct progress/archive labeling entry points, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
 
 - Applying an action-label or keyframe correction now writes the corrected effective data back into the analysis row, so archive/history lists, reports, exports, and reopened workspaces all show the confirmed correction without requiring a full reanalysis.
+- Re-exported all-in-one Docker image from `codex/face-identity-target-lock` with latest face identity features and fixed CRLF line endings for Linux container compatibility.
 - Startup now backfills older already-applied correction cards into their analysis rows, covering legacy action and keyframe corrections that previously existed only in the effective overlay layer.
 - The report follow-up panel and standalone `/analysis-chat` workspace now await the refreshed analysis detail after correction confirmation, updating the current page and selected record cache before showing the success notice.
 - Exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
