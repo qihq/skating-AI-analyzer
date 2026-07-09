@@ -67,7 +67,7 @@ type AnalysisFollowUpPanelProps = {
   analysis: AnalysisDetail | null;
   compact?: boolean;
   variant?: "card" | "workspace";
-  onAnalysisRefresh?: () => void;
+  onAnalysisRefresh?: () => void | Promise<void>;
   onAnalysisRetryQueued?: () => void;
   onNotice?: (message: string) => void;
 };
@@ -781,8 +781,8 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       setCorrections(response.corrections);
       setManualFormDirty(false);
       setPendingSuggestion(null);
+      await onAnalysisRefresh?.();
       showNotice(successMessage);
-      onAnalysisRefresh?.();
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
         setError(String(requestError.response?.data?.detail ?? "修正操作失败，请稍后再试。"));

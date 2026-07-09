@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.models import Analysis
+from sqlalchemy import text
+
+from app.models import Analysis, AnalysisCorrection
 from app.routers.analysis import _auto_apply_video_ai_action_if_confident, _video_ai_auto_action_payload
+from app.services import analysis_corrections as corrections_service
 from app.services.analysis_corrections import (
     apply_analysis_correction,
     build_chat_share_image_payload,
@@ -85,6 +89,123 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(effective["has_applied_corrections"])
             self.assertEqual(effective["analysis"]["action_subtype"], "Salchow")
             self.assertEqual(effective["report"]["action_confirmation"]["confirmed_action"], "Salchow")
+
+    async def test_apply_action_correction_persists_analysis_and_list_cache(self) -> None:
+        from app.database import _apply_patch_i
+
+        async with self.engine.begin() as conn:
+            await _apply_patch_i(conn)
+
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload={
+                    "action_subtype": "Salchow",
+                    "action_confirmation": {"confirmed_action": "Salchow", "confidence": 0.9},
+                },
+                rationale="Manual review",
+            )
+
+            await apply_analysis_correction(session, analysis, correction.id)
+
+            await session.refresh(analysis)
+            self.assertEqual(analysis.action_subtype, "Salchow")
+            self.assertEqual(analysis.report["action_confirmation"]["confirmed_action"], "Salchow")
+
+            row = (
+                await session.execute(
+                    text("SELECT action_subtype FROM analysis_list_items WHERE analysis_id = :analysis_id"),
+                    {"analysis_id": analysis.id},
+                )
+            ).one()
+            self.assertEqual(row.action_subtype, "Salchow")
+
+    async def test_create_applied_action_correction_persists_immediately(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                status="applied",
+                payload={
+                    "action_subtype": "Loop",
+                    "action_confirmation": {"confirmed_action": "Loop", "confidence": 0.91},
+                },
+                rationale="Auto apply",
+            )
+
+            await session.refresh(analysis)
+            self.assertEqual(analysis.action_subtype, "Loop")
+            self.assertEqual(analysis.report["action_confirmation"]["confirmed_action"], "Loop")
+
+    async def test_apply_keyframe_correction_persists_analysis_evidence(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="keyframes",
+                payload={
+                    "key_frames": {
+                        "T": {"frame_id": "semantic_010", "timestamp": 1.2, "phase_code": "takeoff"},
+                        "A": "frame_011",
+                    },
+                    "source": "manual_ui",
+                },
+                rationale="Manual keyframe review",
+            )
+
+            await apply_analysis_correction(session, analysis, correction.id)
+
+            await session.refresh(analysis)
+            self.assertEqual(analysis.bio_data["key_frames"]["T"], "semantic_010")
+            self.assertEqual(analysis.bio_data["key_frames"]["A"], "frame_011")
+            self.assertEqual(analysis.bio_data["corrected_key_frames"]["T"]["timestamp"], 1.2)
+            self.assertTrue(analysis.frame_motion_scores["resolved_keyframes"]["corrected"])
+            self.assertEqual(analysis.frame_motion_scores["resolved_keyframes"]["source"], "manual_ui")
+
+    async def test_backfill_persists_legacy_applied_keyframe_correction(self) -> None:
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.commit()
+            session.add(
+                AnalysisCorrection(
+                    id=str(uuid4()),
+                    analysis_id=analysis.id,
+                    kind="keyframes",
+                    payload={"key_frames": {"L": "frame_099"}, "source": "legacy_manual"},
+                    rationale="Legacy applied correction",
+                    source="manual",
+                    status="applied",
+                    original_snapshot={},
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                    applied_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+
+            backfill = getattr(corrections_service, "backfill_applied_analysis_corrections", None)
+            self.assertIsNotNone(backfill)
+            await backfill(session)
+
+            await session.refresh(analysis)
+            self.assertEqual(analysis.bio_data["key_frames"]["L"], "frame_099")
+            self.assertEqual(analysis.frame_motion_scores["resolved_keyframes"]["source"], "legacy_manual")
 
     async def test_keyframe_dismissed_correction_is_not_effective(self) -> None:
         async with self.Session() as session:

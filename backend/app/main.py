@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import ensure_storage_dirs, init_db
+from app.database import AsyncSessionLocal, ensure_storage_dirs, init_db
 from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
@@ -24,6 +24,7 @@ from app.routers.skaters import admin_router, router as skaters_router, session_
 from app.routers.snowball import router as snowball_router
 from app.schemas import HealthResponse
 from app.services.archive_policy import run_archive_policy
+from app.services.analysis_corrections import backfill_applied_analysis_corrections
 from app.services.pose import log_pose_runtime_mode
 from app.services.skaters import seed_preset_skaters
 from app.services.skills import seed_skill_catalog, sync_all_skater_progress
@@ -45,6 +46,16 @@ async def _sync_skater_progress_background() -> None:
         logger.exception("Startup background skater progress sync failed")
 
 
+async def _backfill_applied_corrections_startup() -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            count = await backfill_applied_analysis_corrections(session)
+        if count:
+            logger.info("startup: backfilled %s analyses from applied corrections", count)
+    except Exception:  # noqa: BLE001
+        logger.exception("Startup applied correction backfill failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("startup: ensure storage dirs")
@@ -53,6 +64,8 @@ async def lifespan(_: FastAPI):
     log_pose_runtime_mode()
     logger.info("startup: init db")
     await init_db()
+    logger.info("startup: backfill applied corrections")
+    await _backfill_applied_corrections_startup()
     logger.info("startup: seed preset skaters")
     await seed_preset_skaters()
     logger.info("startup: seed default memories")

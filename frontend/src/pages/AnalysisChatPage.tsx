@@ -95,13 +95,14 @@ export default function AnalysisChatPage() {
   const loadSelectedAnalysis = async (id: string) => {
     if (!id) {
       setSelectedAnalysis(null);
-      return;
+      return null;
     }
     setIsAnalysisLoading(true);
     setError(null);
     try {
       const data = await fetchAnalysis(id, { isParentRequest: true });
       setSelectedAnalysis(data);
+      return data;
     } catch (requestError) {
       if (axios.isAxiosError(requestError)) {
         setError(String(requestError.response?.data?.detail ?? "分析详情加载失败。"));
@@ -109,6 +110,7 @@ export default function AnalysisChatPage() {
         setError("分析详情加载失败。");
       }
       setSelectedAnalysis(null);
+      return null;
     } finally {
       setIsAnalysisLoading(false);
     }
@@ -128,6 +130,27 @@ export default function AnalysisChatPage() {
       setSearchParams({ analysis: analysisId });
       setIsSelectorOpen(false);
     }
+  };
+
+  const refreshSelectedAnalysis = async (id: string) => {
+    const next = await loadSelectedAnalysis(id);
+    if (!next) {
+      return;
+    }
+    setRecords((current) =>
+      current.map((record) =>
+        record.id === id
+          ? {
+              ...record,
+              action_type: next.action_type,
+              action_subtype: next.action_subtype,
+              analysis_profile: next.analysis_profile,
+              force_score: next.force_score,
+              updated_at: next.updated_at,
+            }
+          : record,
+      ),
+    );
   };
 
   const selectedKeyFrames = selectedAnalysis ? keyFrameChips(selectedAnalysis) : [];
@@ -250,7 +273,7 @@ export default function AnalysisChatPage() {
               <AnalysisFollowUpPanel
                 analysis={selectedAnalysis}
                 variant="workspace"
-                onAnalysisRefresh={() => void loadSelectedAnalysis(selectedAnalysis.id)}
+                onAnalysisRefresh={() => refreshSelectedAnalysis(selectedAnalysis.id)}
                 onAnalysisRetryQueued={() => void loadSelectedAnalysis(selectedAnalysis.id)}
                 onNotice={showNotice}
               />

@@ -471,6 +471,28 @@ async def list_analysis_corrections(session: AsyncSession, analysis_id: str) -> 
     return list(result.scalars().all())
 
 
+async def _persist_applied_corrections(session: AsyncSession, analysis: Analysis) -> None:
+    corrections = await list_analysis_corrections(session, analysis.id)
+    effective = build_effective_analysis_payload(analysis, corrections)
+    apply_effective_payload_to_analysis(analysis, effective)
+    analysis.updated_at = datetime.now(timezone.utc)
+
+
+async def backfill_applied_analysis_corrections(session: AsyncSession) -> int:
+    result = await session.execute(
+        select(Analysis)
+        .join(AnalysisCorrection, AnalysisCorrection.analysis_id == Analysis.id)
+        .where(AnalysisCorrection.status == "applied")
+        .distinct()
+    )
+    analyses = list(result.scalars().all())
+    for analysis in analyses:
+        await _persist_applied_corrections(session, analysis)
+    if analyses:
+        await session.commit()
+    return len(analyses)
+
+
 async def create_analysis_correction(
     session: AsyncSession,
     analysis: Analysis,
@@ -499,6 +521,9 @@ async def create_analysis_correction(
         applied_at=datetime.now(timezone.utc) if normalized_status == "applied" else None,
     )
     session.add(correction)
+    if normalized_status == "applied":
+        await session.flush()
+        await _persist_applied_corrections(session, analysis)
     await session.commit()
     await session.refresh(correction)
     return correction
@@ -517,6 +542,7 @@ async def apply_analysis_correction(
     correction.status = "applied"
     correction.updated_at = datetime.now(timezone.utc)
     correction.applied_at = correction.applied_at or datetime.now(timezone.utc)
+    await _persist_applied_corrections(session, analysis)
     await session.commit()
     await session.refresh(correction)
     return correction

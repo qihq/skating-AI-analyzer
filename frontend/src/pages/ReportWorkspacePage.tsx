@@ -144,6 +144,14 @@ export default function ReportWorkspacePage() {
       .join(" ")}`);
   };
 
+  const refreshAnalysis = async () => {
+    if (!analysis) {
+      return;
+    }
+    const next = await fetchAnalysis(analysis.id, { isParentRequest: true });
+    setAnalysis(next);
+  };
+
   if (!isParentMode) {
     return (
       <section className="app-card mx-auto max-w-3xl p-8 text-center tablet:p-10">
@@ -243,7 +251,7 @@ export default function ReportWorkspacePage() {
           analysis={analysis}
           compact
           variant="workspace"
-          onAnalysisRefresh={() => void fetchAnalysis(analysis.id, { isParentRequest: true }).then((next) => setAnalysis(next))}
+          onAnalysisRefresh={refreshAnalysis}
           onAnalysisRetryQueued={() => void fetchAnalysis(analysis.id, { isParentRequest: true }).then((next) => setAnalysis(next))}
           onNotice={showNotice}
         />

@@ -8,12 +8,15 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.315`.
+The current pipeline version is `v5.2.316`.
 
 ## Recent Updates
 
-Current branch updates focus on the Golden labeling workspace, direct progress/archive labeling entry points, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
+Current branch updates focus on correction confirmation staying visible immediately in the current workspace, while preserving the Golden labeling workspace, direct progress/archive labeling entry points, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
 
+- Applying an action-label or keyframe correction now writes the corrected effective data back into the analysis row, so archive/history lists, reports, exports, and reopened workspaces all show the confirmed correction without requiring a full reanalysis.
+- Startup now backfills older already-applied correction cards into their analysis rows, covering legacy action and keyframe corrections that previously existed only in the effective overlay layer.
+- The report follow-up panel and standalone `/analysis-chat` workspace now await the refreshed analysis detail after correction confirmation, updating the current page and selected record cache before showing the success notice.
 - Exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
 - Completed archive/progress records now expose a direct Golden labeling action that opens `/golden?analysis_id=...`, preselects the matching analysis, and leaves the debug-run panel empty when no replay exists yet.
 - Golden entry links now prepare a labelable local-pose debug run automatically: existing runs are reused, and missing runs are created once so parents land directly in the Golden Label panel instead of a setup form.
@@ -66,8 +69,10 @@ The previous release focused on mobile target selection, action-aware keyframe h
 - Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
-The latest release makes Golden labeling reachable directly from completed analysis history and lets parents choose the exact keyframe window before creating a labelable sample.
+The latest release makes confirmed action and keyframe corrections update the current analysis data immediately, without waiting for another analysis run.
 
+- `v5.2.316`: applied action-label and keyframe correction cards are persisted back into `analyses`, legacy applied corrections are backfilled at startup, and the report/follow-up chat workspaces refresh their current analysis detail before showing correction success.
+- `v5.2.315`: exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
 - `v5.2.314`: progress/archive Golden links now call an idempotent backend entry that finds or creates one local-pose debug run for the selected analysis, then opens the Golden Label panel automatically; repeated clicks reuse the same run instead of creating duplicates.
 - `v5.2.313`: completed archive/progress records now link straight into `/golden?analysis_id=...`; the Golden workspace preselects URL-requested analyses without forcing an unrelated debug run; historical-analysis sample creation exposes manual AI input/keyframe start/end controls prefilled from the saved action window; Golden/debug cards were adjusted for phone, tablet, and desktop overflow safety.
 - `v5.2.312`: merged the Golden labeling workspace into `master`, kept the compact JSON-object training-plan prompt, and restored the one-pass malformed-JSON repair guard so AI plan generation remains robust after the merge.

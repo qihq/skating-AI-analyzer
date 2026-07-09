@@ -1575,23 +1575,6 @@ async def _auto_apply_video_ai_action_if_confident(
         )
     except AnalysisCorrectionError:
         return
-    analysis.action_type = str(payload["action_type"])
-    analysis.action_subtype = str(payload["action_subtype"]) if payload.get("action_subtype") is not None else None
-    analysis.analysis_profile = str(payload["analysis_profile"])
-    report = analysis.report if isinstance(analysis.report, dict) else {}
-    report["action_confirmation"] = {
-        **(report.get("action_confirmation") if isinstance(report.get("action_confirmation"), dict) else {}),
-        **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
-    }
-    analysis.report = report
-    motion = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
-    video_payload = motion.setdefault("video_temporal", {})
-    if isinstance(video_payload, dict):
-        video_payload["action_confirmation"] = {
-            **(video_payload.get("action_confirmation") if isinstance(video_payload.get("action_confirmation"), dict) else {}),
-            **(payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}),
-        }
-    analysis.frame_motion_scores = motion
 
 
 def _mixed_action_profile_reuse_allowed_by_video_ai(
