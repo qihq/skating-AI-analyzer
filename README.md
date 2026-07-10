@@ -8,7 +8,7 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.317`.
+The current pipeline version is `v5.2.318`.
 
 ## Recent Updates
 
