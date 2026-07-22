@@ -297,3 +297,34 @@ class MemorySuggestion(Base):
     suggestions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     is_reviewed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MonthlyChapter(Base):
+    __tablename__ = "monthly_chapters"
+    __table_args__ = (
+        UniqueConstraint("skater_id", "year_month", "revision", name="uq_monthly_chapter_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    skater_id: Mapped[str] = mapped_column(String(36), index=True)
+    year_month: Mapped[str] = mapped_column(String(7), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="facts_ready", index=True)
+    fact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    provider_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provider_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    model_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    generated_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    draft_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_flags: Mapped[list] = mapped_column(JSON, default=list)
+    representative_frames: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

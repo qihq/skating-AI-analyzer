@@ -1037,3 +1037,23 @@ class SnowballChatRequest(BaseModel):
 
 class SnowballChatResponse(BaseModel):
     reply: str
+
+
+class MonthlyChapterPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    skater_id: str
+    year_month: str
+    revision: int
+    status: str
+    fact_snapshot: dict[str, Any]
+    source_hash: str
+    generated_payload: dict[str, Any] | None = None
+    draft_text: str | None = None
+    final_text: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    representative_frames: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    published_at: datetime | None = None
