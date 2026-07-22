@@ -18,6 +18,7 @@ from app.database import AsyncSessionLocal, ensure_storage_dirs, init_db
 from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
+from app.routers.growth import router as growth_router
 from app.routers.providers import router as providers_router
 from app.routers.settings import router as settings_router
 from app.routers.skaters import admin_router, router as skaters_router, session_router, system_router
@@ -112,6 +113,7 @@ app.include_router(auth_router)
 app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(skaters_router)
+app.include_router(growth_router)
 app.include_router(session_router)
 app.include_router(system_router)
 app.include_router(admin_router)

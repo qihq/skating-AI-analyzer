@@ -1057,3 +1057,7 @@ class MonthlyChapterPublic(BaseModel):
     created_at: datetime
     updated_at: datetime
     published_at: datetime | None = None
+
+
+class MonthlyChapterPatchRequest(BaseModel):
+    final_text: str | None = Field(default=None, max_length=2400)
