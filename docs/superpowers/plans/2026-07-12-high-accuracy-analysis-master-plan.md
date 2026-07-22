@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3, FastAPI, SQLAlchemy/SQLite, OpenCV, FFmpeg/ffprobe, Ultralytics YOLO/ByteTrack, MediaPipe, MiMo 2.5 through the existing provider layer, React/TypeScript, unittest/pytest.
 
+**Parallel Product Design:** `docs/superpowers/specs/2026-07-22-growth-story-product-design.md` turns validated analysis evidence into a parent-facing growth home, phase strip, milestones, monthly chapters, sharing, and later annual/event-timeline experiences. It does not change the four-plan execution order or relax any Golden gate below.
+
 ## Global Constraints
 
 - Source inputs are normally <=30 seconds, WeChat-compressed 720p handheld videos with pan, zoom, shake, occlusion, and multiple skaters.
@@ -83,6 +85,23 @@ Do not commit raw user videos, face crops, embeddings, or personally identifying
 | Checkpoints, restart, dependency invalidation | Operations Tasks 5-7 |
 | Storage/privacy and DS918+ resource protection | Operations Tasks 8-9, 11 |
 | 100-video final acceptance and rollback | Operations Task 12 |
+
+## Product Visibility Cross-Dependencies
+
+The growth-story product track may proceed in parallel only where it reuses already persisted evidence without changing analysis behavior.
+
+| Product capability | Accuracy dependency | Rollout rule |
+|---|---|---|
+| T/A/L or profile-specific phase strip | Existing resolved keyframes; G4 improves default trust | May ship early with source, confidence, and explicit missing states; no synthetic prep frame |
+| Growth KPI summary | Persisted sessions, completed analyses, and skill unlock timestamps | Backend aggregation only; do not calculate authoritative counts from frontend pagination |
+| Milestone timeline | Persisted `unlocked_at`, `unlocked_by`, and notes | Keep system, parent, and coach verification visibly distinct |
+| Landing success rate | Versioned attempt/outcome schema with measured coverage | Block display until sample size, unobservable rate, and metric definition are available |
+| Monthly narrative chapter | Deterministic fact snapshot from trustworthy records | Require parent review; narrative cannot invent unsupported causal or emotional claims |
+| Standard-action ghost overlay | Validated reference library and view/scale normalization | Block the `standard comparison` label until separately measured |
+| Full-video technical event timeline | G3 candidate acceptance and G4 specialty/timing acceptance | Event-triggered evidence only; never market uniform per-second inference |
+| Annual PDF | Reviewed monthly chapters and rebuildable media references | Treat PDF as a derived asset with explicit renderer and provenance |
+
+Product work must not add a metric or stronger label merely because the UI can render it. When a required gate is unavailable, show the underlying evidence conservatively or omit the claim.
 
 ## Full Verification Matrix
 
