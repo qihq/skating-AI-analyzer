@@ -294,14 +294,19 @@ function semanticLookup(records: SelectedSemanticFrame[]) {
 function buildContext(analysis: AnalysisDetail): EvidenceBuildContext {
   const selected = analysis.video_temporal_diagnostics?.selected_semantic_frames ?? [];
   const partial = analysis.video_temporal_diagnostics?.partial_semantic_frames ?? [];
-  return {
-    timestampByFrame: collectTimestampByFrame({
+  const timestampByFrame = collectTimestampByFrame({
       frame_motion_scores: analysis.frame_motion_scores,
-      pose_data: analysis.pose_data,
       bio_data: analysis.bio_data,
       selected,
       partial,
-    }),
+    });
+  Object.entries(analysis.pose_data?.frame_timestamps ?? {}).forEach(([frameId, timestamp]) => {
+    if (Number.isFinite(timestamp)) {
+      timestampByFrame.set(normalizedFrameKey(frameId), timestamp);
+    }
+  });
+  return {
+    timestampByFrame,
     semanticMatches: semanticLookup([...selected, ...partial]),
   };
 }

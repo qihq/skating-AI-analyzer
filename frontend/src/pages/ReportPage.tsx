@@ -19,6 +19,7 @@ import {
 } from "../api/client";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
+import ActionPhaseStrip from "../components/ActionPhaseStrip";
 import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import ForceScoreRing from "../components/ForceScoreRing";
@@ -1359,6 +1360,8 @@ export default function ReportPage() {
               </div>
             </div>
           </section>
+
+          <ActionPhaseStrip analysis={deferredAnalysis} pose={deferredAnalysis.pose_data} showVideo />
 
           <div className="grid min-w-0 gap-6 web:grid-cols-[minmax(0,1fr)_360px]">
             <main className="min-w-0 space-y-6">
