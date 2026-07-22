@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+
 import ModeToggle from "./ModeToggle";
 import UiThemeToggle from "./UiThemeToggle";
 
@@ -12,6 +14,13 @@ export default function AppHeader() {
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            <Link
+              aria-label="打开设置"
+              to="/settings"
+              className="flex h-11 w-11 items-center justify-center rounded-full text-lg text-slate-600 transition hover:bg-slate-100"
+            >
+              ⚙️
+            </Link>
             <UiThemeToggle />
             <ModeToggle />
           </div>

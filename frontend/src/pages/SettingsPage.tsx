@@ -23,6 +23,7 @@ import {
   updateSkater,
 } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
+import AdvancedToolsLinks from "../components/AdvancedToolsLinks";
 import PinInput from "../components/PinInput";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import { parseApiDate } from "../utils/datetime";
@@ -793,6 +794,8 @@ export default function SettingsPage() {
           </section>
         </div>
       </section>
+
+      <AdvancedToolsLinks />
 
       {isPinModalOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/36 px-4 backdrop-blur-sm">

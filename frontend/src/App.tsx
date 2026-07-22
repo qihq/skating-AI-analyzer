@@ -8,6 +8,7 @@ import ComparePage from "./pages/ComparePage";
 import DebugPage from "./pages/DebugPage";
 import ArchivePage from "./pages/ArchivePage";
 import HistoryPage from "./pages/HistoryPage";
+import GrowthHomePage from "./pages/GrowthHomePage";
 import ParentSetupPage from "./pages/ParentSetupPage";
 import PlanPage from "./pages/PlanPage";
 import PoseDebugPage from "./pages/PoseDebugPage";
@@ -116,12 +117,13 @@ export default function App() {
       <DesktopWheelScrollFallback />
 
       <Routes>
-        <Route path="/" element={<Navigate to="/path" replace />} />
+        <Route path="/" element={<Navigate to="/home" replace />} />
         <Route path="/upload" element={<Navigate to="/review" replace />} />
         <Route path="/skills" element={<Navigate to="/path" replace />} />
         <Route path="/progress" element={<Navigate to="/archive" replace />} />
 
         <Route element={<AppLayout />}>
+          <Route path="/home" element={<GrowthHomePage />} />
           <Route path="/path" element={<SkillTreePage />} />
           <Route path="/snowball" element={<SnowballPage />} />
           <Route path="/review" element={<ReviewPage />} />
