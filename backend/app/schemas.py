@@ -532,6 +532,38 @@ class ArchiveResponse(BaseModel):
     has_more: bool = False
 
 
+class GrowthFocus(BaseModel):
+    label: str
+    source_analysis_id: str
+    quality: str
+
+
+class GrowthMilestoneEvent(BaseModel):
+    id: str
+    occurred_at: datetime
+    type: str = "skill_unlock"
+    title: str
+    note: str | None = None
+    verification: str
+    source_skill_id: str
+    source_analysis_ids: list[str] = Field(default_factory=list)
+    evidence_quality: str = "persisted"
+
+
+class GrowthSummaryResponse(BaseModel):
+    schema_version: int = 1
+    skater_id: str
+    as_of: datetime
+    lesson_count: int
+    completed_analysis_count: int
+    current_month_analysis_count: int
+    milestone_count: int
+    latest_analysis_id: str | None = None
+    current_focus: GrowthFocus | None = None
+    metric_definitions: dict[str, str]
+    recent_milestones: list[GrowthMilestoneEvent] = Field(default_factory=list)
+
+
 class TrainingSessionBase(BaseModel):
     session_date: date
     location: str = "冰场"

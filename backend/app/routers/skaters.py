@@ -20,6 +20,7 @@ from app.schemas import (
     BackupCreateRequest,
     BackupListResponse,
     BackupRestoreRequest,
+    GrowthSummaryResponse,
     LearningPathResponse,
     SkaterPublic,
     SkaterUpdateRequest,
@@ -35,6 +36,7 @@ from app.schemas import (
     TrainingSessionUpdate,
 )
 from app.services.archive_policy import build_storage_stats, create_manual_backup, list_backups, restore_backup
+from app.services.growth_summary import build_growth_summary
 from app.services.skills import build_learning_path, get_skater_skill_payloads, lock_skill, unlock_skill
 
 
@@ -291,6 +293,17 @@ async def update_skater(
     await session.commit()
     await session.refresh(skater)
     return skater
+
+
+@router.get("/{skater_id}/growth-summary", response_model=GrowthSummaryResponse)
+async def get_growth_summary(
+    skater_id: str,
+    milestone_limit: Annotated[int, Query(ge=1, le=24)] = 8,
+    session: AsyncSession = Depends(get_session),
+) -> GrowthSummaryResponse:
+    if await session.get(Skater, skater_id) is None:
+        raise HTTPException(status_code=404, detail="Skater not found.")
+    return await build_growth_summary(session, skater_id, milestone_limit=milestone_limit)
 
 
 @router.get("/{skater_id}/sessions", response_model=list[TrainingSessionPublic])
