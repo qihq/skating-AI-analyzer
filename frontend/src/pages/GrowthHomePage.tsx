@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -94,6 +94,10 @@ export default function GrowthHomePage() {
 
   const report = latestAnalysis?.report;
   const nextAction = report?.improvements[0]?.action ?? report?.training_focus ?? summary?.current_focus?.label;
+  const skaterName = useMemo(
+    () => skaters.find((s) => s.id === selectedSkaterId)?.display_name ?? "小滑手",
+    [skaters, selectedSkaterId],
+  );
 
   return (
     <div className="space-y-6">
@@ -152,7 +156,7 @@ export default function GrowthHomePage() {
             <section className="app-card p-5 text-sm leading-7 text-slate-500">完成第一次复盘后，这里会出现关键动作阶段。</section>
           )}
 
-          <MilestoneTimeline items={summary.recent_milestones} />
+          <MilestoneTimeline items={summary.recent_milestones} skaterName={skaterName} />
 
           <section className="flex flex-wrap gap-3">
             {summary.latest_analysis_id ? <Link className="app-pill" to={`/report/${summary.latest_analysis_id}`}>查看完整报告</Link> : null}
