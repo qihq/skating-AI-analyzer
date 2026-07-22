@@ -16,6 +16,11 @@ vi.mock("../api/client", () => ({
   uploadAnalysis: vi.fn(),
   fetchHasPin: vi.fn().mockResolvedValue({ has_pin: false, pin_length: 4 }),
   verifyPin: vi.fn(),
+  createMonthlyChapterFacts: vi.fn(),
+  fetchMonthlyChapters: vi.fn(),
+  generateMonthlyChapter: vi.fn(),
+  patchMonthlyChapter: vi.fn(),
+  publishMonthlyChapter: vi.fn(),
 }));
 
 const skaters = [{ id: "skater-1", name: "tantan", display_name: "坦坦", is_default: true }] as Skater[];

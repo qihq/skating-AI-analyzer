@@ -1652,3 +1652,96 @@ export async function restoreBackup(filename: string) {
   const response = await apiClient.post<BackupActionResponse>("/admin/backups/restore", { filename });
   return response.data;
 }
+
+export interface MonthlyFact {
+  id: string;
+  kind: "count" | "metric" | "milestone" | "observation" | "focus" | "quote";
+  text?: string;
+  value?: number;
+  metric?: string;
+  label?: string;
+  unit?: string;
+  action_subtype?: string | null;
+  before?: number;
+  after?: number;
+  sample_count?: number;
+  verification?: string;
+  skill_id?: string;
+  category?: string;
+  occurrence_count?: number;
+  speaker?: QuoteSpeaker | null;
+  source_analysis_ids?: string[];
+  source_analysis_id?: string;
+}
+
+export interface MonthlyFactSnapshot {
+  schema_version: string;
+  skater_id: string;
+  year_month: string;
+  generated_at: string;
+  coverage: { sessions: number; completed_analyses: number; comparable_metrics: number };
+  facts: MonthlyFact[];
+  source_analysis_ids: string[];
+  source_session_ids: string[];
+  source_skill_ids: string[];
+  quality_flags: string[];
+  representative_frames: {
+    analysis_id: string;
+    frame_id: string;
+    timestamp: number;
+    phase: string;
+    evidence_source: string;
+  }[];
+}
+
+export type MonthlyChapterStatus = "facts_ready" | "generated" | "published" | "stale";
+
+export interface MonthlyChapter {
+  id: string;
+  skater_id: string;
+  year_month: string;
+  revision: number;
+  status: MonthlyChapterStatus;
+  fact_snapshot: MonthlyFactSnapshot;
+  source_hash: string;
+  generated_payload: Record<string, unknown> | null;
+  draft_text: string | null;
+  final_text: string | null;
+  quality_flags: string[];
+  representative_frames: MonthlyFactSnapshot["representative_frames"];
+  created_at: string;
+  updated_at: string;
+  published_at: string | null;
+}
+
+export async function createMonthlyChapterFacts(skaterId: string, yearMonth: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/skaters/${skaterId}/chapters/${yearMonth}/facts`);
+  return response.data;
+}
+
+export async function generateMonthlyChapter(chapterId: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/generate`);
+  return response.data;
+}
+
+export async function fetchMonthlyChapters(skaterId: string, yearMonth?: string): Promise<MonthlyChapter[]> {
+  const response = await apiClient.get<MonthlyChapter[]>(`/growth/skaters/${skaterId}/chapters`, {
+    params: yearMonth ? { year_month: yearMonth } : undefined,
+  });
+  return response.data;
+}
+
+export async function fetchMonthlyChapter(chapterId: string): Promise<MonthlyChapter> {
+  const response = await apiClient.get<MonthlyChapter>(`/growth/chapters/${chapterId}`);
+  return response.data;
+}
+
+export async function patchMonthlyChapter(chapterId: string, finalText: string): Promise<MonthlyChapter> {
+  const response = await apiClient.patch<MonthlyChapter>(`/growth/chapters/${chapterId}`, { final_text: finalText });
+  return response.data;
+}
+
+export async function publishMonthlyChapter(chapterId: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/publish`);
+  return response.data;
+}

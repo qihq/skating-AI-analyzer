@@ -156,6 +156,7 @@ export default function GrowthHomePage() {
 
           <section className="flex flex-wrap gap-3">
             {summary.latest_analysis_id ? <Link className="app-pill" to={`/report/${summary.latest_analysis_id}`}>查看完整报告</Link> : null}
+            <Link className="app-pill" to="/chapters">查看月度章节</Link>
             <Link className="app-pill" to="/archive">查看月度进步</Link>
             <Link className="app-pill" to="/path">查看成长档案</Link>
           </section>

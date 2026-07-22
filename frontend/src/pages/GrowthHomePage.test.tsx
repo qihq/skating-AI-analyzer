@@ -10,6 +10,11 @@ vi.mock("../api/client", () => ({
   fetchAnalysis: vi.fn(),
   fetchGrowthSummary: vi.fn(),
   fetchSkaters: vi.fn(),
+  createMonthlyChapterFacts: vi.fn(),
+  fetchMonthlyChapters: vi.fn(),
+  generateMonthlyChapter: vi.fn(),
+  patchMonthlyChapter: vi.fn(),
+  publishMonthlyChapter: vi.fn(),
 }));
 vi.mock("../components/ActionPhaseStrip", () => ({ default: () => <div>阶段联图</div> }));
 
