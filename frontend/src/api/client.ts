@@ -840,6 +840,40 @@ export interface ArchiveResponse {
   has_more?: boolean;
 }
 
+export type MilestoneVerification = "system_detected" | "parent_confirmed" | "coach_confirmed";
+
+export interface GrowthFocus {
+  label: string;
+  source_analysis_id: string;
+  quality: string;
+}
+
+export interface GrowthMilestone {
+  id: string;
+  occurred_at: string;
+  type: string;
+  title: string;
+  note: string | null;
+  verification: MilestoneVerification;
+  source_skill_id: string;
+  source_analysis_ids: string[];
+  evidence_quality: string;
+}
+
+export interface GrowthSummary {
+  schema_version: 1;
+  skater_id: string;
+  as_of: string;
+  lesson_count: number;
+  completed_analysis_count: number;
+  current_month_analysis_count: number;
+  milestone_count: number;
+  latest_analysis_id: string | null;
+  current_focus: GrowthFocus | null;
+  metric_definitions: Record<string, string>;
+  recent_milestones: GrowthMilestone[];
+}
+
 export interface SessionPayload {
   session_date: string;
   location: string;
@@ -1239,6 +1273,13 @@ export async function fetchSkaters() {
 
 export async function fetchArchive(skaterId: string, params?: { limit?: number; offset?: number }) {
   const response = await apiClient.get<ArchiveResponse>(`/skaters/${skaterId}/archive`, { params });
+  return response.data;
+}
+
+export async function fetchGrowthSummary(skaterId: string, milestoneLimit = 8): Promise<GrowthSummary> {
+  const response = await apiClient.get<GrowthSummary>(`/skaters/${skaterId}/growth-summary`, {
+    params: { milestone_limit: milestoneLimit },
+  });
   return response.data;
 }
 
