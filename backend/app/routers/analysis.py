@@ -29,7 +29,7 @@ from app.database import (
     run_db_read_with_retry,
     run_db_write_with_retry,
 )
-from app.models import Analysis, AnalysisComparison, Skater, TrainingPlan, TrainingSession
+from app.models import Analysis, AnalysisComparison, DebugRun, Skater, TrainingPlan, TrainingSession
 from app.schemas import (
     AnalysisChatShareRequest,
     AnalysisChatShareResponse,
@@ -62,6 +62,8 @@ from app.schemas import (
     CompareVideoSide,
     ComparisonChange,
     ExtendPlanBody,
+    GoldenOverrideApplyRequest,
+    GoldenOverrideApplyResponse,
     NoteUpdateRequest,
     ProgressPoint,
     ProgressResponse,
@@ -71,6 +73,14 @@ from app.schemas import (
     TargetPreviewResponse,
     TrainingPlanDetail,
     UpdatePlanSessionRequest,
+)
+from app.services.golden_overrides import (
+    GoldenOverrideValidationError,
+    apply_golden_keyframes,
+    golden_override_hash,
+    golden_retry_stage,
+    normalize_golden_label,
+    validate_golden_override,
 )
 from app.services.analysis_corrections import (
     AnalysisCorrectionError,
@@ -3577,6 +3587,68 @@ PHASE_LABEL_TO_JUMP_PARTIAL_CODE = {
 }
 
 
+def _resolve_golden_pipeline_keyframes(
+    bio_data: dict[str, Any],
+    resolved_keyframes: dict[str, Any],
+    motion_scores: dict[str, Any],
+    golden_overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    updated_bio, updated_resolved = apply_golden_keyframes(
+        bio_data,
+        resolved_keyframes,
+        golden_overrides,
+    )
+    if updated_resolved.get("source") != "golden_override":
+        return updated_bio, updated_resolved, motion_scores
+    updated_motion = dict(motion_scores)
+    updated_motion["resolved_keyframes"] = updated_resolved
+    updated_motion["golden_label_revision"] = updated_resolved.get("golden_label_revision")
+    return updated_bio, updated_resolved, updated_motion
+
+
+async def _materialize_golden_keyframe_frames(
+    video_path: Path,
+    target_dir: Path,
+    resolved_keyframes: dict[str, Any],
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    if resolved_keyframes.get("source") != "golden_override":
+        return [], []
+    paths: list[Path] = []
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(resolved_keyframes.get("selected", []), start=1):
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or item.get("phase_code") or index)
+        try:
+            timestamp = float(item.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        frame_id = f"golden_{key}"
+        item["frame_id"] = frame_id
+        target = target_dir / f"{frame_id}.jpg"
+        await extract_full_frame_at(video_path, timestamp, target)
+        paths.append(target)
+        records.append(
+            {
+                "frame_id": frame_id,
+                "timestamp": round(timestamp, 3),
+                "phase_code": item.get("phase_code"),
+                "key_moment": item.get("key_moment"),
+                "selection_reason": "golden_override",
+                "confidence": 1.0,
+            }
+        )
+    return paths, records
+
+
+def _semantic_artifacts_for_persistence(directory: Path) -> list[Path]:
+    return [
+        *sorted(directory.glob("semantic_*.jpg")),
+        *sorted(directory.glob("partial_semantic_*.jpg")),
+        *sorted(directory.glob("golden_*.jpg")),
+    ]
+
+
 def _motion_timestamp_by_frame_id(frame_motion_scores: dict[str, Any] | None) -> dict[str, float]:
     if not isinstance(frame_motion_scores, dict):
         return {}
@@ -4140,6 +4212,22 @@ async def _start_video_temporal_task_if_missing(
     return handle.task, handle.source_duration_sec, handle.ai_clip_payload()
 
 
+def _can_reuse_cached_extracted_frames(
+    existing_target_lock: dict[str, Any] | None,
+    cached_frames_available: bool,
+    *,
+    retry_from_stage: str | None,
+    golden_overrides: dict[str, Any] | None,
+) -> bool:
+    if not _is_confirmed_target_lock(existing_target_lock) or not cached_frames_available:
+        return False
+    return not (
+        retry_from_stage == "extract_frames"
+        and isinstance(golden_overrides, dict)
+        and isinstance(golden_overrides.get("action_window"), dict)
+    )
+
+
 async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
     timings: dict[str, float] = {}
     total_start = time.monotonic()
@@ -4150,6 +4238,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
     action_subtype: str | None = None
     analysis_profile_hint: str | None = None
     existing_target_lock: dict[str, object] | None = None
+    golden_overrides: dict[str, Any] | None = None
     saved_motion_scores: dict[str, object] | None = None
     saved_action_window_start = 0.0
     saved_action_window_end = 0.0
@@ -4195,6 +4284,25 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             analysis.pipeline_version = CURRENT_PIPELINE_VERSION
             await session.commit()
             existing_target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else None
+            golden_overrides = analysis.golden_overrides if isinstance(analysis.golden_overrides, dict) else None
+            golden_anchors = (
+                golden_overrides.get("tracking_anchors")
+                if isinstance(golden_overrides, dict) and isinstance(golden_overrides.get("tracking_anchors"), list)
+                else []
+            )
+            if golden_anchors:
+                first_anchor = golden_anchors[0] if isinstance(golden_anchors[0], dict) else {}
+                first_bbox = first_anchor.get("bbox") if isinstance(first_anchor.get("bbox"), dict) else None
+                if first_bbox is not None:
+                    existing_target_lock = {
+                        **(existing_target_lock or {}),
+                        "status": "manual",
+                        "manual_override": True,
+                        "selected_bbox": first_bbox,
+                        "preview_frame_index": 0,
+                        "golden_tracking_anchors": copy.deepcopy(golden_anchors),
+                        "golden_label_revision": golden_overrides.get("source_label_revision"),
+                    }
             saved_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
             saved_action_window_start = float(analysis.action_window_start or 0.0)
             saved_action_window_end = float(analysis.action_window_end or 0.0)
@@ -4250,7 +4358,13 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             await _set_analysis_status(analysis_id, 'extracting_frames')
             extract_start = time.monotonic()
             existing_target_lock_confirmed = _is_confirmed_target_lock(existing_target_lock)
-            if existing_target_lock_confirmed and upload_frames_dir is not None and upload_frames_dir.exists():
+            cached_frames_available = upload_frames_dir is not None and upload_frames_dir.exists()
+            if _can_reuse_cached_extracted_frames(
+                existing_target_lock,
+                cached_frames_available,
+                retry_from_stage=retry_from_stage,
+                golden_overrides=golden_overrides,
+            ):
                 sampled_frames = persist_frames(sorted(upload_frames_dir.glob('frame_*.jpg')), processing_frames_dir)
                 motion_scores = saved_motion_scores if isinstance(saved_motion_scores, dict) else _fallback_motion_payload(upload_frames_dir)
                 motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
@@ -4505,6 +4619,9 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                     message='开始提取姿态关键点。',
                 )
                 pose_start = time.monotonic()
+                target_lock["golden_frame_timestamps"] = _motion_timestamp_by_frame_id(
+                    motion_scores if isinstance(motion_scores, dict) else None
+                )
                 bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock, sampling_metadata.effective_fps)
                 tracker_summary = _tracker_debug_summary(target_lock, len(sampled_frames))
                 await _append_analysis_log(
@@ -5098,6 +5215,23 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
                 resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
                 analysis_profile=analysis_profile,
             )
+            bio_data, resolved_keyframes, motion_scores = _resolve_golden_pipeline_keyframes(
+                bio_data,
+                resolved_keyframes if isinstance(resolved_keyframes, dict) else {},
+                motion_scores if isinstance(motion_scores, dict) else {},
+                golden_overrides,
+            )
+            golden_frame_paths, golden_frame_records = await _materialize_golden_keyframe_frames(
+                video_path,
+                processing_frames_dir.parent / "semantic_frames",
+                resolved_keyframes,
+            )
+            if golden_frame_paths:
+                semantic_pipeline.semantic_frames = golden_frame_paths
+                semantic_pipeline.semantic_records = golden_frame_records
+                semantic_pipeline.used_semantic_frames = True
+                semantic_pipeline.has_semantic_moments = True
+                semantic_pipeline.resolved_keyframes = resolved_keyframes
             saved = await _save_analysis_fields_with_retry(
                 analysis_id,
                 {
@@ -5403,10 +5537,7 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             persist_frames(sampled_frames, upload_frames_dir)
             semantic_dir = processing_frames_dir.parent / "semantic_frames"
             if semantic_dir.exists():
-                semantic_artifacts = [
-                    *sorted(semantic_dir.glob("semantic_*.jpg")),
-                    *sorted(semantic_dir.glob("partial_semantic_*.jpg")),
-                ]
+                semantic_artifacts = _semantic_artifacts_for_persistence(semantic_dir)
                 persist_frames(semantic_artifacts, video_path.parent / "semantic_frames")
 
         try:
@@ -5511,6 +5642,36 @@ def _normalize_optional_text(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+HIGHLIGHT_QUOTE_MAX_LEN = 280
+HIGHLIGHT_QUOTE_SPEAKERS = ("skater", "parent", "coach")
+
+
+def _normalize_highlight_quote(
+    quote: str | None,
+    speaker: str | None,
+) -> tuple[str | None, str | None]:
+    """Normalize and validate the family highlight quote pair.
+
+    `speaker` must be null when the quote is empty; both are null together. The
+    quote is whitespace-normalized and capped at 280 characters.
+    """
+    normalized_quote = _normalize_optional_text(quote)
+    normalized_speaker = _normalize_optional_text(speaker)
+
+    if normalized_quote is not None and len(normalized_quote) > HIGHLIGHT_QUOTE_MAX_LEN:
+        raise HTTPException(status_code=400, detail=f"金句长度不能超过 {HIGHLIGHT_QUOTE_MAX_LEN} 个字符。")
+
+    if normalized_quote is None:
+        if normalized_speaker is not None:
+            raise HTTPException(status_code=400, detail="缺少金句内容时不能指定说话人。")
+        return None, None
+
+    if normalized_speaker is None or normalized_speaker not in HIGHLIGHT_QUOTE_SPEAKERS:
+        raise HTTPException(status_code=400, detail="金句说话人必须是 skater / parent / coach 之一。")
+
+    return normalized_quote, normalized_speaker
 
 
 async def _mark_analysis_failed(
@@ -5808,6 +5969,8 @@ def _detail_from_analysis(
         error_detail=analysis.error_detail if include_error_detail else None,
         error_message=analysis.error_message,
         note=analysis.note,
+        highlight_quote=analysis.highlight_quote,
+        quote_speaker=analysis.quote_speaker,
         created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
         updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
     )
@@ -6471,6 +6634,43 @@ def _sync_report_user_note(report: dict[str, Any] | None, note: str | None) -> d
     return updated
 
 
+def _golden_anchor_bboxes_by_frame(
+    sampled_frames: Sequence[Path],
+    target_lock: dict[str, Any],
+) -> dict[int, dict[str, Any]]:
+    anchors = target_lock.get("golden_tracking_anchors")
+    if not isinstance(anchors, list):
+        return {}
+    frame_index_by_id = {
+        frame.stem: index
+        for index, frame in enumerate(sampled_frames)
+    }
+    timestamp_by_id = target_lock.get("golden_frame_timestamps")
+    timestamp_by_id = timestamp_by_id if isinstance(timestamp_by_id, dict) else {}
+    output: dict[int, dict[str, Any]] = {}
+    for anchor in anchors:
+        if not isinstance(anchor, dict) or not isinstance(anchor.get("bbox"), dict):
+            continue
+        source_id = str(anchor.get("source_frame_id") or "")
+        frame_id = source_id.split(":", 1)[-1].removesuffix(".jpg")
+        frame_index = frame_index_by_id.get(frame_id)
+        if frame_index is None and timestamp_by_id:
+            try:
+                anchor_timestamp = float(anchor.get("timestamp_sec"))
+                candidates = [
+                    (index, float(timestamp_by_id[frame.stem]))
+                    for index, frame in enumerate(sampled_frames)
+                    if frame.stem in timestamp_by_id
+                ]
+                if candidates:
+                    frame_index = min(candidates, key=lambda item: abs(item[1] - anchor_timestamp))[0]
+            except (TypeError, ValueError):
+                frame_index = None
+        if frame_index is not None:
+            output[frame_index] = dict(anchor)
+    return output
+
+
 def _build_bbox_per_frame(
     sampled_frames: list[Path],
     target_lock: dict[str, Any],
@@ -6491,17 +6691,28 @@ def _build_bbox_per_frame(
         if manual_lock_mode and support_anchor_bboxes_by_frame:
             _append_target_lock_flags(target_lock, [PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG])
             support_anchor_bboxes_by_frame = {}
+        tracker_kwargs: dict[str, Any] = {
+            "initial_frame_index": anchor_index,
+            "effective_fps": effective_fps,
+            "support_anchor_bboxes_by_frame": support_anchor_bboxes_by_frame,
+            "manual_lock_mode": manual_lock_mode,
+        }
+        golden_anchors = _golden_anchor_bboxes_by_frame(sampled_frames, target_lock)
+        if golden_anchors:
+            tracker_kwargs["golden_anchor_bboxes_by_frame"] = golden_anchors
+            anchor_index = min(golden_anchors)
+            tracker_kwargs["initial_frame_index"] = anchor_index
         bbox_per_frame, flags, diagnostics = track_person_bbox_detailed(
-            sampled_frames,
-            selected_bbox,
-            initial_frame_index=anchor_index,
-            effective_fps=effective_fps,
-            support_anchor_bboxes_by_frame=support_anchor_bboxes_by_frame,
-            manual_lock_mode=manual_lock_mode,
+            sampled_frames, selected_bbox, **tracker_kwargs
         )
         _append_target_lock_flags(target_lock, flags)
         target_lock["bbox_per_frame"] = bbox_per_frame
         target_lock["person_tracker_diagnostics"] = diagnostics
+        if golden_anchors:
+            target_lock["golden_anchor_count"] = len(golden_anchors)
+            target_lock["golden_anchor_hits"] = sum(
+                1 for item in diagnostics if isinstance(item, dict) and item.get("state") == "golden_anchor"
+            )
         target_lock["tracker_type"] = "yolo_bytetrack"
         return bbox_per_frame
     except PersonTrackerUnavailable:
@@ -7133,6 +7344,8 @@ def _list_item_from_analysis(analysis: Analysis, skater_name: str | None = None)
         status=analysis.status,
         force_score=analysis.force_score,
         note=analysis.note,
+        highlight_quote=analysis.highlight_quote,
+        quote_speaker=analysis.quote_speaker,
         created_at=_coerce_utc_datetime(analysis.created_at) or analysis.created_at,
         updated_at=_coerce_utc_datetime(analysis.updated_at) or analysis.updated_at,
     )
@@ -8071,12 +8284,16 @@ async def upload_analysis(
     skill_category: str | None = Form(default=None),
     note: str | None = Form(default=None),
     session_id: str | None = Form(default=None),
+    highlight_quote: str | None = Form(default=None),
+    quote_speaker: str | None = Form(default=None),
     manual_action_window_start_sec: float | None = Form(default=None),
     manual_action_window_end_sec: float | None = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisUploadResponse:
     if action_type not in VALID_ACTION_TYPES:
         raise HTTPException(status_code=400, detail="action_type 必须是 跳跃 / 旋转 / 步法 / 自由滑 之一。")
+
+    normalized_quote, normalized_speaker = _normalize_highlight_quote(highlight_quote, quote_speaker)
 
     skater = await _resolve_skater(session, skater_id)
     normalized_session_id = _normalize_optional_text(session_id)
@@ -8125,6 +8342,8 @@ async def upload_analysis(
         manual_action_window_start=manual_window.input_window_start_sec if manual_window.input_window_mode == "manual_window" else None,
         manual_action_window_end=manual_window.input_window_end_sec if manual_window.input_window_mode == "manual_window" else None,
         note=_normalize_optional_text(note),
+        highlight_quote=normalized_quote,
+        quote_speaker=normalized_speaker,
         status="pending",
         processing_timings=None,
         retry_from_stage=None,
@@ -9553,6 +9772,134 @@ async def retry_analysis(
     return AnalysisRetryResponse(message="已重新提交分析。")
 
 
+@router.post(
+    "/{analysis_id}/golden-overrides/apply-and-retry",
+    response_model=GoldenOverrideApplyResponse,
+)
+async def apply_golden_overrides_and_retry(
+    analysis_id: str,
+    payload: GoldenOverrideApplyRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> GoldenOverrideApplyResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    try:
+        source_video_path = _video_path_for_analysis(analysis)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Source video is unavailable for Golden reanalysis.") from exc
+    if not source_video_path.exists() or not source_video_path.is_file():
+        raise HTTPException(status_code=404, detail="Source video is unavailable for Golden reanalysis.")
+    run = await session.get(DebugRun, payload.debug_run_id)
+    if run is None or run.analysis_id != analysis_id or run.source_type != "analysis":
+        raise HTTPException(status_code=400, detail="Golden debug run does not belong to this analysis.")
+
+    label_path = UPLOADS_DIR / "_debug" / run.id / "golden_label.json"
+    try:
+        label = json.loads(label_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Saved Golden label is unavailable.") from exc
+    if not isinstance(label, dict):
+        raise HTTPException(status_code=400, detail="Saved Golden label is invalid.")
+    current_revision = int(label.get("revision") or 0)
+    if current_revision != payload.label_revision:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Golden label changed; expected revision {payload.label_revision}, current revision is {current_revision}.",
+        )
+    try:
+        override = validate_golden_override(normalize_golden_label(label, run))
+    except GoldenOverrideValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    previous = analysis.golden_overrides if isinstance(analysis.golden_overrides, dict) else None
+    override["label_hash"] = golden_override_hash(override)
+    previous_hash = str(previous.get("label_hash") or "") if previous else ""
+    if previous_hash == override["label_hash"]:
+        return GoldenOverrideApplyResponse(
+            analysis_id=analysis_id,
+            status=analysis.status,
+            retry_from_stage=str(analysis.retry_from_stage or golden_retry_stage(previous, override)),
+            applied_revision=current_revision,
+            report_path=f"/report/{analysis_id}",
+            already_processing=analysis.status in {
+                "pending",
+                "processing",
+                "extracting_frames",
+                "analyzing",
+                "generating_report",
+            },
+        )
+    if analysis.status in {
+        "pending",
+        "processing",
+        "extracting_frames",
+        "awaiting_target_selection",
+        "analyzing",
+        "generating_report",
+    }:
+        raise HTTPException(status_code=400, detail="Analysis is already processing.")
+
+    retry_from_stage = golden_retry_stage(previous, override)
+    override["applied_at"] = datetime.now(timezone.utc).isoformat()
+    override["applied_by"] = "parent"
+    analysis.golden_overrides = override
+    analysis.status = "pending"
+    analysis.retry_from_stage = retry_from_stage
+    analysis.error_code = None
+    analysis.error_detail = None
+    analysis.error_message = None
+    analysis.processing_timings = None
+    action_window = override.get("action_window")
+    if isinstance(action_window, dict):
+        analysis.manual_action_window_start = float(action_window["start_sec"])
+        analysis.manual_action_window_end = float(action_window["end_sec"])
+    if retry_from_stage == "extract_frames":
+        analysis.frame_motion_scores = None
+        analysis.action_window_start = None
+        analysis.action_window_end = None
+    if retry_from_stage in {"extract_frames", "pose"}:
+        analysis.pose_data = None
+        analysis.target_lock = None
+        analysis.target_lock_status = "pending"
+    analysis.bio_data = None
+    analysis.vision_raw = None
+    analysis.vision_structured = None
+    analysis.vision_path_a = None
+    analysis.vision_path_b = None
+    analysis.cross_validation = None
+    analysis.report = None
+    analysis.force_score = None
+    analysis.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    label["applied_revision"] = current_revision
+    label["applied_at"] = override["applied_at"]
+    label_path.write_text(json.dumps(label, ensure_ascii=False, indent=2), encoding="utf-8")
+    background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
+    return GoldenOverrideApplyResponse(
+        analysis_id=analysis_id,
+        status="pending",
+        retry_from_stage=retry_from_stage,
+        applied_revision=current_revision,
+        report_path=f"/report/{analysis_id}",
+    )
+
+
+@router.delete("/{analysis_id}/golden-overrides", response_model=AnalysisRetryResponse)
+async def remove_golden_overrides(
+    analysis_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisRetryResponse:
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    analysis.golden_overrides = None
+    analysis.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    return AnalysisRetryResponse(message="Golden overrides removed. Reanalyze to refresh the report.")
+
+
 @router.get("/{analysis_id}/target-preview", response_model=TargetPreviewResponse)
 @router.get("/{analysis_id}/target_preview", response_model=TargetPreviewResponse)
 async def get_target_preview(analysis_id: str, session: AsyncSession = Depends(get_session)) -> TargetPreviewResponse:
@@ -9787,6 +10134,7 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
         or filename.startswith("semantic_")
         or filename.startswith("semantic_video_ai_rerun_")
         or filename.startswith("partial_semantic_")
+        or filename.startswith("golden_")
     ) or not filename.endswith(".jpg"):
         raise HTTPException(status_code=400, detail="无效的帧文件名。")
 
@@ -9803,12 +10151,18 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
             filename.startswith("semantic_")
             or filename.startswith("semantic_video_ai_rerun_")
             or filename.startswith("partial_semantic_")
+            or filename.startswith("golden_")
         )
         and semantic_dir.exists()
         else frames_dir
     )
     frame_path = (frames_root / filename).resolve()
-    if filename.startswith("semantic_") or filename.startswith("semantic_video_ai_rerun_") or filename.startswith("partial_semantic_"):
+    if (
+        filename.startswith("semantic_")
+        or filename.startswith("semantic_video_ai_rerun_")
+        or filename.startswith("partial_semantic_")
+        or filename.startswith("golden_")
+    ):
         frames_root = semantic_dir
         frame_path = (frames_root / filename).resolve()
     if frames_root in frame_path.parents:

@@ -332,6 +332,7 @@ async def _run_migrations(conn) -> None:
         ("processing_timings", "JSON"),
         ("processing_logs", "JSON"),
         ("target_lock", "JSON"),
+        ("golden_overrides", "JSON"),
         ("target_lock_status", "TEXT"),
         ("manual_action_window_start", "REAL"),
         ("manual_action_window_end", "REAL"),
@@ -390,6 +391,8 @@ async def _run_migrations(conn) -> None:
     await run_migrations_analysis_chat(conn)
     await run_migrations_analysis_corrections(conn)
     await run_migrations_analysis_comparisons(conn)
+    await run_migrations_growth_story(conn)
+    await run_migrations_monthly_chapters(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -922,6 +925,70 @@ async def _create_phase6_tables(conn) -> None:
             """
         )
     )
+
+
+async def run_migrations_growth_story(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _apply_growth_story(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _apply_growth_story(conn)
+
+
+async def _apply_growth_story(conn) -> None:
+    """Idempotently add highlight_quote / quote_speaker columns to analyses."""
+    analyses_columns_result = await conn.execute(text("PRAGMA table_info(analyses)"))
+    analyses_columns = {row[1] for row in analyses_columns_result.fetchall()}
+    if "highlight_quote" not in analyses_columns:
+        await conn.execute(text("ALTER TABLE analyses ADD COLUMN highlight_quote TEXT"))
+    if "quote_speaker" not in analyses_columns:
+        await conn.execute(text("ALTER TABLE analyses ADD COLUMN quote_speaker VARCHAR(16)"))
+
+
+async def run_migrations_monthly_chapters(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_monthly_chapter_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_monthly_chapter_tables(conn)
+
+
+async def _create_monthly_chapter_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS monthly_chapters (
+                id TEXT PRIMARY KEY,
+                skater_id TEXT NOT NULL,
+                year_month VARCHAR(7) NOT NULL,
+                revision INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'facts_ready',
+                fact_snapshot JSON NOT NULL,
+                source_hash TEXT NOT NULL,
+                prompt_version TEXT,
+                provider_id TEXT,
+                provider_name TEXT,
+                model_id TEXT,
+                generated_payload JSON,
+                draft_text TEXT,
+                final_text TEXT,
+                quality_flags JSON NOT NULL DEFAULT '[]',
+                representative_frames JSON NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                published_at TIMESTAMP,
+                CONSTRAINT uq_monthly_chapter_revision UNIQUE (skater_id, year_month, revision)
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_skater_id ON monthly_chapters(skater_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_year_month ON monthly_chapters(year_month)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_status ON monthly_chapters(status)"))
 
 
 class _noop_context:

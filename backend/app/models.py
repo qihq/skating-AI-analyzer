@@ -62,6 +62,7 @@ class Analysis(Base):
     processing_timings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     processing_logs: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     target_lock: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    golden_overrides: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     target_lock_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     action_window_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     action_window_end: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -75,6 +76,8 @@ class Analysis(Base):
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    highlight_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_speaker: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

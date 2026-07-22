@@ -9,6 +9,7 @@ import {
   fetchSkaterSkills,
   fetchSkaters,
   fetchTrainingSessions,
+  QuoteSpeaker,
   SessionPayload,
   Skater,
   SkillNode,
@@ -43,6 +44,8 @@ type ReviewDraft = {
   sessionId: string;
   actionType?: string;
   actionSubtype?: string;
+  highlightQuote?: string;
+  quoteSpeaker?: QuoteSpeaker | "";
 };
 
 type SessionFormState = {
@@ -156,6 +159,8 @@ export default function ReviewPage() {
   const [sessions, setSessions] = useState<TrainingSessionRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState(draft?.sessionId ?? "");
   const [note, setNote] = useState(draft?.note ?? "");
+  const [highlightQuote, setHighlightQuote] = useState(draft?.highlightQuote ?? "");
+  const [quoteSpeaker, setQuoteSpeaker] = useState<QuoteSpeaker | "">(draft?.quoteSpeaker ?? "");
   const [isSessionFormOpen, setIsSessionFormOpen] = useState(false);
   const [sessionForm, setSessionForm] = useState<SessionFormState>(createDefaultSessionForm);
   const [error, setError] = useState<string | null>(null);
@@ -431,6 +436,8 @@ export default function ReviewPage() {
         sessionId: selectedSessionId,
         actionType: selectedActionType,
         actionSubtype: selectedActionSubtype,
+        highlightQuote,
+        quoteSpeaker,
       } satisfies ReviewDraft),
     );
     setSaveMessage("这条复盘草稿已保存。");
@@ -501,6 +508,11 @@ export default function ReviewPage() {
     }
     if (note.trim()) {
       formData.append("note", note.trim());
+    }
+    const trimmedQuote = highlightQuote.trim();
+    if (trimmedQuote) {
+      formData.append("highlight_quote", trimmedQuote);
+      formData.append("quote_speaker", quoteSpeaker || "skater");
     }
     if (selectedSessionId) {
       formData.append("session_id", selectedSessionId);
@@ -641,6 +653,38 @@ export default function ReviewPage() {
                   className="app-textarea min-h-[140px] resize-y"
                 />
               </label>
+
+              <div className="mt-5 space-y-2">
+                <label className="block space-y-2">
+                  <span className="text-sm font-medium text-slate-700">今天最想记住的一句话（可选）</span>
+                  <textarea
+                    value={highlightQuote}
+                    onChange={(event) => setHighlightQuote(event.target.value)}
+                    rows={3}
+                    maxLength={280}
+                    placeholder="比如：我今天敢往后滑了。"
+                    className="app-textarea min-h-[96px] resize-y"
+                  />
+                </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <span>说话人</span>
+                    <select
+                      value={quoteSpeaker}
+                      onChange={(event) => setQuoteSpeaker(event.target.value as QuoteSpeaker | "")}
+                      aria-label="金句说话人"
+                      className="app-input rounded-[18px] text-sm"
+                      disabled={!highlightQuote.trim()}
+                    >
+                      <option value="">不指定</option>
+                      <option value="skater">孩子本人</option>
+                      <option value="parent">家长</option>
+                      <option value="coach">教练</option>
+                    </select>
+                  </label>
+                  <span className="text-xs font-semibold text-slate-400">{highlightQuote.length}/280</span>
+                </div>
+              </div>
             </section>
 
             {error || saveMessage || uploadStage !== "idle" ? (

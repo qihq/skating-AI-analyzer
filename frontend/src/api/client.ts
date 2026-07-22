@@ -159,9 +159,13 @@ export interface AnalysisListItem {
   status: AnalysisStatus;
   force_score: number | null;
   note: string | null;
+  highlight_quote: string | null;
+  quote_speaker: QuoteSpeaker | null;
   created_at: string;
   updated_at: string;
 }
+
+export type QuoteSpeaker = "skater" | "parent" | "coach";
 
 export interface AnalysisDetail extends AnalysisListItem {
   video_path: string;
@@ -560,6 +564,17 @@ export interface DebugRunCreateResponse {
   status: DebugRunStatus | string;
 }
 
+export interface DebugFrameCatalog {
+  run_id: string;
+  total: number;
+  frames: Array<{
+    frame_id: string;
+    source: "sampled" | "semantic" | "partial";
+    timestamp: number | null;
+    url: string;
+  }>;
+}
+
 export interface DebugRunCreatePayload {
   analysisId?: string | null;
   file?: File | null;
@@ -580,6 +595,9 @@ export interface DebugGoldenLabelPayload {
   fps?: number | null;
   keyframes: Record<string, number | null>;
   target_bboxes: Record<string, TargetBBox>;
+  tracking_anchors: GoldenTrackingAnchor[];
+  action_window_start_sec?: number | null;
+  action_window_end_sec?: number | null;
   expected_review_flags: string[];
   notes?: string | null;
 }
@@ -596,6 +614,9 @@ export interface DebugGoldenLabel extends DebugGoldenLabelPayload {
   debug_run_status: string | null;
   manifest_schema_version: number;
   exists: boolean;
+  revision: number;
+  applied_revision: number | null;
+  applied_at: string | null;
   label_quality_flags?: string[];
   created_at: string | null;
   updated_at: string | null;
@@ -1416,6 +1437,11 @@ export async function fetchDebugRun(id: string) {
   return response.data;
 }
 
+export async function fetchDebugFrameCatalog(id: string) {
+  const response = await apiClient.get<DebugFrameCatalog>(`/debug/runs/${id}/frame-catalog`);
+  return response.data;
+}
+
 export async function deleteDebugRun(id: string) {
   await apiClient.delete(`/debug/runs/${id}`);
 }
@@ -1430,8 +1456,37 @@ export async function saveDebugGoldenLabel(id: string, payload: DebugGoldenLabel
   return response.data;
 }
 
+export interface GoldenTrackingAnchor {
+  anchor_id?: string | null;
+  timestamp_sec: number;
+  source_frame_id: string;
+  bbox: TargetBBox;
+}
+
+export interface GoldenOverrideApplyResponse {
+  analysis_id: string;
+  status: string;
+  retry_from_stage: string;
+  applied_revision: number;
+  report_path: string;
+  already_processing: boolean;
+}
+
 export async function ensureGoldenAnalysisDebugRun(analysisId: string) {
   const response = await apiClient.post<DebugRunCreateResponse>(`/debug/golden/analyses/${analysisId}/debug-run`);
+  return response.data;
+}
+
+export async function applyGoldenOverridesAndRetry(analysisId: string, debugRunId: string, labelRevision: number) {
+  const response = await apiClient.post<GoldenOverrideApplyResponse>(
+    `/analysis/${analysisId}/golden-overrides/apply-and-retry`,
+    { debug_run_id: debugRunId, label_revision: labelRevision },
+  );
+  return response.data;
+}
+
+export async function removeGoldenOverrides(analysisId: string) {
+  const response = await apiClient.delete<RetryAnalysisResponse>(`/analysis/${analysisId}/golden-overrides`);
   return response.data;
 }
 

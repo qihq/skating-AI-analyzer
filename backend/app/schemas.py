@@ -144,6 +144,8 @@ class AnalysisListItem(BaseModel):
     status: str
     force_score: int | None = None
     note: str | None = None
+    highlight_quote: str | None = None
+    quote_speaker: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -683,8 +685,37 @@ class DebugGoldenLabelRequest(BaseModel):
     fps: float | None = None
     keyframes: dict[str, float | None] = Field(default_factory=dict)
     target_bboxes: dict[str, TargetBBox] = Field(default_factory=dict)
+    tracking_anchors: list["GoldenTrackingAnchor"] = Field(default_factory=list)
+    action_window_start_sec: float | None = None
+    action_window_end_sec: float | None = None
     expected_review_flags: list[str] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=4000)
+
+
+class GoldenKeyframe(BaseModel):
+    timestamp_sec: float
+    source_frame_id: str | None = None
+
+
+class GoldenTrackingAnchor(BaseModel):
+    anchor_id: str | None = None
+    timestamp_sec: float
+    source_frame_id: str
+    bbox: TargetBBox
+
+
+class GoldenOverrideApplyRequest(BaseModel):
+    debug_run_id: str
+    label_revision: int = Field(ge=1)
+
+
+class GoldenOverrideApplyResponse(BaseModel):
+    analysis_id: str
+    status: str
+    retry_from_stage: str
+    applied_revision: int
+    report_path: str
+    already_processing: bool = False
 
 
 class DebugGoldenLabelResponse(DebugGoldenLabelRequest):
@@ -699,6 +730,9 @@ class DebugGoldenLabelResponse(DebugGoldenLabelRequest):
     debug_run_status: str | None = None
     manifest_schema_version: int = 1
     exists: bool = False
+    revision: int = 0
+    applied_revision: int | None = None
+    applied_at: str | None = None
     label_quality_flags: list[str] = Field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
