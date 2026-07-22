@@ -8,33 +8,19 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.318`.
+The current pipeline version is `v5.2.319`.
 
 ## Recent Updates
 
-Current branch updates focus on correction confirmation staying visible immediately in the current workspace, while preserving the Golden labeling workspace, direct progress/archive labeling entry points, versioned release discipline, golden-set evaluation, safer target relock behavior, keyframe arbitration diagnostics, and the debug review loop:
+Current branch ships the parent Growth Home dashboard (P0), monthly growth chapters with sharing (P1), golden evaluation tooling, person tracker improvements, and an OpenCode API compatibility fix:
 
-- Applying an action-label or keyframe correction now writes the corrected effective data back into the analysis row, so archive/history lists, reports, exports, and reopened workspaces all show the confirmed correction without requiring a full reanalysis.
-- Re-exported all-in-one Docker image from `codex/face-identity-target-lock` with latest face identity features and fixed CRLF line endings for Linux container compatibility.
-- Startup now backfills older already-applied correction cards into their analysis rows, covering legacy action and keyframe corrections that previously existed only in the effective overlay layer.
-- The report follow-up panel and standalone `/analysis-chat` workspace now await the refreshed analysis detail after correction confirmation, updating the current page and selected record cache before showing the success notice.
-- Exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
-- Completed archive/progress records now expose a direct Golden labeling action that opens `/golden?analysis_id=...`, preselects the matching analysis, and leaves the debug-run panel empty when no replay exists yet.
-- Golden entry links now prepare a labelable local-pose debug run automatically: existing runs are reused, and missing runs are created once so parents land directly in the Golden Label panel instead of a setup form.
-- Golden sample creation from a historical analysis can now manually override the AI input/keyframe time range; the form preloads the saved manual or detected action window and validates it against the source duration.
-- Golden/debug history cards and action controls were tightened for phone, tablet, and desktop so long notes, flags, status chips, and the new labeling entry do not overflow compact screens.
-- A standalone `/golden` workspace now gives Golden labeling its own parent-mode entry with labeling history, sample status counts, direct sample selection, and new debug sample creation.
-- Golden bbox drawing now works on sampled, semantic, and partial debug frames, disables native image dragging, and uses a natural-aspect overlay coordinate space so target boxes and pose overlays do not drift from the image without stretching portrait or landscape frames.
-- Golden labels remain incremental: reopening a sample loads the existing `golden_label.json`, so users can mark keyframes first, return later to add bbox/notes/review flags, and save back into the same manifest entry.
-- Development rules now require every GitHub update that ships code, docs, or an all-in-one image to bump `CURRENT_PIPELINE_VERSION`, update README release notes, use versioned commit wording, export with the standard all-in-one script, and start/verify the freshly built local image.
-- Debug runs now include a Golden Label tab for marking skater ID, action/profile, stratum, T/A/L or profile-specific keyframes, target bboxes, review flags, and notes from one place.
-- Saving a golden label writes `golden_label.json`, a matching prediction snapshot, and a shared `golden_manifest.json` so future algorithm changes can be compared against the exact prediction that existed when the sample was labeled.
-- Golden manifests advertise the recommended strata: `single_skater`, `multi_skater`, `small_target`, `occlusion`, and `known_bad_keyframes`; non-recommended or incomplete labels are kept but marked with `label_quality_flags`.
-- `backend/scripts/eval_against_gt.py` evaluates manifests with overall and per-stratum summaries, failures, top quality flags, keyframe deltas, bbox IoU identity accuracy, identity switches, and fixed failure tags such as `identity_switch`, `target_lost`, `takeoff_early`, `apex_drift`, and `landing_glideout`.
-- Person tracker appearance relock remains opt-in through `PERSON_TRACKER_APPEARANCE_RELOCK=1`; when enabled it records similarity, threshold, decision, candidate bbox, and rejection reasons, and fails closed when no appearance anchor or usable signature is available.
-- Jump keyframe resolution now keeps proposal diagnostics across video AI, skeleton candidates, vertical extrema, and motion evidence; vertical extrema are accepted only inside the phase range with enough confidence.
-- Final jump T/A/L output is guarded so invalid ordering cannot remain high-confidence: conflicting T/A/L records are marked unreliable, confidence is lowered, and review flags are preserved for downstream UI/report hints.
-- The Debug page shows Prediction vs Golden keyframe deltas and target bbox IoU, plus fixed review-flag chips for repeatable error triage.
+- **Growth Home (P0)**: New parent-facing growth dashboard with KPI radar, milestone timeline, skill evolution views, profile-aware action phase display, and a comprehensive growth summary API covering Force Score trends, milestone counts, and recent learning highlights.
+- **Monthly Chapters (P1)**: Monthly growth chapter generation with family highlight quotes, reviewable monthly chapters, a chapter workspace for browsing history, and milestone share cards with visual exports for family and coaches.
+- **MiMo/OpenCode API fix**: Removed the redundant `api-key` header from MiMo chat completion requests; OpenCode's new `sk-` format keys rejected the dual-header (`api-key` + `Authorization: Bearer`) auth pattern that the old base64-format keys tolerated. MiMo providers using the OpenCode base URL now connect with `Authorization: Bearer` only.
+- **Golden eval tooling**: Added `golden_overrides.py` for per-sample override logic, `diff_baselines.py` for comparing eval runs, corresponding test suites, and a `golden-eval-ab-runbook.md` documenting the A/B evaluation workflow.
+- **Person tracker**: Improved target relock decision logic, added self-heal recovery for manual-lock lost targets, and expanded test coverage for relock scenarios.
+- **Keyframe candidates**: Enhanced arbitration diagnostics and vertical extrema confidence thresholds.
+- **Debug page**: Golden label anchors now capture tracking anchor metadata (bbox, timestamp, frame ID), action window boundaries, and revision tracking for finer-grained labeling.
 
 The previous release focused on mobile target selection, action-aware keyframe handling, clearer share cards, and reliable subscores:
 
@@ -70,9 +56,10 @@ The previous release focused on mobile target selection, action-aware keyframe h
 - Report now keeps the main page focused on Force Score, conclusion, training focus, issues, subscores, Quality Check, and common actions. Pose Replay, Evidence, Diagnostics, and Follow-up moved into `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`.
 - Debug logs repair known mojibake messages such as the pipeline-complete status for clearer diagnostics.
 
-The latest release makes confirmed action and keyframe corrections update the current analysis data immediately, without waiting for another analysis run.
+The latest release adds the Growth Home dashboard, monthly growth chapters, golden evaluation tooling, person tracker improvements, and an OpenCode API compatibility fix.
 
-- `v5.2.316`: applied action-label and keyframe correction cards are persisted back into `analyses`, legacy applied corrections are backfilled at startup, and the report/follow-up chat workspaces refresh their current analysis detail before showing correction success.
+- `v5.2.319`: Growth Home dashboard with KPI radar, milestone timeline, and skill evolution (P0); monthly growth chapters with highlight quotes, chapter workspace, and milestone share cards (P1); removed redundant `api-key` header for MiMo/OpenCode compatibility with new `sk-` format keys; added golden overrides, diff baselines, and A/B eval runbook; improved person tracker relock and self-heal logic; enhanced keyframe arbitration diagnostics; debug golden labels now capture tracking anchors and action window bounds.
+- `v5.2.318`: applied action-label and keyframe correction cards are persisted back into `analyses`, legacy applied corrections are backfilled at startup, and the report/follow-up chat workspaces refresh their current analysis detail before showing correction success.
 - `v5.2.315`: exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
 - `v5.2.314`: progress/archive Golden links now call an idempotent backend entry that finds or creates one local-pose debug run for the selected analysis, then opens the Golden Label panel automatically; repeated clicks reuse the same run instead of creating duplicates.
 - `v5.2.313`: completed archive/progress records now link straight into `/golden?analysis_id=...`; the Golden workspace preselects URL-requested analyses without forcing an unrelated debug run; historical-analysis sample creation exposes manual AI input/keyframe start/end controls prefilled from the saved action window; Golden/debug cards were adjusted for phone, tablet, and desktop overflow safety.

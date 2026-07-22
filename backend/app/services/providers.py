@@ -578,7 +578,6 @@ async def _request_mimo_completion(
         response = await client.post(
             _mimo_chat_completions_url(_mimo_effective_base_url(provider)),
             headers={
-                "api-key": provider.api_key,
                 "Authorization": f"Bearer {provider.api_key}",
                 "Content-Type": "application/json",
             },
@@ -663,6 +662,12 @@ async def request_text_completion(
             )
 
         client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url, timeout=timeout, max_retries=0)
+        logger.info(
+            "OpenAI request: base_url=%s model=%s key_prefix=%s",
+            provider.base_url,
+            provider.model_id,
+            provider.api_key[:12] + "..." if len(provider.api_key) > 12 else provider.api_key[:4] + "...",
+        )
         response = await client.chat.completions.create(
             model=provider.model_id,
             messages=messages,
@@ -974,6 +979,15 @@ async def get_active_provider(slot: str, session: AsyncSession | None = None) ->
                 )
                 return report_env_fallback
             raise RuntimeError(f"{provider.name} 尚未配置 API Key。")
+
+        logger.info(
+            "Active report provider: id=%s provider=%s base_url=%s model=%s key_prefix=%s",
+            provider.id,
+            provider.provider,
+            provider.base_url,
+            provider.model_id,
+            api_key[:12] + "..." if len(api_key) > 12 else (api_key[:4] + "..." if api_key else "empty"),
+        )
 
         return _active_provider_config_from_model(provider, api_key)
     finally:

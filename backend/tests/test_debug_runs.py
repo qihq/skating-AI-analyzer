@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
@@ -80,6 +82,137 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].mode, "local_pose_keyframes")
         self.assertEqual(runs[0].source_type, "analysis")
+
+    async def test_debug_run_video_endpoint_returns_safe_source_video(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+
+        run_id = str(uuid4())
+        upload_dir = Path(self.tmp.name) / "uploads" / "_debug" / run_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        source_video = upload_dir / "source.mp4"
+        source_video.write_bytes(b"fake-video")
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="local_pose_keyframes",
+                    source_type="upload",
+                    video_path=str(source_video),
+                    action_type="跳跃",
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    status="completed",
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            response = await debug_router.get_debug_run_video(run_id, session=session)
+
+        self.assertEqual(Path(response.path), source_video)
+        self.assertEqual(response.media_type, "video/mp4")
+        self.assertEqual(response.headers.get("accept-ranges"), "bytes")
+
+    async def test_debug_run_video_endpoint_maps_container_debug_path_to_local_uploads(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+
+        run_id = str(uuid4())
+        upload_dir = Path(self.tmp.name) / "uploads" / "_debug" / run_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        source_video = upload_dir / "source.mp4"
+        source_video.write_bytes(b"fake-video")
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="local_pose_keyframes",
+                    source_type="analysis",
+                    video_path=f"/data/uploads/_debug/{run_id}/source.mp4",
+                    action_type="跳跃",
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    status="completed",
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            response = await debug_router.get_debug_run_video(run_id, session=session)
+
+        self.assertEqual(Path(response.path), source_video)
+        self.assertEqual(response.media_type, "video/mp4")
+
+    async def test_debug_run_video_endpoint_blocks_paths_outside_uploads(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+
+        run_id = str(uuid4())
+        unsafe_video = Path(self.tmp.name).parent / f"{run_id}.mp4"
+        unsafe_video.write_bytes(b"fake-video")
+        self.addCleanup(lambda: unsafe_video.unlink(missing_ok=True))
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="local_pose_keyframes",
+                    source_type="upload",
+                    video_path=str(unsafe_video),
+                    action_type="跳跃",
+                    action_subtype="Axel",
+                    analysis_profile="jump",
+                    status="completed",
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            with self.assertRaises(HTTPException) as raised:
+                await debug_router.get_debug_run_video(run_id, session=session)
+
+        self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_debug_frame_catalog_includes_files_missing_from_result_json(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+
+        run_id = str(uuid4())
+        frames_dir = Path(self.tmp.name) / "uploads" / "_debug" / run_id / "frames"
+        semantic_dir = Path(self.tmp.name) / "uploads" / "_debug" / run_id / "semantic_frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        semantic_dir.mkdir(parents=True, exist_ok=True)
+        (frames_dir / "frame_0001.jpg").write_bytes(b"frame")
+        (frames_dir / "frame_0002.jpg").write_bytes(b"frame")
+        (semantic_dir / "semantic_0001.jpg").write_bytes(b"frame")
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="local_pose_keyframes",
+                    source_type="upload",
+                    video_path=str(Path(self.tmp.name) / "source.mp4"),
+                    action_type="jump",
+                    analysis_profile="jump",
+                    status="completed",
+                    result_json={
+                        "sampled_frames": [{"frame_id": "frame_0001", "timestamp": 1.0}],
+                        "semantic_frames": [{"frame_id": "semantic_0001", "timestamp": 1.5}],
+                    },
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            response = await debug_router.get_debug_run_frame_catalog(run_id, session=session)
+
+        self.assertEqual(response["total"], 3)
+        missing = next(item for item in response["frames"] if item["frame_id"] == "frame_0002")
+        self.assertEqual(missing["source"], "sampled")
+        self.assertIsNone(missing["timestamp"])
 
     async def test_local_debug_run_from_analysis_does_not_modify_formal_analysis(self) -> None:
         import app.models as models
@@ -1206,6 +1339,62 @@ class DebugRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("single_skater", manifest["recommended_strata"])
         self.assertIn("golden_label_target_bboxes_below_recommended_count", label["label_quality_flags"])
         self.assertIn("golden_label_stratum_not_recommended", label["label_quality_flags"])
+
+    async def test_golden_label_revision_increments_and_structured_anchors_round_trip(self) -> None:
+        import app.models as models
+        import app.routers.debug as debug_router
+        from app.schemas import DebugGoldenLabelRequest, GoldenTrackingAnchor, TargetBBox
+
+        analysis_id = str(uuid4())
+        run_id = str(uuid4())
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(
+                models.Analysis(
+                    id=analysis_id,
+                    action_type="jump",
+                    analysis_profile="jump",
+                    video_path=str(Path(self.tmp.name) / "source.mp4"),
+                    status="completed",
+                )
+            )
+            session.add(
+                models.DebugRun(
+                    id=run_id,
+                    mode="local_pose_keyframes",
+                    source_type="analysis",
+                    analysis_id=analysis_id,
+                    video_path=str(Path(self.tmp.name) / "source.mp4"),
+                    action_type="jump",
+                    analysis_profile="jump",
+                    status="completed",
+                    result_json={"sampled_frames": [{"frame_id": "frame_0001", "timestamp": 1.25}]},
+                )
+            )
+            await session.commit()
+
+        payload = DebugGoldenLabelRequest(
+            keyframes={"T": 1.2, "A": 1.5, "L": 1.8},
+            tracking_anchors=[
+                GoldenTrackingAnchor(
+                    anchor_id="a1",
+                    timestamp_sec=1.25,
+                    source_frame_id="sampled:frame_0001",
+                    bbox=TargetBBox(x=0.1, y=0.2, width=0.3, height=0.5),
+                )
+            ],
+            action_window_start_sec=1.0,
+            action_window_end_sec=2.0,
+        )
+        async with self.database.AsyncSessionLocal() as session:
+            first = await debug_router.save_debug_golden_label(run_id, payload, session=session)
+            second = await debug_router.save_debug_golden_label(run_id, payload, session=session)
+            loaded = await debug_router.get_debug_golden_label(run_id, session=session)
+
+        self.assertEqual(first.revision, 1)
+        self.assertEqual(second.revision, 2)
+        self.assertEqual(loaded.revision, 2)
+        self.assertEqual(loaded.tracking_anchors[0].source_frame_id, "sampled:frame_0001")
+        self.assertEqual(loaded.action_window_start_sec, 1.0)
 
     async def test_debug_summary_reports_golden_label_status(self) -> None:
         import app.models as models

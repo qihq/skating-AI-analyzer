@@ -1,4 +1,4 @@
-import { CSSProperties, ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, ChangeEvent, FormEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import {
@@ -9,16 +9,19 @@ import {
   DebugRunDetail,
   DebugRunMode,
   DebugRunSummary,
+  GoldenOverrideApplyResponse,
   TargetBBox,
   TargetCandidate,
   createLocalDebugRun,
   createVideoAiDebugRun,
   deleteDebugRun,
   ensureGoldenAnalysisDebugRun,
+  applyGoldenOverridesAndRetry,
   confirmDebugTargetLock,
   fetchAnalyses,
   fetchAnalysis,
   fetchDebugGoldenLabel,
+  fetchDebugFrameCatalog,
   fetchDebugRun,
   fetchDebugRuns,
   saveDebugGoldenLabel,
@@ -513,6 +516,9 @@ function defaultLabelDraft(run: DebugRunDetail, label?: DebugGoldenLabel | null)
     fps,
     keyframes: { ...(label?.keyframes ?? {}) },
     target_bboxes: { ...(label?.target_bboxes ?? {}) },
+    tracking_anchors: [...(label?.tracking_anchors ?? [])],
+    action_window_start_sec: label?.action_window_start_sec ?? null,
+    action_window_end_sec: label?.action_window_end_sec ?? null,
     expected_review_flags: [...(label?.expected_review_flags ?? [])],
     notes: label?.notes ?? "",
   };
@@ -1058,9 +1064,12 @@ function DebugGoldenLabelPanel({
   connections: number[][];
   onSaved?: () => void;
 }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [frameNode, setFrameNode] = useState<HTMLDivElement | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [saveState, setSaveState] = useState<LoadState>("idle");
+  const [applyState, setApplyState] = useState<LoadState>("idle");
+  const [applyResult, setApplyResult] = useState<GoldenOverrideApplyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedLabel, setSavedLabel] = useState<DebugGoldenLabel | null>(null);
   const [draft, setDraft] = useState<DebugGoldenLabelPayload>(() => defaultLabelDraft(run, null));
@@ -1069,11 +1078,32 @@ function DebugGoldenLabelPanel({
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [draftBBox, setDraftBBox] = useState<TargetBBox | null>(null);
   const [frameImageSizes, setFrameImageSizes] = useState<Record<string, { width: number; height: number }>>({});
+  const [videoError, setVideoError] = useState(false);
+  const [videoCursorTime, setVideoCursorTime] = useState<number | null>(null);
+  const [catalogFrames, setCatalogFrames] = useState<LabelFrameRow[]>([]);
 
-  const labelFrames = useMemo(
-    () => buildLabelFrames(sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById),
-    [sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById],
-  );
+  const labelFrames = useMemo(() => {
+    const resultFrames = buildLabelFrames(sampledFrames, semanticFrames, partialSemanticFrames, poseFrameById);
+    const byKey = new Map(resultFrames.map((frame) => [labelFrameKey(frame), frame]));
+    catalogFrames.forEach((frame) => {
+      const key = labelFrameKey(frame);
+      const existing = byKey.get(key);
+      byKey.set(
+        key,
+        existing
+          ? {
+              ...frame,
+              ...existing,
+              url: frame.url ?? existing.url,
+              timestamp: existing.timestamp ?? frame.timestamp,
+            }
+          : frame,
+      );
+    });
+    return Array.from(byKey.values()).sort(
+      (a, b) => (a.timestamp ?? Number.POSITIVE_INFINITY) - (b.timestamp ?? Number.POSITIVE_INFINITY),
+    );
+  }, [catalogFrames, partialSemanticFrames, poseFrameById, sampledFrames, semanticFrames]);
   const selectedFrame = labelFrames.find((frame) => labelFrameKey(frame) === selectedFrameKey) ?? labelFrames[0] ?? null;
   const selectedFrameStableKey = selectedFrame ? labelFrameKey(selectedFrame) : null;
   const selectedImageSize = selectedFrameStableKey ? frameImageSizes[selectedFrameStableKey] : null;
@@ -1085,25 +1115,45 @@ function DebugGoldenLabelPanel({
   const savedBBoxStyle = bboxStyle(savedBBox);
   const draftBBoxStyle = bboxStyle(draftBBox);
   const poseBBoxStyle = bboxStyle(selectedFrame?.poseFrame?.target_bbox);
+  const videoSrc = `/api/debug/runs/${encodeURIComponent(run.id)}/video`;
 
   useEffect(() => {
     let cancelled = false;
     setState("loading");
     setError(null);
     setSaveState("idle");
+    setApplyState("idle");
+    setApplyResult(null);
     setSavedLabel(null);
     setDraft(defaultLabelDraft(run, null));
     setFlagsText("");
     setDraftBBox(null);
+    setVideoError(false);
+    setVideoCursorTime(null);
+    setCatalogFrames([]);
     const load = async () => {
       try {
-        const data = await fetchDebugGoldenLabel(run.id);
+        const [data, catalog] = await Promise.all([
+          fetchDebugGoldenLabel(run.id),
+          fetchDebugFrameCatalog(run.id).catch(() => null),
+        ]);
         if (cancelled) {
           return;
         }
         setSavedLabel(data.exists ? data : null);
         setDraft(defaultLabelDraft(run, data));
         setFlagsText((data.expected_review_flags ?? []).join(", "));
+        setCatalogFrames(
+          (catalog?.frames ?? []).map((frame) => ({
+            id: frame.frame_id,
+            title: frame.frame_id,
+            source: frame.source,
+            url: frame.url,
+            timestamp: frame.timestamp,
+            bboxKey: `${frame.source}:${frame.frame_id}`,
+            poseFrame: poseFrameById.get(frame.frame_id),
+          })),
+        );
         setState("ready");
       } catch {
         if (!cancelled) {
@@ -1135,12 +1185,30 @@ function DebugGoldenLabelPanel({
     setDraft((current) => ({ ...current, ...patch }));
   };
 
+  const seekVideoTo = (timestamp: number | null | undefined, options?: { play?: boolean }) => {
+    if (timestamp == null || Number.isNaN(timestamp)) {
+      setError("No timestamp available for video verification.");
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    const nextTime = Math.max(0, timestamp);
+    video.currentTime = nextTime;
+    setVideoCursorTime(nextTime);
+    if (options?.play) {
+      void video.play().catch(() => undefined);
+    }
+  };
+
   const setKeyframeFromSelected = (key: string) => {
     if (!selectedFrame || selectedFrame.timestamp == null) {
       setError("Selected frame has no timestamp.");
       return;
     }
     setError(null);
+    seekVideoTo(selectedFrame.timestamp, { play: true });
     setDraft((current) => ({
       ...current,
       keyframes: { ...current.keyframes, [key]: Number(selectedFrame.timestamp!.toFixed(3)) },
@@ -1218,6 +1286,20 @@ function DebugGoldenLabelPanel({
     setDraft((current) => ({
       ...current,
       target_bboxes: { ...current.target_bboxes, [selectedFrame.bboxKey]: bbox },
+      tracking_anchors:
+        selectedFrame.timestamp == null
+          ? current.tracking_anchors
+          : [
+              ...current.tracking_anchors.filter(
+                (anchor) => Math.abs(anchor.timestamp_sec - selectedFrame.timestamp!) > 0.001,
+              ),
+              {
+                anchor_id: `golden-${selectedFrame.source}-${selectedFrame.id}`,
+                timestamp_sec: Number(selectedFrame.timestamp.toFixed(3)),
+                source_frame_id: `${selectedFrame.source}:${selectedFrame.id}`,
+                bbox,
+              },
+            ].sort((a, b) => a.timestamp_sec - b.timestamp_sec),
     }));
     setError(null);
   };
@@ -1229,7 +1311,16 @@ function DebugGoldenLabelPanel({
     setDraft((current) => {
       const next = { ...current.target_bboxes };
       delete next[selectedFrame.bboxKey];
-      return { ...current, target_bboxes: next };
+      return {
+        ...current,
+        target_bboxes: next,
+        tracking_anchors:
+          selectedFrame.timestamp == null
+            ? current.tracking_anchors
+            : current.tracking_anchors.filter(
+                (anchor) => Math.abs(anchor.timestamp_sec - selectedFrame.timestamp!) > 0.001,
+              ),
+      };
     });
   };
 
@@ -1272,6 +1363,32 @@ function DebugGoldenLabelPanel({
     } catch {
       setSaveState("error");
       setError("Golden label failed to save.");
+    }
+  };
+
+  const handleApplyAndRetry = async () => {
+    if (!run.analysis_id) {
+      setError("只有来自正式分析的 GOLD 样本才能重新生成报告。");
+      return;
+    }
+    setApplyState("loading");
+    setError(null);
+    try {
+      const saved = await saveDebugGoldenLabel(run.id, {
+        ...draft,
+        expected_review_flags: flagsText
+          .split(",")
+          .map((flag) => flag.trim())
+          .filter(Boolean),
+      });
+      setSavedLabel(saved);
+      const result = await applyGoldenOverridesAndRetry(run.analysis_id, run.id, saved.revision);
+      setApplyResult(result);
+      setApplyState("ready");
+      onSaved?.();
+    } catch {
+      setApplyState("error");
+      setError("应用 GOLD 并重新分析失败，请检查关键帧顺序和主人物框。");
     }
   };
 
@@ -1336,7 +1453,59 @@ function DebugGoldenLabelPanel({
             </div>
           </div>
 
-          <div className="max-h-[26rem] overflow-y-auto rounded-[18px] border border-slate-200 bg-white p-2">
+          <section className="overflow-hidden rounded-[18px] border border-slate-200 bg-white">
+            <div className="flex flex-col gap-3 border-b border-slate-100 px-3 py-3 wide:flex-row wide:items-center wide:justify-between wide:px-4">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">视频验证</p>
+                <p className="mt-1 truncate text-sm font-semibold text-slate-900">
+                  {videoCursorTime == null ? "等待同步选中帧" : `已同步 ${formatDuration(videoCursorTime)}`}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 wide:flex wide:shrink-0">
+                <button
+                  type="button"
+                  onClick={() => seekVideoTo(selectedFrame?.timestamp)}
+                  disabled={!selectedFrame || selectedFrame.timestamp == null || videoError}
+                  className="min-h-[36px] rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  跳转帧
+                </button>
+                <button
+                  type="button"
+                  onClick={() => seekVideoTo(selectedFrame?.timestamp, { play: true })}
+                  disabled={!selectedFrame || selectedFrame.timestamp == null || videoError}
+                  className="min-h-[36px] rounded-full bg-slate-900 px-3 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  播放帧
+                </button>
+              </div>
+            </div>
+            {videoError ? (
+              <div className="flex aspect-video items-center justify-center bg-slate-950 px-4 text-center text-xs leading-6 text-slate-300">
+                当前 debug run 没有可用源视频。
+              </div>
+            ) : (
+              <video
+                ref={videoRef}
+                src={videoSrc}
+                controls
+                preload="metadata"
+                playsInline
+                onError={() => setVideoError(true)}
+                onSeeked={(event) => setVideoCursorTime(event.currentTarget.currentTime)}
+                onTimeUpdate={(event) => setVideoCursorTime(event.currentTarget.currentTime)}
+                className="aspect-video w-full bg-slate-950 object-contain"
+              />
+            )}
+          </section>
+
+          <div className="rounded-[18px] border border-slate-200 bg-white p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+              <p className="text-sm font-semibold text-slate-900">完整关键帧数据</p>
+              <p className="text-xs text-slate-500">
+                共 {labelFrames.length} 帧 · sampled {sampledFrames.length} · semantic {semanticFrames.length} · partial {partialSemanticFrames.length}
+              </p>
+            </div>
             <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {labelFrames.map((frame) => {
                 const key = labelFrameKey(frame);
@@ -1348,6 +1517,7 @@ function DebugGoldenLabelPanel({
                     onClick={() => {
                       setSelectedFrameKey(key);
                       setDraftBBox(null);
+                      seekVideoTo(frame.timestamp);
                     }}
                     className={`min-w-0 rounded-[14px] border px-3 py-2 text-left text-xs transition ${
                       active ? "border-blue-300 bg-blue-50 text-slate-900" : "border-slate-100 bg-slate-50 text-slate-600 hover:border-blue-100"
@@ -1361,6 +1531,11 @@ function DebugGoldenLabelPanel({
                 );
               })}
             </div>
+            {!labelFrames.length ? (
+              <div className="rounded-[14px] border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                当前样本没有可展示的关键帧数据，请确认 debug run 已完成。
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -1443,6 +1618,14 @@ function DebugGoldenLabelPanel({
                     >
                       Clear
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => seekVideoTo(draft.keyframes[spec.key], { play: true })}
+                      disabled={draft.keyframes[spec.key] == null || videoError}
+                      className="min-h-[40px] flex-1 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+                    >
+                      Play
+                    </button>
                   </div>
                 </div>
               ))}
@@ -1482,7 +1665,7 @@ function DebugGoldenLabelPanel({
           {error ? <div className="rounded-[18px] border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</div> : null}
           {saveState === "ready" && savedLabel ? (
             <div className="rounded-[18px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-              Saved · {savedLabel.label_path ?? "golden_label.json"} · {savedLabel.manifest_path ?? "golden_manifest.json"}
+              草稿已保存 · revision {savedLabel.revision} · {savedLabel.label_path ?? "golden_label.json"}
             </div>
           ) : null}
           {savedLabel?.label_quality_flags?.length ? (
@@ -1490,14 +1673,36 @@ function DebugGoldenLabelPanel({
               {savedLabel.label_quality_flags.join(", ")}
             </div>
           ) : null}
-          <button
-            type="button"
-            onClick={() => void handleSave()}
-            disabled={saveState === "loading"}
-            className="min-h-[46px] w-full rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {saveState === "loading" ? "Saving..." : "Save golden label"}
-          </button>
+          {applyResult ? (
+            <div className="rounded-[18px] border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+              已应用 revision {applyResult.applied_revision}，从 {applyResult.retry_from_stage} 阶段重新分析。
+              <Link to={applyResult.report_path} className="ml-2 font-semibold underline">
+                查看原报告
+              </Link>
+            </div>
+          ) : null}
+          <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-6 text-slate-600">
+            将应用 {Object.values(draft.keyframes).filter((value) => value != null).length} 个关键帧和 {draft.tracking_anchors.length} 个人物追踪锚点，
+            更新同一个分析报告。
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => void handleSave()}
+              disabled={saveState === "loading" || applyState === "loading"}
+              className="min-h-[46px] w-full rounded-full border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {saveState === "loading" ? "保存中..." : "保存草稿"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleApplyAndRetry()}
+              disabled={applyState === "loading" || !run.analysis_id}
+              className="min-h-[46px] w-full rounded-full bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {applyState === "loading" ? "正在应用并重新分析..." : "应用 GOLD 并重新分析"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

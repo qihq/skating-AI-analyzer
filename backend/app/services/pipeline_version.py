@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.318"
+CURRENT_PIPELINE_VERSION = "v5.2.319"
 
 # v5.2.318: Re-export all-in-one Docker image from face-identity-target-lock branch.
 # v5.2.317: Export all-in-one Docker image from face-identity-target-lock branch with face identity features, fix CRLF start.sh for Linux container compat.

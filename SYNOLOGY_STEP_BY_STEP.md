@@ -8,7 +8,7 @@
 
 请准备下面两个东西：
 
-1. 镜像包：`deliverables/skating-analyzer-allinone-v5.2.10-时间戳.tar`
+1. 镜像包：`deliverables/skating-analyzer-allinone-latest.tar`，或 `deliverables` 目录里最新的 `skating-analyzer-allinone-v版本号-时间戳.tar`
 2. 环境变量参考：`.env.example`
 
 如果你已经让我导出过镜像，直接把 `tar` 上传到群晖即可。
@@ -33,7 +33,7 @@
 2. 进入 `映像` 或 `镜像`
 3. 点击 `新增` / `导入`
 4. 选择 `从文件添加`
-5. 选中最新的 `skating-analyzer-allinone-v5.2.10-时间戳.tar`
+5. 选中 `skating-analyzer-allinone-latest.tar`，或最新的版本化 tar，例如 `skating-analyzer-allinone-v5.2.316-20260709-1018.tar`
 6. 等待导入完成
 
 导入成功后，你会看到镜像名类似：
@@ -223,3 +223,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\export-allinone-image.ps1
 导出完成后，镜像包默认在：
 
 `deliverables/skating-analyzer-allinone-v版本号-时间戳.tar`
+
+脚本还会同时复制一份稳定文件名：
+
+`deliverables/skating-analyzer-allinone-latest.tar`
+
+如果导入时报 `no such file`，先确认你选择的是实际存在的 tar 文件，不要把 `版本号`、`时间戳` 这类占位文字当成真实文件名。

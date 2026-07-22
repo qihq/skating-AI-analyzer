@@ -45,6 +45,7 @@ class PipelineVersionPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("pipeline_version", columns)
                 self.assertIn("processing_timings", columns)
                 self.assertIn("retry_from_stage", columns)
+                self.assertIn("golden_overrides", columns)
 
             async with database.AsyncSessionLocal() as session:
                 analysis = models.Analysis(

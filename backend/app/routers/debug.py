@@ -25,6 +25,7 @@ from app.routers.analysis import (
     _pose_debug_summary,
     _safe_video_response_path,
     _tracker_debug_summary,
+    _video_media_type,
 )
 from app.schemas import DebugGoldenLabelRequest, DebugGoldenLabelResponse, DebugRunCreateResponse, DebugRunDetail, DebugRunSummary
 from app.services.action_profiles import (
@@ -68,6 +69,7 @@ DEBUG_SOURCE_TYPES = {"analysis", "upload"}
 DEBUG_STATUSES = {"pending", "processing", "awaiting_target_selection", "completed", "failed"}
 DEBUG_FRAME_PREFIXES = ("frame_", "semantic_", "partial_semantic_")
 DEBUG_FRAME_SUFFIX = ".jpg"
+DEBUG_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 CONFIRMED_DEBUG_TARGET_LOCK_STATUSES = {*CONFIRMED_TARGET_LOCK_STATUSES, "auto_locked"}
 DEBUG_SAMPLING_ANALYSIS_REPLAY = "analysis_replay"
 DEBUG_SAMPLING_FORMAL_RESAMPLE = "formal_pipeline_resample"
@@ -541,6 +543,27 @@ def _debug_label_payload_from_request(
             if bbox is not None:
                 target_bboxes[str(key)] = bbox
 
+    tracking_anchors: list[dict[str, Any]] = []
+    raw_anchors = payload.tracking_anchors if payload is not None else existing.get("tracking_anchors")
+    if isinstance(raw_anchors, list):
+        for index, value in enumerate(raw_anchors):
+            item = value.model_dump() if hasattr(value, "model_dump") else value
+            if not isinstance(item, dict):
+                continue
+            bbox = _bbox_payload(item.get("bbox"))
+            timestamp = _float_or_none(item.get("timestamp_sec"))
+            source_frame_id = str(item.get("source_frame_id") or "").strip()
+            if bbox is None or timestamp is None or not source_frame_id:
+                continue
+            tracking_anchors.append(
+                {
+                    "anchor_id": str(item.get("anchor_id") or f"anchor-{index + 1}"),
+                    "timestamp_sec": round(timestamp, 3),
+                    "source_frame_id": source_frame_id,
+                    "bbox": bbox,
+                }
+            )
+
     expected_review_flags = payload.expected_review_flags if payload is not None else existing.get("expected_review_flags", [])
     if not isinstance(expected_review_flags, list):
         expected_review_flags = []
@@ -589,6 +612,16 @@ def _debug_label_payload_from_request(
         "fps": fps,
         "keyframes": keyframes,
         "target_bboxes": target_bboxes,
+        "tracking_anchors": tracking_anchors,
+        "action_window_start_sec": (
+            payload.action_window_start_sec if payload is not None else _float_or_none(existing.get("action_window_start_sec"))
+        ),
+        "action_window_end_sec": (
+            payload.action_window_end_sec if payload is not None else _float_or_none(existing.get("action_window_end_sec"))
+        ),
+        "revision": (int(existing.get("revision") or 0) + 1) if payload is not None else int(existing.get("revision") or 0),
+        "applied_revision": existing.get("applied_revision"),
+        "applied_at": existing.get("applied_at"),
         "expected_review_flags": clean_flags,
         "label_quality_flags": completeness_warnings,
         "notes": (payload.notes if payload is not None else existing.get("notes")) or "",
@@ -629,6 +662,12 @@ def _write_debug_golden_manifest_entry(label: dict[str, Any]) -> None:
             "fps",
             "keyframes",
             "target_bboxes",
+            "tracking_anchors",
+            "action_window_start_sec",
+            "action_window_end_sec",
+            "revision",
+            "applied_revision",
+            "applied_at",
             "expected_review_flags",
             "notes",
             "source_type",
@@ -1003,6 +1042,29 @@ def _require_debug_video_path(run: DebugRun) -> Path:
     if not path.exists() or not path.is_file():
         raise RuntimeError(f"Debug source video is not available: {path}")
     return path
+
+
+def _safe_debug_video_response_path(run: DebugRun) -> Path | None:
+    if not run.video_path:
+        return None
+    raw_path = Path(run.video_path)
+    candidates: list[Path] = [raw_path]
+    debug_root = UPLOADS_DIR / "_debug" / run.id
+    if raw_path.name:
+        candidates.append(debug_root / raw_path.name)
+    if debug_root.exists():
+        candidates.extend(sorted(debug_root.glob("source.*")))
+    path = next((candidate for candidate in candidates if candidate.exists() and candidate.is_file()), None)
+    if path is None:
+        return None
+    resolved = path.resolve()
+    uploads_root = UPLOADS_DIR.resolve()
+    if uploads_root != resolved and uploads_root not in resolved.parents:
+        logger.warning("Blocked unsafe debug video path for run %s: %s", run.id, resolved)
+        return None
+    if resolved.suffix.lower() not in DEBUG_VIDEO_SUFFIXES:
+        return None
+    return resolved
 
 
 async def _source_video_for_analysis(session: AsyncSession, analysis_id: str) -> tuple[Analysis, Path]:
@@ -1533,6 +1595,22 @@ async def delete_debug_run(run_id: str, session: AsyncSession = Depends(get_sess
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/runs/{run_id}/video")
+async def get_debug_run_video(run_id: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
+    run = await session.get(DebugRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug run not found.")
+    video_path = _safe_debug_video_response_path(run)
+    if video_path is None:
+        raise HTTPException(status_code=404, detail="Debug source video is not available.")
+    return FileResponse(
+        video_path,
+        media_type=_video_media_type(video_path),
+        filename=video_path.name,
+        headers={"Accept-Ranges": "bytes"},
+    )
+
+
 @router.post("/runs/local-pose-keyframes", response_model=DebugRunCreateResponse)
 async def create_local_pose_debug_run(
     background_tasks: BackgroundTasks,
@@ -1649,6 +1727,61 @@ async def get_debug_run_frame(run_id: str, filename: str, session: AsyncSession 
         if frame_path.exists() and frame_path.is_file():
             return FileResponse(frame_path, media_type="image/jpeg")
     raise HTTPException(status_code=404, detail="Debug frame not found.")
+
+
+@router.get("/runs/{run_id}/frame-catalog")
+async def get_debug_run_frame_catalog(
+    run_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    run = await session.get(DebugRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug run not found.")
+    result = run.result_json if isinstance(run.result_json, dict) else {}
+    metadata: dict[str, dict[str, Any]] = {}
+    for key, source in (
+        ("sampled_frames", "sampled"),
+        ("semantic_frames", "semantic"),
+        ("partial_semantic_frames", "partial"),
+    ):
+        values = result.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            frame_id = str(value.get("frame_id") or Path(str(value.get("filename") or "")).stem)
+            if frame_id:
+                metadata[f"{source}:{frame_id}"] = dict(value)
+
+    frames: list[dict[str, Any]] = []
+    for directory, default_source in (
+        (_debug_frames_dir(run_id), "sampled"),
+        (_debug_semantic_frames_dir(run_id), "semantic"),
+    ):
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.jpg")):
+            if not path.name.startswith(DEBUG_FRAME_PREFIXES):
+                continue
+            source = "partial" if path.stem.startswith("partial_semantic_") else default_source
+            item = metadata.get(f"{source}:{path.stem}") or metadata.get(f"semantic:{path.stem}") or {}
+            frames.append(
+                {
+                    "frame_id": path.stem,
+                    "source": source,
+                    "timestamp": _float_or_none(item.get("timestamp", item.get("timestamp_sec"))),
+                    "url": f"/api/debug/runs/{run_id}/frames/{path.name}",
+                }
+            )
+    frames.sort(
+        key=lambda item: (
+            item["timestamp"] is None,
+            item["timestamp"] if item["timestamp"] is not None else float("inf"),
+            item["frame_id"],
+        )
+    )
+    return {"run_id": run_id, "total": len(frames), "frames": frames}
 
 
 def delete_debug_artifacts(run_id: str) -> None:

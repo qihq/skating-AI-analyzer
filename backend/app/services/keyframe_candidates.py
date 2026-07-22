@@ -7,10 +7,48 @@ MediaPipe image space, where smaller y means higher in the frame.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 import copy
 import math
 from typing import Any, Iterable
+
+from .smoothing import OneEuroFilter
+
+
+# Phase 1.1 平滑增强 feature flag（默认 OFF，保留原 3 帧滑动平均行为）。
+# ON 时 _smooth() 改用 smoothing.OneEuroFilter 按 frame_index / fps 滤波，
+# 抑制 MediaPipe 抖动导致的 apex 假阳性与膝/踝信号失真。
+# 路线图: 见 plans/codex-multi-pose-allinone-fixes-eventual-lagoon.md Phase 1.1。
+_KEYFRAME_ONE_EURO_SMOOTHING_ENV = "KEYFRAME_ONE_EURO_SMOOTHING"
+_KEYFRAME_ONE_EURO_DEFAULT_MIN_CUTOFF = 1.0
+_KEYFRAME_ONE_EURO_DEFAULT_BETA = 0.05
+
+
+def _one_euro_smoothing_enabled() -> bool:
+    value = os.environ.get(_KEYFRAME_ONE_EURO_SMOOTHING_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "on", "enabled"}
+
+
+def _one_euro_params() -> tuple[float, float]:
+    """Read One-Euro tuning override, fall back to smoothing.py defaults."""
+
+    def _float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        if math.isnan(value) or math.isinf(value) or value <= 0:
+            return default
+        return value
+
+    return (
+        _float("KEYFRAME_ONE_EURO_MIN_CUTOFF", _KEYFRAME_ONE_EURO_DEFAULT_MIN_CUTOFF),
+        _float("KEYFRAME_ONE_EURO_BETA", _KEYFRAME_ONE_EURO_DEFAULT_BETA),
+    )
 
 
 DEFAULT_EFFECTIVE_FPS = 5.0
@@ -2047,15 +2085,35 @@ def _excluded_pose_frame_counts(pose_data: dict[str, Any] | None) -> dict[str, i
     return counts
 
 
-def _smooth(values: list[float | None]) -> list[float | None]:
+def _smooth(values: list[float | None], *, fps: float | None = None) -> list[float | None]:
+    """Smooth a 1-D signal across frames.
+
+    默认: 3 帧滑动平均（前后各 1 帧），保留旧行为。
+    Phase 1.1: 当 KEYFRAME_ONE_EURO_SMOOTHING=1 且 fps 有效时，改用 One-Euro
+    滤波；时间戳取 frame_index / fps。对 None 输入原样返回 None，
+    每个 One-Euro 滤波器在首次有效样本后才开始平滑。
+    """
+
+    if not _one_euro_smoothing_enabled() or fps is None or fps <= 0:
+        smoothed: list[float | None] = []
+        for index in range(len(values)):
+            window = [
+                values[item]
+                for item in range(max(0, index - 1), min(len(values), index + 2))
+                if values[item] is not None
+            ]
+            smoothed.append(sum(window) / len(window) if window else None)
+        return smoothed
+
+    min_cutoff, beta = _one_euro_params()
     smoothed: list[float | None] = []
-    for index in range(len(values)):
-        window = [
-            values[item]
-            for item in range(max(0, index - 1), min(len(values), index + 2))
-            if values[item] is not None
-        ]
-        smoothed.append(sum(window) / len(window) if window else None)
+    filter_instance = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
+    for index, value in enumerate(values):
+        if value is None:
+            smoothed.append(None)
+            continue
+        timestamp = index / fps
+        smoothed.append(filter_instance.filter(float(value), timestamp))
     return smoothed
 
 
@@ -4134,9 +4192,9 @@ def detect_key_frame_candidates(
             fallback["excluded_pose_frames"] = excluded_counts
             return fallback
 
-    smoothed_com = _smooth([signal.com_y for signal in signals])
-    smoothed_knee = _smooth([signal.knee_angle for signal in signals])
-    smoothed_ankle = _smooth([signal.ankle_y for signal in signals])
+    smoothed_com = _smooth([signal.com_y for signal in signals], fps=fps)
+    smoothed_knee = _smooth([signal.knee_angle for signal in signals], fps=fps)
+    smoothed_ankle = _smooth([signal.ankle_y for signal in signals], fps=fps)
     motion_norm = _normalized_motion(signals)
     search_windows = _motion_search_windows(signals)
     search_window: tuple[int, int] | None = search_windows[0] if search_windows else None

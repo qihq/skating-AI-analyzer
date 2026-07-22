@@ -23,6 +23,8 @@ from app.services.person_tracker import (
     PERSON_TRACKER_MANUAL_LOCK_SUPPORT_ANCHOR_BLOCKED_FLAG,
     PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG,
     PERSON_TRACKER_APPEARANCE_RELOCK_USED_FLAG,
+    PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_USED_FLAG,
+    PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG,
     PERSON_TRACKER_RELOCK_PENDING_FLAG,
     PERSON_TRACKER_RELOCK_REJECTED_FLAG,
     PERSON_TRACKER_RELOCKED_FLAG,
@@ -37,6 +39,10 @@ from app.services.person_tracker import (
     _loss_recovery_summary,
     _YOLO_MODEL_PATH_ENV,
     _APPEARANCE_RELOCK_ENV,
+    _APPEARANCE_RELOCK_SOFT_ENV,
+    _APPEARANCE_RELOCK_SOFT_FLOOR_ENV,
+    _MANUAL_LOCK_SELF_HEAL_ENV,
+    _MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES_ENV,
     _resolve_yolo_model_path,
     _zoomed_content_crop_bounds,
     _xyxy_to_bbox,
@@ -256,6 +262,107 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["decision"], "skipped")
         self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["reason"], "anchor_unavailable")
 
+    def test_detector_relock_soft_mode_does_not_fail_closed_on_mismatch(self) -> None:
+        """Phase 1.4: 软打分模式下，颜色不匹配但 similarity 不低于 floor 时不
+        fail-closed，候选进入 pending 等待确认。把 floor 设为 0 让红/蓝这种
+        颜色差异极大的候选也能进软打分路径（验证软模式不在外观层硬拒）。"""
+
+        with patch.dict(
+            "os.environ",
+            {
+                _APPEARANCE_RELOCK_ENV: "1",
+                _APPEARANCE_RELOCK_SOFT_ENV: "1",
+                _APPEARANCE_RELOCK_SOFT_FLOOR_ENV: "0.0",
+            },
+        ):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        anchor_frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        anchor_frame[20:110, 20:70] = (255, 0, 0)
+        tracker._update_appearance_anchor(anchor_frame, tracker._last_known_xyxy)
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (0, 0, 255)  # 不同颜色
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        # 软模式 + floor=0：不应被 fail-closed 拒掉，应进入 pending。
+        self.assertEqual(diagnostic["state"], "full_frame_yolo_relock_pending")
+        self.assertNotIn(PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG, tracker.quality_flags)
+        self.assertIn(PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_USED_FLAG, tracker.quality_flags)
+        self.assertEqual(diagnostic["appearance"]["decision"], "soft_scored")
+
+    def test_detector_relock_soft_mode_rejects_below_floor(self) -> None:
+        """Phase 1.4: 软打分模式下，similarity 低于 floor 时仍拒绝（极端拒门）。"""
+
+        with patch.dict(
+            "os.environ",
+            {
+                _APPEARANCE_RELOCK_ENV: "1",
+                _APPEARANCE_RELOCK_SOFT_ENV: "1",
+                _APPEARANCE_RELOCK_SOFT_FLOOR_ENV: "0.95",  # 把 floor 抬到几乎不可能命中
+            },
+        ):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        anchor_frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        anchor_frame[20:110, 20:70] = (255, 0, 0)
+        tracker._update_appearance_anchor(anchor_frame, tracker._last_known_xyxy)
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (0, 0, 255)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        self.assertIsNone(result)
+        self.assertEqual(diagnostic["state"], "lost_reused")
+        self.assertIn(PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG, tracker.quality_flags)
+        self.assertEqual(diagnostic["rejected_candidates"][0]["reasons"], ["appearance_mismatch_floor"])
+        self.assertEqual(diagnostic["rejected_candidates"][0]["appearance"]["decision"], "rejected")
+
+    def test_detector_relock_soft_mode_anchor_unavailable_does_not_reject(self) -> None:
+        """Phase 1.4: 软打分模式下，anchor 未建好时不应 fail-closed 拒候选。"""
+
+        with patch.dict(
+            "os.environ",
+            {_APPEARANCE_RELOCK_ENV: "1", _APPEARANCE_RELOCK_SOFT_ENV: "1"},
+        ):
+            tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+        # 不调用 _update_appearance_anchor → anchor 为 None
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+        frame[20:110, 22:72] = (255, 0, 0)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        # anchor 缺失也不拒，进入 pending（外观 bonus=0）。
+        self.assertEqual(diagnostic["state"], "full_frame_yolo_relock_pending")
+        self.assertNotIn(PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG, tracker.quality_flags)
+        self.assertEqual(diagnostic["appearance"]["decision"], "soft_scored")
+        self.assertEqual(diagnostic["appearance"]["reason"], "anchor_unavailable")
+
     def test_manual_lock_initial_target_selection_requires_identity_overlap(self) -> None:
         tracker = PersonBBoxTracker(
             yolo_model=object(),
@@ -279,6 +386,94 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(diagnostic["state"], "lost_reused")
         self.assertIn(PERSON_TRACKER_MANUAL_LOCK_IDENTITY_REJECTED_FLAG, tracker.quality_flags)
         self.assertIsNone(tracker._target_tracker_id)
+
+    def test_manual_lock_self_heal_fire_threshold_and_one_shot(self) -> None:
+        """Phase 1.5: self_heal 仅在持续丢失 >= 阈值且本周期未尝试时触发一次。"""
+
+        with patch.dict(
+            "os.environ",
+            {_MANUAL_LOCK_SELF_HEAL_ENV: "1", _MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES_ENV: "15"},
+        ):
+            tracker = PersonBBoxTracker(
+                yolo_model=object(),
+                byte_tracker_factory=lambda _fps: object(),
+                manual_lock_mode=True,
+            )
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+
+        # 阈值以下: 不触发。
+        tracker._lost_frames = 14
+        self.assertFalse(tracker._manual_lock_self_heal_should_fire())
+        self.assertNotIn(PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG, tracker.quality_flags)
+
+        # 达到阈值: 触发一次，打 flag。
+        tracker._lost_frames = 15
+        self.assertTrue(tracker._manual_lock_self_heal_should_fire())
+        self.assertIn(PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG, tracker.quality_flags)
+
+        # 第二次: 已尝试过，不再触发（一次性）。
+        tracker._lost_frames = 30
+        self.assertFalse(tracker._manual_lock_self_heal_should_fire())
+
+    def test_manual_lock_self_heal_disabled_by_default_keeps_relock_blocked(self) -> None:
+        """Phase 1.5: 默认 OFF 时 manual_lock 仍阻塞 relock（旧行为不变）。"""
+
+        tracker = PersonBBoxTracker(
+            yolo_model=object(),
+            byte_tracker_factory=lambda _fps: object(),
+            manual_lock_mode=True,
+        )
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 4
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        # 默认 OFF: manual_lock 仍阻塞，未自愈。
+        self.assertIsNone(result)
+        self.assertIn(PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG, tracker.quality_flags)
+        self.assertNotIn(PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG, tracker.quality_flags)
+
+    def test_manual_lock_self_heal_fires_one_shot_in_full_process(self) -> None:
+        """Phase 1.5: SELF_HEAL=1 且持续丢失达阈值时，单次 process_frame_detailed
+        触发自愈放行 detector relock（外观 OFF 时仍走几何 relock 候选评估）。"""
+
+        with patch.dict(
+            "os.environ",
+            {_MANUAL_LOCK_SELF_HEAL_ENV: "1", _MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES_ENV: "15"},
+        ):
+            tracker = PersonBBoxTracker(
+                yolo_model=object(),
+                byte_tracker_factory=lambda _fps: object(),
+                manual_lock_mode=True,
+            )
+        tracker._last_known_xyxy = (20.0, 20.0, 70.0, 110.0)
+        tracker._target_tracker_id = 1
+        tracker._lost_frames = 16  # 已超阈值
+
+        candidate = (22.0, 20.0, 72.0, 110.0)
+        frame = np.zeros((140, 180, 3), dtype=np.uint8)
+
+        with (
+            patch.object(tracker, "_detect", return_value=[(*candidate, 0.92)]),
+            patch.object(tracker, "_update_tracks", return_value=_FakeDetections([], [])),
+        ):
+            result, diagnostic = tracker.process_frame_detailed(frame, tracker._last_known_xyxy, frame_index=6)
+
+        # 触发了自愈放行: 不再阻塞 relock，且只 fire 一次。
+        self.assertNotIn(PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG, tracker.quality_flags)
+        self.assertIn(PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG, tracker.quality_flags)
+        self.assertTrue(tracker._manual_lock_self_heal_attempted)
+        # 一次性: 再次检查应不再触发。
+        self.assertFalse(tracker._manual_lock_self_heal_should_fire())
 
     def test_relock_allows_tiny_partial_bbox_to_recover_from_history(self) -> None:
         tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
@@ -2292,6 +2487,37 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertEqual(sorted(calls[1]), [0, 1])
         self.assertEqual(calls[0][1]["bbox"]["x"], 0.1)
         self.assertEqual(calls[1][1]["bbox"]["x"], 0.3)
+
+    def test_golden_anchor_forces_confirmed_bbox_and_reseeds_following_tracking(self) -> None:
+        tracker = PersonBBoxTracker(yolo_model=object(), byte_tracker_factory=lambda _fps: object())
+        frames = [Path("frame_0001.jpg"), Path("frame_0002.jpg"), Path("frame_0003.jpg")]
+        image = np.zeros((100, 200, 3), dtype=np.uint8)
+        automatic = (20.0, 20.0, 60.0, 80.0)
+
+        with (
+            patch.object(tracker, "_read_frame", return_value=image),
+            patch.object(tracker, "_update_appearance_anchor") as update_appearance,
+            patch.object(
+                tracker,
+                "process_frame_detailed",
+                return_value=(automatic, {"state": "tracked", "rejected_reasons": []}),
+            ) as process,
+        ):
+            tracked, _flags, diagnostics = tracker.track_sequence_detailed(
+                frames,
+                {"x": 0.1, "y": 0.2, "width": 0.2, "height": 0.6},
+                golden_anchor_bboxes_by_frame={
+                    1: {"bbox": {"x": 0.55, "y": 0.1, "width": 0.2, "height": 0.7}, "anchor_id": "gold-1"}
+                },
+            )
+
+        self.assertEqual(tracked[1], {"x": 0.55, "y": 0.1, "width": 0.2, "height": 0.7})
+        self.assertEqual(diagnostics[1]["state"], "golden_anchor")
+        self.assertEqual(diagnostics[1]["golden_anchor_id"], "gold-1")
+        np.testing.assert_allclose(process.call_args_list[1].args[1], (110.0, 10.0, 150.0, 80.0))
+        np.testing.assert_allclose(update_appearance.call_args.args[1], (110.0, 10.0, 150.0, 80.0))
+        self.assertIsNone(tracker._target_tracker_id)
+        self.assertTrue(diagnostics[1]["golden_anchor_conflict"])
 
 
 if __name__ == "__main__":

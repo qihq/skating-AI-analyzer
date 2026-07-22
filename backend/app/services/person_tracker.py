@@ -46,6 +46,22 @@ _YOLO_MODEL_NAME = "yolov8n.pt"
 _YOLO_MODEL_PATH_ENV = "YOLO_PERSON_MODEL_PATH"
 _APPEARANCE_RELOCK_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK"
 _APPEARANCE_RELOCK_THRESHOLD_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK_THRESHOLD"
+# Phase 1.4 软打分: 在硬阈值之上叠加软项加权进 score，避免 anchor 缺失时 fail-closed
+# 把所有候选拒掉导致 tracker 丢失→pose 丢→关键帧退化。路线图见 plans/
+# codex-multi-pose-allinone-fixes-eventual-lagoon.md Phase 1.4。
+_APPEARANCE_RELOCK_SOFT_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK_SOFT"
+_APPEARANCE_RELOCK_SOFT_FLOOR_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_FLOOR"
+_APPEARANCE_RELOCK_SOFT_WEIGHT_ENV = "PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_WEIGHT"
+_APPEARANCE_RELOCK_SOFT_DEFAULT_FLOOR = 0.30
+_APPEARANCE_RELOCK_SOFT_DEFAULT_WEIGHT = 0.20
+PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_USED_FLAG = "person_tracker_appearance_relock_soft_used"
+# Phase 1.5 manual_lock 错锁自愈: 当 manual_lock 下持续丢失帧数超过阈值时，
+# 放行一次带外观签名的 detector relock 尝试，失败/超时回退原 manual_lock 静态保持。
+# 路线图见 plans/codex-multi-pose-allinone-fixes-eventual-lagoon.md Phase 1.5。
+_MANUAL_LOCK_SELF_HEAL_ENV = "PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL"
+_MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES_ENV = "PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES"
+_MANUAL_LOCK_SELF_HEAL_DEFAULT_MIN_LOST_FRAMES = 15
+PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG = "person_tracker_manual_lock_self_heal_fired"
 _YOLO_MOUNTED_MODEL_PATH = Path("/models") / _YOLO_MODEL_NAME
 _YOLO_CONF_THRESHOLD = 0.40
 _TRACK_ACTIVATION_THRESHOLD = 0.35
@@ -557,6 +573,51 @@ def _appearance_relock_threshold() -> float:
     return max(0.0, min(value, 1.0))
 
 
+def _appearance_relock_soft_enabled() -> bool:
+    return _env_flag_enabled(_APPEARANCE_RELOCK_SOFT_ENV)
+
+
+def _appearance_relock_soft_floor() -> float:
+    raw = os.getenv(_APPEARANCE_RELOCK_SOFT_FLOOR_ENV, "").strip()
+    if not raw:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_FLOOR
+    try:
+        value = float(raw)
+    except ValueError:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_FLOOR
+    if value != value:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_FLOOR
+    return max(0.0, min(value, 1.0))
+
+
+def _appearance_relock_soft_weight() -> float:
+    raw = os.getenv(_APPEARANCE_RELOCK_SOFT_WEIGHT_ENV, "").strip()
+    if not raw:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_WEIGHT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_WEIGHT
+    if value != value:
+        return _APPEARANCE_RELOCK_SOFT_DEFAULT_WEIGHT
+    if value < 0.0:
+        return 0.0
+    return value
+
+
+def _manual_lock_self_heal_min_lost_frames() -> int:
+    raw = os.getenv(_MANUAL_LOCK_SELF_HEAL_MIN_LOST_FRAMES_ENV, "").strip()
+    if not raw:
+        return _MANUAL_LOCK_SELF_HEAL_DEFAULT_MIN_LOST_FRAMES
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return _MANUAL_LOCK_SELF_HEAL_DEFAULT_MIN_LOST_FRAMES
+    if value < 1:
+        return _MANUAL_LOCK_SELF_HEAL_DEFAULT_MIN_LOST_FRAMES
+    return value
+
+
 def _expand_xyxy(xyxy: Sequence[float], frame_w: int, frame_h: int, padding_ratio: float) -> tuple[int, int, int, int]:
     x1, y1, x2, y2 = _clamp_xyxy(xyxy, frame_w, frame_h)
     width = max(1.0, x2 - x1)
@@ -836,6 +897,12 @@ class PersonBBoxTracker:
         self._accepted_xyxy_history: list[tuple[int, tuple[float, float, float, float]]] = []
         self._center_history: dict[int, list[tuple[float, float]]] = {}
         self._appearance_relock_enabled = _env_flag_enabled(_APPEARANCE_RELOCK_ENV)
+        self._appearance_relock_soft_enabled = _appearance_relock_soft_enabled()
+        self._appearance_relock_soft_floor = _appearance_relock_soft_floor()
+        self._appearance_relock_soft_weight = _appearance_relock_soft_weight()
+        self._manual_lock_self_heal_enabled = _env_flag_enabled(_MANUAL_LOCK_SELF_HEAL_ENV)
+        self._manual_lock_self_heal_min_lost_frames = _manual_lock_self_heal_min_lost_frames()
+        self._manual_lock_self_heal_attempted = False
         self._appearance_anchor_hist: np.ndarray | None = None
         self._pending_detector_relock_appearance: dict[str, Any] | None = None
         self.quality_flags: list[str] = []
@@ -879,6 +946,7 @@ class PersonBBoxTracker:
         initial_bbox: dict[str, Any],
         *,
         support_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
+        golden_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, float]], list[str], list[dict[str, Any]]]:
         frames = list(frame_paths)
         if not frames:
@@ -891,6 +959,25 @@ class PersonBBoxTracker:
             frame_h, frame_w = frame.shape[:2]
             if frame_index == 0 and self._last_known_xyxy is None:
                 self._last_known_xyxy = _bbox_to_xyxy(_normalize_bbox(initial_bbox), frame_w, frame_h)
+            golden_anchor = (
+                golden_anchor_bboxes_by_frame.get(frame_index)
+                if isinstance(golden_anchor_bboxes_by_frame, dict)
+                else None
+            )
+            golden_bbox = golden_anchor.get("bbox") if isinstance(golden_anchor, dict) else None
+            golden_xyxy = (
+                _bbox_to_xyxy(_normalize_bbox(golden_bbox), frame_w, frame_h)
+                if isinstance(golden_bbox, dict)
+                else None
+            )
+            if golden_xyxy is not None:
+                self._last_known_xyxy = golden_xyxy
+                self._target_tracker_id = None
+                self._lost_frames = 0
+                self._pending_relock_tracker_id = None
+                self._pending_relock_count = 0
+                self._pending_detector_relock_xyxy = None
+                self._pending_detector_relock_count = 0
 
             target_xyxy, diagnostic = self.process_frame_detailed(
                 frame,
@@ -903,6 +990,27 @@ class PersonBBoxTracker:
                     else None
                 ),
             )
+            if golden_xyxy is not None:
+                automatic_xyxy = target_xyxy
+                target_xyxy = golden_xyxy
+                self._target_tracker_id = None
+                self._pending_relock_tracker_id = None
+                self._pending_relock_count = 0
+                self._pending_detector_relock_xyxy = None
+                self._pending_detector_relock_count = 0
+                self._accepted_xyxy_history = [(frame_index, golden_xyxy)]
+                self._center_history = {}
+                self._appearance_anchor_hist = None
+                self._update_appearance_anchor(frame, golden_xyxy)
+                diagnostic.update(
+                    {
+                        "state": "golden_anchor",
+                        "golden_anchor_id": golden_anchor.get("anchor_id"),
+                        "golden_source_frame_id": golden_anchor.get("source_frame_id"),
+                        "golden_anchor_applied": True,
+                        "golden_anchor_conflict": automatic_xyxy is not None and _iou(automatic_xyxy, golden_xyxy) < 0.3,
+                    }
+                )
             if target_xyxy is None:
                 _add_flag(self.quality_flags, PERSON_TRACKER_TARGET_LOST_FLAG)
                 target_xyxy = self._last_known_xyxy or _bbox_to_xyxy(_normalize_bbox(initial_bbox), frame_w, frame_h)
@@ -2872,6 +2980,24 @@ class PersonBBoxTracker:
             return False
         return _is_plausible_human_xyxy(candidate_xyxy, frame_w=frame_w, frame_h=frame_h)
 
+    def _manual_lock_self_heal_should_fire(self) -> bool:
+        """Phase 1.5: manual_lock 错锁自愈是否应触发一次性 detector relock 放行。
+
+        触发条件: self_heal 开启 AND 持续丢失帧数 >= 阈值 AND 本分析周期未尝试过。
+        本函数有副作用: 触发时设置 ``_manual_lock_self_heal_attempted = True``
+        并打 quality flag，保证一次分析周期内最多放行一次（保守）。
+        """
+
+        if not self._manual_lock_mode or not self._manual_lock_self_heal_enabled:
+            return False
+        if self._manual_lock_self_heal_attempted:
+            return False
+        if self._lost_frames < self._manual_lock_self_heal_min_lost_frames:
+            return False
+        self._manual_lock_self_heal_attempted = True
+        _add_flag(self.quality_flags, PERSON_TRACKER_MANUAL_LOCK_SELF_HEAL_FIRED_FLAG)
+        return True
+
     def _select_detector_relock_candidate(
         self,
         boxes: Sequence[tuple[float, float, float, float, float]],
@@ -2946,17 +3072,79 @@ class PersonBBoxTracker:
                 continue
 
             appearance: dict[str, Any] | None = None
+            appearance_bonus = 0.0
             if self._appearance_relock_enabled:
-                if self._appearance_anchor_hist is None:
-                    appearance = self._appearance_diagnostic(None, decision="skipped", reason="anchor_unavailable")
+                if self._appearance_relock_soft_enabled:
+                    # Phase 1.4 软打分: 极端不匹配(<floor)仍拒；其余把 similarity
+                    # 作为软项加权进 score，不 fail-closed。anchor/signature 缺失
+                    # 时 bonus=0（外观既不加分也不拒绝）。
+                    soft_floor = self._appearance_relock_soft_floor
+                    soft_weight = self._appearance_relock_soft_weight
+                    if self._appearance_anchor_hist is None:
+                        appearance = self._appearance_diagnostic(
+                            None, decision="soft_scored", reason="anchor_unavailable"
+                        )
+                    else:
+                        signature = self._appearance_signature(frame_bgr, candidate_xyxy)
+                        similarity = self._appearance_similarity(signature)
+                        if similarity is None:
+                            appearance = self._appearance_diagnostic(
+                                None, decision="soft_scored", reason="signature_unavailable"
+                            )
+                        elif similarity < soft_floor:
+                            appearance = self._appearance_diagnostic(
+                                similarity, decision="rejected", reason="below_soft_floor"
+                            )
+                            rejected.append(
+                                _rejected_candidate_diagnostic(
+                                    candidate_xyxy,
+                                    frame_w=frame_w,
+                                    frame_h=frame_h,
+                                    source=source,
+                                    confidence=confidence,
+                                    reasons=["appearance_mismatch_floor"],
+                                    reference_xyxy=reference_xyxy,
+                                    prediction_xyxy=prediction_xyxy,
+                                    appearance=appearance,
+                                )
+                            )
+                            _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG)
+                            continue
+                        else:
+                            appearance = self._appearance_diagnostic(
+                                similarity, decision="soft_scored"
+                            )
+                            appearance_bonus = soft_weight * float(similarity)
+                    _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_SOFT_USED_FLAG)
                 else:
-                    signature = self._appearance_signature(frame_bgr, candidate_xyxy)
-                    similarity = self._appearance_similarity(signature)
-                    threshold = _appearance_relock_threshold()
-                    if similarity is None:
-                        appearance = self._appearance_diagnostic(similarity, decision="skipped", reason="signature_unavailable")
-                    elif similarity < threshold:
-                        appearance = self._appearance_diagnostic(similarity, decision="rejected", reason="below_threshold")
+                    if self._appearance_anchor_hist is None:
+                        appearance = self._appearance_diagnostic(None, decision="skipped", reason="anchor_unavailable")
+                    else:
+                        signature = self._appearance_signature(frame_bgr, candidate_xyxy)
+                        similarity = self._appearance_similarity(signature)
+                        threshold = _appearance_relock_threshold()
+                        if similarity is None:
+                            appearance = self._appearance_diagnostic(similarity, decision="skipped", reason="signature_unavailable")
+                        elif similarity < threshold:
+                            appearance = self._appearance_diagnostic(similarity, decision="rejected", reason="below_threshold")
+                            rejected.append(
+                                _rejected_candidate_diagnostic(
+                                    candidate_xyxy,
+                                    frame_w=frame_w,
+                                    frame_h=frame_h,
+                                    source=source,
+                                    confidence=confidence,
+                                    reasons=["appearance_mismatch"],
+                                    reference_xyxy=reference_xyxy,
+                                    prediction_xyxy=prediction_xyxy,
+                                    appearance=appearance,
+                                )
+                            )
+                            _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG)
+                            continue
+                        else:
+                            appearance = self._appearance_diagnostic(similarity, decision="passed")
+                    if appearance.get("decision") == "skipped":
                         rejected.append(
                             _rejected_candidate_diagnostic(
                                 candidate_xyxy,
@@ -2964,31 +3152,13 @@ class PersonBBoxTracker:
                                 frame_h=frame_h,
                                 source=source,
                                 confidence=confidence,
-                                reasons=["appearance_mismatch"],
+                                reasons=[str(appearance.get("reason") or "appearance_skipped")],
                                 reference_xyxy=reference_xyxy,
                                 prediction_xyxy=prediction_xyxy,
                                 appearance=appearance,
                             )
                         )
-                        _add_flag(self.quality_flags, PERSON_TRACKER_APPEARANCE_RELOCK_REJECTED_FLAG)
                         continue
-                    else:
-                        appearance = self._appearance_diagnostic(similarity, decision="passed")
-                if appearance.get("decision") == "skipped":
-                    rejected.append(
-                        _rejected_candidate_diagnostic(
-                            candidate_xyxy,
-                            frame_w=frame_w,
-                            frame_h=frame_h,
-                            source=source,
-                            confidence=confidence,
-                            reasons=[str(appearance.get("reason") or "appearance_skipped")],
-                            reference_xyxy=reference_xyxy,
-                            prediction_xyxy=prediction_xyxy,
-                            appearance=appearance,
-                        )
-                    )
-                    continue
 
             distance = _center_distance(candidate_xyxy, reference) if reference is not None else 0.0
             score = (
@@ -2996,6 +3166,7 @@ class PersonBBoxTracker:
                 + _iou(candidate_xyxy, reference_xyxy)
                 + max(0.0, 1.0 - distance / max(diagonal, 1.0)) * 0.2
                 + confidence * 0.1
+                + appearance_bonus
             )
             if score > best_score:
                 best_xyxy = candidate_xyxy
@@ -3181,7 +3352,7 @@ class PersonBBoxTracker:
         rejected_candidates: list[dict[str, Any]] = [
             item for item in (extra_rejected_candidates or []) if isinstance(item, dict)
         ]
-        if self._manual_lock_mode:
+        if self._manual_lock_mode and not self._manual_lock_self_heal_should_fire():
             self._clear_pending_detector_relock()
             _add_flag(self.quality_flags, PERSON_TRACKER_MANUAL_LOCK_RELOCK_BLOCKED_FLAG)
             if mark_relock_rejected_on_failure:
@@ -4187,14 +4358,14 @@ def _track_forward_detailed(
     *,
     effective_fps: float | None,
     support_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
+    golden_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
     manual_lock_mode: bool = False,
 ) -> tuple[list[dict[str, float]], list[str], list[dict[str, Any]]]:
     tracker = PersonBBoxTracker(effective_fps=effective_fps, manual_lock_mode=manual_lock_mode)
-    return tracker.track_sequence_detailed(
-        frame_paths,
-        initial_bbox,
-        support_anchor_bboxes_by_frame=support_anchor_bboxes_by_frame,
-    )
+    kwargs: dict[str, Any] = {"support_anchor_bboxes_by_frame": support_anchor_bboxes_by_frame}
+    if golden_anchor_bboxes_by_frame:
+        kwargs["golden_anchor_bboxes_by_frame"] = golden_anchor_bboxes_by_frame
+    return tracker.track_sequence_detailed(frame_paths, initial_bbox, **kwargs)
 
 
 def track_person_bbox(
@@ -4251,6 +4422,7 @@ def track_person_bbox_detailed(
     initial_frame_index: int = 0,
     effective_fps: float | None = None,
     support_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
+    golden_anchor_bboxes_by_frame: dict[int, dict[str, Any]] | None = None,
     manual_lock_mode: bool = False,
 ) -> tuple[list[dict[str, float]], list[str], list[dict[str, Any]]]:
     """Detailed variant of track_person_bbox for analysis/debug diagnostics."""
@@ -4262,13 +4434,14 @@ def track_person_bbox_detailed(
     normalized_initial = _normalize_bbox(initial_bbox)
     start_index = max(0, min(int(initial_frame_index or 0), len(frames) - 1))
     if start_index == 0:
-        return _track_forward_detailed(
-            frames,
-            normalized_initial,
-            effective_fps=effective_fps,
-            support_anchor_bboxes_by_frame=support_anchor_bboxes_by_frame,
-            manual_lock_mode=manual_lock_mode,
-        )
+        kwargs: dict[str, Any] = {
+            "effective_fps": effective_fps,
+            "support_anchor_bboxes_by_frame": support_anchor_bboxes_by_frame,
+            "manual_lock_mode": manual_lock_mode,
+        }
+        if golden_anchor_bboxes_by_frame:
+            kwargs["golden_anchor_bboxes_by_frame"] = golden_anchor_bboxes_by_frame
+        return _track_forward_detailed(frames, normalized_initial, **kwargs)
 
     backward_frames = list(reversed(frames[: start_index + 1]))
     support_by_frame = support_anchor_bboxes_by_frame if isinstance(support_anchor_bboxes_by_frame, dict) else {}
@@ -4282,19 +4455,36 @@ def track_person_bbox_detailed(
         for frame_index, anchor in support_by_frame.items()
         if start_index <= frame_index < len(frames)
     }
+    golden_by_frame = golden_anchor_bboxes_by_frame if isinstance(golden_anchor_bboxes_by_frame, dict) else {}
+    backward_golden = {
+        start_index - frame_index: anchor
+        for frame_index, anchor in golden_by_frame.items()
+        if 0 <= frame_index <= start_index
+    }
+    forward_golden = {
+        frame_index - start_index: anchor
+        for frame_index, anchor in golden_by_frame.items()
+        if start_index <= frame_index < len(frames)
+    }
+    backward_kwargs: dict[str, Any] = {
+        "effective_fps": effective_fps,
+        "support_anchor_bboxes_by_frame": backward_support,
+        "manual_lock_mode": manual_lock_mode,
+    }
+    forward_kwargs: dict[str, Any] = {
+        "effective_fps": effective_fps,
+        "support_anchor_bboxes_by_frame": forward_support,
+        "manual_lock_mode": manual_lock_mode,
+    }
+    if backward_golden:
+        backward_kwargs["golden_anchor_bboxes_by_frame"] = backward_golden
+    if forward_golden:
+        forward_kwargs["golden_anchor_bboxes_by_frame"] = forward_golden
     backward_tracked, backward_flags, backward_diagnostics = _track_forward_detailed(
-        backward_frames,
-        normalized_initial,
-        effective_fps=effective_fps,
-        support_anchor_bboxes_by_frame=backward_support,
-        manual_lock_mode=manual_lock_mode,
+        backward_frames, normalized_initial, **backward_kwargs
     )
     forward_tracked, forward_flags, forward_diagnostics = _track_forward_detailed(
-        frames[start_index:],
-        normalized_initial,
-        effective_fps=effective_fps,
-        support_anchor_bboxes_by_frame=forward_support,
-        manual_lock_mode=manual_lock_mode,
+        frames[start_index:], normalized_initial, **forward_kwargs
     )
     tracked = list(reversed(backward_tracked))[0:-1] + forward_tracked
     diagnostics = list(reversed(backward_diagnostics))[0:-1] + forward_diagnostics

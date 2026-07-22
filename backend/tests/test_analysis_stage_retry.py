@@ -13,6 +13,368 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_semantic_artifact_collection_includes_golden_frames(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for name in ("semantic_0001.jpg", "partial_semantic_0002.jpg", "golden_T.jpg", "ignore.jpg"):
+                (root / name).write_bytes(b"x")
+
+            self.assertEqual(
+                [path.name for path in analysis_router._semantic_artifacts_for_persistence(root)],
+                ["semantic_0001.jpg", "partial_semantic_0002.jpg", "golden_T.jpg"],
+            )
+    def test_golden_tracking_anchors_map_to_stable_sampled_frame_ids(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        mapped = analysis_router._golden_anchor_bboxes_by_frame(
+            [Path("frame_0001.jpg"), Path("frame_0002.jpg"), Path("frame_0003.jpg")],
+            {
+                "golden_tracking_anchors": [
+                    {
+                        "anchor_id": "a2",
+                        "timestamp_sec": 1.5,
+                        "source_frame_id": "sampled:frame_0002",
+                        "bbox": {"x": 0.5, "y": 0.1, "width": 0.2, "height": 0.7},
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(list(mapped), [1])
+        self.assertEqual(mapped[1]["anchor_id"], "a2")
+
+    def test_golden_action_window_disables_cached_frame_reuse(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        self.assertFalse(
+            analysis_router._can_reuse_cached_extracted_frames(
+                {"status": "manual"},
+                True,
+                retry_from_stage="extract_frames",
+                golden_overrides={"action_window": {"start_sec": 1.0, "end_sec": 3.0}},
+            )
+        )
+        self.assertTrue(
+            analysis_router._can_reuse_cached_extracted_frames(
+                {"status": "manual"},
+                True,
+                retry_from_stage="pose",
+                golden_overrides={"tracking_anchors": []},
+            )
+        )
+
+    def test_resolve_golden_pipeline_keyframes_updates_motion_and_bio(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        bio, resolved, motion = analysis_router._resolve_golden_pipeline_keyframes(
+            {"key_frame_timestamps": {"T": 1.1}},
+            {"source": "video_ai", "selected": [{"phase_code": "takeoff", "timestamp": 1.1}]},
+            {"selected": [{"frame_id": "old"}]},
+            {
+                "source_label_revision": 5,
+                "keyframes": {
+                    "T": {"timestamp_sec": 1.2},
+                    "A": {"timestamp_sec": 1.5},
+                    "L": {"timestamp_sec": 1.8},
+                },
+            },
+        )
+
+        self.assertEqual(bio["key_frame_timestamps"]["A"], 1.5)
+        self.assertEqual(resolved["source"], "golden_override")
+        self.assertEqual(motion["resolved_keyframes"]["golden_label_revision"], 5)
+
+    async def test_materializes_golden_keyframes_at_exact_video_timestamps(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            async def fake_extract(_video: Path, timestamp: float, target: Path) -> None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(str(timestamp), encoding="utf-8")
+
+            with patch.object(analysis_router, "extract_full_frame_at", side_effect=fake_extract):
+                paths, records = await analysis_router._materialize_golden_keyframe_frames(
+                    root / "source.mp4",
+                    root / "semantic",
+                    {
+                        "source": "golden_override",
+                        "selected": [
+                            {"key": "T", "phase_code": "takeoff", "timestamp": 1.2},
+                            {"key": "A", "phase_code": "apex", "timestamp": 1.5},
+                            {"key": "L", "phase_code": "landing", "timestamp": 1.8},
+                        ],
+                    },
+                )
+
+            self.assertEqual([path.name for path in paths], ["golden_T.jpg", "golden_A.jpg", "golden_L.jpg"])
+            self.assertEqual(records[1]["timestamp"], 1.5)
+            self.assertEqual(records[1]["frame_id"], "golden_A")
+
+    async def test_apply_golden_override_retries_same_analysis_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.routers.debug",
+                "app.services.golden_overrides",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import json
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.schemas import GoldenOverrideApplyRequest
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            analysis_id = str(uuid4())
+            run_id = str(uuid4())
+            upload_dir = Path(tmpdir) / "uploads" / analysis_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            video = upload_dir / "source.mp4"
+            video.write_bytes(b"video")
+            label_dir = Path(tmpdir) / "uploads" / "_debug" / run_id
+            label_dir.mkdir(parents=True, exist_ok=True)
+            (label_dir / "golden_label.json").write_text(
+                json.dumps(
+                    {
+                        "revision": 2,
+                        "keyframes": {"T": 1.2, "A": 1.5, "L": 1.8},
+                        "tracking_anchors": [
+                            {
+                                "anchor_id": "a1",
+                                "timestamp_sec": 1.25,
+                                "source_frame_id": "sampled:frame_0001",
+                                "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.5},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        analysis_profile="jump",
+                        video_path=str(video),
+                        status="completed",
+                        report={"summary": "old"},
+                        pose_data={"frames": []},
+                        bio_data={"key_frames": {}},
+                        target_lock={"status": "locked", "selected_bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.5}},
+                    )
+                )
+                session.add(
+                    models.DebugRun(
+                        id=run_id,
+                        mode="local_pose_keyframes",
+                        source_type="analysis",
+                        analysis_id=analysis_id,
+                        video_path=str(video),
+                        action_type="jump",
+                        analysis_profile="jump",
+                        status="completed",
+                    )
+                )
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+
+            class _Tasks:
+                def add_task(self, func: object, *args: object, **kwargs: object) -> None:
+                    queued.append((func, args))
+
+            request = GoldenOverrideApplyRequest(debug_run_id=run_id, label_revision=2)
+            async with database.AsyncSessionLocal() as session:
+                first = await analysis_router.apply_golden_overrides_and_retry(
+                    analysis_id, request, _Tasks(), session=session
+                )
+            async with database.AsyncSessionLocal() as session:
+                second = await analysis_router.apply_golden_overrides_and_retry(
+                    analysis_id, request, _Tasks(), session=session
+                )
+                saved = await session.get(models.Analysis, analysis_id)
+
+            self.assertEqual(first.analysis_id, analysis_id)
+            self.assertEqual(first.retry_from_stage, "pose")
+            self.assertEqual(first.report_path, f"/report/{analysis_id}")
+            self.assertTrue(second.already_processing)
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0][1], (analysis_id, "pose"))
+            self.assertIsNotNone(saved)
+            assert saved is not None
+            self.assertEqual(saved.status, "pending")
+            self.assertEqual(saved.golden_overrides["source_label_revision"], 2)
+            self.assertIsNone(saved.pose_data)
+            self.assertIsNone(saved.report)
+
+    async def test_apply_golden_override_missing_video_preserves_completed_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.golden_overrides",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import json
+            from fastapi import HTTPException
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.schemas import GoldenOverrideApplyRequest
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            analysis_id = str(uuid4())
+            run_id = str(uuid4())
+            label_dir = Path(tmpdir) / "uploads" / "_debug" / run_id
+            label_dir.mkdir(parents=True, exist_ok=True)
+            (label_dir / "golden_label.json").write_text(
+                json.dumps(
+                    {
+                        "revision": 1,
+                        "analysis_profile": "jump",
+                        "keyframes": {"T": 1.0, "A": 1.5, "L": 2.0},
+                        "tracking_anchors": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        analysis_profile="jump",
+                        video_path=str(Path(tmpdir) / "missing.mp4"),
+                        status="completed",
+                        report={"summary": "keep me"},
+                    )
+                )
+                session.add(
+                    models.DebugRun(
+                        id=run_id,
+                        mode="local_pose_keyframes",
+                        source_type="analysis",
+                        analysis_id=analysis_id,
+                        video_path=str(Path(tmpdir) / "missing.mp4"),
+                        action_type="jump",
+                        analysis_profile="jump",
+                        status="completed",
+                    )
+                )
+                await session.commit()
+
+            async with database.AsyncSessionLocal() as session:
+                with self.assertRaises(HTTPException) as raised:
+                    await analysis_router.apply_golden_overrides_and_retry(
+                        analysis_id,
+                        GoldenOverrideApplyRequest(debug_run_id=run_id, label_revision=1),
+                        SimpleNamespace(add_task=lambda *_args, **_kwargs: None),
+                        session=session,
+                    )
+                saved = await session.get(models.Analysis, analysis_id)
+
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertEqual(saved.status, "completed")
+            self.assertEqual(saved.report, {"summary": "keep me"})
+
+    async def test_apply_same_completed_golden_override_does_not_queue_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["DATA_DIR"] = tmpdir
+            os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(tmpdir) / 'test.db'}"
+            for module_name in [
+                "app.database",
+                "app.models",
+                "app.routers.analysis",
+                "app.services.golden_overrides",
+                "app.services.pipeline_version",
+            ]:
+                sys.modules.pop(module_name, None)
+
+            import json
+            import app.database as database
+            import app.models as models
+            import app.routers.analysis as analysis_router
+            from app.schemas import GoldenOverrideApplyRequest
+            from app.services.golden_overrides import golden_override_hash, normalize_golden_label
+
+            database.ensure_storage_dirs()
+            await database.init_db()
+            analysis_id = str(uuid4())
+            run_id = str(uuid4())
+            video = Path(tmpdir) / "source.mp4"
+            video.write_bytes(b"video")
+            label = {
+                "revision": 1,
+                "analysis_profile": "jump",
+                "keyframes": {"T": 1.0, "A": 1.5, "L": 2.0},
+                "tracking_anchors": [],
+            }
+            label_dir = Path(tmpdir) / "uploads" / "_debug" / run_id
+            label_dir.mkdir(parents=True, exist_ok=True)
+            (label_dir / "golden_label.json").write_text(json.dumps(label), encoding="utf-8")
+            run = models.DebugRun(
+                id=run_id,
+                mode="local_pose_keyframes",
+                source_type="analysis",
+                analysis_id=analysis_id,
+                video_path=str(video),
+                action_type="jump",
+                analysis_profile="jump",
+                status="completed",
+            )
+            override = normalize_golden_label(label, run)
+            override["label_hash"] = golden_override_hash(override)
+            async with database.AsyncSessionLocal() as session:
+                session.add(
+                    models.Analysis(
+                        id=analysis_id,
+                        action_type="jump",
+                        analysis_profile="jump",
+                        video_path=str(video),
+                        status="completed",
+                        report={"summary": "current"},
+                        golden_overrides=override,
+                    )
+                )
+                session.add(run)
+                await session.commit()
+
+            queued: list[tuple[object, tuple[object, ...]]] = []
+            async with database.AsyncSessionLocal() as session:
+                response = await analysis_router.apply_golden_overrides_and_retry(
+                    analysis_id,
+                    GoldenOverrideApplyRequest(debug_run_id=run_id, label_revision=1),
+                    SimpleNamespace(add_task=lambda func, *args: queued.append((func, args))),
+                    session=session,
+                )
+
+            self.assertEqual(response.status, "completed")
+            self.assertFalse(response.already_processing)
+            self.assertEqual(queued, [])
+
     def test_normalize_processing_logs_repairs_known_mojibake(self) -> None:
         sys.modules.pop("app.routers.analysis", None)
         import app.routers.analysis as analysis_router
