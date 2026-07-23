@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
 import { createPlan, extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSession } from "../api/client";
+import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import IslandShareDialog from "../modern/IslandShareDialog";
 
 const LOCATION_MODE_STORAGE_KEY = "plan_location_mode";
 
@@ -58,6 +60,8 @@ export default function PlanPage() {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
   const [hasAppliedFocusTarget, setHasAppliedFocusTarget] = useState(false);
   const routeState = location.state as PlanLocationState;
   const focusSessionId = routeState?.focusSessionId ?? null;
@@ -270,6 +274,30 @@ export default function PlanPage() {
     }
   };
 
+  const handleSharePlan = async () => {
+    if (!plan) return;
+    setIsSharing(true);
+    try {
+      const sections = plan.plan_json.days.flatMap((day) => day.sessions.map((session) => ({
+        label: `第 ${day.day} 天 · ${day.theme}`,
+        title: session.title,
+        body: session.description,
+        meta: `${session.duration}${session.is_office_trainable ? " · 居家可练" : " · 需上冰"}`,
+      })));
+      const result = await createAdaptiveSharePoster({
+        eyebrow: "Animal Island · 训练计划",
+        title: plan.plan_json.title,
+        subtitle: `训练聚焦：${plan.plan_json.focus_skill}`,
+        intro: "按天完成训练，记录每一次小进步。",
+        sections,
+        filename: `training-plan-${plan.id}.jpg`,
+      });
+      setSharePreview(createShareImagePreview(result, false));
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
   return (
     <main className="app-shell page-scroll-container page-content min-h-screen">
       <section className="page-content safe-bottom mx-auto min-h-screen w-full max-w-[1480px] px-4 pt-20 phone:px-5 tablet:px-6 tablet:pt-24 web:px-8 web:pb-10">
@@ -284,11 +312,12 @@ export default function PlanPage() {
                   type="button"
                   onClick={handleRegeneratePlan}
                   disabled={isRegenerating || isExtending}
-                  className="min-h-[44px] w-full rounded-full border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-600 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60 phone:w-auto"
+                  className="island-button island-button--secondary min-h-[44px] w-full phone:w-auto"
                 >
                   {isRegenerating ? "重新生成中..." : "重新生成"}
                 </button>
               ) : null}
+              {plan ? <button type="button" className="island-button island-button--primary min-h-[44px] w-full phone:w-auto" onClick={() => void handleSharePlan()} disabled={isSharing}>{isSharing ? "生成中..." : "分享计划"}</button> : null}
               <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-center text-sm font-medium text-slate-600 shadow-sm">
                 整体进度 {progress.completed}/{progress.total}
               </div>
@@ -484,6 +513,7 @@ export default function PlanPage() {
           )}
         </div>
       </section>
+      <IslandShareDialog preview={sharePreview} title="训练计划分享" onClose={() => setSharePreview(null)} />
     </main>
   );
 }

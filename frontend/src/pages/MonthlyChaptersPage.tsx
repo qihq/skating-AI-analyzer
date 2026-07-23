@@ -13,6 +13,8 @@ import {
 } from "../api/client";
 import MonthlyFactPreview from "../components/MonthlyFactPreview";
 import MonthlyChapterEditor from "../components/MonthlyChapterEditor";
+import IslandShareDialog from "../modern/IslandShareDialog";
+import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
 
 const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -44,6 +46,7 @@ export default function MonthlyChaptersPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
   const chapterRequestVersion = useRef(0);
 
   useEffect(() => {
@@ -181,6 +184,18 @@ export default function MonthlyChaptersPage() {
 
   const monthInvalid = !MONTH_REGEX.test(yearMonth);
   const snapshot = selectedChapter?.fact_snapshot ?? null;
+  const handleShareChapter = async () => {
+    if (!selectedChapter) return;
+    const result = await createAdaptiveSharePoster({
+      eyebrow: "Animal Island · 月度故事",
+      title: selectedChapter.year_month,
+      subtitle: skaters.find((item) => item.id === selectedSkaterId)?.display_name || "成长记录",
+      intro: selectedChapter.final_text || selectedChapter.draft_text || "本月故事还在整理中。",
+      sections: [{ label: "章节状态", title: statusLabel(selectedChapter.status), body: `第 ${selectedChapter.revision} 次修订`, meta: "每一步都值得被记住" }],
+      filename: `monthly-story-${selectedChapter.year_month}.jpg`,
+    });
+    setSharePreview(createShareImagePreview(result, false));
+  };
 
   return (
     <div className="space-y-6">
@@ -229,6 +244,7 @@ export default function MonthlyChaptersPage() {
       <section className="app-card p-5">
         <h2 className="text-lg font-semibold text-slate-900">章节修订流程</h2>
         <div className="mt-4 flex flex-wrap gap-3">
+          <button type="button" className="island-button island-button--secondary min-h-[44px] px-5" onClick={() => void handleShareChapter()} disabled={!selectedChapter}>分享月度故事</button>
           <button
             type="button"
             className="app-pill min-h-[44px] px-5 text-sm font-semibold"
@@ -281,6 +297,7 @@ export default function MonthlyChaptersPage() {
           error={editorError}
         />
       ) : null}
+      <IslandShareDialog preview={sharePreview} title="月度故事分享" onClose={() => setSharePreview(null)} />
     </div>
   );
 }

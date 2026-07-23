@@ -55,9 +55,8 @@ def _require_pdf_dependencies():
         from PIL import Image as PilImage
         from PIL import ImageOps
     except ImportError as exc:  # pragma: no cover - deployment dependency guard
-        raise AnnualPdfError(
-            "Annual PDF export requires reportlab and pypdf. Install backend requirements before exporting."
-        ) from exc
+        missing = getattr(exc, "name", None) or "reportlab/pypdf"
+        raise AnnualPdfError(f"年度 PDF 运行依赖缺失：{missing}。请重新安装完整后端依赖后再试。") from exc
     return {
         "colors": colors,
         "TA_CENTER": TA_CENTER,

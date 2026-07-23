@@ -20,6 +20,9 @@ The app now includes an optional **Animal Island-inspired modern interface** for
 - **Family-friendly atmosphere**: Automatic morning, daytime, sunset, and night themes can be pinned manually. The scene uses Animal Island grass texture, sea, and tree-line artwork with time-aware colour treatment; night mode uses dedicated high-contrast chrome text. Child and parent modes share the same layout while adjusting copy, density, and protected tools.
 - **Refined navigation assets**: The four primary destinations use adapted Animal Island map, camera, miles, and design icons. The review action stays neutral outside the review workspace and becomes sun-yellow only when active.
 - **PWA support**: The production build registers a same-origin service worker, includes an installable manifest, and provides navigation fallback when the shell is cached. API and write requests are not cached.
+- **Integrated growth tools**: Training plans and comparisons now open through dedicated hubs, so routes without IDs no longer lead to invalid-parameter dead ends.
+- **Animal Island dialogs and sharing**: Parent PIN prompts, milestone cards, plans, comparisons, monthly stories, and annual collections use the same responsive island dialog language. Long-form posters grow with their content; annual collections pair a compact cover card with the full PDF download.
+- **Complete annual PDF runtime**: The all-in-one image includes pinned `reportlab` and `pypdf` dependencies, and missing runtime modules are reported explicitly if an incomplete deployment is detected.
 
 The natural palette, rounded cards, and navigation language are adapted from [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui), licensed under CC BY-NC 4.0. This adaptation is for personal, non-commercial use and retains attribution.
 

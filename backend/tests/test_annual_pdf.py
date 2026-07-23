@@ -18,6 +18,22 @@ def _annual_pdf_module():
 
 
 class AnnualPdfTests(unittest.TestCase):
+    def test_dependency_error_names_missing_module(self) -> None:
+        import builtins
+        from unittest.mock import patch
+
+        annual_pdf = _annual_pdf_module()
+        real_import = builtins.__import__
+
+        def blocked_import(name, *args, **kwargs):
+            if name.startswith("reportlab"):
+                raise ModuleNotFoundError("No module named 'reportlab'", name="reportlab")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=blocked_import):
+            with self.assertRaisesRegex(annual_pdf.AnnualPdfError, "reportlab"):
+                annual_pdf._require_pdf_dependencies()
+
     def test_renderer_writes_extractable_chinese_text_and_text_only_fallback(self) -> None:
         render_annual_pdf = _annual_pdf_module().render_annual_pdf
 

@@ -229,48 +229,48 @@ export async function createAdaptiveSharePoster({
   ctx.scale(scale, scale);
 
   const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#F8FBFF");
-  gradient.addColorStop(0.54, "#EEF7F4");
-  gradient.addColorStop(1, "#FFF7ED");
+  gradient.addColorStop(0, "#BDE8EB");
+  gradient.addColorStop(0.54, "#E5F5E7");
+  gradient.addColorStop(1, "#F5F0E3");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.fillStyle = "rgba(255,250,240,0.96)";
   drawRoundRect(ctx, 64, 64, width - 128, height - 128, 44);
   ctx.fill();
-  ctx.strokeStyle = "rgba(148,163,184,0.32)";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#D9CCB5";
+  ctx.lineWidth = 4;
   ctx.stroke();
 
   let y = 142;
-  ctx.fillStyle = "#2563EB";
+  ctx.fillStyle = "#0B7E77";
   ctx.font = "800 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   ctx.fillText(eyebrow, 112, y);
 
   y += 84;
-  ctx.fillStyle = "#0F172A";
+  ctx.fillStyle = "#59472F";
   ctx.font = "800 56px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   drawWrappedText(ctx, safeTitle, 112, y, scoreValue ? 560 : contentWidth, 64);
 
-  ctx.fillStyle = "#64748B";
+  ctx.fillStyle = "#806D55";
   ctx.font = "500 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   drawWrappedText(ctx, safeSubtitle, 112, y + titleHeight + 28, scoreValue ? 560 : contentWidth, 38);
 
   if (scoreValue) {
-    ctx.fillStyle = "#DBEAFE";
+    ctx.fillStyle = "#FFF2BD";
     drawRoundRect(ctx, 710, 142, 220, 220, 110);
     ctx.fill();
-    ctx.strokeStyle = "#93C5FD";
+    ctx.strokeStyle = "#E3BD46";
     ctx.lineWidth = 5;
     ctx.stroke();
-    ctx.fillStyle = "#1D4ED8";
+    ctx.fillStyle = "#665130";
     ctx.font = "800 66px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(scoreValue, 820, 244);
     ctx.font = "700 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     ctx.fillText(scoreLabel ?? "Score", 820, 288);
     if (scoreMeta) {
-      ctx.fillStyle = "#64748B";
+      ctx.fillStyle = "#806D55";
       ctx.font = "600 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       ctx.fillText(scoreMeta, 820, 322);
     }
@@ -279,7 +279,7 @@ export async function createAdaptiveSharePoster({
 
   y += titleHeight + 28 + subtitleHeight + 68;
   if (safeIntro) {
-    ctx.fillStyle = "#334155";
+    ctx.fillStyle = "#67543B";
     ctx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
     y += drawWrappedText(ctx, safeIntro, 112, y, contentWidth, 46) + 60;
   }
@@ -297,30 +297,30 @@ export async function createAdaptiveSharePoster({
     ctx.fillText(section.label, 152, y + 48);
     let textY = y + 94;
     if (section.title) {
-      ctx.fillStyle = "#0F172A";
+      ctx.fillStyle = "#59472F";
       ctx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       textY += drawWrappedText(ctx, section.title, 152, textY, textWidth, 40) + 16;
     }
     if (section.body) {
-      ctx.fillStyle = "#475569";
+      ctx.fillStyle = "#705D45";
       ctx.font = "500 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       textY += drawWrappedText(ctx, section.body, 152, textY, textWidth, 34) + 14;
     }
     if (section.meta) {
-      ctx.fillStyle = "#64748B";
+      ctx.fillStyle = "#8A775F";
       ctx.font = "600 23px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       drawWrappedText(ctx, section.meta, 152, textY, textWidth, 30);
     }
     y += blockHeight + 28;
   });
 
-  ctx.strokeStyle = "rgba(148,163,184,0.34)";
+  ctx.strokeStyle = "rgba(126,105,77,0.3)";
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(112, y + 26);
   ctx.lineTo(968, y + 26);
   ctx.stroke();
-  ctx.fillStyle = "#94A3B8";
+  ctx.fillStyle = "#9A876E";
   ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   drawWrappedText(ctx, footer, 112, y + 82, contentWidth, 30);
 

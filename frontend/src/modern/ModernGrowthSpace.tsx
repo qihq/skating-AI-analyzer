@@ -3,13 +3,13 @@ import { useSearchParams } from "react-router-dom";
 
 import { IslandPageHeader } from "./IslandSurface";
 import SectionNav from "./SectionNav";
+import GrowthCompareHub from "./GrowthCompareHub";
+import GrowthPlanHub from "./GrowthPlanHub";
 
 const AnnualCollectionPage = lazy(() => import("../pages/AnnualCollectionPage"));
 const ArchivePage = lazy(() => import("../pages/ArchivePage"));
-const ComparePage = lazy(() => import("../pages/ComparePage"));
 const HistoryPage = lazy(() => import("../pages/HistoryPage"));
 const MonthlyChaptersPage = lazy(() => import("../pages/MonthlyChaptersPage"));
-const PlanPage = lazy(() => import("../pages/PlanPage"));
 const SkillTreePage = lazy(() => import("../pages/SkillTreePage"));
 const SnowballPage = lazy(() => import("../pages/SnowballPage"));
 
@@ -43,11 +43,11 @@ export default function ModernGrowthSpace() {
   const content: Record<GrowthView, ReactNode> = {
     overview: <ArchivePage />,
     timeline: <HistoryPage />,
-    compare: <ComparePage />,
+    compare: <GrowthCompareHub />,
     chapters: <MonthlyChaptersPage />,
     annual: <AnnualCollectionPage />,
     skills: <SkillTreePage />,
-    plans: <PlanPage />,
+    plans: <GrowthPlanHub />,
     snowball: <SnowballPage />,
   };
   return <ModernGrowthFrame view={view}>{content[view]}</ModernGrowthFrame>;

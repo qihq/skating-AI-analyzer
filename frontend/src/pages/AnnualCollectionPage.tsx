@@ -17,6 +17,8 @@ import {
 import AnnualChapterPicker from "../components/AnnualChapterPicker";
 import AnnualExportStatus from "../components/AnnualExportStatus";
 import AnnualMilestonePicker from "../components/AnnualMilestonePicker";
+import IslandShareDialog from "../modern/IslandShareDialog";
+import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
 
 function initialYear(): number { return new Date().getFullYear(); }
 function message(error: unknown): string {
@@ -36,6 +38,7 @@ export default function AnnualCollectionPage() {
   const [exportJob, setExportJob] = useState<AnnualExport | null>(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -103,6 +106,21 @@ export default function AnnualCollectionPage() {
     finally { setWorking(false); }
   };
 
+  const handleShareAnnual = async () => {
+    if (!exportJob || exportJob.status !== "completed") return;
+    const skater = skaters.find((item) => item.id === skaterId);
+    const highlights = chapters.slice(0, 4).map((chapter) => `${chapter.year_month}: ${chapter.final_text || chapter.draft_text || "月度记录"}`).join("\n");
+    const result = await createAdaptiveSharePoster({
+      eyebrow: "Animal Island · 年度合集",
+      title: `${year} 年成长合集`,
+      subtitle: skater?.display_name || skater?.name || "训练档案",
+      intro: `收录 ${selectedCount} 个月度章节 · ${selectedMilestoneIds.length} 个里程碑`,
+      sections: [{ label: "年度亮点", title: "这一年的小岛足迹", body: highlights || "每一次练习都值得被记录。", meta: "PDF 完整合集可下载分享" }],
+      filename: `annual-collection-${year}.jpg`,
+    });
+    setSharePreview(createShareImagePreview(result, false));
+  };
+
   return (
     <div className="space-y-6">
       <section className="app-card p-6 tablet:p-8">
@@ -119,6 +137,13 @@ export default function AnnualCollectionPage() {
       <section className="app-card flex flex-wrap items-center gap-3 p-5"><p className="mr-auto text-sm text-slate-600">已选择 {selectionSummary}</p><button type="button" className="app-pill min-h-[44px] px-5 font-semibold" disabled={!canExport} onClick={() => void handlePreview()}>预览合集</button><button type="button" className="app-pill min-h-[44px] px-5 font-semibold" disabled={!canExport} onClick={() => void handleExport()}>生成年度 PDF</button></section>
       {preview ? <section className="rounded-2xl bg-blue-50 px-5 py-4 text-sm leading-7 text-blue-800">预览：{preview.coverage.published_chapter_count} 个已发布章节，其中 {preview.coverage.text_only_chapter_count} 个将以文字版呈现。</section> : null}
       <AnnualExportStatus exportJob={exportJob} onRetry={() => void handleRetryExport()} retrying={working} />
+      {exportJob?.status === "completed" ? <button type="button" className="island-button island-button--primary" onClick={() => void handleShareAnnual()}>分享年度合集</button> : null}
+      <IslandShareDialog
+        preview={sharePreview}
+        title="年度合集分享"
+        onClose={() => setSharePreview(null)}
+        extraActions={exportJob?.status === "completed" ? <a className="island-button island-button--secondary" href={`/api/annual/exports/${exportJob.id}/download`} download={`annual-collection-${year}.pdf`}>下载 PDF</a> : null}
+      />
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   shareImageFile,
   ShareImageResult,
 } from "../utils/shareCanvas";
+import IslandDialog from "../modern/IslandDialog";
 
 interface MilestoneShareDialogProps {
   open: boolean;
@@ -90,60 +91,18 @@ export default function MilestoneShareDialog({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="分享里程碑"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="max-h-[90vh] w-full max-w-md overflow-auto rounded-[28px] bg-white p-6 shadow-xl">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold text-slate-900">分享里程碑</h2>
-          <button type="button" onClick={onClose} className="rounded-full px-3 py-1 text-sm font-semibold text-slate-500 hover:bg-slate-100">
-            ✕
-          </button>
-        </div>
-
+    <IslandDialog title="分享里程碑" description="把这次解锁做成一张岛屿纪念卡。" icon="growth" onClose={onClose} className="island-share-dialog" footer={result ? <><button type="button" className="island-button island-button--quiet" onClick={() => void handleCopy()}>{copied ? "已复制" : "复制到剪贴板"}</button><button type="button" className="island-button island-button--secondary" onClick={handleDownload}>保存图片</button>{canNativeShareImage(result.blob,result.filename)?<button type="button" className="island-button island-button--primary" onClick={() => void handleShare()}>系统分享</button>:null}</> : null}>
         {busy ? (
-          <p className="mt-8 py-12 text-center text-sm text-slate-500">正在生成分享图…</p>
+          <p className="island-route-loading"><span className="island-leaf-spinner" /> 正在生成分享图…</p>
         ) : error ? (
           <p role="alert" className="mt-6 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</p>
         ) : previewUrl.current ? (
           <>
-            <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
+            <div className="island-share-preview">
               <img src={previewUrl.current} alt="里程碑分享预览" className="w-full" />
-            </div>
-            <div className="mt-4 flex flex-wrap gap-3">
-              <button
-                type="button"
-                className="app-pill min-h-[44px] px-5 text-sm font-semibold"
-                onClick={() => void handleCopy()}
-              >
-                {copied ? "已复制" : "复制到剪贴板"}
-              </button>
-              <button
-                type="button"
-                className="app-pill min-h-[44px] px-5 text-sm font-semibold"
-                onClick={handleDownload}
-              >
-                保存图片
-              </button>
-              {result && canNativeShareImage(result.blob, result.filename) ? (
-                <button
-                  type="button"
-                  className="app-pill min-h-[44px] px-5 text-sm font-semibold"
-                  onClick={() => void handleShare()}
-                >
-                  系统分享
-                </button>
-              ) : null}
             </div>
           </>
         ) : null}
-      </div>
-    </div>
+    </IslandDialog>
   );
 }

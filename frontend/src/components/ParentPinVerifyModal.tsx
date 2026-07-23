@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import { verifyPin } from "../api/client";
 import PinInput from "./PinInput";
+import IslandDialog from "../modern/IslandDialog";
 
 const LOCK_SECONDS = 30;
 
@@ -92,13 +93,8 @@ export default function ParentPinVerifyModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/28 px-4 backdrop-blur-sm">
-      <section className="app-card w-full max-w-md p-6 tablet:p-7">
-        <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Parent PIN</p>
-        <h2 className="mt-3 text-2xl font-semibold text-slate-900">{title}</h2>
-        <p className="mt-3 text-sm leading-6 text-slate-500">{description}</p>
-
-        <div className="mt-6">
+    <IslandDialog title={title} description={description} icon="me" onClose={onClose} className="island-dialog__panel--compact" footer={<><button type="button" onClick={onClose} className="island-button island-button--secondary">取消</button><button type="button" onClick={() => void handleSubmit()} disabled={isSubmitting || isLocked || pin.length !== pinLength} className="island-button island-button--primary">{isSubmitting ? <><span className="island-leaf-spinner" />验证中…</> : confirmLabel}</button></>}>
+        <div className="island-pin-house"><div className="island-pin-house__roof" aria-hidden="true" /><p>只有家长知道的小屋钥匙</p>
           <PinInput
             length={pinLength}
             value={pin}
@@ -110,26 +106,11 @@ export default function ParentPinVerifyModal({
             label={title}
           />
         </div>
-
-        {error ? <p className="mt-4 text-center text-sm text-rose-500">{error}</p> : null}
+        {error ? <p className="island-dialog__error">{error}</p> : null}
         {failedAttempts > 0 && !error && !isLocked ? (
           <p className="mt-4 text-center text-sm text-amber-500">已输错 {failedAttempts} 次。</p>
         ) : null}
 
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
-          <button type="button" onClick={onClose} className="app-pill">
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleSubmit()}
-            disabled={isSubmitting || isLocked || pin.length !== pinLength}
-            className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {isSubmitting ? "验证中..." : confirmLabel}
-          </button>
-        </div>
-      </section>
-    </div>
+    </IslandDialog>
   );
 }
