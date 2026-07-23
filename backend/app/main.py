@@ -39,6 +39,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 scheduler = AsyncIOScheduler()
 logger = logging.getLogger(__name__)
+annual_export_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _sync_skater_progress_background() -> None:
@@ -60,7 +61,9 @@ async def _backfill_applied_corrections_startup() -> None:
 
 async def _recover_annual_exports_startup() -> None:
     async def enqueue(export_id: str) -> None:
-        asyncio.create_task(run_export(export_id))
+        task = asyncio.create_task(run_export(export_id))
+        annual_export_tasks.add(task)
+        task.add_done_callback(annual_export_tasks.discard)
 
     try:
         recovered = await recover_incomplete_exports(enqueue=enqueue)
@@ -100,6 +103,11 @@ async def lifespan(_: FastAPI):
     scheduler.start()
     logger.info("startup: complete")
     yield
+    pending_export_tasks = tuple(annual_export_tasks)
+    for task in pending_export_tasks:
+        task.cancel()
+    if pending_export_tasks:
+        await asyncio.gather(*pending_export_tasks, return_exceptions=True)
     if scheduler.running:
         scheduler.shutdown(wait=False)
 
