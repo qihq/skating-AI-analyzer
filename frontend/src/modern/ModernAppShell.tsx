@@ -26,6 +26,7 @@ function ModernShellContent() {
 
   return (
     <div className="modern-island-shell" data-island-period={period}>
+      <div className="island-scene" aria-hidden="true" />
       <IslandRail activeSpace={activeSpace} />
       <div className="modern-island-shell__body">
         <header className="island-topbar">

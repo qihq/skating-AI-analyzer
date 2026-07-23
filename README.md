@@ -16,8 +16,9 @@ The app now includes an optional **Animal Island-inspired modern interface** for
 
 - **Four clear spaces**: Today Island (`/home`), Start Review / Rink Cabin (`/review`), Growth Islands (`/growth`), and Resident Services (`/me`). Previously scattered screens are grouped into these destinations without breaking legacy URLs.
 - **Unified review workspace**: Report summary, key moments, body and pose, follow-up questions, and diagnostics are sections of one analysis detail page. Legacy workspace `tab` links map to the matching modern section.
-- **Responsive by design**: Phone PWA uses a safe-area-aware bottom dock with a raised Start Review action; iPad portrait keeps the dock and uses a two-column canvas; iPad landscape and desktop use a persistent left rail.
-- **Family-friendly atmosphere**: Automatic morning, daytime, sunset, and night themes can be pinned manually. Child and parent modes share the same layout while adjusting copy, density, and protected tools.
+- **Responsive by design**: Phone PWA uses a safe-area-aware dock fixed to the viewport bottom; iPad portrait keeps the dock and uses a two-column canvas; iPad landscape and desktop use a persistent left rail. Only the current destination is highlighted, including Start Review.
+- **Family-friendly atmosphere**: Automatic morning, daytime, sunset, and night themes can be pinned manually. The scene uses Animal Island grass texture, sea, and tree-line artwork with time-aware colour treatment; night mode uses dedicated high-contrast chrome text. Child and parent modes share the same layout while adjusting copy, density, and protected tools.
+- **Refined navigation assets**: The four primary destinations use adapted Animal Island map, camera, miles, and design icons. The review action stays neutral outside the review workspace and becomes sun-yellow only when active.
 - **PWA support**: The production build registers a same-origin service worker, includes an installable manifest, and provides navigation fallback when the shell is cached. API and write requests are not cached.
 
 The natural palette, rounded cards, and navigation language are adapted from [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui), licensed under CC BY-NC 4.0. This adaptation is for personal, non-commercial use and retains attribution.
