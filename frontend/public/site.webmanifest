@@ -1,7 +1,7 @@
 {
-  "name": "Skating Analyzer",
+  "name": "IceBuddy 冰上成长岛",
   "short_name": "IceBuddy",
-  "description": "IceBuddy skating training analyzer",
+  "description": "家庭花样滑冰训练复盘与成长记录",
   "icons": [
     {
       "src": "/icon-192.png",
@@ -14,8 +14,10 @@
       "type": "image/png"
     }
   ],
-  "theme_color": "#fafafa",
-  "background_color": "#fafafa",
+  "theme_color": "#19b9ab",
+  "background_color": "#e9f7f0",
   "display": "standalone",
-  "orientation": "portrait"
+  "orientation": "any",
+  "start_url": "/home",
+  "scope": "/"
 }

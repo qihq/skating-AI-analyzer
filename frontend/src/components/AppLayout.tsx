@@ -6,6 +6,7 @@ import AppHeader from "./AppHeader";
 import BottomNav from "./BottomNav";
 import ModeToggle from "./ModeToggle";
 import UiThemeToggle from "./UiThemeToggle";
+import ModernAppShell from "../modern/ModernAppShell";
 
 function modernTitleForPath(pathname: string) {
   if (pathname.startsWith("/report")) return "分析详情";
@@ -68,7 +69,7 @@ export default function AppLayout() {
   const { theme, isModern } = useAppearance();
   const activeTab = primaryTabForPath(location.pathname);
 
-  if (isModern) return <ModernLayout />;
+  if (isModern) return <ModernAppShell />;
 
   return (
     <div className="app-shell" data-ui-theme={theme}>

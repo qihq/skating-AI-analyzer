@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PRIMARY_NAV_ITEMS, primaryTabForPath } from "./navigation";
+import { MODERN_NAV_ITEMS, modernSpaceForPath, PRIMARY_NAV_ITEMS, primaryTabForPath } from "./navigation";
 
 describe("primary navigation", () => {
   it("contains exactly the four parent concepts", () => {
@@ -18,5 +18,25 @@ describe("primary navigation", () => {
     expect(primaryTabForPath("/history")).toBe("archive");
     expect(primaryTabForPath("/compare/a/b")).toBe("archive");
     expect(primaryTabForPath("/settings")).toBeUndefined();
+  });
+});
+
+describe("modern island navigation", () => {
+  it("exposes exactly four family-growth spaces with review as the primary action", () => {
+    expect(MODERN_NAV_ITEMS.map((item) => [item.label, item.to, item.primary])).toEqual([
+      ["首页", "/home", false],
+      ["开始复盘", "/review", true],
+      ["成长", "/growth", false],
+      ["我的", "/me", false],
+    ]);
+  });
+
+  it("folds legacy routes into their modern parent spaces", () => {
+    expect(modernSpaceForPath("/report/analysis-1/workspace")).toBe("review");
+    expect(modernSpaceForPath("/analysis-chat")).toBe("review");
+    expect(modernSpaceForPath("/chapters")).toBe("growth");
+    expect(modernSpaceForPath("/plan/plan-1")).toBe("growth");
+    expect(modernSpaceForPath("/settings/api")).toBe("me");
+    expect(modernSpaceForPath("/golden")).toBe("me");
   });
 });

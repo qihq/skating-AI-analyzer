@@ -97,6 +97,16 @@ body {
   overflow-y: visible;
 }
 
+.app-route-loading {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  color: #725d42;
+  background: #e9f7f0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 * {
   box-sizing: border-box;
 }

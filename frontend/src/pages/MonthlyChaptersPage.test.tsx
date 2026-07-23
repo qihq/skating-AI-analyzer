@@ -115,8 +115,9 @@ describe("MonthlyChaptersPage", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByLabelText("练习档案");
-    fireEvent.click(screen.getByRole("button", { name: "整理本月事实" }));
+    const gatherButton = screen.getByRole("button", { name: "整理本月事实" });
+    await waitFor(() => expect(gatherButton).toBeEnabled());
+    fireEvent.click(gatherButton);
     await screen.findByText("本月记录 2 次训练课次");
 
     fireEvent.click(screen.getByRole("button", { name: "生成叙事初稿" }));

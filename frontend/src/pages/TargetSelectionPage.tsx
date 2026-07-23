@@ -62,7 +62,7 @@ function midpoint(a: PointerPoint, b: PointerPoint) {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
-export default function TargetSelectionPage() {
+export default function TargetSelectionPage({ hideHeader = false }: { hideHeader?: boolean }) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -353,13 +353,13 @@ export default function TargetSelectionPage() {
 
   return (
     <div className="space-y-6">
-      <section className="app-card p-4 phone:p-6 tablet:p-8">
+      {!hideHeader ? <section className="app-card p-4 phone:p-6 tablet:p-8">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Target Lock</p>
         <h1 className="mt-3 text-3xl font-semibold text-slate-900">确认主滑行者</h1>
         <p className="mt-4 max-w-2xl text-base leading-8 text-slate-500">
           冰场多人同框时，请确认这次要分析的选手。可以选择自动候选，也可以切换到手动框选。
         </p>
-      </section>
+      </section> : null}
 
       <section className="app-card p-6 tablet:p-8">
         <div className="mb-4 flex flex-col gap-3 phone:flex-row phone:flex-wrap">

@@ -13,7 +13,7 @@ import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { parseApiDate, apiDateTimeFormatter } from "../utils/datetime";
 
-type WorkspaceTab = "pose" | "evidence" | "diagnostics" | "followup";
+export type WorkspaceTab = "pose" | "evidence" | "diagnostics" | "followup";
 
 const TAB_META: Array<{ id: WorkspaceTab; label: string; description: string }> = [
   { id: "pose", label: "姿态", description: "骨架与生物力学" },
@@ -52,7 +52,7 @@ function draftKeyframesFromAnalysis(analysis: AnalysisDetail | null) {
   };
 }
 
-export default function ReportWorkspacePage() {
+export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: { forcedTab?: WorkspaceTab; hideHeader?: boolean } = {}) {
   const { id } = useParams<{ id: string }>();
   const { isParentMode, enterParentMode } = useAppMode();
   const [searchParams] = useSearchParams();
@@ -62,7 +62,7 @@ export default function ReportWorkspacePage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const activeTab = (searchParams.get("tab") as WorkspaceTab | null) ?? "pose";
+  const activeTab = forcedTab ?? (searchParams.get("tab") as WorkspaceTab | null) ?? "pose";
   const title = analysis ? buildTitle(analysis) : "报告工作台";
   const draftKeyframes = useMemo(() => draftKeyframesFromAnalysis(analysis), [analysis]);
 
@@ -176,7 +176,7 @@ export default function ReportWorkspacePage() {
       {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
 
-      <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
+      {!hideHeader ? <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-7">
         <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Report Workspace</p>
@@ -209,7 +209,7 @@ export default function ReportWorkspacePage() {
             );
           })}
         </div>
-      </section>
+      </section> : null}
 
       {!analysis ? (
         <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载工作台...</div>

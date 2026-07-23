@@ -26,7 +26,13 @@ function keyFrameChips(analysis: AnalysisDetail) {
   return analysis.bio_data?.key_frames ? Object.entries(analysis.bio_data.key_frames).filter(([, value]) => value) : [];
 }
 
-export default function AnalysisChatPage() {
+export default function AnalysisChatPage({
+  autoSelectFirst = true,
+  showSelectorWhenEmpty = false,
+}: {
+  autoSelectFirst?: boolean;
+  showSelectorWhenEmpty?: boolean;
+}) {
   const { isParentMode, enterParentMode } = useAppMode();
   const [searchParams, setSearchParams] = useSearchParams();
   const [records, setRecords] = useState<AnalysisListItem[]>([]);
@@ -72,7 +78,7 @@ export default function AnalysisChatPage() {
         }
         setRecords(data);
         const firstCompleted = data.find((record) => record.status === "completed");
-        if (!selectedId && firstCompleted) {
+        if (autoSelectFirst && !selectedId && firstCompleted) {
           setSearchParams({ analysis: firstCompleted.id }, { replace: true });
         }
       } catch {
@@ -90,7 +96,7 @@ export default function AnalysisChatPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [autoSelectFirst]);
 
   const loadSelectedAnalysis = async (id: string) => {
     if (!id) {
@@ -278,6 +284,8 @@ export default function AnalysisChatPage() {
                 onNotice={showNotice}
               />
             </>
+          ) : showSelectorWhenEmpty ? (
+            <section className="app-card p-4 tablet:p-6">{selectorContent}</section>
           ) : (
             <AnalysisFollowUpPanel analysis={null} variant="workspace" />
           )}

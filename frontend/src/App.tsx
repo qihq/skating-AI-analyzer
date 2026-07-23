@@ -1,26 +1,35 @@
-import { useEffect, useLayoutEffect } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import AppLayout from "./components/AppLayout";
-import AnalysisChatPage from "./pages/AnalysisChatPage";
-import ApiSettingsPage from "./pages/ApiSettingsPage";
-import ComparePage from "./pages/ComparePage";
-import DebugPage from "./pages/DebugPage";
-import ArchivePage from "./pages/ArchivePage";
-import HistoryPage from "./pages/HistoryPage";
-import GrowthHomePage from "./pages/GrowthHomePage";
-import MonthlyChaptersPage from "./pages/MonthlyChaptersPage";
-import AnnualCollectionPage from "./pages/AnnualCollectionPage";
-import ParentSetupPage from "./pages/ParentSetupPage";
-import PlanPage from "./pages/PlanPage";
-import PoseDebugPage from "./pages/PoseDebugPage";
-import ReportPage from "./pages/ReportPage";
-import ReportWorkspacePage from "./pages/ReportWorkspacePage";
-import ReviewPage from "./pages/ReviewPage";
-import SettingsPage from "./pages/SettingsPage";
-import SkillTreePage from "./pages/SkillTreePage";
-import SnowballPage from "./pages/SnowballPage";
-import TargetSelectionPage from "./pages/TargetSelectionPage";
+import ModernGrowthSpace, { ModernGrowthFrame } from "./modern/ModernGrowthSpace";
+import ModernMeSpace, { ModernAdvancedTool } from "./modern/ModernMeSpace";
+import ThemedPage from "./modern/ThemedPage";
+import ModernReviewSpace from "./modern/ModernReviewSpace";
+import ModernOnlyLayout from "./modern/ModernOnlyLayout";
+import ModernAnalysisChatRoute from "./modern/ModernAnalysisChatRoute";
+
+const AnalysisChatPage = lazy(() => import("./pages/AnalysisChatPage"));
+const ApiSettingsPage = lazy(() => import("./pages/ApiSettingsPage"));
+const ComparePage = lazy(() => import("./pages/ComparePage"));
+const DebugPage = lazy(() => import("./pages/DebugPage"));
+const ArchivePage = lazy(() => import("./pages/ArchivePage"));
+const HistoryPage = lazy(() => import("./pages/HistoryPage"));
+const GrowthHomePage = lazy(() => import("./pages/GrowthHomePage"));
+const MonthlyChaptersPage = lazy(() => import("./pages/MonthlyChaptersPage"));
+const AnnualCollectionPage = lazy(() => import("./pages/AnnualCollectionPage"));
+const ParentSetupPage = lazy(() => import("./pages/ParentSetupPage"));
+const PlanPage = lazy(() => import("./pages/PlanPage"));
+const PoseDebugPage = lazy(() => import("./pages/PoseDebugPage"));
+const ReportPage = lazy(() => import("./pages/ReportPage"));
+const ReportWorkspacePage = lazy(() => import("./pages/ReportWorkspacePage"));
+const ReviewPage = lazy(() => import("./pages/ReviewPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const SkillTreePage = lazy(() => import("./pages/SkillTreePage"));
+const SnowballPage = lazy(() => import("./pages/SnowballPage"));
+const TargetSelectionPage = lazy(() => import("./pages/TargetSelectionPage"));
+const ModernAnalysisDetail = lazy(() => import("./modern/ModernAnalysisDetail"));
+const ModernTodayIsland = lazy(() => import("./modern/ModernTodayIsland"));
 
 function ScrollToTopOnRouteChange() {
   const location = useLocation();
@@ -118,6 +127,7 @@ export default function App() {
       <ScrollToTopOnRouteChange />
       <DesktopWheelScrollFallback />
 
+      <Suspense fallback={<div className="app-route-loading" role="status">正在打开 IceBuddy…</div>}>
       <Routes>
         <Route path="/" element={<Navigate to="/home" replace />} />
         <Route path="/upload" element={<Navigate to="/review" replace />} />
@@ -125,29 +135,36 @@ export default function App() {
         <Route path="/progress" element={<Navigate to="/archive" replace />} />
 
         <Route element={<AppLayout />}>
-          <Route path="/home" element={<GrowthHomePage />} />
-          <Route path="/chapters" element={<MonthlyChaptersPage />} />
-          <Route path="/annual" element={<AnnualCollectionPage />} />
-          <Route path="/path" element={<SkillTreePage />} />
-          <Route path="/snowball" element={<SnowballPage />} />
-          <Route path="/review" element={<ReviewPage />} />
-          <Route path="/analysis-chat" element={<AnalysisChatPage />} />
-          <Route path="/archive" element={<ArchivePage />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/compare/results/:comparison_id" element={<ComparePage />} />
-          <Route path="/compare/:id_a/:id_b" element={<ComparePage />} />
-          <Route path="/report/:id" element={<ReportPage />} />
-          <Route path="/report/:id/workspace" element={<ReportWorkspacePage />} />
-          <Route path="/report/:id/pose-debug" element={<PoseDebugPage />} />
-          <Route path="/report/:id/target" element={<TargetSelectionPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/settings/api" element={<ApiSettingsPage />} />
-          <Route path="/debug" element={<DebugPage />} />
-          <Route path="/golden" element={<DebugPage workspace="golden" />} />
+          <Route path="/home" element={<ThemedPage classic={<GrowthHomePage />} modern={<ModernTodayIsland />} />} />
+          <Route path="/growth" element={<ModernGrowthSpace />} />
+          <Route path="/chapters" element={<ThemedPage classic={<MonthlyChaptersPage />} modern={<ModernGrowthFrame view="chapters"><MonthlyChaptersPage /></ModernGrowthFrame>} />} />
+          <Route path="/annual" element={<ThemedPage classic={<AnnualCollectionPage />} modern={<ModernGrowthFrame view="annual"><AnnualCollectionPage /></ModernGrowthFrame>} />} />
+          <Route path="/path" element={<ThemedPage classic={<SkillTreePage />} modern={<ModernGrowthFrame view="skills"><SkillTreePage /></ModernGrowthFrame>} />} />
+          <Route path="/snowball" element={<ThemedPage classic={<SnowballPage />} modern={<ModernGrowthFrame view="snowball"><SnowballPage /></ModernGrowthFrame>} />} />
+          <Route path="/review" element={<ThemedPage classic={<ReviewPage />} modern={<ModernReviewSpace><ReviewPage /></ModernReviewSpace>} />} />
+          <Route path="/analysis-chat" element={<ThemedPage classic={<AnalysisChatPage />} modern={<ModernAnalysisChatRoute><AnalysisChatPage autoSelectFirst={false} showSelectorWhenEmpty /></ModernAnalysisChatRoute>} />} />
+          <Route path="/archive" element={<ThemedPage classic={<ArchivePage />} modern={<ModernGrowthFrame view="timeline"><ArchivePage /></ModernGrowthFrame>} />} />
+          <Route path="/history" element={<ThemedPage classic={<HistoryPage />} modern={<ModernGrowthFrame view="timeline"><HistoryPage /></ModernGrowthFrame>} />} />
+          <Route path="/compare/results/:comparison_id" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
+          <Route path="/compare/:id_a/:id_b" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
+          <Route path="/analysis/:id" element={<ModernAnalysisDetail />} />
+          <Route path="/report/:id" element={<ThemedPage classic={<ReportPage />} modern={<ModernAnalysisDetail initialView="summary" />} />} />
+          <Route path="/report/:id/workspace" element={<ThemedPage classic={<ReportWorkspacePage />} modern={<ModernAnalysisDetail />} />} />
+          <Route path="/report/:id/pose-debug" element={<ThemedPage classic={<PoseDebugPage />} modern={<ModernAnalysisDetail initialView="more" />} />} />
+          <Route path="/report/:id/target" element={<ThemedPage classic={<TargetSelectionPage />} modern={<ModernReviewSpace title="确认主滑行者" description="确认这次要分析的滑行者，然后继续生成同一份复盘。"><TargetSelectionPage hideHeader /></ModernReviewSpace>} />} />
+          <Route path="/me" element={<ModernMeSpace />} />
+          <Route path="/me/advanced" element={<ModernAdvancedTool />} />
+          <Route path="/settings" element={<ThemedPage classic={<SettingsPage />} modern={<ModernMeSpace />} />} />
+          <Route path="/settings/api" element={<ThemedPage classic={<ApiSettingsPage />} modern={<ModernAdvancedTool />} />} />
+          <Route path="/debug" element={<ThemedPage classic={<DebugPage />} modern={<ModernAdvancedTool initialTool="debug" />} />} />
+          <Route path="/golden" element={<ThemedPage classic={<DebugPage workspace="golden" />} modern={<ModernAdvancedTool initialTool="golden" />} />} />
         </Route>
-        <Route path="/parent/setup" element={<ParentSetupPage />} />
-        <Route path="/plan/:plan_id" element={<PlanPage />} />
+        <Route element={<ModernOnlyLayout />}>
+          <Route path="/parent/setup" element={<ThemedPage classic={<ParentSetupPage />} modern={<ModernMeSpace />} />} />
+          <Route path="/plan/:plan_id" element={<ThemedPage classic={<PlanPage />} modern={<ModernGrowthFrame view="plans"><PlanPage /></ModernGrowthFrame>} />} />
+        </Route>
       </Routes>
+      </Suspense>
     </>
   );
 }

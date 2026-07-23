@@ -10,6 +10,18 @@ Skating Analyzer helps skaters, parents, and coaches review training videos with
 
 The current pipeline version is `v5.2.319`.
 
+## Modern Animal Island UI
+
+The app now includes an optional **Animal Island-inspired modern interface** for family use. The classic interface remains available and unchanged; switch between the two from the top bar at any time.
+
+- **Four clear spaces**: Today Island (`/home`), Start Review / Rink Cabin (`/review`), Growth Islands (`/growth`), and Resident Services (`/me`). Previously scattered screens are grouped into these destinations without breaking legacy URLs.
+- **Unified review workspace**: Report summary, key moments, body and pose, follow-up questions, and diagnostics are sections of one analysis detail page. Legacy workspace `tab` links map to the matching modern section.
+- **Responsive by design**: Phone PWA uses a safe-area-aware bottom dock with a raised Start Review action; iPad portrait keeps the dock and uses a two-column canvas; iPad landscape and desktop use a persistent left rail.
+- **Family-friendly atmosphere**: Automatic morning, daytime, sunset, and night themes can be pinned manually. Child and parent modes share the same layout while adjusting copy, density, and protected tools.
+- **PWA support**: The production build registers a same-origin service worker, includes an installable manifest, and provides navigation fallback when the shell is cached. API and write requests are not cached.
+
+The natural palette, rounded cards, and navigation language are adapted from [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui), licensed under CC BY-NC 4.0. This adaptation is for personal, non-commercial use and retains attribution.
+
 ## Recent Updates (P0 — P2)
 
 The current release ships three major tracks: **P0 Growth Home**, **P1 Monthly Story & Sharing**, and **P2 Annual & Event Timeline**, plus golden evaluation tooling, person tracker improvements, and an OpenCode API compatibility fix.

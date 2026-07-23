@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createMonthlyChapterFacts,
@@ -44,6 +44,7 @@ export default function MonthlyChaptersPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const chapterRequestVersion = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,17 +63,20 @@ export default function MonthlyChaptersPage() {
   }, []);
 
   const reloadChapters = async (skaterId: string, month: string) => {
+    const requestVersion = ++chapterRequestVersion.current;
     setLoadingList(true);
     setError(null);
     try {
       const list = await fetchMonthlyChapters(skaterId, month);
+      if (requestVersion !== chapterRequestVersion.current) return;
       setChapters(list);
       setSelectedChapterId(list[0]?.id ?? null);
     } catch (requestError) {
+      if (requestVersion !== chapterRequestVersion.current) return;
       setChapters([]);
       setError(errorMessage(requestError));
     } finally {
-      setLoadingList(false);
+      if (requestVersion === chapterRequestVersion.current) setLoadingList(false);
     }
   };
 
@@ -112,6 +116,8 @@ export default function MonthlyChaptersPage() {
       return;
     }
     setWorking(true);
+    chapterRequestVersion.current += 1;
+    setLoadingList(false);
     setError(null);
     try {
       const chapter = await createMonthlyChapterFacts(selectedSkaterId, yearMonth);
