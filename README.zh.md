@@ -10,368 +10,150 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 
 当前分析管线版本为 `v5.2.319`。
 
-## 最近更新
+## 最近更新（P0 — P2）
 
-当前分支重点交付家长 Growth Home 成长看板 (P0)、月度成长故事 (P1)、Golden 评测工具链、人物追踪改进，以及 OpenCode API 兼容修复：
+当前版本交付三条核心产品线：**P0 成长看板**、**P1 月度故事与分享**、**P2 年度合集与事件时间线**，以及 Golden 评测工具链、人物追踪改进和 OpenCode API 兼容修复。
 
-- **Growth Home (P0)**：新增家长端成长看板，包含 KPI 雷达图、里程碑时间线、技能演进视图、按动作类型展示阶段数据，以及综合成长摘要 API，覆盖 Force Score 趋势、里程碑计数和近期学习亮点。
-- **月度故事 (P1)**：月度成长章节自动生成，支持家庭高光引用、可审核月度章节、章节浏览工作台和里程碑分享卡片（含可视化导出），方便分享给家人和教练。
-- **MiMo/OpenCode API 修复**：移除 MiMo 聊天补全请求中多余的 `api-key` header；OpenCode 新 `sk-` 格式 Key 拒绝双 header（`api-key` + `Authorization: Bearer`）认证模式，旧 base64 格式 Key 则兼容。使用 OpenCode 的 MiMo provider 现仅发送 `Authorization: Bearer`。
+### P0 — 成长看板
+
+面向家长的成长仪表盘，全景展示孩子的训练轨迹：
+
+- **成长摘要 API**：聚合课次数量、完成分析数、当月分析数、里程碑总数、最新分析及其训练重点，以及 Force Score 趋势数据，供前端看板消费。
+- **GrowthKpiBar**：雷达式 KPI 条带，一目了然地展示 Force Score 趋势、课次计数、完成分析数和里程碑总数。
+- **MilestoneTimeline**：按时间排列的里程碑列表，带有系统检测 / 家长确认 / 教练确认验证徽章、解锁时间戳和关联分析链接。
+- **ActionPhaseStrip**：根据分析类型展示不同阶段的关键帧——跳跃显示 T/A/L，旋转显示 entry/main/exit，燕式显示 hold，步法显示覆盖帧，支持视频回放。
+- **成长首页** (`/home`)：统一看板，整合 KPI、最新分析摘要、当前重点、下一步动作、关键帧阶段条、里程碑时间线及各成长工具导航入口。
+
+### P1 — 月度故事与分享
+
+可审核的月度成长章节，配备家庭金句引用和里程碑分享卡片：
+
+- **家庭金句引用**：复盘上传表单新增可选字段——`highlight_quote`（最多 280 字）和 `quote_speaker`（孩子本人/家长/教练）。持久化在 `Analysis` 表，并在详情和月度事实快照中展示。
+- **月度事实引擎** (`monthly_facts.py`)：按滑行者/月份的确定性事实聚合——课次计数、可比较跳跃指标（前后值、样本数、关联分析 ID）、当月里程碑解锁、报告问题类别的重复观察、训练重点追踪，以及逐字保留的金句。全部事实按确定性顺序排列。当无可靠趋势时自动标记 `insufficient_comparable_evidence` 等质量标志。从里程碑关联或高质量分析中选取最多四张代表性帧引用。
+- **结构化章节生成** (`monthly_chapters.py`)：调用活跃的 `report` 供应商，传入确定性事实快照和结构化 JSON schema。验证每个亮点都引用存在的事实 ID、金句文本逐字复制、叙事不超过 1600 字，且禁止推断受伤、恐惧、疲劳诊断、一定能升级、教练确认等结论（除非该表述在供给事实中逐字出现）。供应商失败时保留 `facts_ready` 修订——快照永不删除。
+- **成长 API** (`/api/growth`)：六个端点——`POST facts`、`POST generate`、`GET list`、`GET by ID`、`PATCH final_text`、`POST publish`。已发布的修订不可变；重新生成会创建下一个修订。
+- **月度章节工作台** (`/chapters`)：滑行者/月份选择器、显式流程按钮（整理本月事实 → 生成叙事初稿 → 编辑 → 发布）、修订历史选择器、MonthlyFactPreview 按 count/metric/milestone/observation/quote 分组事实并显示来源/质量徽章，MonthlyChapterEditor 分离 AI 初稿与家长可编辑最终文字，含字符计数器和发布确认弹窗。
+- **里程碑分享卡片** (`milestoneShareCanvas.ts`)：1080×1350 JPEG 分享图生成器，包含标题、日期、滑行者名称、验证徽章、金句引用、可选指标面板和可选关键帧图片。渐变主题设计；图片缺失时优雅降级为无图片面板。每个里程碑卡片上设有下载、复制到剪贴板和系统分享按钮。
+
+### P2 — 年度合集与事件时间线
+
+将月度章节汇编为可下载 PDF 的年度成长合集：
+
+- **年度合集 API** (`/api/annual`)：预览合集（选中章节 + 里程碑的快照）、创建合集并记录来源哈希以保证可复现性、按滑行者/年份列出合集、列出含封面元数据的年度里程碑。
+- **年度 PDF 导出** (`annual_pdf.py`)：基于 ReportLab 生成 A4 排版 PDF，包含封面页、目录、月度章节叙事、里程碑时间线和代表性帧图片。通过 `BackgroundTasks` 后台导出，状态跟踪（`pending` → `processing` → `completed`/`failed`）。
+- **断点续传**：服务器崩溃/重启后的未完成导出任务会在启动时自动恢复。续传导出追踪 `resumed_at` 时间戳，保留原始 `created_at` 以维持排序。
+- **年度合集界面** (`/annual`)：多步骤页面——从已发布月度章节中选取、选择里程碑、预览合集、触发 PDF 导出。显示实时导出状态，包括进度、成功/失败状态和下载链接。成长首页"制作年度合集"入口仅在存在已发布章节时显示。
+
+### 基础设施与工具
+
+- **MiMo/OpenCode API 修复**：移除 MiMo 聊天补全请求中多余的 `api-key` header；OpenCode 新 `sk-` 格式 Key 拒绝双 header 认证模式。新增诊断日志，输出活跃供应商 ID、类型、Base URL、模型和已解密 Key 前缀，方便排查认证问题。
 - **Golden 评测工具链**：新增 `golden_overrides.py`（逐样本覆盖逻辑）、`diff_baselines.py`（评测运行对比）、对应测试套件，以及 `golden-eval-ab-runbook.md` A/B 评测流程文档。
 - **人物追踪**：改进目标重锁定决策逻辑，新增手动锁定目标丢失后的自愈恢复，扩展重锁定场景测试覆盖。
 - **关键帧候选**：增强仲裁诊断和垂直极值置信度阈值。
 - **Debug 页面**：Golden 标注锚点现在捕获跟踪锚元数据（bbox、时间戳、帧 ID）、动作窗口边界和修订版本号，支持更精细的标注。
 
-最新版本新增 Growth Home 成长看板、月度成长章节、Golden 评测工具链、人物追踪改进，以及 OpenCode API 兼容修复。
+## 版本历史
 
-- `v5.2.319`：Growth Home 成长看板，含 KPI 雷达图、里程碑时间线和技能演进 (P0)；月度成长章节，含家庭高光引用、章节工作台和里程碑分享卡 (P1)；移除多余 `api-key` header，兼容 OpenCode 新 `sk-` 格式 Key；新增 golden overrides、diff baselines 和 A/B 评测手册；改进人物追踪重锁定和自愈逻辑；增强关键帧仲裁诊断；debug golden 标注支持跟踪锚点和动作窗口边界。
+- `v5.2.319`：P0 成长看板，含 KPI 雷达图、里程碑时间线、技能演进和按类型展示阶段数据；P1 月度成长章节，含家庭金句、确定性事实聚合、结构化章节生成、章节工作台和里程碑分享卡；P2 年度合集，含章节/里程碑选择、预览、后台 PDF 导出、断点续传和下载；移除多余 `api-key` header 兼容 OpenCode 新 `sk-` 格式 Key；新增 golden overrides、diff baselines 和 A/B 评测手册；改进人物追踪重锁定和自愈逻辑；增强关键帧仲裁诊断；debug golden 标注支持跟踪锚点和动作窗口边界。
 - `v5.2.318`：已应用的动作识别和关键帧修正会写回 `analyses`；启动时自动回填历史已应用修正；报告/追问聊天工作台会在显示成功前刷新当前分析详情。
 - `v5.2.315`：从 `codex/face-identity-target-lock` 导出 all-in-one Docker 镜像，包含人脸身份模型层、滑行者人脸档案 API、目标诊断、父级 UI 及档案删除功能。
-- `v5.2.314`：进展/档案里的 Golden 标注入口会调用幂等后端接口，为选中的正式分析查找或创建一个本地 pose debug run，然后自动打开 Golden Label 面板；重复点击会复用同一个 run，不会生成重复样本。
-- `v5.2.313`：已完成的进展/档案记录可直接跳转到 `/golden?analysis_id=...`；Golden 工作台会按 URL 自动选中正式分析，不再强行打开无关 debug run；基于历史分析创建样本时提供手动 AI 输入/关键帧起止秒数，默认复用已保存动作窗口；Golden/debug 卡片完成手机、平板、桌面窄屏适配。
-- `v5.2.312`：将 Golden 标注工作台合入 `master`；保留训练计划 compact JSON-object prompt，并恢复一次 malformed JSON 修复保护，避免合并后 AI 训练计划生成遇到坏 JSON 就直接失败。
-- `v5.2.311`：新增独立 `/golden` 家长模式标注工作台，包含历史记录和新建样本入口；Golden bbox 可在 sampled/semantic/partial 帧上绘制，overlay 按原始画面比例与大图坐标对齐并禁用图片原生拖拽；已保存标注可再次打开分次补完，不需要额外脚本才生效。
-- `v5.2.310`：开发文档要求每次推送 GitHub 和导出 all-in-one 镜像时同步 pipeline version、README release notes、commit wording、导出文件名和本地启动验证。
-- `v5.2.309`：Debug golden label 会保存 label、prediction snapshot 和 manifest；评测脚本支持 overall/per-stratum 指标、失败列表、quality flags、关键帧误差、bbox IoU identity accuracy、identity switches 和固定错误标签；appearance relock 默认实验开关，关键帧 resolver 增加 vertical extrema proposal 和 T/A/L 顺序 fail-closed。
-- `v5.2.308`：手机端主角框选支持双指放大、平移和重置；手动动作区间启用更高密度采样并补足跳跃窗口；关键帧证据按 jump/spin/step/spiral profile 展示；分项评分统一修正来源和回退逻辑，对比页不再空白；报告/进展分享图加入 comments 与分项条，追问分享改为清晰多轮时间线。
-- `v5.2.307`：对比生成持久化为 `analysis_comparisons` 后台任务；完整源视频只交给激活的 `vision` 模型，`report` provider 只基于结构化 JSON 文本生成总结；新增对比结果历史、重试、分享、手机端全静音同步播放、对比页布局整理，并加强训练计划兜底。
-- `v5.2.306`：追问聊天能识别用户备注中的多个问题并逐一回答，区分能/不能从证据确认的内容；训练计划改用儿童安全低冲击提示词，强制 JSON schema 并记录 `generation_status`；报告自动解析上传备注中的问题并逐条 Q&A；KeyframeEvidencePanel 逻辑抽取到 `keyframeEvidence.ts` 工具模块，支持响应式布局；Archive 新增家长模式聚合 `fetchArchiveSummary` 接口、可点开的日历日详情弹窗和"回到最近记录月份"导航；新增帧回填测试。
-- `v5.2.305`：追问可只跑“视频 AI 全量视频关键帧重识别”，生成待确认关键帧修正卡；不重置主人物锁定、不重跑 pose/生物力学/视觉报告、不自动应用数据，也不覆盖报告。
-- `v5.2.304`：追问聊天可提交重置主人物锁定的完整视频重新分析；重试确认会说明是否重新建立 skater lock；报告/追问分享图可随长文本自适应高度并导出压缩 JPEG。
-- `v5.2.303`：Review 上传不再要求精确动作子类或技能节点；支持“不确定 / 只知道大类”，并把用户补充说明传入 video-temporal 动作识别，再进入关键帧和报告生成。
-- `v5.2.302`：手动目标锁定缺少 tracker 诊断时 fail closed，避免 pose 回填把错误滑行者的骨架画回报告。
-- `v5.2.11`：默认使用全量视频上下文；Review 和 Debug 支持可选手动起止点；报告和 Debug 页面显示实际 AI 输入范围；Path A 使用生成的 AI clip；带多人/人工复核标记的目标锁定必须进入手动选人。
-- `v5.2.10`：后端启动不再自动 seed AI provider；请在 `/settings/api` 创建模型实例。旧数据库里重复的历史 provider 行不会再阻塞容器启动。
-- `v5.2.9`：Path A 会请求更严格的 JSON、恢复非标准模型输出、追加一次 JSON-only 修复重试；报告在 Path A 不可用时会回退使用 Path B/top issues 证据和动作专项训练建议。
+- `v5.2.313`：已完成的进展/档案记录可直接跳转到 `/golden`；Golden 工作台按 URL 自动选中正式分析，不再强行打开无关 debug run。
+- `v5.2.308`：手机端主角框选支持双指放大、平移和重置；手动动作区间启用更高密度采样；关键帧按 jump/spin/step/spiral 展示；分项评分统一修正来源和回退逻辑；报告/进展分享图加入 comments 与分项条，追问分享改为清晰多轮时间线。
+- `v5.2.307`：对比生成持久化为 `analysis_comparisons` 后台任务；完整源视频只交给激活的 `vision` 模型；`report` provider 只基于结构化 JSON 文本生成总结；新增对比结果历史、重试、分享、手机端全静音同步播放。
+- `v5.2.306`：追问聊天能识别用户备注中的多个问题并逐一回答；训练计划改用儿童安全低冲击提示词并强制 JSON schema；Archive 新增家长模式聚合接口、日历详情弹窗和快速导航。
+- `v5.2.305`：追问可只跑视频 AI 全量视频关键帧重识别，生成待确认关键帧修正卡，不重跑 pose/生物力学/视觉报告。
+- `v5.2.304`：追问聊天可提交重置主人物锁定的完整视频重新分析；重试确认会说明是否重新建立 skater lock；分享图可随长文本自适应高度。
+- `v5.2.303`：Review 上传不再要求精确动作子类或技能节点；支持"不确定 / 只知道大类"，并把用户补充说明传入动作识别。
+- `v5.2.11`：默认使用全量视频上下文；Review 和 Debug 支持可选手动起止点；Path A 使用生成的 AI clip。
+- `v5.2.10`：后端启动不再自动 seed AI provider；请在 `/settings/api` 创建模型实例。
+- `v5.2.9`：Path A 请求更严格的 JSON、恢复非标准模型输出、追加 JSON-only 修复重试；并回退 Path B/top-issue 兜底。
 - `v5.2.8`：丢失后复用的 tracker bbox 可作为带 padding 的 pose crop hint，用于远距离小目标滑行者。
-- `v5.2.7`：当 overlap-safe rejected tracker hint 成为 reference bbox 时，应用 tracker 风格的 crop padding。
-- `v5.2.6`：overlap-safe continuity-rejected tracker bbox 可作为 pose crop hint 复用，但不会接受目标身份切换。
-- `v5.2.5`：当同时尝试 motion-predicted crop 时，regular pose crop 会按真实 reference bbox 校验。
-- `v5.2.4`：保留完整有序的可见 T/A/L 候选，同时保留低置信度关键帧警告。
-- `v5.2.3`：未确认但通过 gate 的 tracker relock bbox 可辅助 pose crop，不切换目标身份。
-- `v5.2.2`：快速目标运动中保留 tracker-aligned crop pose，避免过度惩罚 seed bbox drift。
-- `v5.2.1`：收紧跳跃动作窗口 padding，目标预览优先锚定高运动采样帧。
-- `v5.2.0`：Debug 回放复用正式采样流程，并从关键帧评分中排除不可靠 pose 帧。
+
+更早版本（v5.2.1 — v5.2.7）聚焦跟踪稳定性、姿态平滑、关键帧置信度和管线鲁棒性。完整历史见 [git log](https://github.com/qihq/skating-AI-analyzer/commits/master)。
 
 ## 核心功能
 
-- 视频上传、异步分析与阶段感知重试；不知道精确动作名时可只提交动作大类，技能分类可选。
-- 运动采样、视频预检、模糊过滤和更大的 nginx 上传限制。
-- 目标预览、默认隐藏候选框、手动 bbox 框选、YOLO + ByteTrack 人体跟踪和逐帧 bbox 诊断。
+- 视频上传、异步分析与阶段感知重试；不知道精确动作名时可只提交动作大类。
+- 运动采样、视频预检、模糊过滤。
+- 目标预览、手动 bbox 框选、YOLO + ByteTrack 人体跟踪和逐帧 bbox 诊断。
 - MediaPipe 姿态提取，支持平滑、多候选和 crop 回退逻辑。
 - 生物力学指标，包括阶段时序、跳跃证据、旋转估算和姿态质量。
-- Qwen 3.6 Plus 视频语义时间定位，用于动作大类识别与起跳/腾空/落冰区间解析，并会参考用户上传备注。
-- 结合视频 AI、运动密度和骨架候选的语义关键帧时间戳仲裁。
-- 双路径视觉分析，支持 video context、供应商回退、非标准 JSON 恢复、重试处理和成本限制。
-- AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式；报告兜底会使用 Path B 证据和动作专项训练建议。
-- 后台对比工作台支持持久化对比历史、通过 `vision` 槽进行完整源视频 AI 对比、通过 `report` 槽生成纯文本家长总结、同步播放、失败重试和分享图导出。
-- 已完成视频的持久化 AI 追问，基于现有证据回答，支持 AI/手动修正卡、视频 AI 关键帧轻量重跑修正卡、应用/忽略确认，以及基于已应用修正重新生成报告。
-- 独立 `/analysis-chat` 工作台，可选择任意已完成分析，查看有效识别、关键帧、partial semantic candidates、修正历史，并分享文字/图片复盘内容。
-- 响应式 archive/report 工作台：archive 支持分页列表和日历 tab；report 保持主报告简洁，高级内容通过姿态、证据、诊断、追问 tab 展示。
-- Pose Debug 与 Debug 页面，用于骨架回放、tracker 缩略图、候选数量、姿态诊断、AI 输入范围、耗时和日志检查。
+- Qwen 3.6 Plus 视频语义时间定位，用于动作大类识别与起跳/腾空/落冰区间解析。
+- 语义关键帧时间戳仲裁，融合视频 AI、运动密度和骨架候选。
+- 双路径视觉分析，支持 video context、供应商回退、非标准 JSON 恢复和成本限制。
+- AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式。
+- 后台对比工作台——持久化对比历史、完整源视频 AI 对比、同步播放和分享图导出。
+- 成长看板 (P0) —— KPI 雷达、里程碑时间线、当前重点、下一步动作和技能演进视图。
+- 月度成长章节 (P1) —— 家庭金句、确定性事实、AI 生成可审核章节、章节工作台和里程碑分享卡片。
+- 年度合集导出 (P2) —— 月度章节汇编为 PDF，含封面、目录、叙事和里程碑，支持断点续传。
+- 已完成视频的持久化 AI 追问，基于现有证据回答，支持 AI/手动修正卡和报告重新生成。
+- 响应式 archive/report 工作台：archive 支持分页列表和日历 tab；report 保持主报告简洁，高级内容通过 workspace tab 展示。
+- Pose Debug 与 Debug 页面，用于骨架回放、tracker 诊断和日志检查。
 - Docker Compose 与 all-in-one Docker 部署，适合 NAS 或本地单容器运行。
 
 ## 分析流程
 
 1. 上传源视频并创建分析记录；不知道精确动作名称时，可以只填写动作大类。
-2. 解析 AI 输入范围：填写手动起止点时使用手动片段，否则默认使用完整源视频时间轴；只有硬性兜底才允许系统截断并记录原因。
+2. 解析 AI 输入范围：填写手动起止点时使用手动片段，否则默认使用完整源视频时间轴。
 3. 执行视频预检、运动采样和关键帧/动作时序解析，时间戳保持源视频绝对时间。
 4. 生成目标预览候选；置信度不足或存在多人/人工复核标记时等待手动选择。
 5. 使用 YOLO/ByteTrack 跟踪目标滑行者，并执行逐帧 bbox 连续性检查。
-6. 从 regular、tracker-guided 和 fallback crop 中提取姿态点。
-7. 平滑姿态信号，计算生物力学、跳跃特征和关键帧候选。
-8. 在已配置供应商时运行视频语义 AI，把上传备注作为上下文，识别实际动作大类并解析 T/A/L 时间戳。
-9. 用 FFmpeg 抽取语义关键帧，并把 video context 或 AI clip 注入视觉模型。
-10. 融合姿态、生物力学、视频 AI、Path A 纯视觉和 Path B 骨架量化证据，生成结构化报告。
-11. 持久化帧、日志、耗时、调试摘要、AI 输入范围元数据和重试检查点。
+6. 运行 MediaPipe 姿态提取和平滑处理。
+7. 根据分析类型（跳跃/旋转/步法/燕式/自由滑）计算生物力学指标。
+8. 如果在 `/settings/api` 中配置了 AI 供应商，系统会通过双路径视觉分析生成结构化报告和训练计划。
+9. 完成的分析记录可在报告、追问、档案和进度视图中复查。
+10. 成长看板、月度章节和年度合集可按自身节奏依次使用。
 
-## 技术栈
+## 部署
 
-- 前端：React 18、TypeScript、Vite、Tailwind CSS、React Router、Recharts。
-- 后端：FastAPI、SQLAlchemy Async、SQLite、APScheduler。
-- 视觉与媒体：FFmpeg、OpenCV、MediaPipe、YOLO/ByteTrack、PyTorch CPU。
-- AI 接入：兼容 OpenAI SDK 的文本、图片和视频语义视觉供应商。
-- 部署：Docker、nginx、Docker Compose、all-in-one 容器镜像。
-
-## 目录结构
-
-```text
-skating-analyzer/
-|-- backend/                  # FastAPI 后端
-|   |-- app/
-|   |   |-- configs/          # 动作 profile 与供应商配置
-|   |   |-- routers/          # API 路由
-|   |   |-- services/         # 分析、姿态、跟踪、视觉、报告、技能服务
-|   |   |-- main.py
-|   |   |-- models.py
-|   |   `-- schemas.py
-|   |-- tests/                # 后端回归测试
-|   `-- requirements.txt
-|-- frontend/                 # React 前端
-|   |-- src/
-|   `-- public/
-|-- docker/
-|   `-- allinone/             # all-in-one 镜像 Dockerfile、nginx 配置和启动脚本
-|-- docs/                     # 管线文档
-|-- skating_vision/           # 独立视觉分析包
-|-- ai_skating_analysis_pack/ # 独立参考包
-|-- scripts/                  # 诊断、批量分析、镜像导出脚本
-|-- data/                     # 运行时数据，Git 忽略
-|-- backups/                  # 运行时备份，Git 忽略
-|-- models/                   # 本地模型权重，Git 忽略
-|-- deliverables/             # 导出的镜像文件，Git 忽略
-|-- .env.example
-|-- docker-compose.yml
-`-- README.zh.md
-```
-
-## 环境变量
-
-复制 `.env.example` 为 `.env`，并填写自己的密钥：
-
-```bash
-cp .env.example .env
-```
-
-示例：
-
-```bash
-# AI Key 启动时可不填。推荐应用启动后进入
-# 家长设置 -> API 设置，创建模型实例并保存 Key。
-# QWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-QWEN_VISION_MODEL=qwen3.6-plus
-QWEN_VISION_DAILY_COST_LIMIT_CNY=30
-QWEN_VISION_VIDEO_ESTIMATED_COST_CNY=0.6
-# VIDEO_TEMPORAL_MAX_FRAMES=12
-# DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-SECRET_KEY=replace-with-a-random-32-char-secret
-
-# 可选：启用二期多姿态跟踪
-# MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task
-# POSE_NUM_POSES=4
-
-# 可选：使用挂载的 YOLO 人体检测权重，避免运行时下载
-# YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt
-```
-
-说明：
-
-- `.env` 不会提交到 Git。
-- 后端启动时不会再自动写入 AI provider 行。请在 `/settings/api` 创建文本报告、主视觉、Path A 和 Path B 模型实例，并按 slot 激活需要使用的供应商。
-- NAS 上已有的旧数据库可以继续复用；重复的历史 provider 行不会再导致容器启动失败。
-- 默认视觉模型为 `qwen3.6-plus`；`qwen-vl-max-latest` 只作为历史迁移输入保留。
-- `QWEN_VISION_DAILY_COST_LIMIT_CNY` 控制每日视觉成本上限。
-- `QWEN_VISION_VIDEO_ESTIMATED_COST_CNY` 用于估算单次视频语义调用成本。
-- `VIDEO_TEMPORAL_MAX_FRAMES` 控制进入图片 AI 的语义帧数量。
-- 运行时数据库、上传视频、抽帧、备份、Docker tar 包和本地模型文件不会提交。
-
-## 双路径报告韧性
-
-分析流程会同时保存 `vision_path_a` 和 `vision_path_b`，便于审计和调试。
-
-- Path A 是纯视觉判断。现在会要求供应商返回 JSON 对象，从带噪输出中抽取合法 JSON，并在失败时追加一次低温 JSON 修复请求，再标记 Path A 不可用。
-- Path B 使用叠加骨架的关键帧和生物力学数值。它的 `top_issues`、`top_positives`、阶段摘要和帧级问题会注入报告上下文。
-- 如果 Path A 失败，或报告模型输出过于模板化，后端会用 Path B 证据替换“数据质量有限”类占位问题，并按跳跃、旋转、燕式、步法 profile 生成更具体的训练动作。
-- 当证据不完整时，报告仍会保持 `data_quality=partial`，但问题列表和改进建议应继续绑定到可见或可量化的技术结论。
-
-## 本地模型
-
-二期多姿态和人体跟踪通过宿主机挂载模型文件启用。
-
-- 将 MediaPipe task 文件放到 `./models`，例如 `./models/pose_landmarker_heavy.task`。
-- 在 `.env` 中设置 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`。
-- 可选设置 `POSE_NUM_POSES=4`。
-- 将 YOLO 权重放到 `./models`，例如 `./models/yolov8n.pt`。
-- 可选设置 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。
-- 如果没有设置 `YOLO_PERSON_MODEL_PATH`，后端会先检查 `/models/yolov8n.pt`，再允许 Ultralytics 下载 `yolov8n.pt`。
-- 设置页会分别展示姿态运行时和 YOLO 运行时状态。
-- 如果模型缺失或加载失败，后端会回退到可用的更保守流程。
-
-## skating_vision 独立包
-
-`skating_vision` 目录是一个可脱离 FastAPI 主应用复用的独立 Python 包。
-
-- `video`：抽帧、运动采样、动作窗口检测、模糊过滤。
-- `pose`：MediaPipe 姿态提取，支持多候选回退。
-- `biomechanics`：几何指标和跳跃旋转估算。
-- `vision`：基于 LLM 的视觉分析。
-- `report`：结构化报告生成和评分融合。
-- `providers`：兼容 OpenAI SDK 的供应商抽象。
-- `target_lock`：主滑行者候选锁定。
-- `action_profiles`：跳跃、旋转、燕式和步法序列的动作类型推断。
-
-```python
-from skating_vision.video import extract_motion_sampled_frames
-from skating_vision.pose import extract_pose
-from skating_vision.biomechanics import analyze_biomechanics
-from skating_vision.report import generate_report
-```
-
-完整管线说明见 [docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)。
-
-## 本地开发
-
-后端：
-
-```bash
-cd backend
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --no-use-colors
-```
-
-前端：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-默认地址：
-
-- 前端：`http://localhost:5173`
-- 后端：`http://localhost:8000`
-- 健康检查：`http://localhost:8000/api/health`
-
-## 测试
-
-后端回归测试覆盖：
-
-- 根据用户输入推断动作 profile。
-- 仅提交动作大类的复盘上传，以及用户备注进入 AI 提示上下文。
-- 阶段重试和管线版本行为。
-- debug run 持久化和回放流程。
-- 视频预检、精准抽帧和语义时间解析。
-- bbox tracking、target lock、person tracking 和 pose smoothing。
-- 关键帧候选、T/A/L 顺序和生物力学时序。
-- 双路径视觉、Path A 非标准 JSON 恢复、供应商重试、报告融合和内容归一化。
-- AI 追问持久化、包含 comments/action confirmation/partial semantic candidates 的 prompt 上下文、建议修正卡、有效修正层和分享 payload 生成。
-
-运行后端测试：
-
-```bash
-cd backend
-pytest tests
-```
-
-构建前端：
-
-```bash
-cd frontend
-npm run build
-```
-
-## Docker Compose
-
-```bash
-docker compose up --build
-```
-
-如果要启用二期姿态或 YOLO 跟踪，请在启动 Docker Compose 前把模型文件放入 `./models`。
-
-默认地址：
-
-- 应用：`http://localhost:8080`
-- API 健康检查：`http://localhost:8000/api/health`
-
-## all-in-one 镜像
-
-构建：
-
-```bash
-docker build -f docker/allinone/Dockerfile -t skating-analyzer-allinone:latest .
-```
-
-运行：
+### All-in-one Docker
 
 ```bash
 docker run -d \
   --name skating-allinone \
   -p 8080:80 \
-  -v "$(pwd)/data:/data" \
-  -v "$(pwd)/backups:/backups" \
-  -v "$(pwd)/models:/models:ro" \
-  -v "$(pwd)/.env:/workspace/.env:ro" \
+  -v /path/to/data:/data \
+  -v /path/to/backups:/backups \
+  -v /path/to/.env:/workspace/.env:ro \
   skating-analyzer-allinone:latest
 ```
 
-导出：
+### Docker Compose
 
-```powershell
-.\scripts\export-allinone-image.ps1
+```bash
+docker compose up -d
 ```
 
-导出脚本会重新构建 `skating-analyzer-allinone:latest`，从 `backend/app/services/pipeline_version.py` 读取当前管线版本，并在 `./deliverables` 下生成带时间戳的 tar 文件。脚本还会复制一份稳定文件名 `./deliverables/skating-analyzer-allinone-latest.tar`，群晖导入时优先选这个文件，避免版本号或时间戳写错导致 `no such file`。
+`.env` 文件至少需包含：
 
-all-in-one 说明：
+```env
+SECRET_KEY=你的随机密钥
+```
 
-- 如果挂载 `.env`，启用 MediaPipe task 模型时请包含 `MEDIAPIPE_POSE_TASK_PATH=/models/pose_landmarker_heavy.task`。
-- 使用挂载 YOLO 权重时请包含 `YOLO_PERSON_MODEL_PATH=/models/yolov8n.pt`。
-- 如果在 NAS 或 Container Manager 里直接配置环境变量，可以不挂载 `.env`。
-- AI provider 的 API Key 可以在启动后进入 `/settings/api` 配置；容器启动只要求 `SECRET_KEY` 用于加密保存的 Key。
-- `data`、`backups` 和 `models` 应保持宿主机挂载，避免运行时数据和模型文件被打进镜像。
-- 旧分析记录如果保存的是 Windows 绝对路径，all-in-one 会回退到容器内 `/data/uploads/<analysis_id>/source.*` 查找原视频。
+## 开发
 
-## 镜像体积说明
+```bash
+# 后端
+cd backend
+pip install -r requirements.txt
+PYTHONPATH=backend uvicorn app.main:app --reload
 
-all-in-one 镜像比拆分前端镜像大是预期现象，因为它同时包含后端、前端、FFmpeg、nginx、MediaPipe、OpenCV、PyTorch CPU、Ultralytics YOLO 和跟踪依赖。
+# 前端
+cd frontend
+npm install
+npm run dev
+```
 
-最近检查 `skating-analyzer-allinone:latest` 的结果：
+### 运行测试
 
-- Docker 镜像大小约 `3.72GB`。
-- 最大镜像层是 `pip install` 安装 Python 依赖，约 `2.25GB`。
-- 系统媒体/服务层包含 `ffmpeg`、`nginx`、`curl`，约 `467MB`。
-- 最大 Python 包包括：`torch` 约 `724MB`、`jaxlib` 约 `330MB`、`scipy` 约 `113MB`、OpenCV 相关包与 libs 合计约 `337MB`、`mediapipe` 约 `66MB`。
-- `tmp/` 诊断产物会让 Docker build context 和 Git 历史变得很吵，但 all-in-one Dockerfile 最终只复制 `backend/app`、`backend/requirements.txt`、`frontend` 和 `docker/allinone` 文件。现在 `tmp/` 已加入 Git 和 Docker 忽略规则。
+```bash
+# 后端
+PYTHONPATH=backend pytest backend/tests -q
 
-## 主要页面
-
-- `/path`：技能树与学习路径。
-- `/review`：上传视频并发起分析。
-- `/report/:id`：简洁版分析报告。
-- `/report/:id/workspace?tab=pose|evidence|diagnostics|followup`：报告详情工作台，展示姿态回放、证据、诊断和 AI 追问。
-- `/analysis-chat`：独立家长/教练追问工作台，可选择任意已完成分析。
-- `/report/:id/pose-debug`：大屏骨架回放与 tracker 诊断。
-- `/archive`：分页历史档案，支持列表和日历视图。
-- `/plan/:plan_id`：训练计划。
-- `/snowball`：陪练聊天和记忆建议。
-- `/settings`：PIN、备份、供应商、成本限制、姿态运行时和 YOLO 运行时检查。
-- `/debug`：分析调试日志和 debug run 回放。
-
-## 数据与隐私
-
-- 运行时数据默认写入 `./data`。
-- 上传视频和抽帧素材不会进入 Git。
-- API Key 使用应用内加密存储。
-- 对外公开时只应共享 `.env.example`。
-
-## 当前仓库不包含
-
-- 真实 API Key。
-- 本地数据库。
-- 训练视频或抽帧素材。
-- 导出的 Docker tar 包。
-- 本地模型权重。
-- 本地 worktree 元数据。
-- 临时诊断和交付物打包产物。
-
-## 开源补充材料
-
-- 封面图文案：[REPO_COVER_COPY.md](./REPO_COVER_COPY.md)
-- GitHub About / Topics 文案：[GITHUB_PROFILE_COPY.md](./GITHUB_PROFILE_COPY.md)
-- 截图规划：[SCREENSHOT_GUIDE.md](./SCREENSHOT_GUIDE.md)
-- Release 文案草稿：[RELEASE_BODY_v1.0.0.md](./RELEASE_BODY_v1.0.0.md)
-- AI 分析流程：[docs/ai-analysis-flow.md](./docs/ai-analysis-flow.md)
-- 迭代开发指南：[video-analysis-iteration-guide.md](./video-analysis-iteration-guide%20(1).md)
+# 前端
+cd frontend && npm test
+```
 
 ## 许可证
 
-MIT
+MIT License。详见 [LICENSE](./LICENSE)。
