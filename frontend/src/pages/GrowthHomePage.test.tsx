@@ -68,4 +68,11 @@ describe("GrowthHomePage", () => {
     expect(await screen.findByText("完成第一次复盘后，这里会出现关键动作阶段。")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /年度/ })).not.toBeInTheDocument();
   });
+
+  it("keeps the growth summary available when the annual entry check fails", async () => {
+    vi.mocked(fetchMonthlyChapters).mockRejectedValueOnce(new Error("chapters unavailable"));
+    render(<MemoryRouter><GrowthHomePage /></MemoryRouter>);
+    expect(await screen.findByText("这次落冰更稳定")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("link", { name: /年度/ })).not.toBeInTheDocument());
+  });
 });

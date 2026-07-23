@@ -68,15 +68,14 @@ export default function GrowthHomePage() {
 
     void (async () => {
       try {
-        const [nextSummary, monthlyChapters] = await Promise.all([
-          fetchGrowthSummary(selectedSkaterId),
-          fetchMonthlyChapters(selectedSkaterId),
-        ]);
+        const nextSummary = await fetchGrowthSummary(selectedSkaterId);
         if (cancelled) {
           return;
         }
         setSummary(nextSummary);
-        setHasPublishedChapters(monthlyChapters.some((chapter) => chapter.status === "published"));
+        void fetchMonthlyChapters(selectedSkaterId)
+          .then((chapters) => !cancelled && setHasPublishedChapters(chapters.some((chapter) => chapter.status === "published")))
+          .catch(() => !cancelled && setHasPublishedChapters(false));
         if (nextSummary.latest_analysis_id) {
           const analysis = await fetchAnalysis(nextSummary.latest_analysis_id);
           if (!cancelled) {

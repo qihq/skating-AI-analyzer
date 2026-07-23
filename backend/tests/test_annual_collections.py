@@ -95,6 +95,28 @@ class AnnualCollectionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(AnnualCollectionValidationError, "source hash"):
                 await build_annual_snapshot(session, "skater-1", 2026, ["chapter-tampered"], [])
 
+    async def test_snapshot_uses_hashed_fact_frame_references_not_mutable_chapter_column(self) -> None:
+        from app.services.annual_collections import build_annual_snapshot
+        from app.services.monthly_facts import monthly_source_hash
+
+        facts = {
+            "schema_version": "monthly_facts.v1", "coverage": {}, "facts": [],
+            "representative_frames": [{"analysis_id": "analysis-fact", "frame_id": "semantic_0001"}],
+        }
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(self.models.Skater(id="skater-1", name="Tantan"))
+            session.add(self.models.MonthlyChapter(
+                id="chapter-frames", skater_id="skater-1", year_month="2026-01", revision=1,
+                status="published", fact_snapshot=facts, source_hash=monthly_source_hash(facts), final_text="Final",
+                representative_frames=[{"analysis_id": "analysis-mutated", "frame_id": "frame_0001"}],
+                published_at=datetime(2026, 1, 31, tzinfo=timezone.utc),
+            ))
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            snapshot = await build_annual_snapshot(session, "skater-1", 2026, ["chapter-frames"], [])
+        self.assertEqual(snapshot["chapters"][0]["representative_frames"][0]["analysis_id"], "analysis-fact")
+
     async def test_snapshot_rejects_milestone_from_another_year(self) -> None:
         from app.services.annual_collections import AnnualCollectionValidationError, build_annual_snapshot
 

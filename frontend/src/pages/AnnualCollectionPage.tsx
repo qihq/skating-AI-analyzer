@@ -51,6 +51,8 @@ export default function AnnualCollectionPage() {
     if (!skaterId) return;
     let active = true;
     setPreview(null);
+    setSelectedIds([]);
+    setSelectedMilestoneIds([]);
     void Promise.all([fetchMonthlyChapters(skaterId), fetchAnnualMilestones(skaterId, year)]).then(([items, milestoneItems]) => {
       if (!active) return;
       const published = items.filter((item) => item.status === "published" && item.year_month.startsWith(`${year}-`));

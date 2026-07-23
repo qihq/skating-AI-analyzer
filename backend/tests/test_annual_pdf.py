@@ -98,6 +98,19 @@ class AnnualPdfTests(unittest.TestCase):
         self.assertIn("Representative frame: landing", result.extracted_text)
         self.assertIn("Representative frame unavailable: takeoff", result.extracted_text)
 
+    def test_renderer_loads_semantic_frame_from_allowlisted_directory(self) -> None:
+        module = _annual_pdf_module()
+        from PIL import Image
+
+        snapshot = {"year": 2026, "chapters": [{"year_month": "2026-01", "final_text": "Frame chapter", "coverage": {}, "quote_facts": [], "media_mode": "with_frames", "representative_frames": [{"analysis_id": "analysis-1", "frame_id": "semantic_0001", "phase": "air"}]}], "milestones": [], "coverage": {}, "metric_definitions": {}}
+        font_paths = {"regular": Path("C:/Windows/Fonts/Deng.ttf"), "bold": Path("C:/Windows/Fonts/Dengb.ttf")}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "uploads" / "analysis-1" / "semantic_frames" / "semantic_0001.jpg"
+            source.parent.mkdir(parents=True)
+            Image.new("RGB", (320, 180), "navy").save(source)
+            result = module.render_annual_pdf(snapshot, Path(directory) / "annual.pdf", font_paths, frames_root=Path(directory) / "uploads")
+        self.assertIn("Representative frame: air", result.extracted_text)
+
 
 if __name__ == "__main__":
     unittest.main()

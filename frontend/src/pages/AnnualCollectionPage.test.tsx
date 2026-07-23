@@ -70,4 +70,11 @@ describe("AnnualCollectionPage", () => {
     await waitFor(() => expect(createAnnualExport).toHaveBeenCalledTimes(2));
     expect(createAnnualExport).toHaveBeenLastCalledWith("collection-1");
   });
+
+  it("clears the prior selection while loading a different year", async () => {
+    render(<MemoryRouter><AnnualCollectionPage /></MemoryRouter>);
+    expect(await screen.findByRole("checkbox", { name: /2026-01/ })).toBeChecked();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "年份" }), { target: { value: "2025" } });
+    expect(screen.getByRole("button", { name: "生成年度 PDF" })).toBeDisabled();
+  });
 });

@@ -243,7 +243,12 @@ async def create_export(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        return AnnualExportPublic.model_validate(existing)
+        if existing.asset_relative_path and _resolve_export_path(existing.asset_relative_path).is_file():
+            return AnnualExportPublic.model_validate(existing)
+        existing.status = "failed"
+        existing.error_message = "年度导出文件已不存在，可重新生成。"
+        existing.asset_relative_path = None
+        await session.commit()
     export = AnnualExport(collection_id=collection.id, status="pending", renderer_version=RENDERER_VERSION)
     session.add(export)
     await session.commit()

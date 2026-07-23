@@ -111,12 +111,15 @@ def _representative_frame_path(frame: dict[str, Any], frames_root: Path) -> Path
     if not _SAFE_FRAME_TOKEN.fullmatch(analysis_id) or not _SAFE_FRAME_TOKEN.fullmatch(frame_id):
         return None
     root = frames_root.resolve()
-    candidate = (root / analysis_id / "frames" / f"{frame_id}.jpg").resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
+    for directory in ("frames", "semantic_frames"):
+        candidate = (root / analysis_id / directory / f"{frame_id}.jpg").resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _representative_frame_flowable(frame: dict[str, Any], frames_root: Path, lib: dict[str, Any], body_style, muted_style):

@@ -96,6 +96,29 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
                 await annual.download_export("export-1", session=session)
         self.assertEqual(raised.exception.status_code, 404)
 
+    async def test_missing_completed_asset_creates_a_rebuild_job(self) -> None:
+        import app.routers.annual as annual
+
+        async with self.database.AsyncSessionLocal() as session:
+            collection = self.models.AnnualCollection(
+                id="collection-missing", skater_id="skater-1", year=2026, revision=1, status="exported", title="Annual",
+                selected_chapter_ids=["chapter-1"], selected_milestone_ids=[], snapshot={}, source_hash="a" * 64,
+            )
+            session.add(collection)
+            session.add(self.models.AnnualExport(
+                id="export-missing", collection_id=collection.id, status="completed", renderer_version="annual_pdf.v1",
+                asset_relative_path="annual/collection-missing/export-missing.pdf", file_sha256="a" * 64, page_count=1,
+            ))
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            created = await annual.create_export("collection-missing", background_tasks=_BackgroundTasksStub(), session=session)
+            missing = await session.get(self.models.AnnualExport, "export-missing")
+            assert missing is not None
+            self.assertEqual(missing.status, "failed")
+        self.assertNotEqual(created.id, "export-missing")
+        self.assertEqual(created.status, "pending")
+
     async def test_lists_only_the_selected_years_milestones(self) -> None:
         import app.routers.annual as annual
 

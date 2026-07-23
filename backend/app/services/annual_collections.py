@@ -26,7 +26,7 @@ def annual_source_hash(snapshot: dict[str, Any]) -> str:
 
 def _chapter_snapshot(chapter: MonthlyChapter) -> dict[str, Any]:
     facts = chapter.fact_snapshot if isinstance(chapter.fact_snapshot, dict) else {}
-    frames = chapter.representative_frames if isinstance(chapter.representative_frames, list) else []
+    frames = facts.get("representative_frames") if isinstance(facts.get("representative_frames"), list) else []
     safe_frames = [
         {
             "analysis_id": str(frame.get("analysis_id") or ""),
