@@ -19,6 +19,7 @@ from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
 from app.routers.growth import router as growth_router
+from app.routers.annual import recover_incomplete_exports, router as annual_router, run_export
 from app.routers.providers import router as providers_router
 from app.routers.settings import router as settings_router
 from app.routers.skaters import admin_router, router as skaters_router, session_router, system_router
@@ -57,6 +58,18 @@ async def _backfill_applied_corrections_startup() -> None:
         logger.exception("Startup applied correction backfill failed")
 
 
+async def _recover_annual_exports_startup() -> None:
+    async def enqueue(export_id: str) -> None:
+        asyncio.create_task(run_export(export_id))
+
+    try:
+        recovered = await recover_incomplete_exports(enqueue=enqueue)
+        if recovered:
+            logger.info("startup: resumed %s interrupted annual exports", len(recovered))
+    except Exception:  # noqa: BLE001
+        logger.exception("Startup annual export recovery failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("startup: ensure storage dirs")
@@ -67,6 +80,7 @@ async def lifespan(_: FastAPI):
     await init_db()
     logger.info("startup: backfill applied corrections")
     await _backfill_applied_corrections_startup()
+    await _recover_annual_exports_startup()
     logger.info("startup: seed preset skaters")
     await seed_preset_skaters()
     logger.info("startup: seed default memories")
@@ -114,6 +128,7 @@ app.include_router(providers_router)
 app.include_router(settings_router)
 app.include_router(skaters_router)
 app.include_router(growth_router)
+app.include_router(annual_router)
 app.include_router(session_router)
 app.include_router(system_router)
 app.include_router(admin_router)

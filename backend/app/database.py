@@ -393,6 +393,7 @@ async def _run_migrations(conn) -> None:
     await run_migrations_analysis_comparisons(conn)
     await run_migrations_growth_story(conn)
     await run_migrations_monthly_chapters(conn)
+    await run_migrations_annual_collections(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -989,6 +990,61 @@ async def _create_monthly_chapter_tables(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_skater_id ON monthly_chapters(skater_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_year_month ON monthly_chapters(year_month)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_status ON monthly_chapters(status)"))
+
+
+async def run_migrations_annual_collections(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _create_annual_collection_tables(conn)
+        return
+
+    async with engine.begin() as conn:
+        await _create_annual_collection_tables(conn)
+
+
+async def _create_annual_collection_tables(conn) -> None:
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS annual_collections (
+                id TEXT PRIMARY KEY,
+                skater_id TEXT NOT NULL REFERENCES skaters(id),
+                year INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ready',
+                title TEXT NOT NULL,
+                selected_chapter_ids JSON NOT NULL DEFAULT '[]',
+                selected_milestone_ids JSON NOT NULL DEFAULT '[]',
+                snapshot JSON NOT NULL,
+                source_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_annual_collection_revision UNIQUE (skater_id, year, revision)
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS annual_exports (
+                id TEXT PRIMARY KEY,
+                collection_id TEXT NOT NULL REFERENCES annual_collections(id),
+                status TEXT NOT NULL DEFAULT 'pending',
+                renderer_version TEXT NOT NULL,
+                asset_relative_path TEXT,
+                file_sha256 TEXT,
+                page_count INTEGER,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+            """
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_collections_skater_year ON annual_collections(skater_id, year)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_exports_collection_id ON annual_exports(collection_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_exports_status ON annual_exports(status)"))
 
 
 class _noop_context:

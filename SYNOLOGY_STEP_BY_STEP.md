@@ -15,15 +15,17 @@
 
 ## 2. 先在群晖创建目录
 
-建议先在群晖的共享文件夹里创建下面两个目录：
+建议先在群晖的共享文件夹里创建下面三个目录：
 
 1. `/volume1/docker/skating-analyzer/data`
 2. `/volume1/docker/skating-analyzer/backups`
+3. `/volume1/docker/skating-analyzer/fonts`
 
 说明：
 
 - `data` 用来放数据库、上传视频、抽帧图片、归档文件
 - `backups` 用来放应用内创建的备份 zip
+- `fonts` 用来放年度 PDF 使用的已获授权中文字体
 
 ## 3. 导入镜像
 
@@ -65,10 +67,11 @@
 
 ## 6. 配置卷映射
 
-在 `存储空间` / `卷` / `Volume` 里添加 2 条映射：
+在 `存储空间` / `卷` / `Volume` 里添加 3 条映射：
 
 1. 群晖目录 `/volume1/docker/skating-analyzer/data` 映射到容器 `/data`
 2. 群晖目录 `/volume1/docker/skating-analyzer/backups` 映射到容器 `/backups`
+3. 群晖目录 `/volume1/docker/skating-analyzer/fonts` 映射到容器 `/app/assets/fonts`，设为只读
 
 这一步很重要。
 
@@ -99,6 +102,17 @@
 - `QWEN_API_KEY` 和 `DEEPSEEK_API_KEY` 现在都可以先不填，后续进系统后再在“API 设置”页面里分别创建文本、主视觉、Path A 和 Path B 模型实例
 - `DATA_DIR` 和 `DATABASE_URL` 不填也通常可以跑，因为镜像默认就是按 `/data` 设计的
 - 从 `v5.2.10` 开始，后端启动不会再自动写入 AI 供应商配置；已有旧数据库中如果存在重复 provider 行，也不会再因为 seed 查询报错导致容器启动失败
+
+### 年度 PDF 中文字体（P2-A）
+
+年度合集 PDF 不会在运行时下载字体。请将已获授权的 `NotoSansCJKsc-Regular.otf` 和 `NotoSansCJKsc-Bold.otf` 放入 `/volume1/docker/skating-analyzer/fonts`，并设置：
+
+```text
+ANNUAL_PDF_FONT_PATH=/app/assets/fonts/NotoSansCJKsc-Regular.otf
+ANNUAL_PDF_FONT_BOLD_PATH=/app/assets/fonts/NotoSansCJKsc-Bold.otf
+```
+
+如果使用其他文件名，需要同步修改环境变量。未配置字体时，年度导出会明确失败，不会生成缺字 PDF。
 
 ## 8. 启动容器
 

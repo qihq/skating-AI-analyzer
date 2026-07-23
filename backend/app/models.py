@@ -328,3 +328,40 @@ class MonthlyChapter(Base):
         onupdate=utcnow,
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnnualCollection(Base):
+    __tablename__ = "annual_collections"
+    __table_args__ = (
+        UniqueConstraint("skater_id", "year", "revision", name="uq_annual_collection_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    skater_id: Mapped[str] = mapped_column(String(36), ForeignKey("skaters.id"), index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    title: Mapped[str] = mapped_column(Text)
+    selected_chapter_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    selected_milestone_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AnnualExport(Base):
+    __tablename__ = "annual_exports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    collection_id: Mapped[str] = mapped_column(String(36), ForeignKey("annual_collections.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    renderer_version: Mapped[str] = mapped_column(String(40))
+    asset_relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

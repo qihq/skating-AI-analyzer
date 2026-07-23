@@ -1745,3 +1745,90 @@ export async function publishMonthlyChapter(chapterId: string): Promise<MonthlyC
   const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/publish`);
   return response.data;
 }
+
+export interface AnnualCollectionPreview {
+  snapshot: Record<string, unknown>;
+  source_hash: string;
+  coverage: {
+    published_chapter_count: number;
+    text_only_chapter_count: number;
+    selected_milestone_count: number;
+  };
+}
+
+export interface AnnualCollection {
+  id: string;
+  skater_id: string;
+  year: number;
+  revision: number;
+  status: "ready" | "exported" | "stale" | "draft";
+  title: string;
+  selected_chapter_ids: string[];
+  selected_milestone_ids: string[];
+  snapshot: Record<string, unknown>;
+  source_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnnualExport {
+  id: string;
+  collection_id: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  renderer_version: string;
+  asset_relative_path: string | null;
+  file_sha256: string | null;
+  page_count: number | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface AnnualMilestone {
+  id: string;
+  title: string;
+  occurred_at: string;
+  note: string | null;
+  verification: "system_detected" | "parent_confirmed" | "coach_confirmed";
+}
+
+export async function previewAnnualCollection(
+  skaterId: string,
+  year: number,
+  chapterIds: string[],
+  milestoneIds: string[],
+): Promise<AnnualCollectionPreview> {
+  const response = await apiClient.post<AnnualCollectionPreview>(`/annual/skaters/${skaterId}/${year}/preview`, {
+    chapter_ids: chapterIds,
+    milestone_ids: milestoneIds,
+  });
+  return response.data;
+}
+
+export async function fetchAnnualMilestones(skaterId: string, year: number): Promise<AnnualMilestone[]> {
+  const response = await apiClient.get<AnnualMilestone[]>(`/annual/skaters/${skaterId}/${year}/milestones`);
+  return response.data;
+}
+
+export async function createAnnualCollection(
+  skaterId: string,
+  year: number,
+  chapterIds: string[],
+  milestoneIds: string[],
+): Promise<AnnualCollection> {
+  const response = await apiClient.post<AnnualCollection>(`/annual/skaters/${skaterId}/${year}/collections`, {
+    chapter_ids: chapterIds,
+    milestone_ids: milestoneIds,
+  });
+  return response.data;
+}
+
+export async function createAnnualExport(collectionId: string): Promise<AnnualExport> {
+  const response = await apiClient.post<AnnualExport>(`/annual/collections/${collectionId}/exports`);
+  return response.data;
+}
+
+export async function fetchAnnualExport(exportId: string): Promise<AnnualExport> {
+  const response = await apiClient.get<AnnualExport>(`/annual/exports/${exportId}`);
+  return response.data;
+}

@@ -1061,3 +1061,55 @@ class MonthlyChapterPublic(BaseModel):
 
 class MonthlyChapterPatchRequest(BaseModel):
     final_text: str | None = Field(default=None, max_length=2400)
+
+
+class AnnualCollectionCreateRequest(BaseModel):
+    chapter_ids: list[str] = Field(min_length=1)
+    milestone_ids: list[str] = Field(default_factory=list)
+    title: str | None = Field(default=None, max_length=200)
+
+
+class AnnualCollectionPreview(BaseModel):
+    snapshot: dict[str, Any]
+    source_hash: str
+    coverage: dict[str, int]
+
+
+class AnnualMilestonePublic(BaseModel):
+    id: str
+    title: str
+    occurred_at: datetime
+    note: str | None = None
+    verification: str
+
+
+class AnnualCollectionPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    skater_id: str
+    year: int
+    revision: int
+    status: str
+    title: str
+    selected_chapter_ids: list[str] = Field(default_factory=list)
+    selected_milestone_ids: list[str] = Field(default_factory=list)
+    snapshot: dict[str, Any]
+    source_hash: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnnualExportPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    collection_id: str
+    status: str
+    renderer_version: str
+    asset_relative_path: str | None = None
+    file_sha256: str | None = None
+    page_count: int | None = None
+    error_message: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None

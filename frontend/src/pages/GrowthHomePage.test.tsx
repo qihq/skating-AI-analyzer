@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchAnalysis, fetchGrowthSummary, fetchSkaters } from "../api/client";
-import type { AnalysisDetail, GrowthSummary, Skater } from "../api/client";
+import { fetchAnalysis, fetchGrowthSummary, fetchMonthlyChapters, fetchSkaters } from "../api/client";
+import type { AnalysisDetail, GrowthSummary, MonthlyChapter, Skater } from "../api/client";
 import GrowthHomePage from "./GrowthHomePage";
 
 vi.mock("../api/client", () => ({
@@ -40,12 +40,14 @@ const analysis = {
   report: { summary: "这次落冰更稳定", training_focus: "落冰保持", improvements: [{ target: "膝盖缓冲", action: "做三组落冰定格" }] },
   pose_data: null,
 } as AnalysisDetail;
+const publishedChapter = { id: "chapter-1", status: "published" } as MonthlyChapter;
 
 describe("GrowthHomePage", () => {
   beforeEach(() => {
     vi.mocked(fetchSkaters).mockResolvedValue(skaters);
     vi.mocked(fetchGrowthSummary).mockImplementation(async (id) => ({ ...summary, skater_id: id, latest_analysis_id: id === "skater-1" ? "analysis-1" : null }));
     vi.mocked(fetchAnalysis).mockResolvedValue(analysis);
+    vi.mocked(fetchMonthlyChapters).mockImplementation(async (id) => id === "skater-1" ? [publishedChapter] : []);
   });
 
   it("loads the default skater and composes the growth story", async () => {
@@ -56,6 +58,7 @@ describe("GrowthHomePage", () => {
     expect(screen.getByText("这次落冰更稳定")).toBeInTheDocument();
     expect(screen.getByText("做三组落冰定格")).toBeInTheDocument();
     expect(await screen.findByText("阶段联图")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /年度/ })).toHaveAttribute("href", "/annual");
   });
 
   it("reloads the selected skater and handles an empty analysis history", async () => {
@@ -63,5 +66,6 @@ describe("GrowthHomePage", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "当前练习档案" }), { target: { value: "skater-2" } });
     await waitFor(() => expect(fetchGrowthSummary).toHaveBeenCalledWith("skater-2"));
     expect(await screen.findByText("完成第一次复盘后，这里会出现关键动作阶段。")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /年度/ })).not.toBeInTheDocument();
   });
 });

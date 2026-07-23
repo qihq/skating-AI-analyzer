@@ -9,6 +9,7 @@ services:
     volumes:
       - ./data:/data
       - ./models:/models:ro
+      - ./fonts:/app/assets/fonts:ro
     ports:
       - "8000:8000"
     restart: unless-stopped

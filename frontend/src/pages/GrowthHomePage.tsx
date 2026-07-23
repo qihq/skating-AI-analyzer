@@ -5,6 +5,7 @@ import {
   AnalysisDetail,
   fetchAnalysis,
   fetchGrowthSummary,
+  fetchMonthlyChapters,
   fetchSkaters,
   GrowthSummary,
   Skater,
@@ -22,6 +23,7 @@ export default function GrowthHomePage() {
   const [selectedSkaterId, setSelectedSkaterId] = useState<string | null>(null);
   const [summary, setSummary] = useState<GrowthSummary | null>(null);
   const [latestAnalysis, setLatestAnalysis] = useState<AnalysisDetail | null>(null);
+  const [hasPublishedChapters, setHasPublishedChapters] = useState(false);
   const [loadingSkaters, setLoadingSkaters] = useState(true);
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,14 +64,19 @@ export default function GrowthHomePage() {
     setError(null);
     setSummary(null);
     setLatestAnalysis(null);
+    setHasPublishedChapters(false);
 
     void (async () => {
       try {
-        const nextSummary = await fetchGrowthSummary(selectedSkaterId);
+        const [nextSummary, monthlyChapters] = await Promise.all([
+          fetchGrowthSummary(selectedSkaterId),
+          fetchMonthlyChapters(selectedSkaterId),
+        ]);
         if (cancelled) {
           return;
         }
         setSummary(nextSummary);
+        setHasPublishedChapters(monthlyChapters.some((chapter) => chapter.status === "published"));
         if (nextSummary.latest_analysis_id) {
           const analysis = await fetchAnalysis(nextSummary.latest_analysis_id);
           if (!cancelled) {
@@ -161,6 +168,7 @@ export default function GrowthHomePage() {
           <section className="flex flex-wrap gap-3">
             {summary.latest_analysis_id ? <Link className="app-pill" to={`/report/${summary.latest_analysis_id}`}>查看完整报告</Link> : null}
             <Link className="app-pill" to="/chapters">查看月度章节</Link>
+            {hasPublishedChapters ? <Link className="app-pill" to="/annual">制作年度合集</Link> : null}
             <Link className="app-pill" to="/archive">查看月度进步</Link>
             <Link className="app-pill" to="/path">查看成长档案</Link>
           </section>

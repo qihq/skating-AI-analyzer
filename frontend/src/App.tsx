@@ -10,6 +10,7 @@ import ArchivePage from "./pages/ArchivePage";
 import HistoryPage from "./pages/HistoryPage";
 import GrowthHomePage from "./pages/GrowthHomePage";
 import MonthlyChaptersPage from "./pages/MonthlyChaptersPage";
+import AnnualCollectionPage from "./pages/AnnualCollectionPage";
 import ParentSetupPage from "./pages/ParentSetupPage";
 import PlanPage from "./pages/PlanPage";
 import PoseDebugPage from "./pages/PoseDebugPage";
@@ -126,6 +127,7 @@ export default function App() {
         <Route element={<AppLayout />}>
           <Route path="/home" element={<GrowthHomePage />} />
           <Route path="/chapters" element={<MonthlyChaptersPage />} />
+          <Route path="/annual" element={<AnnualCollectionPage />} />
           <Route path="/path" element={<SkillTreePage />} />
           <Route path="/snowball" element={<SnowballPage />} />
           <Route path="/review" element={<ReviewPage />} />
