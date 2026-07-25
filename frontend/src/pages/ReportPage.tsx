@@ -639,7 +639,7 @@ function SubscoreRadarChart({ subscores }: { subscores: Record<string, number | 
         })}
         {hasMissingValues ? (
           <text x={RADAR_CENTER} y={RADAR_VIEWBOX_SIZE - 12} textAnchor="middle" className="fill-slate-400 text-[10px] font-semibold">
-            æ•°æ®ä¸è¶³
+            数据不足
           </text>
         ) : null}
       </svg>
@@ -1424,7 +1424,7 @@ export default function ReportPage() {
                           <article key={key} className="rounded-[20px] bg-slate-50 p-4">
                             <p className="text-sm text-slate-500">{SUBSCORE_LABELS[key] ?? key}</p>
                             <p className="mt-3 text-2xl font-semibold text-slate-900">{value ?? "--"}</p>
-                            {value == null ? <p className="mt-1 text-xs text-slate-400">æ•°æ®ä¸è¶³</p> : null}
+                            {value == null ? <p className="mt-1 text-xs text-slate-400">数据不足</p> : null}
                           </article>
                         ))}
                       </div>

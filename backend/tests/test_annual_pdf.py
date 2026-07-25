@@ -85,6 +85,18 @@ class AnnualPdfTests(unittest.TestCase):
                     {"regular": Path(directory) / "missing.ttf", "bold": Path(directory) / "missing-bold.ttf"},
                 )
 
+    def test_empty_font_configuration_has_actionable_error_without_dot_paths(self) -> None:
+        module = _annual_pdf_module()
+
+        with self.assertRaises(module.AnnualPdfFontError) as raised:
+            module.validate_font_paths({"regular": "", "bold": ""})
+
+        message = str(raised.exception)
+        self.assertIn("常规字体", message)
+        self.assertIn("粗体字体", message)
+        self.assertNotIn("missing: .", message)
+        self.assertNotIn("missing: ..", message)
+
     def test_renderer_uses_allowlisted_frame_and_falls_back_when_frame_is_missing(self) -> None:
         module = _annual_pdf_module()
         render_annual_pdf = module.render_annual_pdf

@@ -556,7 +556,7 @@ def _merge_vision_results(
             {
                 **legacy_frame,
                 "frame_id": frame_id,
-                "phase": frame.get("phase", legacy_frame.get("phase", "ä¸å¯åˆ†æž")),
+                "phase": frame.get("phase", legacy_frame.get("phase", "不可分析")),
                 "phase_votes": legacy_frame.get("phase_votes", frame.get("phase_votes", {})),
                 "phase_scores": frame.get("phase_scores", {}),
                 "fusion_evidence": frame.get("fusion_evidence", {}),
@@ -952,7 +952,7 @@ async def analyze_frames(
                 "n_votes_valid": 1,
                 "providers": [str(normalized.get("provider_name") or normalized.get("provider") or "vision")],
                 "phase_votes": {
-                    str(frame.get("frame_id", "")): {str(frame.get("phase", "ä¸å¯åˆ†æž")): 1}
+                    str(frame.get("frame_id", "")): {str(frame.get("phase", "不可分析")): 1}
                     for frame in normalized.get("frame_analysis", [])
                     if isinstance(frame, dict)
                 },

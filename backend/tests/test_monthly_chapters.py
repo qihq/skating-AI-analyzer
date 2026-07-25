@@ -203,3 +203,54 @@ class MonthlyChapterPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(public.quality_flags, [])
             self.assertEqual(public.representative_frames, [])
             self.assertIsNone(public.published_at)
+
+    async def test_published_revision_preserves_original_and_recycle_lifecycle(self) -> None:
+        import app.models as models
+        import app.routers.growth as growth
+        from app.schemas import MonthlyChapterRevisionRequest
+        from app.services.auth import hash_pin
+
+        original_id = str(uuid4())
+        snapshot = {"schema_version": "monthly_facts.v1", "facts": [{"id": "one"}]}
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(models.Skater(id="skater-1", name="Tantan"))
+            session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
+            session.add(models.MonthlyChapter(
+                id=original_id,
+                skater_id="skater-1",
+                year_month="2026-07",
+                revision=1,
+                title="原始月报",
+                status="published",
+                fact_snapshot=snapshot,
+                source_hash="abc",
+                final_text="原始正文",
+                published_at=datetime.now(timezone.utc),
+            ))
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            revised = await growth.create_chapter_revision(
+                original_id,
+                MonthlyChapterRevisionRequest(title="修订月报", final_text="修订正文"),
+                x_parent_pin="1234",
+                session=session,
+            )
+            original = await session.get(models.MonthlyChapter, original_id)
+            assert original is not None
+            self.assertEqual((original.title, original.final_text, original.status), ("原始月报", "原始正文", "published"))
+            self.assertEqual(revised.parent_revision_id, original_id)
+            self.assertEqual(revised.revision, 2)
+            self.assertEqual(revised.fact_snapshot, snapshot)
+
+        async with self.database.AsyncSessionLocal() as session:
+            await growth.recycle_chapter(revised.id, x_parent_pin="1234", session=session)
+        async with self.database.AsyncSessionLocal() as session:
+            active = await growth.list_chapters("skater-1", recycled=False, session=session)
+            recycled = await growth.list_chapters("skater-1", recycled=True, session=session)
+            self.assertEqual([item.id for item in active], [original_id])
+            self.assertEqual([item.id for item in recycled], [revised.id])
+            await growth.restore_chapter(revised.id, x_parent_pin="1234", session=session)
+            await growth.recycle_chapter(revised.id, x_parent_pin="1234", session=session)
+            await growth.permanently_delete_chapter(revised.id, x_parent_pin="1234", session=session)
+            self.assertIsNone(await session.get(models.MonthlyChapter, revised.id))

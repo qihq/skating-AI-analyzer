@@ -1,6 +1,6 @@
 import axios from "axios";
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import { fetchHasPin, verifyPin } from "../api/client";
 import { ChildView } from "../utils/childView";
@@ -14,6 +14,7 @@ type AppModeContextValue = {
   childView: ChildView;
   hasPin: boolean | null;
   pinLength: number;
+  parentPin: string | null;
   openParentDialog: () => void;
   setChildView: (nextView: ChildView) => void;
   switchToChildView: (nextView: ChildView) => void;
@@ -46,13 +47,13 @@ function readInitialChildView(): ChildView {
 
 export function AppModeProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const location = useLocation();
   const [mode, setMode] = useState<AppMode>(readInitialMode);
   const [childView, setChildViewState] = useState<ChildView>(readInitialChildView);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [hasPin, setHasPin] = useState<boolean | null>(null);
   const [pinLength, setPinLength] = useState(4);
   const [pin, setPin] = useState("");
+  const [parentPin, setParentPin] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [failedAttempts, setFailedAttempts] = useState(0);
@@ -104,15 +105,10 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
     void refreshPinState();
   }, []);
 
-  useEffect(() => {
-    setDialogOpen(false);
-    setPin("");
-    setError(null);
-  }, [location.pathname]);
-
   const openParentDialog = () => {
     setError(null);
     setPin("");
+    setParentPin(null);
     setDialogOpen(true);
   };
 
@@ -141,6 +137,7 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
 
   const switchToChildMode = () => {
     setModeAndPersist("child");
+    setParentPin(null);
     setDialogOpen(false);
     setPin("");
     setError(null);
@@ -180,6 +177,7 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
       setFailedAttempts(0);
       setLockedUntil(null);
       setModeAndPersist("parent");
+      setParentPin(pin);
       setDialogOpen(false);
       setPin("");
     } catch (requestError) {
@@ -201,6 +199,7 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
         childView,
         hasPin,
         pinLength,
+        parentPin,
         openParentDialog,
         setChildView: setChildViewAndPersist,
         switchToChildView,

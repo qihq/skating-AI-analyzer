@@ -967,6 +967,8 @@ async def _create_monthly_chapter_tables(conn) -> None:
                 skater_id TEXT NOT NULL,
                 year_month VARCHAR(7) NOT NULL,
                 revision INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                parent_revision_id TEXT,
                 status TEXT NOT NULL DEFAULT 'facts_ready',
                 fact_snapshot JSON NOT NULL,
                 source_hash TEXT NOT NULL,
@@ -982,6 +984,7 @@ async def _create_monthly_chapter_tables(conn) -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 published_at TIMESTAMP,
+                deleted_at TIMESTAMP,
                 CONSTRAINT uq_monthly_chapter_revision UNIQUE (skater_id, year_month, revision)
             )
             """
@@ -990,6 +993,16 @@ async def _create_monthly_chapter_tables(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_skater_id ON monthly_chapters(skater_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_year_month ON monthly_chapters(year_month)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_status ON monthly_chapters(status)"))
+    monthly_columns_result = await conn.execute(text("PRAGMA table_info(monthly_chapters)"))
+    monthly_columns = {row[1] for row in monthly_columns_result.fetchall()}
+    if "title" not in monthly_columns:
+        await conn.execute(text("ALTER TABLE monthly_chapters ADD COLUMN title TEXT NOT NULL DEFAULT ''"))
+    if "parent_revision_id" not in monthly_columns:
+        await conn.execute(text("ALTER TABLE monthly_chapters ADD COLUMN parent_revision_id TEXT"))
+    if "deleted_at" not in monthly_columns:
+        await conn.execute(text("ALTER TABLE monthly_chapters ADD COLUMN deleted_at TIMESTAMP"))
+    await conn.execute(text("UPDATE monthly_chapters SET title = year_month || ' 月度成长记录' WHERE title = '' OR title IS NULL"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_monthly_chapters_deleted_at ON monthly_chapters(deleted_at)"))
 
 
 async def run_migrations_annual_collections(engine) -> None:
@@ -1011,6 +1024,7 @@ async def _create_annual_collection_tables(conn) -> None:
                 skater_id TEXT NOT NULL REFERENCES skaters(id),
                 year INTEGER NOT NULL,
                 revision INTEGER NOT NULL,
+                parent_revision_id TEXT,
                 status TEXT NOT NULL DEFAULT 'ready',
                 title TEXT NOT NULL,
                 selected_chapter_ids JSON NOT NULL DEFAULT '[]',
@@ -1019,6 +1033,7 @@ async def _create_annual_collection_tables(conn) -> None:
                 source_hash TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP,
                 CONSTRAINT uq_annual_collection_revision UNIQUE (skater_id, year, revision)
             )
             """
@@ -1045,6 +1060,13 @@ async def _create_annual_collection_tables(conn) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_collections_skater_year ON annual_collections(skater_id, year)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_exports_collection_id ON annual_exports(collection_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_exports_status ON annual_exports(status)"))
+    annual_columns_result = await conn.execute(text("PRAGMA table_info(annual_collections)"))
+    annual_columns = {row[1] for row in annual_columns_result.fetchall()}
+    if "parent_revision_id" not in annual_columns:
+        await conn.execute(text("ALTER TABLE annual_collections ADD COLUMN parent_revision_id TEXT"))
+    if "deleted_at" not in annual_columns:
+        await conn.execute(text("ALTER TABLE annual_collections ADD COLUMN deleted_at TIMESTAMP"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_collections_deleted_at ON annual_collections(deleted_at)"))
 
 
 class _noop_context:

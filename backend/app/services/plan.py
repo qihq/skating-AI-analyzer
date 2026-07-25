@@ -43,17 +43,17 @@ async def _repair_training_plan_json(
     expected_shape: str = "object",
 ) -> Any:
     shape_instruction = (
-        "ä¸€ä¸ªå®Œæ•´åˆæ³• JSON arrayï¼Œç¬¬ä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ [ï¼Œæœ€åŽä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ ]"
+        "一个完整合法 JSON array，第一个字符必须是 [，最后一个字符必须是 ]"
         if expected_shape == "array"
-        else "ä¸€ä¸ªå®Œæ•´åˆæ³• JSON objectï¼Œç¬¬ä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ {ï¼Œæœ€åŽä¸€ä¸ªå­—ç¬¦å¿…é¡»æ˜¯ }"
+        else "一个完整合法 JSON object，第一个字符必须是 {，最后一个字符必须是 }"
     )
     repair_prompt = (
-        "ä¸Šä¸€æ¬¡è®­ç»ƒè®¡åˆ’è¾“å‡ºä¸æ˜¯åˆæ³• JSONã€‚"
-        f"JSON è§£æžé”™è¯¯ï¼š{error}\n\n"
-        f"è¯·ä¿®å¤ä¸‹é¢çš„å†…å®¹ï¼Œåªè¿”å›ž{shape_instruction}ï¼Œä¸è¦ Markdownã€è§£é‡Šæˆ–ä»£ç å—ã€‚\n\n"
-        "å¿…é¡»ä¿æŒè¿™ä¸ªç»“æž„ï¼š"
-        '{"title":"...","focus_skill":"...","days":[{"day":1,"theme":"...","sessions":[{"id":"d1s1","title":"...","duration":"6åˆ†é’Ÿ","description":"...","related_issue":"...","parent_tip":"...","is_office_trainable":true,"completed":false}]}]}\n\n'
-        f"éœ€è¦ä¿®å¤çš„å†…å®¹ï¼š\n{raw_content[:6000]}"
+        "上一次训练计划输出不是合法 JSON。"
+        f"JSON 解析错误：{error}\n\n"
+        f"请修复下面的内容，只返回{shape_instruction}，不要 Markdown、解释或代码块。\n\n"
+        "必须保持这个结构："
+        '{"title":"...","focus_skill":"...","days":[{"day":1,"theme":"...","sessions":[{"id":"d1s1","title":"...","duration":"6分钟","description":"...","related_issue":"...","parent_tip":"...","is_office_trainable":true,"completed":false}]}]}\n\n'
+        f"需要修复的内容：\n{raw_content[:6000]}"
     )
     repaired_content = await request_text_completion(
         provider,
@@ -72,14 +72,14 @@ async def _repair_training_plan_json(
     except json.JSONDecodeError as repair_error:
         logger.warning("Training plan JSON repair failed: %s | raw: %s", repair_error, repaired_cleaned[:500])
         raise PlanGenerationError(
-            f"AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ä¸æ˜¯åˆæ³• JSONï¼š{_invalid_json_detail(repair_error, repaired_content)}"
+            f"AI 返回的训练计划不是合法 JSON：{_invalid_json_detail(repair_error, repaired_content)}"
         ) from repair_error
     if expected_shape == "array":
         if not isinstance(repaired, list):
-            raise PlanGenerationError("AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ JSON ä¸æ˜¯æ•°ç»„ã€‚")
+            raise PlanGenerationError("AI 返回的训练计划 JSON 不是数组。")
         return repaired
     if not isinstance(repaired, dict):
-        raise PlanGenerationError("AI è¿”å›žçš„è®­ç»ƒè®¡åˆ’ JSON ä¸æ˜¯å¯¹è±¡ã€‚")
+        raise PlanGenerationError("AI 返回的训练计划 JSON 不是对象。")
     return repaired
 
 

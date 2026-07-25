@@ -18,6 +18,7 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
             sys.modules.pop(name, None)
         import app.database as database
         import app.models as models
+        from app.services.auth import hash_pin
 
         self.database = database
         self.models = models
@@ -28,6 +29,7 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
         facts = {"schema_version": "monthly_facts.v1", "coverage": {}, "facts": [], "representative_frames": []}
         async with database.AsyncSessionLocal() as session:
             session.add(models.Skater(id="skater-1", name="Tantan"))
+            session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
             session.add(models.MonthlyChapter(
                 id="chapter-1", skater_id="skater-1", year_month="2026-01", revision=1,
                 status="published", fact_snapshot=facts,
@@ -48,13 +50,13 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
         async with self.database.AsyncSessionLocal() as session:
             preview = await annual.preview_collection("skater-1", 2026, request, session=session)
             self.assertEqual(preview.coverage["published_chapter_count"], 1)
-            collection = await annual.create_collection("skater-1", 2026, request, session=session)
+            collection = await annual.create_collection("skater-1", 2026, request, x_parent_pin="1234", session=session)
             self.assertEqual(collection.status, "ready")
             self.assertEqual(collection.revision, 1)
 
         with patch("app.routers.annual.run_export", new=AsyncMock()) as run_export:
             async with self.database.AsyncSessionLocal() as session:
-                export = await annual.create_export(collection.id, background_tasks=_BackgroundTasksStub(), session=session)
+                export = await annual.create_export(collection.id, background_tasks=_BackgroundTasksStub(), x_parent_pin="1234", session=session)
             self.assertEqual(export.status, "pending")
             run_export.assert_not_awaited()
 
@@ -112,7 +114,7 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            created = await annual.create_export("collection-missing", background_tasks=_BackgroundTasksStub(), session=session)
+            created = await annual.create_export("collection-missing", background_tasks=_BackgroundTasksStub(), x_parent_pin="1234", session=session)
             missing = await session.get(self.models.AnnualExport, "export-missing")
             assert missing is not None
             self.assertEqual(missing.status, "failed")
@@ -167,6 +169,110 @@ class AnnualRouteTests(unittest.IsolatedAsyncioTestCase):
             recovered_export = await session.get(self.models.AnnualExport, "export-recover")
             assert recovered_export is not None
             self.assertEqual(recovered_export.status, "pending")
+
+    async def test_revision_recycle_restore_and_permanent_delete(self) -> None:
+        import app.routers.annual as annual
+        from app.schemas import AnnualCollectionCreateRequest, AnnualCollectionRevisionRequest
+
+        async with self.database.AsyncSessionLocal() as session:
+            original = await annual.create_collection(
+                "skater-1", 2026,
+                AnnualCollectionCreateRequest(title="原年度报告", chapter_ids=["chapter-1"], milestone_ids=[]),
+                x_parent_pin="1234",
+                session=session,
+            )
+            revised = await annual.revise_collection(
+                original.id,
+                AnnualCollectionRevisionRequest(title="修订年度报告", chapter_ids=["chapter-1"], milestone_ids=[]),
+                x_parent_pin="1234",
+                session=session,
+            )
+            original_row = await session.get(self.models.AnnualCollection, original.id)
+            assert original_row is not None
+            self.assertEqual(original_row.title, "原年度报告")
+            self.assertEqual(revised.parent_revision_id, original.id)
+            self.assertEqual(revised.revision, 2)
+
+        async with self.database.AsyncSessionLocal() as session:
+            await annual.recycle_collection(revised.id, x_parent_pin="1234", session=session)
+            active = await annual.list_collections("skater-1", 2026, recycled=False, session=session)
+            recycled = await annual.list_collections("skater-1", 2026, recycled=True, session=session)
+            self.assertEqual([item.id for item in active], [original.id])
+            self.assertEqual([item.id for item in recycled], [revised.id])
+            await annual.restore_collection(revised.id, x_parent_pin="1234", session=session)
+            await annual.recycle_collection(revised.id, x_parent_pin="1234", session=session)
+            await annual.permanently_delete_collection(revised.id, x_parent_pin="1234", session=session)
+            self.assertIsNone(await session.get(self.models.AnnualCollection, revised.id))
+
+    async def test_mutation_requires_a_valid_parent_pin(self) -> None:
+        import app.routers.annual as annual
+        from app.schemas import AnnualCollectionCreateRequest
+        from fastapi import HTTPException
+
+        request = AnnualCollectionCreateRequest(chapter_ids=["chapter-1"], milestone_ids=[])
+        async with self.database.AsyncSessionLocal() as session:
+            for pin in (None, "9999"):
+                with self.assertRaises(HTTPException) as raised:
+                    await annual.create_collection("skater-1", 2026, request, x_parent_pin=pin, session=session)
+                self.assertEqual(raised.exception.status_code, 403)
+            created = await annual.create_collection("skater-1", 2026, request, x_parent_pin="1234", session=session)
+            self.assertEqual(created.status, "ready")
+
+    async def test_permanent_delete_keeps_records_when_asset_removal_fails(self) -> None:
+        import app.routers.annual as annual
+        from fastapi import HTTPException
+
+        relative_path = "annual/collection-delete/export-delete.pdf"
+        asset_path = annual.ANNUAL_ASSET_ROOT / relative_path
+        asset_path.parent.mkdir(parents=True, exist_ok=True)
+        asset_path.write_bytes(b"%PDF-1.4\n")
+        async with self.database.AsyncSessionLocal() as session:
+            collection = self.models.AnnualCollection(
+                id="collection-delete", skater_id="skater-1", year=2026, revision=1, status="exported",
+                title="Annual", selected_chapter_ids=[], selected_milestone_ids=[], snapshot={},
+                source_hash="a" * 64, deleted_at=datetime.now(timezone.utc),
+            )
+            session.add(collection)
+            session.add(self.models.AnnualExport(
+                id="export-delete", collection_id=collection.id, status="completed",
+                renderer_version="annual_pdf.v1", asset_relative_path=relative_path,
+            ))
+            await session.commit()
+            collection_id = collection.id
+            with patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+                with self.assertRaises(HTTPException) as raised:
+                    await annual.permanently_delete_collection(collection_id, x_parent_pin="1234", session=session)
+            self.assertEqual(raised.exception.status_code, 500)
+            self.assertIsNotNone(await session.get(self.models.AnnualCollection, collection_id))
+            self.assertIsNotNone(await session.get(self.models.AnnualExport, "export-delete"))
+
+    async def test_export_deduplicates_active_job_and_force_creates_new_job(self) -> None:
+        import app.routers.annual as annual
+
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(self.models.AnnualCollection(
+                id="collection-dedup", skater_id="skater-1", year=2026, revision=1,
+                status="ready", title="Annual", selected_chapter_ids=["chapter-1"],
+                selected_milestone_ids=[], snapshot={}, source_hash="a" * 64,
+            ))
+            session.add(self.models.AnnualExport(
+                id="export-active", collection_id="collection-dedup", status="pending", renderer_version="annual_pdf.v1",
+            ))
+            await session.commit()
+            deduplicated = await annual.create_export(
+                "collection-dedup", background_tasks=_BackgroundTasksStub(), force=True, x_parent_pin="1234", session=session,
+            )
+            self.assertEqual(deduplicated.id, "export-active")
+            active = await session.get(self.models.AnnualExport, "export-active")
+            assert active is not None
+            active.status = "completed"
+            active.asset_relative_path = "annual/collection-dedup/export-active.pdf"
+            await session.commit()
+            forced = await annual.create_export(
+                "collection-dedup", background_tasks=_BackgroundTasksStub(), force=True, x_parent_pin="1234", session=session,
+            )
+            self.assertNotEqual(forced.id, "export-active")
+            self.assertEqual(forced.status, "pending")
 
 
 class _BackgroundTasksStub:

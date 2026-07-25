@@ -309,6 +309,8 @@ class MonthlyChapter(Base):
     skater_id: Mapped[str] = mapped_column(String(36), index=True)
     year_month: Mapped[str] = mapped_column(String(7), index=True)
     revision: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(Text, default="")
+    parent_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="facts_ready", index=True)
     fact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     source_hash: Mapped[str] = mapped_column(String(64))
@@ -328,6 +330,7 @@ class MonthlyChapter(Base):
         onupdate=utcnow,
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class AnnualCollection(Base):
@@ -340,6 +343,7 @@ class AnnualCollection(Base):
     skater_id: Mapped[str] = mapped_column(String(36), ForeignKey("skaters.id"), index=True)
     year: Mapped[int] = mapped_column(Integer, index=True)
     revision: Mapped[int] = mapped_column(Integer)
+    parent_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
     title: Mapped[str] = mapped_column(Text)
     selected_chapter_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -350,6 +354,7 @@ class AnnualCollection(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class AnnualExport(Base):

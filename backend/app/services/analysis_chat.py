@@ -28,6 +28,8 @@ ANALYSIS_CHAT_SYSTEM_PROMPT = (
     "当动作识别、关键帧或证据之间有冲突时，必须明确说明不确定性，并指出哪些证据支持当前结论、"
     "哪些证据支持另一种可能。若用户要求重新看完整视频，说明当前聊天不会重新跑视频分析，"
     "可以建议重新分析或后续关键帧视觉复核。回答要简洁、具体、可执行。"
+    "先直接回答用户问的技术问题，再给证据和建议；不要复述用户问题或 saved comments，"
+    "不要使用‘能确认的是/不能确认的是’‘已纳入关注’等固定模板。证据不足时只用一句话说明缺少哪种画面或阶段。"
 )
 CORRECTION_SUGGESTION_PROMPT = (
     "\n\nCorrection proposal protocol: if the user explicitly asks to correct action labels, action confirmation, "
@@ -48,8 +50,8 @@ MODEL_IDENTITY_PROMPT = (
 )
 MULTI_QUESTION_PROMPT = (
     "\n\nComment question protocol: if saved user comments or the latest user message contain multiple questions, "
-    "answer each one explicitly. For every question, say what can be confirmed from saved evidence and what cannot "
-    "be confirmed from the current analysis."
+    "answer each one explicitly with a short numbered list. Lead with the actual technical judgment, cite the most "
+    "relevant saved evidence, and give one concrete next check or drill. Do not repeat a generic confirmed/unconfirmed format."
 )
 
 MAX_HISTORY_MESSAGES = 12

@@ -52,6 +52,7 @@ async def build_chapter_facts(
         skater_id=skater_id,
         year_month=year_month,
         revision=next_revision,
+        title=f"{year_month} 月度成长记录",
         status="facts_ready",
         fact_snapshot=snapshot,
         source_hash=source_hash,
@@ -231,6 +232,7 @@ async def generate_chapter_text(
     validate_generated_chapter(payload, snapshot)
 
     chapter.generated_payload = payload
+    chapter.title = str(payload.get("title") or chapter.title or f"{chapter.year_month} 月度成长记录").strip()
     chapter.draft_text = _compose_draft_text(payload)
     chapter.status = "generated"
     chapter.prompt_version = PROMPT_VERSION

@@ -8,6 +8,7 @@ import {
   fetchMonthlyChapters,
   generateMonthlyChapter,
   patchMonthlyChapter,
+  reviseMonthlyChapter,
   publishMonthlyChapter,
 } from "../api/client";
 import type { MonthlyChapter, Skater } from "../api/client";
@@ -19,7 +20,15 @@ vi.mock("../api/client", () => ({
   createMonthlyChapterFacts: vi.fn(),
   generateMonthlyChapter: vi.fn(),
   patchMonthlyChapter: vi.fn(),
+  reviseMonthlyChapter: vi.fn(),
+  recycleMonthlyChapter: vi.fn(),
+  restoreMonthlyChapter: vi.fn(),
+  permanentlyDeleteMonthlyChapter: vi.fn(),
   publishMonthlyChapter: vi.fn(),
+}));
+
+vi.mock("../components/AppModeContext", () => ({
+  useAppMode: () => ({ parentPin: "1234", enterParentMode: vi.fn() }),
 }));
 
 const skaters = [{ id: "skater-1", name: "tantan", display_name: "坦坦", is_default: true }] as Skater[];
@@ -67,12 +76,14 @@ describe("MonthlyChaptersPage", () => {
     vi.mocked(createMonthlyChapterFacts).mockReset();
     vi.mocked(generateMonthlyChapter).mockReset();
     vi.mocked(patchMonthlyChapter).mockReset();
+    vi.mocked(reviseMonthlyChapter).mockReset();
     vi.mocked(publishMonthlyChapter).mockReset();
     vi.mocked(fetchSkaters).mockResolvedValue(skaters);
     vi.mocked(fetchMonthlyChapters).mockResolvedValue([]);
     vi.mocked(createMonthlyChapterFacts).mockResolvedValue(makeChapter({ id: "chapter-new" }));
     vi.mocked(generateMonthlyChapter).mockResolvedValue(makeChapter({ id: "chapter-new", status: "generated", draft_text: "AI 初稿。" }));
     vi.mocked(patchMonthlyChapter).mockResolvedValue(makeChapter({ id: "chapter-new", status: "generated", final_text: "编辑后的文字。" }));
+    vi.mocked(reviseMonthlyChapter).mockResolvedValue(makeChapter({ id: "chapter-2", revision: 2, status: "generated", final_text: "已发布文字。" }));
     vi.mocked(publishMonthlyChapter).mockResolvedValue(makeChapter({ id: "chapter-new", status: "published", final_text: "编辑后的文字。", published_at: "2026-07-31T12:00:00Z" }));
   });
 
@@ -88,11 +99,12 @@ describe("MonthlyChaptersPage", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("option", { name: /第 2 次修订（已发布）/ });
-    expect(screen.getByRole("option", { name: /第 1 次修订（事实就绪）/ })).toBeInTheDocument();
+    await screen.findAllByText("第 2 次修订（已发布）");
+    fireEvent.click(screen.getByLabelText("选择修订"));
+    expect(await screen.findByRole("option", { name: /第 1 次修订（事实就绪）/ })).toBeInTheDocument();
   });
 
-  it("locks editing for a published chapter", async () => {
+  it("creates a new version from a published chapter", async () => {
     vi.mocked(fetchMonthlyChapters).mockResolvedValue([makeChapter({ id: "chapter-1", status: "published", final_text: "已发布文字。" })]);
 
     render(
@@ -101,9 +113,12 @@ describe("MonthlyChaptersPage", () => {
       </MemoryRouter>,
     );
 
-    const saveButton = await screen.findByRole("button", { name: "保存修改" });
-    expect(saveButton).toBeDisabled();
-    expect(screen.getByText("已发布")).toBeInTheDocument();
+    const saveButton = await screen.findByRole("button", { name: "创建新版本" });
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(reviseMonthlyChapter).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText("选择修订"));
+    expect(await screen.findByRole("option", { name: /第 1 次修订（已发布）/ })).toBeInTheDocument();
   });
 
   it("keeps facts on generation error and surfaces the message", async () => {

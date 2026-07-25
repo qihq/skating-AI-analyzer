@@ -18,7 +18,10 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
   const { id } = useParams<{ id: string }>();
   const [params] = useSearchParams();
   const view = resolveAnalysisView({ initialView, view: params.get("view"), legacyTab: params.get("tab") });
-  const sectionItems = ITEMS.map((item) => ({ ...item, to: `/analysis/${id}?view=${item.to}` }));
+  const sectionItems = ITEMS.map((item) => ({
+    ...item,
+    to: `/analysis/${id}?view=${item.to}${item.id === "more" ? "&tool=diagnostics" : ""}`,
+  }));
   const workspaceTab: Record<Exclude<AnalysisView, "summary">, WorkspaceTab> = {
     moments: "evidence", body: "pose", ask: "followup", more: "diagnostics",
   };

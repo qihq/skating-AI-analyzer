@@ -1,5 +1,5 @@
 import axios from "axios";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { AnalysisDetail, fetchAnalysis, fetchAnalysisPose, PoseResponse } from "../api/client";
@@ -53,6 +53,7 @@ function draftKeyframesFromAnalysis(analysis: AnalysisDetail | null) {
 }
 
 export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: { forcedTab?: WorkspaceTab; hideHeader?: boolean } = {}) {
+  const diagnosticsRef = useRef<HTMLDivElement | null>(null);
   const { id } = useParams<{ id: string }>();
   const { isParentMode, enterParentMode } = useAppMode();
   const [searchParams] = useSearchParams();
@@ -65,6 +66,18 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
   const activeTab = forcedTab ?? (searchParams.get("tab") as WorkspaceTab | null) ?? "pose";
   const title = analysis ? buildTitle(analysis) : "报告工作台";
   const draftKeyframes = useMemo(() => draftKeyframesFromAnalysis(analysis), [analysis]);
+
+  useEffect(() => {
+    if (activeTab !== "diagnostics" || !analysis || !diagnosticsRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      diagnosticsRef.current?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+      diagnosticsRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, analysis?.id]);
 
   useEffect(() => {
     setAnalysis(null);
@@ -234,7 +247,7 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
           <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-500">这里展示关键帧、语义帧和候选证据的对应关系。</div>
         </section>
       ) : activeTab === "diagnostics" ? (
-        <div className="grid gap-6">
+        <div ref={diagnosticsRef} tabIndex={-1} className="grid scroll-mt-28 gap-6 outline-none" aria-label="分析诊断">
           <AnalysisQualityPanel analysis={analysis} />
           <AnalysisDebugLogPanel
             logs={analysis.processing_logs ?? []}

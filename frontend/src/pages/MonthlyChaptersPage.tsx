@@ -5,6 +5,10 @@ import {
   fetchMonthlyChapters,
   generateMonthlyChapter,
   patchMonthlyChapter,
+  reviseMonthlyChapter,
+  recycleMonthlyChapter,
+  restoreMonthlyChapter,
+  permanentlyDeleteMonthlyChapter,
   publishMonthlyChapter,
   MonthlyChapter,
   MonthlyFactSnapshot,
@@ -15,6 +19,10 @@ import MonthlyFactPreview from "../components/MonthlyFactPreview";
 import MonthlyChapterEditor from "../components/MonthlyChapterEditor";
 import IslandShareDialog from "../modern/IslandShareDialog";
 import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { Button, Card, Collapse, Input, Select, Tag } from "../modern/AnimalUi";
+import { useAppMode } from "../components/AppModeContext";
+import ModernConfirmModal from "../modern/ModernConfirmModal";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
 
 const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -37,6 +45,9 @@ interface Revision {
 }
 
 export default function MonthlyChaptersPage() {
+  const { parentPin, enterParentMode } = useAppMode();
+  const online = useOnlineStatus();
+  const [confirmation, setConfirmation] = useState<{ title: string; description: string; label: string; danger?: boolean; run: () => Promise<void> } | null>(null);
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState<string | null>(null);
   const [yearMonth, setYearMonth] = useState<string>(currentYearMonth());
@@ -47,6 +58,7 @@ export default function MonthlyChaptersPage() {
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [recycled, setRecycled] = useState<MonthlyChapter[]>([]);
   const chapterRequestVersion = useRef(0);
 
   useEffect(() => {
@@ -70,9 +82,10 @@ export default function MonthlyChaptersPage() {
     setLoadingList(true);
     setError(null);
     try {
-      const list = await fetchMonthlyChapters(skaterId, month);
+      const [list, recycledList] = await Promise.all([fetchMonthlyChapters(skaterId, month), fetchMonthlyChapters(skaterId, month, true)]);
       if (requestVersion !== chapterRequestVersion.current) return;
       setChapters(list);
+      setRecycled(recycledList);
       setSelectedChapterId(list[0]?.id ?? null);
     } catch (requestError) {
       if (requestVersion !== chapterRequestVersion.current) return;
@@ -114,6 +127,7 @@ export default function MonthlyChaptersPage() {
     };
 
   const handleGatherFacts = async () => {
+    if (!parentPin) { setError("请先验证家长 PIN 后再整理月报。"); await enterParentMode(); return; }
     if (!selectedSkaterId || !MONTH_REGEX.test(yearMonth)) {
       setError("请先选择合法的月份（YYYY-MM）。");
       return;
@@ -123,7 +137,7 @@ export default function MonthlyChaptersPage() {
     setLoadingList(false);
     setError(null);
     try {
-      const chapter = await createMonthlyChapterFacts(selectedSkaterId, yearMonth);
+      const chapter = await createMonthlyChapterFacts(selectedSkaterId, yearMonth, parentPin);
       setChapters((current) => {
         const next = [...current.filter((item) => item.id !== chapter.id), chapter];
         next.sort((a, b) => b.revision - a.revision);
@@ -139,10 +153,11 @@ export default function MonthlyChaptersPage() {
 
   const handleGenerate = async () => {
     if (!selectedChapter) return;
+    if (!parentPin) { setError("请先验证家长 PIN 后再生成月报。"); await enterParentMode(); return; }
     setWorking(true);
     setError(null);
     try {
-      const updated = await generateMonthlyChapter(selectedChapter.id);
+      const updated = await generateMonthlyChapter(selectedChapter.id, parentPin);
       setChapters(upsert(updated));
       setSelectedChapterId(updated.id);
     } catch (requestError) {
@@ -152,12 +167,15 @@ export default function MonthlyChaptersPage() {
     }
   };
 
-  const handleSaveDraft = async (finalText: string) => {
+  const handleSaveDraft = async (finalText: string, title: string) => {
     if (!selectedChapter) return;
+    if (!parentPin) { setEditorError("请先验证家长 PIN 后再保存。"); await enterParentMode(); return; }
     setWorking(true);
     setEditorError(null);
     try {
-      const updated = await patchMonthlyChapter(selectedChapter.id, finalText);
+      const updated = selectedChapter.status === "published"
+        ? await reviseMonthlyChapter(selectedChapter.id, finalText, title, parentPin)
+        : await patchMonthlyChapter(selectedChapter.id, finalText, title, parentPin);
       setChapters(upsert(updated));
       setSelectedChapterId(updated.id);
     } catch (requestError) {
@@ -169,10 +187,11 @@ export default function MonthlyChaptersPage() {
 
   const handlePublish = async () => {
     if (!selectedChapter) return;
+    if (!parentPin) { setEditorError("请先验证家长 PIN 后再发布。"); await enterParentMode(); return; }
     setWorking(true);
     setEditorError(null);
     try {
-      const updated = await publishMonthlyChapter(selectedChapter.id);
+      const updated = await publishMonthlyChapter(selectedChapter.id, parentPin);
       setChapters(upsert(updated));
       setSelectedChapterId(updated.id);
     } catch (requestError) {
@@ -197,6 +216,33 @@ export default function MonthlyChaptersPage() {
     setSharePreview(createShareImagePreview(result, false));
   };
 
+  const handleRecycle = async () => {
+    if (!selectedChapter) return;
+    if (!parentPin) { setError("请先验证家长 PIN 后再删除。"); await enterParentMode(); return; }
+    setWorking(true);
+    try { await recycleMonthlyChapter(selectedChapter.id, parentPin); if (selectedSkaterId) await reloadChapters(selectedSkaterId, yearMonth); }
+    catch (requestError) { setError(errorMessage(requestError)); } finally { setWorking(false); }
+  };
+
+  const handleRestore = async (id: string) => {
+    if (!parentPin) { setError("请先验证家长 PIN 后再恢复。"); await enterParentMode(); return; }
+    setWorking(true); try { await restoreMonthlyChapter(id, parentPin); if (selectedSkaterId) await reloadChapters(selectedSkaterId, yearMonth); }
+    catch (requestError) { setError(errorMessage(requestError)); } finally { setWorking(false); }
+  };
+
+  const handlePermanentDelete = async (id: string) => {
+    if (!parentPin) { setError("请先验证家长 PIN 后再永久删除。"); await enterParentMode(); return; }
+    setWorking(true); try { await permanentlyDeleteMonthlyChapter(id, parentPin); if (selectedSkaterId) await reloadChapters(selectedSkaterId, yearMonth); }
+    catch (requestError) { setError(errorMessage(requestError)); } finally { setWorking(false); }
+  };
+
+  const confirmRecycle = () => {
+    if (!selectedChapter) return;
+    setConfirmation({ title: "移入回收站", description: `“${selectedChapter.title}”删除后仍可恢复。`, label: "移入回收站", danger: true, run: handleRecycle });
+  };
+
+  const confirmPermanentDelete = (id: string) => setConfirmation({ title: "永久删除月报", description: "永久删除后无法恢复，请确认确实不再需要这个版本。", label: "永久删除", danger: true, run: () => handlePermanentDelete(id) });
+
   return (
     <div className="space-y-6">
       <section className="app-card p-6 tablet:p-8">
@@ -211,27 +257,20 @@ export default function MonthlyChaptersPage() {
           <div className="flex flex-wrap gap-3">
             <label className="space-y-2">
               <span className="text-sm font-medium text-slate-700">练习档案</span>
-              <select
+              <Select
                 aria-label="练习档案"
                 value={selectedSkaterId ?? ""}
-                onChange={(event) => setSelectedSkaterId(event.target.value || null)}
-                className="app-input"
-              >
-                {skaters.map((skater) => (
-                  <option key={skater.id} value={skater.id}>
-                    {skater.display_name || skater.name}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setSelectedSkaterId(value || null)}
+                options={skaters.map((skater) => ({ key: skater.id, label: skater.display_name || skater.name }))}
+              />
             </label>
             <label className="space-y-2">
               <span className="text-sm font-medium text-slate-700">月份</span>
-              <input
+              <Input
                 aria-label="月份"
                 type="month"
                 value={yearMonth}
                 onChange={(event) => setYearMonth(event.target.value)}
-                className="app-input"
               />
             </label>
           </div>
@@ -239,45 +278,39 @@ export default function MonthlyChaptersPage() {
       </section>
 
       {monthInvalid ? <p className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">请选择合法的月份（YYYY-MM）。</p> : null}
+      {!online ? <p role="status" className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800">当前离线：可以查看已缓存内容，编辑、删除、恢复和生成操作暂不可用。</p> : null}
       {error ? <p role="alert" className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p> : null}
 
       <section className="app-card p-5">
         <h2 className="text-lg font-semibold text-slate-900">章节修订流程</h2>
         <div className="mt-4 flex flex-wrap gap-3">
-          <button type="button" className="island-button island-button--secondary min-h-[44px] px-5" onClick={() => void handleShareChapter()} disabled={!selectedChapter}>分享月度故事</button>
-          <button
-            type="button"
-            className="app-pill min-h-[44px] px-5 text-sm font-semibold"
+          <Button onClick={() => void handleShareChapter()} disabled={!selectedChapter}>分享月度故事</Button>
+          <Button
             onClick={() => void handleGatherFacts()}
-            disabled={!selectedSkaterId || monthInvalid || working}
+            disabled={!selectedSkaterId || monthInvalid || working || !online}
+            loading={working}
           >
             整理本月事实
-          </button>
-          <button
-            type="button"
-            className="app-pill min-h-[44px] px-5 text-sm font-semibold"
+          </Button>
+          <Button
+            type="primary"
             onClick={() => void handleGenerate()}
-            disabled={!selectedChapter || selectedChapter.status === "published" || working}
+            disabled={!selectedChapter || selectedChapter.status === "published" || working || !online}
+            loading={working}
           >
             生成叙事初稿
-          </button>
+          </Button>
         </div>
 
         {revisionOptions.length > 0 ? (
           <label className="mt-4 block space-y-2">
             <span className="text-sm font-medium text-slate-700">选择修订</span>
-            <select
+            <Select
               aria-label="选择修订"
               value={selectedChapterId ?? ""}
-              onChange={(event) => setSelectedChapterId(event.target.value || null)}
-              className="app-input"
-            >
-              {revisionOptions.map((revision) => (
-                <option key={revision.value} value={revision.value}>
-                  {revision.label}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => setSelectedChapterId(value || null)}
+              options={revisionOptions.map((revision) => ({ key: revision.value, label: revision.label }))}
+            />
           </label>
         ) : loadingList ? (
           <p className="mt-4 text-sm text-slate-500">正在读取已有章节…</p>
@@ -289,15 +322,14 @@ export default function MonthlyChaptersPage() {
       {snapshot ? <MonthlyFactPreview snapshot={snapshot as MonthlyFactSnapshot} /> : null}
 
       {selectedChapter ? (
-        <MonthlyChapterEditor
-          chapter={selectedChapter}
-          onSaveDraft={handleSaveDraft}
-          onPublish={handlePublish}
-          saving={working}
-          error={editorError}
-        />
+        <>
+          <MonthlyChapterEditor chapter={selectedChapter} onSaveDraft={handleSaveDraft} onPublish={handlePublish} saving={working} error={editorError} />
+          <Card pattern="app-red" className="mt-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><strong>管理这个版本</strong><p className="text-sm">删除后可在本月回收站恢复。</p></div><Button danger onClick={confirmRecycle} disabled={working || !online}>移入回收站</Button></div></Card>
+        </>
       ) : null}
+      <Collapse question={`本月回收站（${recycled.length}）`} answer={recycled.length ? <div className="space-y-3">{recycled.map((item) => <Card key={item.id} pattern="default"><div className="flex flex-wrap items-center justify-between gap-3"><div><strong>{item.title}</strong><Tag color="brown">第 {item.revision} 版</Tag></div><div className="flex gap-2"><Button onClick={() => void handleRestore(item.id)} disabled={working || !online}>恢复</Button><Button danger onClick={() => confirmPermanentDelete(item.id)} disabled={working || !online}>永久删除</Button></div></div></Card>)}</div> : <p>回收站为空。</p>} />
       <IslandShareDialog preview={sharePreview} title="月度故事分享" onClose={() => setSharePreview(null)} />
+      <ModernConfirmModal open={Boolean(confirmation)} title={confirmation?.title || "确认操作"} description={confirmation?.description || ""} confirmLabel={confirmation?.label || "确认"} danger={confirmation?.danger} loading={working} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation?.run; if (!action) return; void action().finally(() => setConfirmation(null)); }} />
     </div>
   );
 }

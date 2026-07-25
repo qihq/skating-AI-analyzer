@@ -4,15 +4,17 @@ interface AnnualExportStatusProps {
   exportJob: AnnualExport | null;
   onRetry?: () => void;
   retrying?: boolean;
+  onRegenerate?: () => void;
 }
 
-export default function AnnualExportStatus({ exportJob, onRetry, retrying = false }: AnnualExportStatusProps) {
+export default function AnnualExportStatus({ exportJob, onRetry, onRegenerate, retrying = false }: AnnualExportStatusProps) {
   if (!exportJob) return null;
   if (exportJob.status === "completed") {
     return (
       <div className="island-card rounded-2xl px-4 py-4 text-sm text-emerald-900">
         <p>年度 PDF 已生成（{exportJob.page_count ?? "?"} 页）。</p>
         <a className="island-button island-button--secondary mt-3 inline-flex" href={`/api/annual/exports/${exportJob.id}/download`}>下载年度 PDF</a>
+        {onRegenerate ? <button type="button" className="island-button island-button--primary ml-2 mt-3" disabled={retrying} onClick={onRegenerate}>{retrying ? "生成中…" : "重新生成年度 PDF"}</button> : null}
       </div>
     );
   }

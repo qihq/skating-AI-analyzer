@@ -7,6 +7,7 @@ import {
   createAnnualExport,
   fetchAnnualExport,
   fetchAnnualMilestones,
+  fetchAnnualCollections,
   fetchMonthlyChapters,
   fetchSkaters,
   previewAnnualCollection,
@@ -22,6 +23,15 @@ vi.mock("../api/client", () => ({
   createAnnualExport: vi.fn(),
   fetchAnnualExport: vi.fn(),
   fetchAnnualMilestones: vi.fn(),
+  fetchAnnualCollections: vi.fn(),
+  reviseAnnualCollection: vi.fn(),
+  recycleAnnualCollection: vi.fn(),
+  restoreAnnualCollection: vi.fn(),
+  permanentlyDeleteAnnualCollection: vi.fn(),
+}));
+
+vi.mock("../components/AppModeContext", () => ({
+  useAppMode: () => ({ parentPin: "1234", enterParentMode: vi.fn() }),
 }));
 
 const chapter: MonthlyChapter = {
@@ -43,6 +53,7 @@ describe("AnnualCollectionPage", () => {
     vi.mocked(fetchSkaters).mockResolvedValue([skater]);
     vi.mocked(fetchMonthlyChapters).mockResolvedValue([chapter]);
     vi.mocked(fetchAnnualMilestones).mockResolvedValue([]);
+    vi.mocked(fetchAnnualCollections).mockResolvedValue([]);
     vi.mocked(previewAnnualCollection).mockResolvedValue({ snapshot: {}, source_hash: "b".repeat(64), coverage: { published_chapter_count: 1, text_only_chapter_count: 1, selected_milestone_count: 0 } });
     vi.mocked(createAnnualCollection).mockResolvedValue({ id: "collection-1", skater_id: "skater-1", year: 2026, revision: 1, status: "ready", title: "2026 年度成长合集", selected_chapter_ids: ["chapter-1"], selected_milestone_ids: [], snapshot: {}, source_hash: "b".repeat(64), created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z" });
     vi.mocked(createAnnualExport).mockResolvedValue({ id: "export-1", collection_id: "collection-1", status: "pending", renderer_version: "annual_pdf.v1", asset_relative_path: null, file_sha256: null, page_count: null, error_message: null, created_at: "2026-07-23T00:00:00Z", completed_at: null });
@@ -57,7 +68,7 @@ describe("AnnualCollectionPage", () => {
     await waitFor(() => expect(previewAnnualCollection).toHaveBeenCalledWith("skater-1", 2026, ["chapter-1"], []));
     fireEvent.click(screen.getByRole("button", { name: "生成年度 PDF" }));
     await waitFor(() => expect(createAnnualCollection).toHaveBeenCalled());
-    await waitFor(() => expect(createAnnualExport).toHaveBeenCalledWith("collection-1"));
+    await waitFor(() => expect(createAnnualExport).toHaveBeenCalledWith("collection-1", false, "1234"));
     expect(await screen.findByRole("link", { name: "下载年度 PDF" })).toHaveAttribute("href", "/api/annual/exports/export-1/download");
   });
 
@@ -68,7 +79,7 @@ describe("AnnualCollectionPage", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("font unavailable");
     fireEvent.click(screen.getByRole("button", { name: "重新生成年度 PDF" }));
     await waitFor(() => expect(createAnnualExport).toHaveBeenCalledTimes(2));
-    expect(createAnnualExport).toHaveBeenLastCalledWith("collection-1");
+    expect(createAnnualExport).toHaveBeenLastCalledWith("collection-1", true, "1234");
   });
 
   it("clears the prior selection while loading a different year", async () => {

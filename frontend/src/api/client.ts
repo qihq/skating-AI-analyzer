@@ -1701,6 +1701,8 @@ export interface MonthlyChapter {
   skater_id: string;
   year_month: string;
   revision: number;
+  title?: string;
+  parent_revision_id?: string | null;
   status: MonthlyChapterStatus;
   fact_snapshot: MonthlyFactSnapshot;
   source_hash: string;
@@ -1712,21 +1714,24 @@ export interface MonthlyChapter {
   created_at: string;
   updated_at: string;
   published_at: string | null;
+  deleted_at?: string | null;
 }
 
-export async function createMonthlyChapterFacts(skaterId: string, yearMonth: string): Promise<MonthlyChapter> {
-  const response = await apiClient.post<MonthlyChapter>(`/growth/skaters/${skaterId}/chapters/${yearMonth}/facts`);
+function parentHeaders(parentPin: string) { return { headers: { "X-Parent-Pin": parentPin } }; }
+
+export async function createMonthlyChapterFacts(skaterId: string, yearMonth: string, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/skaters/${skaterId}/chapters/${yearMonth}/facts`, null, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function generateMonthlyChapter(chapterId: string): Promise<MonthlyChapter> {
-  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/generate`);
+export async function generateMonthlyChapter(chapterId: string, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/generate`, null, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function fetchMonthlyChapters(skaterId: string, yearMonth?: string): Promise<MonthlyChapter[]> {
+export async function fetchMonthlyChapters(skaterId: string, yearMonth?: string, recycled = false): Promise<MonthlyChapter[]> {
   const response = await apiClient.get<MonthlyChapter[]>(`/growth/skaters/${skaterId}/chapters`, {
-    params: yearMonth ? { year_month: yearMonth } : undefined,
+    params: { ...(yearMonth ? { year_month: yearMonth } : {}), recycled },
   });
   return response.data;
 }
@@ -1736,13 +1741,24 @@ export async function fetchMonthlyChapter(chapterId: string): Promise<MonthlyCha
   return response.data;
 }
 
-export async function patchMonthlyChapter(chapterId: string, finalText: string): Promise<MonthlyChapter> {
-  const response = await apiClient.patch<MonthlyChapter>(`/growth/chapters/${chapterId}`, { final_text: finalText });
+export async function patchMonthlyChapter(chapterId: string, finalText: string, title: string | undefined, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.patch<MonthlyChapter>(`/growth/chapters/${chapterId}`, { final_text: finalText, ...(title !== undefined ? { title } : {}) }, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function publishMonthlyChapter(chapterId: string): Promise<MonthlyChapter> {
-  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/publish`);
+export async function reviseMonthlyChapter(chapterId: string, finalText: string, title: string, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/revisions`, { final_text: finalText, title }, parentHeaders(parentPin));
+  return response.data;
+}
+
+export async function recycleMonthlyChapter(chapterId: string, parentPin: string) { await apiClient.delete(`/growth/chapters/${chapterId}`, parentHeaders(parentPin)); }
+export async function restoreMonthlyChapter(chapterId: string, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/restore`, null, parentHeaders(parentPin)); return response.data;
+}
+export async function permanentlyDeleteMonthlyChapter(chapterId: string, parentPin: string) { await apiClient.delete(`/growth/chapters/${chapterId}/permanent`, parentHeaders(parentPin)); }
+
+export async function publishMonthlyChapter(chapterId: string, parentPin: string): Promise<MonthlyChapter> {
+  const response = await apiClient.post<MonthlyChapter>(`/growth/chapters/${chapterId}/publish`, null, parentHeaders(parentPin));
   return response.data;
 }
 
@@ -1761,6 +1777,7 @@ export interface AnnualCollection {
   skater_id: string;
   year: number;
   revision: number;
+  parent_revision_id?: string | null;
   status: "ready" | "exported" | "stale" | "draft";
   title: string;
   selected_chapter_ids: string[];
@@ -1769,6 +1786,7 @@ export interface AnnualCollection {
   source_hash: string;
   created_at: string;
   updated_at: string;
+  deleted_at?: string | null;
 }
 
 export interface AnnualExport {
@@ -1815,16 +1833,35 @@ export async function createAnnualCollection(
   year: number,
   chapterIds: string[],
   milestoneIds: string[],
+  title?: string,
+  parentPin?: string,
 ): Promise<AnnualCollection> {
   const response = await apiClient.post<AnnualCollection>(`/annual/skaters/${skaterId}/${year}/collections`, {
     chapter_ids: chapterIds,
     milestone_ids: milestoneIds,
-  });
+    ...(title ? { title } : {}),
+  }, parentHeaders(parentPin || ""));
   return response.data;
 }
 
-export async function createAnnualExport(collectionId: string): Promise<AnnualExport> {
-  const response = await apiClient.post<AnnualExport>(`/annual/collections/${collectionId}/exports`);
+export async function fetchAnnualCollections(skaterId: string, year: number, recycled = false): Promise<AnnualCollection[]> {
+  const response = await apiClient.get<AnnualCollection[]>(`/annual/skaters/${skaterId}/${year}/collections`, { params: { recycled } });
+  return response.data;
+}
+
+export async function reviseAnnualCollection(collectionId: string, title: string, chapterIds: string[], milestoneIds: string[], parentPin: string): Promise<AnnualCollection> {
+  const response = await apiClient.post<AnnualCollection>(`/annual/collections/${collectionId}/revisions`, { title, chapter_ids: chapterIds, milestone_ids: milestoneIds }, parentHeaders(parentPin));
+  return response.data;
+}
+
+export async function recycleAnnualCollection(collectionId: string, parentPin: string) { await apiClient.delete(`/annual/collections/${collectionId}`, parentHeaders(parentPin)); }
+export async function restoreAnnualCollection(collectionId: string, parentPin: string): Promise<AnnualCollection> {
+  const response = await apiClient.post<AnnualCollection>(`/annual/collections/${collectionId}/restore`, null, parentHeaders(parentPin)); return response.data;
+}
+export async function permanentlyDeleteAnnualCollection(collectionId: string, parentPin: string) { await apiClient.delete(`/annual/collections/${collectionId}/permanent`, parentHeaders(parentPin)); }
+
+export async function createAnnualExport(collectionId: string, force = false, parentPin = ""): Promise<AnnualExport> {
+  const response = await apiClient.post<AnnualExport>(`/annual/collections/${collectionId}/exports`, null, { params: { force }, ...parentHeaders(parentPin) });
   return response.data;
 }
 

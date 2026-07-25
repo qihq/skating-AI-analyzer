@@ -12,9 +12,13 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_RETRIES=10
+ENV ANNUAL_PDF_FONT_PATH=/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+ENV ANNUAL_PDF_FONT_BOLD_PATH=/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg nginx curl \
+    && apt-get install -y --no-install-recommends ffmpeg nginx curl fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/backend
@@ -28,6 +32,8 @@ COPY docker/allinone/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/allinone/start.sh /start.sh
 
 RUN mkdir -p /data/uploads /data/archive /backups /var/log/nginx \
+    && test -r "$ANNUAL_PDF_FONT_PATH" \
+    && test -r "$ANNUAL_PDF_FONT_BOLD_PATH" \
     && rm -f /etc/nginx/sites-enabled/default \
     && rm -f /etc/nginx/sites-available/default \
     && chmod +x /start.sh

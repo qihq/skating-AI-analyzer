@@ -27,6 +27,7 @@ from app.routers.snowball import router as snowball_router
 from app.schemas import HealthResponse
 from app.services.archive_policy import run_archive_policy
 from app.services.analysis_corrections import backfill_applied_analysis_corrections
+from app.services.annual_pdf import AnnualPdfFontError, validate_font_paths
 from app.services.pose import log_pose_runtime_mode
 from app.services.skaters import seed_preset_skaters
 from app.services.skills import seed_skill_catalog, sync_all_skater_progress
@@ -77,6 +78,10 @@ async def _recover_annual_exports_startup() -> None:
 async def lifespan(_: FastAPI):
     logger.info("startup: ensure storage dirs")
     ensure_storage_dirs()
+    try:
+        validate_font_paths()
+    except AnnualPdfFontError as exc:
+        logger.warning("startup: annual PDF fonts unavailable: %s", exc)
     logger.info("startup: log pose runtime")
     log_pose_runtime_mode()
     logger.info("startup: init db")

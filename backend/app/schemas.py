@@ -1046,6 +1046,8 @@ class MonthlyChapterPublic(BaseModel):
     skater_id: str
     year_month: str
     revision: int
+    title: str = ""
+    parent_revision_id: str | None = None
     status: str
     fact_snapshot: dict[str, Any]
     source_hash: str
@@ -1057,9 +1059,16 @@ class MonthlyChapterPublic(BaseModel):
     created_at: datetime
     updated_at: datetime
     published_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 class MonthlyChapterPatchRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    final_text: str | None = Field(default=None, max_length=2400)
+
+
+class MonthlyChapterRevisionRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
     final_text: str | None = Field(default=None, max_length=2400)
 
 
@@ -1067,6 +1076,10 @@ class AnnualCollectionCreateRequest(BaseModel):
     chapter_ids: list[str] = Field(min_length=1)
     milestone_ids: list[str] = Field(default_factory=list)
     title: str | None = Field(default=None, max_length=200)
+
+
+class AnnualCollectionRevisionRequest(AnnualCollectionCreateRequest):
+    pass
 
 
 class AnnualCollectionPreview(BaseModel):
@@ -1090,6 +1103,7 @@ class AnnualCollectionPublic(BaseModel):
     skater_id: str
     year: int
     revision: int
+    parent_revision_id: str | None = None
     status: str
     title: str
     selected_chapter_ids: list[str] = Field(default_factory=list)
@@ -1098,6 +1112,7 @@ class AnnualCollectionPublic(BaseModel):
     source_hash: str
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class AnnualExportPublic(BaseModel):

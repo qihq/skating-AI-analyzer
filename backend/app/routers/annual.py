@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, DATA_DIR, UPLOADS_DIR, get_session
@@ -17,11 +17,13 @@ from app.schemas import (
     AnnualCollectionCreateRequest,
     AnnualCollectionPreview,
     AnnualCollectionPublic,
+    AnnualCollectionRevisionRequest,
     AnnualExportPublic,
     AnnualMilestonePublic,
 )
 from app.services.annual_collections import AnnualCollectionValidationError, annual_source_hash, build_annual_snapshot
 from app.services.annual_pdf import AnnualPdfError, RENDERER_VERSION, configured_font_paths, render_annual_pdf
+from app.services.parent_access import require_parent_pin
 
 
 logger = logging.getLogger(__name__)
@@ -69,8 +71,10 @@ async def create_collection(
     skater_id: str,
     year: int,
     payload: AnnualCollectionCreateRequest,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> AnnualCollectionPublic:
+    await require_parent_pin(session, x_parent_pin)
     snapshot = await _snapshot_or_error(session, skater_id, year, payload)
     source_hash = annual_source_hash(snapshot)
     existing = (
@@ -115,17 +119,104 @@ async def create_collection(
 async def list_collections(
     skater_id: str,
     year: int,
+    recycled: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnnualCollectionPublic]:
     await _require_skater(session, skater_id)
     rows = (
         await session.execute(
             select(AnnualCollection)
-            .where(AnnualCollection.skater_id == skater_id, AnnualCollection.year == year)
+            .where(
+                AnnualCollection.skater_id == skater_id,
+                AnnualCollection.year == year,
+                AnnualCollection.deleted_at.is_not(None) if recycled is True else AnnualCollection.deleted_at.is_(None),
+            )
             .order_by(desc(AnnualCollection.revision))
         )
     ).scalars().all()
     return [AnnualCollectionPublic.model_validate(row) for row in rows]
+
+
+@router.post("/collections/{collection_id}/revisions", response_model=AnnualCollectionPublic, status_code=201)
+async def revise_collection(
+    collection_id: str,
+    payload: AnnualCollectionRevisionRequest,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> AnnualCollectionPublic:
+    await require_parent_pin(session, x_parent_pin)
+    current = await session.get(AnnualCollection, collection_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="未找到年度合集。")
+    if current.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="请先从回收站恢复该年度合集。")
+    snapshot = await _snapshot_or_error(session, current.skater_id, current.year, payload)
+    revision = int((await session.scalar(
+        select(AnnualCollection.revision)
+        .where(AnnualCollection.skater_id == current.skater_id, AnnualCollection.year == current.year)
+        .order_by(desc(AnnualCollection.revision)).limit(1)
+    )) or 0) + 1
+    collection = AnnualCollection(
+        skater_id=current.skater_id,
+        year=current.year,
+        revision=revision,
+        parent_revision_id=current.id,
+        status="ready",
+        title=(payload.title or current.title).strip(),
+        selected_chapter_ids=list(payload.chapter_ids),
+        selected_milestone_ids=list(payload.milestone_ids),
+        snapshot=snapshot,
+        source_hash=annual_source_hash(snapshot),
+    )
+    session.add(collection)
+    await session.commit()
+    await session.refresh(collection)
+    return AnnualCollectionPublic.model_validate(collection)
+
+
+@router.delete("/collections/{collection_id}", status_code=204, response_class=Response)
+async def recycle_collection(collection_id: str, x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"), session: AsyncSession = Depends(get_session)) -> Response:
+    await require_parent_pin(session, x_parent_pin)
+    collection = await session.get(AnnualCollection, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail="未找到年度合集。")
+    collection.deleted_at = datetime.now(timezone.utc)
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/collections/{collection_id}/restore", response_model=AnnualCollectionPublic)
+async def restore_collection(collection_id: str, x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"), session: AsyncSession = Depends(get_session)) -> AnnualCollectionPublic:
+    await require_parent_pin(session, x_parent_pin)
+    collection = await session.get(AnnualCollection, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail="未找到年度合集。")
+    collection.deleted_at = None
+    await session.commit()
+    await session.refresh(collection)
+    return AnnualCollectionPublic.model_validate(collection)
+
+
+@router.delete("/collections/{collection_id}/permanent", status_code=204, response_class=Response)
+async def permanently_delete_collection(collection_id: str, x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"), session: AsyncSession = Depends(get_session)) -> Response:
+    await require_parent_pin(session, x_parent_pin)
+    collection = await session.get(AnnualCollection, collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail="未找到年度合集。")
+    if collection.deleted_at is None:
+        raise HTTPException(status_code=409, detail="只有回收站中的年度合集可以永久删除。")
+    exports = (await session.execute(select(AnnualExport).where(AnnualExport.collection_id == collection.id))).scalars().all()
+    asset_paths = [_resolve_export_path(item.asset_relative_path) for item in exports if item.asset_relative_path]
+    for path in asset_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=500, detail=f"无法删除年度 PDF 文件，请检查存储权限后重试：{path.name}") from exc
+    await session.execute(delete(AnnualExport).where(AnnualExport.collection_id == collection.id))
+    await session.execute(delete(AnnualCollection).where(AnnualCollection.id == collection.id))
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.get("/skaters/{skater_id}/{year}/milestones", response_model=list[AnnualMilestonePublic])
@@ -229,11 +320,25 @@ async def recover_incomplete_exports(*, enqueue=run_export) -> list[str]:
 async def create_export(
     collection_id: str,
     background_tasks: BackgroundTasks,
+    force: bool = Query(default=False),
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> AnnualExportPublic:
+    await require_parent_pin(session, x_parent_pin)
     collection = await session.get(AnnualCollection, collection_id)
     if collection is None:
         raise HTTPException(status_code=404, detail="未找到年度合集。")
+    if collection.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="请先从回收站恢复该年度合集。")
+    active = (
+        await session.execute(
+            select(AnnualExport)
+            .where(AnnualExport.collection_id == collection.id, AnnualExport.status.in_(("pending", "processing")))
+            .order_by(desc(AnnualExport.created_at)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if active is not None:
+        return AnnualExportPublic.model_validate(active)
     existing = (
         await session.execute(
             select(AnnualExport)
@@ -242,7 +347,7 @@ async def create_export(
             .limit(1)
         )
     ).scalar_one_or_none()
-    if existing is not None:
+    if existing is not None and force is not True:
         if existing.asset_relative_path and _resolve_export_path(existing.asset_relative_path).is_file():
             return AnnualExportPublic.model_validate(existing)
         existing.status = "failed"

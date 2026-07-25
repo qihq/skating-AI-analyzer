@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.routers.analysis import _sync_report_user_note
 from app.services.llm_context import split_user_note_questions
-from app.services.report import normalize_report
+from app.services.report import _answer_single_user_note_question, normalize_report
 
 
 class AnalysisNoteTests(unittest.TestCase):
@@ -53,6 +53,20 @@ class AnalysisNoteTests(unittest.TestCase):
         questions = split_user_note_questions("这个具体是哪个动作？落冰为什么不稳？能不能给训练重点")
 
         self.assertEqual(questions, ["这个具体是哪个动作", "落冰为什么不稳", "能不能给训练重点"])
+
+    def test_note_questions_get_specific_answers_without_confirmation_template(self) -> None:
+        report = {
+            "issues": [{"category": "起跳", "phase": "起跳", "description": "蹬冰结束偏早，离地前力量没有完整传递"}],
+            "subscores": {"takeoff_power": 58, "arm_coordination": 74, "core_stability": 70},
+        }
+
+        symmetry = _answer_single_user_note_question("手对称了吗", report, "jump")
+        power = _answer_single_user_note_question("小朋友哪里用力不够", report, "jump")
+
+        self.assertIn("左右手对比", symmetry)
+        self.assertIn("蹬冰结束偏早", power)
+        self.assertNotIn("能确认的是", symmetry + power)
+        self.assertNotIn("不能确认的是", symmetry + power)
 
 
 if __name__ == "__main__":

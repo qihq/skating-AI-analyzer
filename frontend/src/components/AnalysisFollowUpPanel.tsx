@@ -40,6 +40,7 @@ import {
   type KeyframeEvidenceItem,
 } from "../utils/keyframeEvidence";
 import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
+import { Button, Loading } from "../modern/AnimalUi";
 
 const QUICK_PROMPTS = [
   "我的 comments 有没有被考虑？",
@@ -403,22 +404,21 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
 
   const contentWidth = 856;
   const textWidth = 760;
-  measureCtx.font = "800 56px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  await document.fonts?.ready;
+  const shareFont = "'Noto Sans SC', Nunito, 'Microsoft YaHei', sans-serif";
+  measureCtx.font = `800 56px ${shareFont}`;
   const titleHeight = measureWrappedText(measureCtx, title, 760, 64);
-  measureCtx.font = "500 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  measureCtx.font = `500 30px ${shareFont}`;
   const summaryHeight = measureWrappedText(measureCtx, summary, contentWidth, 44);
-  measureCtx.font = "650 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  measureCtx.font = `650 31px ${shareFont}`;
   const questionHeight = measureWrappedText(measureCtx, timelineText, textWidth, 39, 18);
   const answerHeight = 0;
-  measureCtx.font = "600 27px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  measureCtx.font = `600 27px ${shareFont}`;
   const correctionHeight = measureWrappedText(measureCtx, correctionText || "暂无已应用修正。", textWidth, 36);
   const questionBlockHeight = Math.max(260, 96 + questionHeight + 38);
   const answerBlockHeight = 0;
   const correctionBlockHeight = Math.max(118, 82 + correctionHeight + 30);
-  const height = Math.min(
-    6000,
-    Math.max(980, 112 + 42 + 54 + titleHeight + 42 + summaryHeight + 74 + questionBlockHeight + 32 + answerBlockHeight + 32 + correctionBlockHeight + 126),
-  );
+  const height = Math.max(980, 112 + 42 + 54 + titleHeight + 42 + summaryHeight + 74 + questionBlockHeight + 32 + answerBlockHeight + 32 + correctionBlockHeight + 126);
 
   canvas.width = width * scale;
   canvas.height = height * scale;
@@ -447,16 +447,16 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
 
   let y = 142;
   ctx.fillStyle = "#0F766E";
-  ctx.font = "800 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `800 30px ${shareFont}`;
   ctx.fillText("IceBuddy AI 追问", 112, y);
 
   y += 84;
   ctx.fillStyle = "#0F172A";
-  ctx.font = "800 56px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `800 56px ${shareFont}`;
   y += drawWrappedText(ctx, title, 112, y, 760, 64) + 42;
 
   ctx.fillStyle = "#475569";
-  ctx.font = "500 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `500 30px ${shareFont}`;
   y += drawWrappedText(ctx, summary, 112, y, contentWidth, 44) + 54;
 
   const blocks = [
@@ -467,10 +467,10 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
     drawRoundRect(ctx, 112, y, contentWidth, block.height, 28);
     ctx.fill();
     ctx.fillStyle = block.color;
-    ctx.font = "800 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.font = `800 25px ${shareFont}`;
     ctx.fillText(block.label, 152, y + 50);
     ctx.fillStyle = "#0F172A";
-    ctx.font = "650 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.font = `650 31px ${shareFont}`;
     drawWrappedText(ctx, block.text, 152, y + 100, textWidth, 42);
     y += block.height + 32;
   });
@@ -479,15 +479,15 @@ async function createChatShareImage(share: AnalysisChatShareResponse) {
   drawRoundRect(ctx, 112, y, contentWidth, correctionBlockHeight, 28);
   ctx.fill();
   ctx.fillStyle = "#EA580C";
-  ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `800 24px ${shareFont}`;
   ctx.fillText("修正记录", 152, y + 50);
   ctx.fillStyle = "#334155";
-  ctx.font = "600 27px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `600 27px ${shareFont}`;
   drawWrappedText(ctx, correctionText || "暂无已应用修正。", 152, y + 92, textWidth, 36);
   y += correctionBlockHeight + 64;
 
   ctx.fillStyle = "#94A3B8";
-  ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  ctx.font = `500 22px ${shareFont}`;
   ctx.fillText("修正需人工确认后才会进入系统有效数据", 112, Math.min(y, height - 92));
 
   const blob = await canvasToCompressedBlob(canvas, { type: "image/jpeg", quality: 0.82, maxBytes: 1_500_000 });
@@ -1259,8 +1259,11 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
               </div>
             )}
             {isSending ? (
-              <div className="flex justify-start">
-                <div className="rounded-[22px] border border-white bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">AI 正在对照证据...</div>
+              <div className="flex justify-start" role="status" aria-live="polite">
+                <div className="flex items-center gap-3 rounded-[22px] border border-teal-100 bg-white px-4 py-3 text-sm font-semibold text-teal-800 shadow-sm">
+                  <Loading />
+                  <span>AI 正在对照视频、关键帧和报告证据…</span>
+                </div>
               </div>
             ) : null}
           </div>
@@ -1291,13 +1294,15 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             {error ? <p className="text-sm leading-6 text-rose-600">{error}</p> : null}
             <div className="flex flex-col gap-3 phone:flex-row phone:items-center phone:justify-between">
               <span className="text-xs text-slate-400">{input.length}/4000</span>
-              <button
-                type="submit"
+              <Button
+                htmlType="submit"
+                type="primary"
+                loading={isSending}
                 disabled={isSending || !input.trim() || analysis.status !== "completed"}
-                className="min-h-[44px] w-full rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50 phone:w-auto"
+                className="min-h-[44px] w-full phone:w-auto"
               >
-                {isSending ? "发送中..." : "发送"}
-              </button>
+                {isSending ? "发送中…" : "发送"}
+              </Button>
             </div>
           </form>
         </div>

@@ -33,11 +33,11 @@ class AnnualPdfResult:
     renderer_version: str = RENDERER_VERSION
 
 
-def configured_font_paths() -> dict[str, Path]:
+def configured_font_paths() -> dict[str, str]:
     """Return deploy-configured font paths without downloading a font at runtime."""
     return {
-        "regular": Path(os.getenv("ANNUAL_PDF_FONT_PATH", "")),
-        "bold": Path(os.getenv("ANNUAL_PDF_FONT_BOLD_PATH", "")),
+        "regular": os.getenv("ANNUAL_PDF_FONT_PATH", "").strip(),
+        "bold": os.getenv("ANNUAL_PDF_FONT_BOLD_PATH", "").strip(),
     }
 
 
@@ -80,15 +80,23 @@ def _require_pdf_dependencies():
     }
 
 
-def _validate_font_paths(font_paths: Mapping[str, Path]) -> tuple[Path, Path]:
-    regular = Path(font_paths.get("regular", ""))
-    bold = Path(font_paths.get("bold", ""))
-    missing = [str(path) for path in (regular, bold) if not path.is_file()]
+def validate_font_paths(font_paths: Mapping[str, Path | str] | None = None) -> tuple[Path, Path]:
+    """Validate configured font files without importing the PDF renderer."""
+    font_paths = font_paths or configured_font_paths()
+    regular_value = str(font_paths.get("regular", "")).strip()
+    bold_value = str(font_paths.get("bold", "")).strip()
+    regular = Path(regular_value) if regular_value else None
+    bold = Path(bold_value) if bold_value else None
+    missing = [label for label, path in (("常规字体", regular), ("粗体字体", bold)) if path is None or not path.is_file()]
     if missing:
         raise AnnualPdfFontError(
-            "Annual PDF Chinese fonts are missing: " + ", ".join(missing) + ". Configure ANNUAL_PDF_FONT_PATH and ANNUAL_PDF_FONT_BOLD_PATH."
+            "年度 PDF 中文字体不可用：" + "、".join(missing) + "。请检查一体化镜像中的字体安装和 ANNUAL_PDF_FONT_PATH 配置。"
         )
+    assert regular is not None and bold is not None
     return regular, bold
+
+
+_validate_font_paths = validate_font_paths
 
 
 def _safe_text(value: Any) -> str:
@@ -152,8 +160,8 @@ def render_annual_pdf(
     frames_root: Path | None = None,
 ) -> AnnualPdfResult:
     """Render a stable annual snapshot atomically; only snapshot data reaches the PDF."""
+    regular_path, bold_path = validate_font_paths(font_paths)
     lib = _require_pdf_dependencies()
-    regular_path, bold_path = _validate_font_paths(font_paths or configured_font_paths())
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frame_root = Path(frames_root).resolve() if frames_root is not None else output_path.parent / "_missing_frames"

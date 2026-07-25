@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { MonthlyChapter } from "../api/client";
@@ -53,7 +53,7 @@ describe("MonthlyChapterEditor", () => {
     expect(screen.getByLabelText("最终文字")).toHaveValue("AI 初稿内容。");
   });
 
-  it("disables edit controls when the chapter is published", () => {
+  it("offers a new revision when the chapter is published", () => {
     render(
       <MonthlyChapterEditor
         chapter={chapter({ status: "published", final_text: "已发布最终文字。", published_at: "2026-07-31T00:00:00Z" })}
@@ -63,16 +63,13 @@ describe("MonthlyChapterEditor", () => {
         error={null}
       />,
     );
-    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建新版本" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
     expect(screen.getByText("已发布")).toBeInTheDocument();
   });
 
-  it("calls onPublish only after the confirm dialog is accepted", () => {
-    const confirmSpy = vi.spyOn(window, "confirm");
+  it("calls onPublish only after the confirm dialog is accepted", async () => {
     const onPublish = vi.fn().mockResolvedValue(undefined);
-    confirmSpy.mockReturnValueOnce(false);
-    confirmSpy.mockReturnValueOnce(true);
 
     render(
       <MonthlyChapterEditor
@@ -84,12 +81,11 @@ describe("MonthlyChapterEditor", () => {
       />,
     );
 
-    screen.getByRole("button", { name: "确认发布" }).click();
+    fireEvent.click(screen.getByRole("button", { name: "确认发布" }));
     expect(onPublish).not.toHaveBeenCalled();
-
-    screen.getByRole("button", { name: "确认发布" }).click();
-    expect(onPublish).toHaveBeenCalledTimes(1);
-    confirmSpy.mockRestore();
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(dialog.querySelectorAll("button")[1]);
+    await waitFor(() => expect(onPublish).toHaveBeenCalledTimes(1));
   });
 
   it("renders error message and calls onSaveDraft when saving", () => {

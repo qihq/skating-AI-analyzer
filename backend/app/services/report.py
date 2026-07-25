@@ -499,43 +499,47 @@ def _landing_explanation_from_report(report: dict[str, Any]) -> str:
     return "落冰不稳主要和" + "；".join(chosen) + "有关。"
 
 
-def _user_note_response(
-    *,
-    report: dict[str, Any],
-    action_type: str,
-    prompt_context: AnalysisPromptContext | None,
-    dual_path_meta: dict[str, Any] | None,
-) -> str | None:
-    note = _text(prompt_context.user_note if prompt_context is not None else None)
-    if not note:
-        return None
-    existing = _text(report.get("user_note_response"))
-    if existing and note in existing:
-        return existing
-
-    parts = [f"家长/学员备注提到：{note}"]
-    if any(token in note for token in ("哪个动作", "什么动作", "具体", "跳种", "动作")):
-        parts.append(_action_confirmation_text(report.get("action_confirmation"), action_type))
-    if any(token in note for token in ("落冰", "不稳", "为什么", "原因")):
-        parts.append(_landing_explanation_from_report(report))
-    if len(parts) == 1:
-        focus = _text(report.get("training_focus") or report.get("summary"))
-        if focus:
-            parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
-    return " ".join(parts)
-
-
 def _answer_single_user_note_question(question: str, report: dict[str, Any], action_type: str) -> str:
-    if any(token in question for token in ("哪个动作", "哪一个动作", "什么动作", "具体", "跳种", "动作名", "动作")):
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    issue_texts = [
+        _text(item.get("description"))
+        for item in issues
+        if isinstance(item, dict) and _text(item.get("description"))
+    ]
+    searchable_issues = [
+        (f"{_text(item.get('category'))} {_text(item.get('phase'))} {_text(item.get('description'))}", _text(item.get("description")))
+        for item in issues
+        if isinstance(item, dict) and _text(item.get("description"))
+    ]
+
+    asks_action_name = any(token in question for token in ("哪个动作", "哪一个动作", "什么动作", "跳种", "动作名"))
+    asks_technique_detail = any(token in question for token in ("手", "手臂", "胳膊", "对称", "协调", "用力", "发力", "力量", "落冰", "不稳"))
+    if asks_action_name or ("具体" in question and "动作" in question and not asks_technique_detail):
         action_text = _action_confirmation_text(report.get("action_confirmation"), action_type)
-        return f"{question}：能确认的是，{action_text}；不能确认的是，当前证据不足以稳定支持的更细动作名称不应强行判定。"
+        return f"{question}：{action_text}"
     if any(token in question for token in ("落冰", "不稳", "为什么", "为何", "原因", "怎么回事")):
         landing_text = _landing_explanation_from_report(report)
-        return f"{question}：能确认的是，{landing_text}；不能确认的是，单靠当前证据无法排除拍摄角度、遮挡或关键帧偏差带来的影响。"
-    focus = _text(report.get("training_focus") or report.get("summary"))
-    if focus:
-        return f"{question}：能确认的是，本次报告已把这个问题纳入关注，当前训练重点是{focus}；不能确认的是，证据里没有直接覆盖的细节需要结合原视频或现场观察复核。"
-    return f"{question}：能确认的是，当前报告只能基于已保存的动作识别、关键帧和生物力学证据回答；不能确认的是，证据未覆盖的细节不能写成确定结论。"
+        return f"{question}：{landing_text}"
+    if any(token in question for token in ("手", "手臂", "胳膊", "对称", "协调")):
+        arm_evidence = [description for text, description in searchable_issues if any(token in text for token in ("手", "手臂", "胳膊", "对称", "协调"))]
+        if arm_evidence:
+            return f"{question}：从已保存关键帧看，{'；'.join(arm_evidence[:2])}。"
+        return f"{question}：现有关键帧没有提供可靠的左右手对比，暂时不能判断是否对称。建议在起跳前和空中正面帧分别检查双手高度、离身体距离和收臂时机。"
+    if any(token in question for token in ("用力", "发力", "力量", "力不够", "哪里弱")):
+        power_evidence = [description for text, description in searchable_issues if any(token in text for token in ("发力", "力量", "起跳", "蹬冰", "核心", "轴心", "收紧"))]
+        if power_evidence:
+            return f"{question}：证据更指向{'；'.join(power_evidence[:2])}。"
+        subscores = report.get("subscores") if isinstance(report.get("subscores"), dict) else {}
+        labels = {"takeoff_power": "起跳蹬冰", "core_stability": "核心稳定", "arm_coordination": "手臂配合", "landing_absorption": "落冰缓冲"}
+        scored = [(key, value) for key, value in subscores.items() if key in labels and isinstance(value, (int, float))]
+        if scored:
+            weakest_key, weakest_score = min(scored, key=lambda item: item[1])
+            return f"{question}：当前分项里相对薄弱的是{labels[weakest_key]}（{round(weakest_score)} 分），优先复核这一环节；分数只能定位方向，不能等同于肌力诊断。"
+        return f"{question}：现有证据没有定位到明确的发力不足部位。需要结合起跳前屈膝、蹬冰离地和空中收紧三个连续阶段复核，不能只凭单帧判断。"
+
+    if issue_texts:
+        return f"{question}：这次画面里最直接相关的发现是：{'；'.join(issue_texts[:2])}。"
+    return f"{question}：当前保存的关键帧和报告没有覆盖这个细节，暂时无法可靠判断。"
 
 
 def _user_note_response(
@@ -555,12 +559,12 @@ def _user_note_response(
     questions = split_user_note_questions(note)
     if questions:
         answers = [_answer_single_user_note_question(question, report, action_type) for question in questions]
-        return " 家长/学员备注提到：" + note + " " + " ".join(answers)
+        return "\n".join(answers)
 
     parts = [f"家长/学员备注提到：{note}"]
     focus = _text(report.get("training_focus") or report.get("summary"))
     if focus:
-        parts.append(f"本次报告已把这条备注作为训练关注点，优先复核：{focus}")
+        parts.append(f"建议本次优先复核：{focus}")
     else:
         parts.append("当前报告已把这条备注作为观察线索；证据不足的部分不会写成确定结论。")
     return " ".join(parts)
@@ -1348,7 +1352,7 @@ async def generate_report(
         '  "subscores": {"takeoff_power":0,"rotation_axis":0,"arm_coordination":0,"landing_absorption":0,"core_stability":0},\n'
         '  "data_quality": "good|partial|poor",\n'
         '  "action_confirmation": {"action_family":"jump|spin|spiral|step|unknown","confirmed_action":"具体动作名或不可分析","confidence":0.0,"notes":"证据说明"},\n'
-        '  "user_note_response": "如用户备注/comments 提问，必须用 1-2 句直接回应；若证据不足，明确说明只能确认到哪一层级。"\n'
+        '  "user_note_response": "逐条直接回答用户备注中的问题，使用本次可见证据和具体训练建议，不复述问题，不套用固定免责声明。"\n'
         "}\n\n"
         "评分要求：subscores 每项为 0-100 的整数；优先参考骨骼几何指标，无法判断则给 partial。\n"
         "视觉评分参考：视觉摘要中的 pure_vision_subscores（0-1 小数）是纯视觉分析的评分，"
@@ -1374,6 +1378,7 @@ async def generate_report(
         "用户备注/comments 要体现在关注点和训练建议中，但必须标注为“家长/学员备注提到...”或只作为训练重点线索，"
         "不要把备注里的感受写成已验证技术事实。"
         "如果 comments 是问题（例如“具体是哪个动作”“为什么落冰不稳”），必须在 user_note_response 中逐条直接回答；"
+        "开头直接给判断和依据，不要复述整段 comments，不要使用“能确认的是/不能确认的是”“已纳入关注”等模板句式；"
         "具体动作名必须优先参考视频时序的 action_confirmation，证据不足时写“只能确认大类/不可可靠确认具体细项”。\n\n"
         "问题与建议质量要求：issues 必须至少 2 条可执行技术问题，优先引用 Path B top_issues 或帧级 issues；"
         "不要只写“数据质量有限”。improvements 必须逐条对应具体问题，写成可以当天训练的动作或分段练习；"
