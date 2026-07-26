@@ -164,14 +164,16 @@ async def _repair_path_a_payload(
     *,
     raw_text: str,
     max_tokens: int,
+    output_mode: Literal["frames", "video"],
 ) -> dict[str, Any] | None:
     if not raw_text or not raw_text.strip():
         return None
 
+    carrier_field = "frame_analysis" if output_mode == "frames" else "phase_segments"
     repair_prompt = (
         "下面是一段花样滑冰 Path A 视觉分析模型输出，它本应是一个 JSON 对象，但可能有多余文字、截断、"
         "缺少逗号或括号不完整。请只修复 JSON 语法，不新增观察结论，不输出 Markdown。\n"
-        "必须保留可识别的 frame_analysis、action_phase_summary、pure_vision_subscores、overall_raw_text 字段。\n\n"
+        f"必须保留可识别的 {carrier_field}、action_phase_summary、pure_vision_subscores、overall_raw_text 字段。\n\n"
         f"原始输出：\n{raw_text[:6000]}"
     )
     try:
@@ -199,13 +201,19 @@ async def _parse_or_repair_path_a_payload(
     raw_text: str,
     *,
     max_tokens: int,
+    output_mode: Literal["frames", "video"] = "frames",
 ) -> dict[str, Any]:
     try:
         return _load_path_a_payload_or_raise(raw_text)
     except AnalysisPipelineError as exc:
         if exc.code != AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL:
             raise
-        repaired = await _repair_path_a_payload(provider, raw_text=raw_text, max_tokens=max_tokens)
+        repaired = await _repair_path_a_payload(
+            provider,
+            raw_text=raw_text,
+            max_tokens=max_tokens,
+            output_mode=output_mode,
+        )
         if repaired is not None:
             return repaired
         raise
@@ -292,7 +300,7 @@ async def analyze_path_a(
                     AnalysisErrorCode.UNKNOWN_ERROR,
                     f"Path A native video mode does not support provider={provider_name}.",
                 )
-            parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens)
+            parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens, output_mode="video")
             normalized = normalize_vision_payload(parsed, frame_payloads, window_start_sec=window_start_sec) | {
                 "pure_vision_subscores": parsed.get("pure_vision_subscores") if isinstance(parsed.get("pure_vision_subscores"), dict) else {},
                 "path": "A",
@@ -341,7 +349,7 @@ async def analyze_path_a(
         ],
     )
 
-    parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens)
+    parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens, output_mode="frames")
 
     normalized = _normalize_path_a_payload(parsed, frame_payloads)
     if mode == "video" and clip_path is not None:
