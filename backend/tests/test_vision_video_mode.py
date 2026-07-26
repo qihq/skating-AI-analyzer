@@ -295,6 +295,44 @@ class VisionVideoModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("video_context_note", user_prompt)
         self.assertIn("每个 phase_segments 项", user_prompt)
 
+    async def test_path_a_video_failure_rebuilds_frame_prompt_for_image_fallback(self) -> None:
+        frames = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA", timestamp_sec=0.2)]
+        provider = SimpleNamespace(provider="qwen", api_key="test-key", base_url="https://example.com/v1", model_id="test-model")
+        fallback_payload = {
+            "frame_analysis": [{"frame_id": "frame_0001", "phase": "起跳", "confidence": 0.8}],
+            "pure_vision_subscores": {},
+            "action_phase_summary": {},
+            "overall_raw_text": "fallback",
+        }
+
+        with (
+            patch(
+                "app.services.vision_path_a.request_dashscope_video_completion",
+                AsyncMock(side_effect=TimeoutError("native video failed")),
+            ),
+            patch(
+                "app.services.vision_path_a.request_text_completion",
+                AsyncMock(return_value=json.dumps(fallback_payload, ensure_ascii=False)),
+            ) as frame_mock,
+        ):
+            result = await analyze_path_a(
+                "jump",
+                frames,
+                provider,
+                mode="video",
+                clip_path=Path("clip.mp4"),
+                video_context_by_frame={"frame_0001": {"confirmed_action": "Axel", "timestamp_sec": 0.2}},
+            )
+
+        prompt_text = frame_mock.await_args.kwargs["messages"][1]["content"][0]["text"]
+        content = frame_mock.await_args.kwargs["messages"][1]["content"]
+        self.assertEqual(prompt_text.count('"frame_analysis"'), 1)
+        self.assertNotIn("phase_segments", prompt_text)
+        self.assertIn("每个 frame_analysis 项", prompt_text)
+        self.assertTrue(any(item["type"] == "image_url" for item in content))
+        self.assertIn("vision_fallback_to_frames", result["quality_flags"])
+        self.assertEqual(result["vision_mode"], "frames")
+
 
 if __name__ == "__main__":
     unittest.main()

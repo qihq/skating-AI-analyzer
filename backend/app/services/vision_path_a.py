@@ -302,6 +302,24 @@ async def analyze_path_a(
             return normalized
         except Exception as exc:  # noqa: BLE001
             logger.warning("Path A native video mode failed, falling back to frames: %s", exc)
+            system_prompt, user_text = _build_specialized_prompts(
+                action_type,
+                action_subtype,
+                analysis_profile,
+                profile_evidence,
+                motion_features,
+                skill_category=skill_category,
+                output_mode="frames",
+            )
+            context_block = format_video_context_prompt_block(
+                video_context_by_frame,
+                include_skeleton_provenance=False,
+                output_mode="frames",
+            )
+            if context_block:
+                user_text = f"{user_text}{context_block}"
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n{memory_context}"
 
     content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
     for frame in frame_payloads:
