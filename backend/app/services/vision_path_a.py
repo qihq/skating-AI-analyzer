@@ -252,7 +252,11 @@ async def analyze_path_a(
         skill_category=skill_category,
         output_mode="video" if mode == "video" and clip_path is not None else "frames",
     )
-    context_block = format_video_context_prompt_block(video_context_by_frame, include_skeleton_provenance=False)
+    context_block = format_video_context_prompt_block(
+        video_context_by_frame,
+        include_skeleton_provenance=False,
+        output_mode="video" if mode == "video" and clip_path is not None else "frames",
+    )
     if context_block:
         user_text = f"{user_text}{context_block}"
     if memory_context:

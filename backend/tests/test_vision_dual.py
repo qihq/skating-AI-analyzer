@@ -401,7 +401,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         assert decoded is not None
         self.assertLessEqual(decoded.shape[1], 640)
 
-    async def test_prompt_context_is_passed_to_both_paths(self) -> None:
+    async def test_prompt_context_keeps_bio_payload_out_of_path_a(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
             provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
@@ -414,7 +414,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                 analysis_profile="jump",
                 profile_evidence={"source": "test"},
                 motion_features={"sample_count": 32},
-                bio_data={"quality_flags": []},
+                bio_data={"quality_flags": [], "sentinel": "PATH_A_BIO_SENTINEL"},
                 user_note="今天起跳有点犹豫",
                 memory_context="长期训练目标：稳定落冰。",
             )
@@ -446,7 +446,8 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill_category: 前进燕式", context_text_a)
         self.assertIn("上传备注/额外 comments: 今天起跳有点犹豫", context_text_a)
         self.assertIn("长期训练目标：稳定落冰", context_text_a)
-        self.assertEqual(context_text_a, context_text_b)
+        self.assertNotIn("PATH_A_BIO_SENTINEL", context_text_a)
+        self.assertIn("PATH_A_BIO_SENTINEL", context_text_b)
         self.assertEqual(mock_b.await_args.kwargs["skill_category"], "前进燕式")
 
 

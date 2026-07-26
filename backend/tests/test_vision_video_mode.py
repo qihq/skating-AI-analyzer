@@ -274,11 +274,26 @@ class VisionVideoModeTests(unittest.IsolatedAsyncioTestCase):
             "app.services.vision_path_a.request_dashscope_video_completion",
             AsyncMock(return_value=json.dumps(payload)),
         ) as video_mock:
-            await analyze_path_a("jump", frames, provider, mode="video", clip_path=Path("clip.mp4"))
+            await analyze_path_a(
+                "jump",
+                frames,
+                provider,
+                mode="video",
+                clip_path=Path("clip.mp4"),
+                video_context_by_frame={
+                    "frame_0001": {
+                        "confirmed_action": "Axel",
+                        "phase_label": "起跳",
+                        "timestamp_sec": 0.2,
+                    }
+                },
+            )
 
         user_prompt = video_mock.await_args.kwargs["user_prompt"]
         self.assertEqual(user_prompt.count('"phase_segments"'), 1)
-        self.assertNotIn('"frame_analysis"', user_prompt)
+        self.assertNotIn("每个 frame_analysis 项", user_prompt)
+        self.assertNotIn("video_context_note", user_prompt)
+        self.assertIn("每个 phase_segments 项", user_prompt)
 
 
 if __name__ == "__main__":

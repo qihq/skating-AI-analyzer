@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from app.services.video import FramePayload
 
@@ -97,18 +97,36 @@ def format_video_context_prompt_block(
     video_context_by_frame: dict[str, dict[str, Any]] | None,
     *,
     include_skeleton_provenance: bool = True,
+    output_mode: Literal["frames", "video"] = "frames",
 ) -> str:
     if not video_context_by_frame:
         return ""
+    if output_mode not in ("frames", "video"):
+        raise ValueError(f"Unsupported video context output mode: {output_mode}")
     provenance = "骨架候选仲裁" if include_skeleton_provenance else "语义帧选择"
+    item_requirement = (
+        "每个 frame_analysis 项必须新增 phase_verification、conflict_with_video_context、video_context_note。\n"
+        if output_mode == "frames"
+        else "每个 phase_segments 项必须结合 video_context 验证阶段，并在 issues 或 overall_raw_text 说明有证据的偏差。\n"
+    )
+    phase_verification_requirement = (
+        'phase_verification 只能是 "agree|shifted|disagree|uncertain"。\n'
+        if output_mode == "frames"
+        else ""
+    )
+    challenge_requirement = (
+        "可以挑战 video_context，但必须在 video_context_note 说明原因。\n"
+        if output_mode == "frames"
+        else "可以挑战 video_context，但必须在 issues 或 overall_raw_text 说明原因。\n"
+    )
     return (
         "\n\n【video_context 语义帧上下文】\n"
         f"这些图片来自视频 AI 阶段区间 + 运动密度 + {provenance}后的语义关键帧。"
         "请不要从零猜阶段，而是在 video_context 中做帧级验证。\n"
         f"{json.dumps(video_context_by_frame, ensure_ascii=False, indent=2, sort_keys=True)}\n\n"
-        "输出要求：每个 frame_analysis 项必须新增 phase_verification、conflict_with_video_context、video_context_note。\n"
-        'phase_verification 只能是 "agree|shifted|disagree|uncertain"。\n'
-        "可以挑战 video_context，但必须在 video_context_note 说明原因。\n"
+        f"输出要求：{item_requirement}"
+        f"{phase_verification_requirement}"
+        f"{challenge_requirement}"
         "刃面或入跳弧线不可见时必须输出“不可判断/不可判定”，不要猜 Lutz/Flip 内外刃。\n"
         "请使用 5-8 岁儿童训练标准，中文、鼓励性、训练导向。"
     )
