@@ -20,7 +20,7 @@
 
 ### 2.1 运行与快照边界
 
-- **运行源码**：`backend/app/services/` 与少量路由级调用（例如 `backend/app/routers/analysis.py`）。所有线上 provider 请求最终经 `backend/app/services/providers.py` 的 provider adapter 发出。
+- **运行源码**：`backend/app/services/` 与少量路由级调用（例如 `backend/app/routers/analysis.py`）。大多数线上推理调用经 `backend/app/services/providers.py` 的 provider adapter 发出；设置页健康检查是已在调用面表中单独盘点的例外，其 vision 探测在 `backend/app/routers/settings.py:36` 直接实例化 `AsyncOpenAI`。
 - **生成快照**：`ai_skating_analysis_pack/src/app/services/`。`ai_skating_analysis_pack/README.md:4` 明确声明其来自 `backend/`，不是线上源码；`ai_skating_analysis_pack/_rebuild.py:13` 以 backend services 为复制源。
 - **同步约束**：`backend/tests/test_ai_pack_generation.py:33` 遍历生成清单，对全部 26 个 service 文件做逐字节一致性检查。功能改动必须先进入 `backend/`，再运行 rebuild。
 - **参考文本**：`ai_skating_analysis_pack/configs/*_prompt.txt` 仅用于阅读，不是 provider 运行配置。
@@ -48,7 +48,7 @@
 | `report`：月度成长章节 | `generate_chapter_text()`，`backend/app/services/monthly_chapters.py:196` | `_chapter_system_prompt(snapshot)` | 先固化的事实快照及 fact IDs | JSON object：标题、叙事、亮点、引用与质量说明 | 非法 JSON 或事实引用校验失败抛 `GeneratedChapterError`，保留 `facts_ready` 快照，见 `monthly_chapters.py:200`、`monthly_chapters.py:227` |
 | `report`：分析对比文案 | `_build_ai_compare_narrative()`，`backend/app/routers/analysis.py:8062` | `COMPARE_NARRATIVE_SYSTEM_PROMPT` | 两次分析的结构化比较摘要 | 家长可读中文短文 | provider/空回复回落到本地比较文案，见 `analysis.py:8074`、`analysis.py:8116` |
 | `report`：完整视频 AI 对比报告 | `_build_video_ai_compare_report()`，`backend/app/routers/analysis.py:8731` | `VIDEO_AI_COMPARE_REPORT_SYSTEM_PROMPT` | 两侧完整视频时序结果及确定性 fallback 比较 | JSON compare report，normalize 后保留确定性状态和 caveats | 无可用两侧数据则不调用；调用/解析失败返回本地 fallback compare report，见 `analysis.py:8734`、`analysis.py:8763` |
-| 任意 provider：连通性诊断 | `test_provider_connectivity()`，`backend/app/services/providers.py:1100` | 固定 `Reply with ok.`；视觉 slot 附 1×1 测试图 | 仅 provider 配置和测试内容，不含用户分析数据 | 非空文本即成功详情 | 捕获异常并返回 `(False, 中文错误)`；这不是分析质量调用，见 `providers.py:1117`、`providers.py:1151` |
+| 任意 provider：连通性诊断 | `test_provider_connectivity()`，`backend/app/services/providers.py:1100` | 固定 `Reply with ok.`；视觉 slot 附 1×1 测试图 | 仅 provider 配置和测试内容，不含用户分析数据 | 请求无异常即返回成功；响应为空时以固定中文成功文案代替详情 | 捕获异常并返回 `(False, 中文错误)`；这不是分析质量调用，见 `providers.py:1117`、`providers.py:1151` |
 | `vision` + `report`：设置页健康检查 | `GET /api/settings/test-api` → `test_api_connection()`，`backend/app/routers/settings.py:30` | 固定“请回复 ok。”；vision 请求附 1×1 测试图 | 当前激活 provider 配置和测试内容，不含用户分析数据 | 两个 slot 均成功后返回连接状态 | 任一阶段异常均分类为认证/额度/超时等中文诊断；不进入分析 fallback |
 
 补充说明：`plan.py` 中 `_legacy_generate_training_plan_full_prompt()` 目前没有线上调用者，不应与 `generate_training_plan()` 的有效入口混为一谈。
