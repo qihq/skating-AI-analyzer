@@ -125,6 +125,9 @@ def build_specialized_vision_prompt(
     normalized_profile = (analysis_profile or "unknown").strip() or "unknown"
     normalized_subtype = (action_subtype or "\u672a\u6307\u5b9a").strip() or "\u672a\u6307\u5b9a"
     schema = json.dumps(build_specialized_vision_schema(output_mode), ensure_ascii=False, indent=2)
+    system_prompt = SPECIALIZED_VISION_SYSTEM_PROMPT
+    if not include_biomechanics:
+        system_prompt += "\n- 这是纯视觉模式：不引入骨架或测量数据。"
     biomechanics_section = (
         "biomechanics:\n"
         f"{_json_for_prompt(biomechanics)}\n\n"
@@ -141,6 +144,18 @@ def build_specialized_vision_prompt(
         else ""
     )
 
+    candidate_key_frame_section = (
+        "【后端自动关键帧候选】\n"
+        "candidate_key_frames:\n"
+        f"{_json_for_prompt(candidate_key_frames)}\n\n"
+        if candidate_key_frames is not None
+        else ""
+    )
+    evidence_rule = (
+        "- issues 和 positives 必须来自可见画面、候选帧或骨架数据，不要把用户备注当作事实。\n\n"
+        if include_biomechanics
+        else "- issues 和 positives 必须来自可见画面、运动线索或视频语义上下文，不要把用户备注当作事实。\n\n"
+    )
     user_prompt = (
         "【动作信息】\n"
         f"action_type: {action_type}\n"
@@ -148,9 +163,7 @@ def build_specialized_vision_prompt(
         f"analysis_profile: {normalized_profile}\n"
         f"skill_category: {skill_category or '未指定'}\n"
         "skater_level: Free Skate 1\n\n"
-        "【后端自动关键帧候选】\n"
-        "candidate_key_frames:\n"
-        f"{_json_for_prompt(candidate_key_frames)}\n\n"
+        f"{candidate_key_frame_section}"
         "【运动与姿态证据】\n"
         "motion_features:\n"
         f"{_json_for_prompt(motion_features)}\n\n"
@@ -168,7 +181,7 @@ def build_specialized_vision_prompt(
         "【不确定性规则】\n"
         "- action_subtype=未指定 表示用户不知道细项；仅在画面证据清楚时才给具体子类型。\n"
         "- 如果画面只支持动作大类，请把具体刃型、周数或跳跃细项写为不可判断，并把 confidence 降低。\n"
-        "- issues 和 positives 必须来自可见画面、候选帧或骨架数据，不要把用户备注当作事实。\n\n"
+        f"{evidence_rule}"
         "【jump profile 补充规则】\n"
         "- 当 analysis_profile=jump 时，T/A/L 候选帧是后端自动证据，不是最终结论；请结合画面保守确认。\n"
         '- 如果脚踝、冰刀或入跳弧线不可见，必须令 observations.blade_edge="不可判断"。\n'
@@ -178,4 +191,4 @@ def build_specialized_vision_prompt(
         "JSON schema:\n"
         f"{schema}"
     )
-    return SPECIALIZED_VISION_SYSTEM_PROMPT, user_prompt
+    return system_prompt, user_prompt

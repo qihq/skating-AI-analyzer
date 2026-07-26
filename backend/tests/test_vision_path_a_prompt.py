@@ -14,7 +14,7 @@ from app.services.vision_path_a import analyze_path_a
 
 
 class VisionPathAPromptTests(unittest.IsolatedAsyncioTestCase):
-    async def test_path_a_uses_specialized_prompt_with_keyframe_and_bio_evidence(self) -> None:
+    async def test_path_a_excludes_biomechanics_evidence_but_keeps_motion_context(self) -> None:
         frame_payloads = [
             FramePayload(frame_id="frame_0004", data_url="data:image/jpeg;base64,AAA", timestamp_sec=0.4),
             FramePayload(frame_id="frame_0006", data_url="data:image/jpeg;base64,BBB", timestamp_sec=0.6),
@@ -23,11 +23,9 @@ class VisionPathAPromptTests(unittest.IsolatedAsyncioTestCase):
         bio_data = {
             "analysis_profile": "jump",
             "key_frame_candidates": {
-                "T": {"frame_id": "frame_0004", "timestamp": 0.4, "confidence": 0.72},
-                "A": {"frame_id": "frame_0006", "timestamp": 0.6, "confidence": 0.81},
-                "L": {"frame_id": "frame_0008", "timestamp": 0.8, "confidence": 0.76},
+                "T": {"frame_id": "SKELETON_SENTINEL"},
             },
-            "jump_metrics": {"estimated_rotation_turns": 0.5},
+            "jump_metrics": {"estimated_rotation_turns": 9.99},
         }
         motion_features = {
             "sample_count": 9,
@@ -70,14 +68,17 @@ class VisionPathAPromptTests(unittest.IsolatedAsyncioTestCase):
         request_kwargs = request_mock.await_args.kwargs
         user_content = request_kwargs["messages"][1]["content"]
         prompt_text = user_content[0]["text"]
+        system_prompt = request_kwargs["messages"][0]["content"]
 
-        self.assertIn("candidate_key_frames", prompt_text)
+        self.assertNotIn("candidate_key_frames", prompt_text)
         self.assertIn("Free Skate 1", prompt_text)
         self.assertIn("JSON schema:", prompt_text)
-        self.assertIn('"frame_id": "frame_0004"', prompt_text)
-        self.assertIn('"estimated_rotation_turns": 0.5', prompt_text)
+        self.assertNotIn("SKELETON_SENTINEL", prompt_text)
+        self.assertNotIn("estimated_rotation_turns", prompt_text)
+        self.assertNotIn("biomechanics:", prompt_text)
         self.assertIn('"motion_score": 0.95', prompt_text)
         self.assertIn("element_confidence<=0.55", prompt_text)
+        self.assertIn("不引入骨架或测量数据", system_prompt)
         self.assertEqual(result["path"], "A")
         self.assertEqual(len(result["frame_analysis"]), 2)
         self.assertIn("phase", result["frame_analysis"][0])

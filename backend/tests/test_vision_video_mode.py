@@ -265,5 +265,21 @@ class VisionVideoModeTests(unittest.IsolatedAsyncioTestCase):
         video_mock.assert_awaited_once()
 
 
+    async def test_path_a_video_prompt_uses_only_phase_segment_schema(self) -> None:
+        frames = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]
+        provider = SimpleNamespace(provider="qwen", api_key="test-key", base_url="https://example.com/v1", model_id="test-model")
+        payload = {"phase_segments": [], "pure_vision_subscores": {}, "action_phase_summary": {}, "overall_raw_text": "ok"}
+
+        with patch(
+            "app.services.vision_path_a.request_dashscope_video_completion",
+            AsyncMock(return_value=json.dumps(payload)),
+        ) as video_mock:
+            await analyze_path_a("jump", frames, provider, mode="video", clip_path=Path("clip.mp4"))
+
+        user_prompt = video_mock.await_args.kwargs["user_prompt"]
+        self.assertEqual(user_prompt.count('"phase_segments"'), 1)
+        self.assertNotIn('"frame_analysis"', user_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

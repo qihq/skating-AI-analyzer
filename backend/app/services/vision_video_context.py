@@ -93,12 +93,17 @@ def build_video_context_by_frame(
     return by_frame
 
 
-def format_video_context_prompt_block(video_context_by_frame: dict[str, dict[str, Any]] | None) -> str:
+def format_video_context_prompt_block(
+    video_context_by_frame: dict[str, dict[str, Any]] | None,
+    *,
+    include_skeleton_provenance: bool = True,
+) -> str:
     if not video_context_by_frame:
         return ""
+    provenance = "骨架候选仲裁" if include_skeleton_provenance else "语义帧选择"
     return (
         "\n\n【video_context 语义帧上下文】\n"
-        "这些图片来自视频 AI 阶段区间 + 运动密度 + 骨架候选仲裁后的语义关键帧。"
+        f"这些图片来自视频 AI 阶段区间 + 运动密度 + {provenance}后的语义关键帧。"
         "请不要从零猜阶段，而是在 video_context 中做帧级验证。\n"
         f"{json.dumps(video_context_by_frame, ensure_ascii=False, indent=2, sort_keys=True)}\n\n"
         "输出要求：每个 frame_analysis 项必须新增 phase_verification、conflict_with_video_context、video_context_note。\n"

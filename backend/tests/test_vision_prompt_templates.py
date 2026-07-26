@@ -99,6 +99,19 @@ class VisionPromptTemplateTests(unittest.TestCase):
         self.assertIn("action_subtype=未指定", first[1])
         self.assertIn(json.dumps(args["motion_features"], ensure_ascii=False, indent=2, sort_keys=True), first[1])
 
+    def test_pure_visual_mode_omits_biomechanics_and_keyframe_sections(self) -> None:
+        system_prompt, user_prompt = build_specialized_vision_prompt(
+            action_type="jump",
+            candidate_key_frames=None,
+            biomechanics=None,
+            include_biomechanics=False,
+        )
+
+        self.assertIn("不引入骨架或测量数据", system_prompt)
+        self.assertNotIn("candidate_key_frames", user_prompt)
+        self.assertNotIn("biomechanics:", user_prompt)
+        self.assertNotIn("骨架数据", user_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
