@@ -33,7 +33,6 @@ def _build_specialized_prompts(
     action_type: str,
     action_subtype: str | None,
     analysis_profile: str | None,
-    profile_evidence: dict[str, Any] | None,
     motion_features: dict[str, Any] | list[Any] | None,
     skill_category: str | None = None,
     output_mode: Literal["frames", "video"] = "frames",
@@ -45,10 +44,11 @@ def _build_specialized_prompts(
         candidate_key_frames=None,
         motion_features=motion_features,
         biomechanics=None,
-        profile_evidence=profile_evidence,
+        profile_evidence=None,
         skill_category=skill_category,
         output_mode=output_mode,
         include_biomechanics=False,
+        include_profile_evidence=False,
     )
 
 def _normalize_path_a_payload(
@@ -255,7 +255,6 @@ async def analyze_path_a(
         action_type,
         action_subtype,
         analysis_profile,
-        profile_evidence,
         motion_features,
         skill_category=skill_category,
         output_mode="video" if mode == "video" and clip_path is not None else "frames",
@@ -314,7 +313,6 @@ async def analyze_path_a(
                 action_type,
                 action_subtype,
                 analysis_profile,
-                profile_evidence,
                 motion_features,
                 skill_category=skill_category,
                 output_mode="frames",

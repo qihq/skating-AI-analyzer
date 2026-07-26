@@ -68,6 +68,7 @@ class VisionPromptTemplateTests(unittest.TestCase):
         self.assertIn('"overall_raw_text": "2-3句中文总结"', user_prompt)
         self.assertIn('"frame_id": "frame_0004"', user_prompt)
         self.assertIn('"estimated_rotation_turns": 0.5', user_prompt)
+        self.assertIn('"toe_pick_pulse": 0.2', user_prompt)
 
     def test_jump_profile_rule_requires_unknown_edge_and_low_element_confidence(self) -> None:
         _, user_prompt = build_specialized_vision_prompt(

@@ -226,7 +226,7 @@ ai_skating_analysis_pack/
 
 注: 标注 [v1.1.x+] 或 [新增] 的文件为该版本引入的新模块。
     src/app/services/ 下的文件为 v1.1.11 最新版本，保持原始 `app.services.*` import 路径。
-    旧版目录（src/preprocessing/ 等）为 v1.1.0 快照，可通过 `_rebuild.py` 更新。
+    旧版目录（src/preprocessing/ 等）为 v1.1.0 历史快照；`_rebuild.py` 仅同步 src/app/services/，不会更新这些历史目录。
 ```
 
 ---

@@ -31,6 +31,7 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("不能强行猜成具体动作名", rendered)
         self.assertIn("上传备注/comments 是用户观察线索", rendered)
         self.assertIn("不等同于已验证事实", rendered)
+        self.assertIn('profile_evidence: {"source": "test"}', rendered)
         self.assertIn("bio_data", rendered)
         self.assertIn("长期目标：落冰更稳", rendered)
 

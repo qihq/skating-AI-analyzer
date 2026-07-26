@@ -116,6 +116,7 @@ def build_specialized_vision_prompt(
     skill_category: str | None = None,
     output_mode: VisionOutputMode = "frames",
     include_biomechanics: bool = True,
+    include_profile_evidence: bool = True,
 ) -> tuple[str, str]:
     """Build a reusable figure-skating specialized vision prompt.
 
@@ -151,6 +152,12 @@ def build_specialized_vision_prompt(
         if candidate_key_frames is not None
         else ""
     )
+    profile_evidence_section = (
+        "profile_evidence:\n"
+        f"{_json_for_prompt(profile_evidence)}\n\n"
+        if include_profile_evidence
+        else ""
+    )
     evidence_rule = (
         "- issues 和 positives 必须来自可见画面、候选帧或骨架数据，不要把用户备注当作事实。\n\n"
         if include_biomechanics
@@ -168,8 +175,7 @@ def build_specialized_vision_prompt(
         "motion_features:\n"
         f"{_json_for_prompt(motion_features)}\n\n"
         f"{biomechanics_section}"
-        "profile_evidence:\n"
-        f"{_json_for_prompt(profile_evidence)}\n\n"
+        f"{profile_evidence_section}"
         "【分析步骤】\n"
         "1. 判断画面质量：good / partial / poor。\n"
         "2. 判断拍摄角度：front / side / diagonal_front / diagonal_back / unknown。\n"

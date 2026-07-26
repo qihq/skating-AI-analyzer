@@ -59,7 +59,16 @@ class VisionPathAPromptTests(unittest.IsolatedAsyncioTestCase):
                 provider,
                 action_subtype="waltz jump",
                 analysis_profile="jump",
-                profile_evidence={"jump_subtype_evidence": {"toe_pick_pulse": 0.2}},
+                profile_evidence={
+                    "mixed_jump_gate_passed": True,
+                    "airborne_frames_detected": 7,
+                    "relative_vertical_range": 0.91,
+                    "hip_rotation_signal": 0.73,
+                    "jump_subtype_evidence": {
+                        "toe_pick_pulse": 0.2,
+                        "sentinel": "PATH_A_PROFILE_EVIDENCE_SENTINEL",
+                    },
+                },
                 bio_data=bio_data,
                 motion_features=motion_features,
                 mode="frames",
@@ -76,6 +85,9 @@ class VisionPathAPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SKELETON_SENTINEL", prompt_text)
         self.assertNotIn("estimated_rotation_turns", prompt_text)
         self.assertNotIn("biomechanics:", prompt_text)
+        self.assertNotIn("profile_evidence", prompt_text)
+        self.assertNotIn("PATH_A_PROFILE_EVIDENCE_SENTINEL", prompt_text)
+        self.assertNotIn("hip_rotation_signal", prompt_text)
         self.assertIn('"motion_score": 0.95', prompt_text)
         self.assertIn("element_confidence<=0.55", prompt_text)
         self.assertIn("不引入骨架或测量数据", system_prompt)

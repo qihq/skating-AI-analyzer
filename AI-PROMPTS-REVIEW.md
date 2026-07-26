@@ -36,9 +36,9 @@
 | Slot | 入口点 | Prompt builder / policy | 证据边界 | 输出契约 | 解析与 fallback |
 |---|---|---|---|---|---|
 | `vision`：完整视频时序 | `analyze_video_temporal()`，`backend/app/services/video_temporal.py:1916` | `build_video_temporal_prompts()`，`backend/app/services/video_temporal.py:1476` | 原视频、动作大类/可选细项、用户备注、时长/FPS；不注入骨架测量值 | 时序 JSON：动作确认、`phase_segments`、T/A/L、宏观评价、质量与 fallback 建议 | provider/超时/解析失败均返回诊断 payload，让骨架/采样帧链继续；见 `video_temporal.py:1935`、`video_temporal.py:2005` |
-| `vision_path_a`：原生视频或原始帧 | `analyze_frames_dual()` → `analyze_path_a()`，`backend/app/services/vision_dual.py:310`、`backend/app/services/vision_path_a.py:222` | `build_specialized_vision_prompt(..., include_biomechanics=False)`，经 `vision_path_a.py:254` 调用 | 原视频或原始帧、动作/profile 线索、非骨架 motion features、去骨架 provenance 的时序上下文；Path A context 由 `render_prompt_context(..., include_bio=False)` 构建，见 `vision_dual.py:299` | 原生视频使用 `phase_segments`；帧模式使用 `frame_analysis`；两者共享 `pure_vision_subscores` 五字段 | 原生视频失败时重建帧契约并调用图像 completion，见 `vision_path_a.py:311`；JSON 先多策略本地提取，失败后最多一次、且按输出模式 repair，见 `vision_path_a.py:162`、`vision_path_a.py:199` |
-| `vision_path_b`：骨架标注帧 | `analyze_frames_dual()` → `analyze_path_b()`，`backend/app/services/vision_dual.py:328`、`backend/app/services/vision_path_b.py:193` | `PATH_B_SYSTEM` + `_build_user_prompt()` | 骨架标注帧、逐帧 bio context、jump metrics、动作/profile 线索、含 bio 的统一 context；见 `vision_dual.py:304`、`vision_path_b.py:240` | JSON object：`frame_analysis`、`subscores`、阶段摘要、问题等 | 本地直接/围栏/平衡对象提取；任何调用或解析错误返回带 `error` 的软失败 payload，见 `vision_path_b.py:212`、`vision_path_b.py:265` |
-| `vision`：通用帧/视频分析 | `analyze_frames()`，`backend/app/services/vision.py:659` | `_build_specialized_prompts()` → shared builder | 帧或视频、动作/profile、候选关键帧、motion features、可选 biomechanics、记忆上下文 | 与 Path A 共用 Python schema：帧为 `frame_analysis`，视频为 `phase_segments`，五 subscores 同源 | 原生视频失败后重建帧 prompt；帧 JSON 可激进提取，仍失败则转 raw-text fallback；全部 vote 失败返回规范化 unavailable payload，见 `vision.py:604`、`vision.py:877` |
+| `vision_path_a`：原生视频或原始帧 | `analyze_frames_dual()` → `analyze_path_a()`，`backend/app/services/vision_dual.py:207`、`backend/app/services/vision_path_a.py:223` | `build_specialized_vision_prompt(..., include_biomechanics=False, include_profile_evidence=False)`，经 `vision_path_a.py:255` 调用 | 原视频或原始帧、动作大类/细项/profile 名、非骨架 motion features、去骨架 provenance 的时序上下文；明确排除 `profile_evidence`、`bio_data`、骨架/关键帧测量和 pose-derived evidence；Path A context 由 `render_prompt_context(..., include_bio=False, include_profile_evidence=False)` 构建，见 `vision_dual.py:299` | 原生视频使用 `phase_segments`；帧模式使用 `frame_analysis`；两者共享 `pure_vision_subscores` 五字段 | 原生视频失败时重建帧契约并调用图像 completion，见 `vision_path_a.py:314`；JSON 先多策略本地提取，失败后最多一次、且按输出模式 repair，见 `vision_path_a.py:163`、`vision_path_a.py:200` |
+| `vision_path_b`：骨架标注帧 | `analyze_frames_dual()` → `analyze_path_b()`，`backend/app/services/vision_dual.py:207`、`backend/app/services/vision_path_b.py:193` | `PATH_B_SYSTEM` + `_build_user_prompt()` | 骨架标注帧、逐帧 bio context、jump metrics、动作/profile 线索、`profile_evidence` 和含 bio 的统一 context；见 `vision_dual.py:332`、`vision_path_b.py:240` | JSON object：`frame_analysis`、`subscores`、阶段摘要、问题等 | 本地直接/围栏/平衡对象提取；任何调用或解析错误返回带 `error` 的软失败 payload，见 `vision_path_b.py:212`、`vision_path_b.py:265` |
+| `vision`：通用帧/视频分析（导出但 dormant 的兼容面） | `analyze_frames()`，`backend/app/services/vision.py:659`；当前 `backend/app` 无生产调用者，仅测试直接调用 | `_build_specialized_prompts()` → shared builder | 帧或视频、动作/profile、候选关键帧、motion features、可选 biomechanics、`profile_evidence`、记忆上下文 | 与 Path A 共用 Python schema：帧为 `frame_analysis`，视频为 `phase_segments`，五 subscores 同源 | 原生视频失败后重建帧 prompt；帧 JSON 可激进提取，仍失败则转 raw-text fallback；全部 vote 失败返回规范化 unavailable payload，见 `vision.py:604`、`vision.py:877` |
 | `report`：训练报告 | `generate_report()`，`backend/app/services/report.py:1293` | `REPORT_SYSTEM_PROMPT` + 函数内结构化 user prompt | 视觉摘要、bio 数据、双路校验、时序上下文、统一分析 context/记忆 | JSON report：summary、issues、improvements、training focus、五项 0-100 subscores、质量与动作确认 | 最多 3 次完整报告请求（`REPORT_JSON_MAX_ATTEMPTS`），provider/解析失败转结构化 biomechanics/视觉 fallback，见 `report.py:43`、`report.py:1403`、`report.py:1461` |
 | `report`：初始训练计划 | API `create_training_plan()` → `generate_training_plan()`，`backend/app/routers/analysis.py:9214`、`backend/app/services/plan.py:701` | 唯一 `PLAN_SYSTEM_PROMPT` + compact JSON input | 儿童资料摘要、动作类型、报告问题、记忆、variation key；政策要求 3-6 岁、低冲击、每天两项、Day 7 仅冰上和禁用器械 | 一个含 `title`、`focus_skill`、7 天 sessions 的 JSON object | 首次 parse 失败后最多一次 JSON repair；AI 失败由路由生成 deterministic fallback plan，见 `plan.py:37`、`analysis.py:9246` |
 | `report`：训练计划续写 | API `extend_plan()` → `extend_training_plan()`，`backend/app/routers/analysis.py:10087`、`backend/app/services/plan.py:549` | `EXTEND_PLAN_SYSTEM_PROMPT` + 已完成/剩余天数 prompt | 原计划、完成进度、报告问题、儿童 context、记忆 | 仅待更新天数的 JSON array，随后与原计划合并并 normalize | parse 失败后最多一次 array-mode JSON repair；AI 失败由路由保留完成天并生成 fallback 剩余计划，见 `plan.py:590`、`analysis.py:10116` |
@@ -52,6 +52,8 @@
 | `vision` + `report`：设置页健康检查 | `GET /api/settings/test-api` → `test_api_connection()`，`backend/app/routers/settings.py:30` | 固定“请回复 ok。”；vision 请求附 1×1 测试图 | 当前激活 provider 配置和测试内容，不含用户分析数据 | 两个 slot 均成功后返回连接状态 | 任一阶段异常均分类为认证/额度/超时等中文诊断；不进入分析 fallback |
 
 补充说明：`plan.py` 中 `_legacy_generate_training_plan_full_prompt()` 目前没有线上调用者，不应与 `generate_training_plan()` 的有效入口混为一谈。
+
+路由生产链使用 `backend/app/routers/analysis.py:5310` 的 `analyze_frames_dual()`；通用 `analyze_frames()` 保留为导出兼容面，但当前未发现生产调用者。
 
 ## 4. 本轮已修复问题
 
@@ -70,7 +72,7 @@
 ### 4.3 Path A 纯视觉边界及模式一致性
 
 - 旧的 Path A 专用 system/user prompt helpers 已删除；Path A 复用 shared builder 的纯视觉模式，因此获得同一儿童校准和不确定性规则。
-- `vision_dual.py:299` 将 Path A context 与 Path B context 分开渲染，避免统一 context 把 `bio_data` 重新带回 Path A system context。
+- `vision_dual.py:299` 将 Path A context 与 Path B context 分开渲染，避免统一 context 把 `profile_evidence` 或 `bio_data` 重新带回 Path A system context。
 - shared builder 在纯视觉模式下不序列化 candidate keyframes 或 biomechanics；视频 context 对 Path A 隐藏 skeleton provenance。
 - 原生视频 context 使用 segment 指令；视频失败后的图像 completion 重建 frame 指令；repair 根据调用模式要求正确 carrier 字段。
 
@@ -111,15 +113,15 @@
 最终验证命令（从 `backend/` 执行）：
 
 ```powershell
-python -m pytest tests/test_plan_generation.py tests/test_prompt_policy.py tests/test_vision_prompt_templates.py tests/test_vision_specialized_prompt.py tests/test_vision_path_a_prompt.py tests/test_vision_path_a.py tests/test_vision_video_context.py tests/test_vision_dual.py tests/test_vision_fallback.py tests/test_video_temporal_prompt.py tests/test_ai_pack_generation.py -q
+python -m pytest tests/test_plan_generation.py tests/test_prompt_policy.py tests/test_vision_prompt_templates.py tests/test_vision_specialized_prompt.py tests/test_vision_path_a_prompt.py tests/test_vision_path_a.py tests/test_vision_video_context.py tests/test_vision_dual.py tests/test_vision_fallback.py tests/test_vision_video_mode.py tests/test_video_temporal_prompt.py tests/test_ai_pack_generation.py -q
 ```
 
-结果：`60 passed, 3 warnings in 22.08s`。三个 warning 均来自第三方依赖：Starlette 对 `python_multipart` 的 `PendingDeprecationWarning`，以及 protobuf 的 `MessageMapContainer` / `ScalarMapContainer` Python 3.14 兼容性 `DeprecationWarning`。该 suite 覆盖：
+结果：`68 passed, 3 warnings in 20.17s`。三个 warning 均来自第三方依赖：Starlette 对 `python_multipart` 的 `PendingDeprecationWarning`，以及 protobuf 的 `MessageMapContainer` / `ScalarMapContainer` Python 3.14 兼容性 `DeprecationWarning`。该 suite 覆盖：
 
 - 训练计划唯一 policy、儿童安全条款、请求边界与单次 repair；
 - 帧/视频 shared schema 和五项 subscore 同源；
-- Path A 的 bio 隔离、双路 system-context 隔离、视频 context 模式、帧 fallback prompt 和 output-mode-aware repair；
-- 通用 vision fallback 和 video temporal prompt；
+- Path A 的 `profile_evidence`/bio 隔离、双路 system-context 隔离、视频 context 模式、帧 fallback prompt 和 output-mode-aware repair；
+- 通用 vision 的原生视频请求、帧 fallback、模式重建和 video temporal prompt；
 - 全 26 文件生成清单及 backend/snapshot 字节级一致性。
 
 静态扫描用于防止旧 active-state 叙述回归；历史结论在本评审中统一改写为“旧专用 prompt 已删除”或“同名英文覆盖已消除”。仓库 hygiene 门禁另执行 `git diff --check` 和 `git status --short`。
@@ -130,5 +132,5 @@ python -m pytest tests/test_plan_generation.py tests/test_prompt_policy.py tests
 2. **记录调用级指标。** 至少记录 prompt/schema version、provider/model、mode、首解析成功、repair 使用/成功、fallback 原因、token、延迟和成本；Path A/Path B 分开观察。
 3. **做 contract diff 门禁。** 将 report、Path B、video temporal、plan 的 schema hint 逐步转为 Python/类型模型生成，并在 CI 比较 prompt schema 与 normalize/validate 接口。
 4. **评估而非假设 repair 策略。** 先用生产匿名统计和离线 malformed corpus 计算一次 repair 的成功率、成本和尾延迟，再决定是否调整；默认维持一次上限。
-5. **增加 prompt injection 与证据污染样本。** 专门覆盖 user note、历史记忆、provider raw text 中的指令注入，以及 Path A 中 `bio_data`/skeleton sentinel 不可见性。
+5. **增加 prompt injection 与证据污染样本。** 专门覆盖 user note、历史记忆、provider raw text 中的指令注入，以及 Path A 中 `profile_evidence`/`bio_data`/skeleton sentinel 不可见性。
 6. **设置质量发布门槛。** 结构测试之外，要求关键动作族的识别率、T/A/L 时间误差、不可判断 precision、儿童 subscore 校准和中文建议人工评分不退化，才宣称模型质量改善。
