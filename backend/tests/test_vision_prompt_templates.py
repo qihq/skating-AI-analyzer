@@ -11,6 +11,33 @@ from app.services.vision_prompt_templates import build_specialized_vision_prompt
 
 
 class VisionPromptTemplateTests(unittest.TestCase):
+    @staticmethod
+    def _schema_from_prompt(prompt: str) -> dict[str, object]:
+        return json.loads(prompt.split("JSON schema:\n", 1)[1])
+
+    def test_frame_and_video_contracts_share_subscores(self) -> None:
+        _, frame_prompt = build_specialized_vision_prompt(action_type="jump", output_mode="frames")
+        _, video_prompt = build_specialized_vision_prompt(action_type="jump", output_mode="video")
+
+        frame_schema = self._schema_from_prompt(frame_prompt)
+        video_schema = self._schema_from_prompt(video_prompt)
+
+        self.assertIn("frame_analysis", frame_schema)
+        self.assertNotIn("phase_segments", frame_schema)
+        self.assertIn("phase_segments", video_schema)
+        self.assertNotIn("frame_analysis", video_schema)
+        self.assertEqual(frame_schema["pure_vision_subscores"], video_schema["pure_vision_subscores"])
+        self.assertEqual(
+            set(frame_schema["pure_vision_subscores"]),
+            {
+                "takeoff_power",
+                "rotation_axis",
+                "arm_coordination",
+                "landing_absorption",
+                "core_stability",
+            },
+        )
+
     def test_specialized_prompt_contains_required_sections_and_schema(self) -> None:
         system_prompt, user_prompt = build_specialized_vision_prompt(
             action_type="jump",

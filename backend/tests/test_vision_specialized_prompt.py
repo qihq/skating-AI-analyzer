@@ -93,7 +93,33 @@ class VisionSpecializedPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("candidate_key_frames", kwargs["user_prompt"])
         self.assertIn('"frame_id": "frame_0001"', kwargs["user_prompt"])
         self.assertIn('"motion_score": 0.9', kwargs["user_prompt"])
-        self.assertIn("phase_segments", kwargs["user_prompt"])
+        self.assertEqual(kwargs["user_prompt"].count("JSON schema:"), 1)
+        self.assertIn('"phase_segments"', kwargs["user_prompt"])
+        self.assertIn('"core_stability"', kwargs["user_prompt"])
+        self.assertIn('"element_confidence"', kwargs["user_prompt"])
+
+    async def test_video_failure_falls_back_to_frame_contract(self) -> None:
+        frame_payloads = [FramePayload(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]
+        video_mock = AsyncMock(side_effect=TimeoutError("video unavailable"))
+        frame_mock = AsyncMock(return_value=json.dumps({"frame_analysis": [], "overall_raw_text": "ok"}))
+
+        with (
+            patch("app.services.vision.get_vision_providers", AsyncMock(return_value=[_provider("qwen")])),
+            patch("app.services.vision.build_memory_context", AsyncMock(return_value="")),
+            patch("app.services.vision.request_dashscope_video_completion", video_mock),
+            patch("app.services.vision.request_text_completion", frame_mock),
+        ):
+            await analyze_frames(
+                "jump",
+                frame_payloads,
+                mode="video",
+                clip_path=Path("clip.mp4"),
+                n_votes=1,
+            )
+
+        fallback_prompt = frame_mock.await_args.kwargs["messages"][1]["content"][0]["text"]
+        self.assertIn('"frame_analysis"', fallback_prompt)
+        self.assertNotIn('"phase_segments"', fallback_prompt)
 
 
 if __name__ == "__main__":

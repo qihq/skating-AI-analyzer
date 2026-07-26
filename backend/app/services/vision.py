@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
-from app.services.action_profiles import get_jump_characteristics
 from app.services.providers import (
     get_active_provider,
     get_vision_providers,
@@ -26,38 +25,6 @@ from app.services.vision_video_context import normalize_video_context_fields
 
 
 logger = logging.getLogger(__name__)
-
-VISION_SYSTEM_PROMPT = (
-    "你是专业花样滑冰技术分析师，熟悉 ISU 评分体系和生物力学。"
-    "你的输出必须严格遵循指定 JSON 格式，不得输出任何格式之外的文字。"
-)
-
-PROFILE_HINTS: dict[str, str] = {
-    "jump": (
-        "重点观察：① 起跳阶段膝关节弯曲深度（深蹲效果）"
-        " ② 腾空阶段手臂是否快速收紧至胸前"
-        " ③ 落冰阶段是否为单腿支撑、膝盖弯曲缓冲"
-        " ④ 轴线是否保持垂直，无明显侧倾。"
-    ),
-    "spin": (
-        "重点观察：① 旋转轴垂直度，是否存在前倾/后仰漂移"
-        " ② 手臂/腿收紧与旋转加速的对应关系"
-        " ③ 入转和出转冰刃切换是否流畅"
-        " ④ 头部固定点（spotting）是否存在。"
-    ),
-    "spiral": (
-        "重点观察：① 自由腿高度，理想应超过髋关节水平线"
-        " ② 支撑腿膝盖是否完全伸直"
-        " ③ 躯干稳定性，不应有明显晃动"
-        " ④ 手臂姿态是否与身体轴线协调。"
-    ),
-    "step": (
-        "重点观察：① 冰刃切换节奏是否与音乐/节拍匹配"
-        " ② 膝盖推送力度，每步是否有明显 push"
-        " ③ 上半身（肩/臂）是否过度摆动"
-        " ④ 重心转移是否平稳，无明显身体侧倾。"
-    ),
-}
 
 VALID_PHASES = {"准备", "起跳", "腾空", "落冰", "滑出", "旋转入", "旋转中", "旋转出", "步法", "不可分析"}
 VALID_DATA_QUALITY_HINTS = {"good", "partial", "poor"}
@@ -304,6 +271,7 @@ def _build_specialized_prompts(
     profile_evidence: dict[str, Any] | None,
     bio_data: dict[str, Any] | None,
     motion_features: dict[str, Any] | list[Any] | None,
+    output_mode: Literal["frames", "video"] = "frames",
 ) -> tuple[str, str]:
     return build_specialized_vision_prompt(
         action_type=action_type,
@@ -313,50 +281,8 @@ def _build_specialized_prompts(
         motion_features=motion_features,
         biomechanics=bio_data,
         profile_evidence=profile_evidence,
+        output_mode=output_mode,
     )
-
-
-def _build_specialized_video_prompt(user_prompt: str) -> str:
-    video_rules = (
-        "\n\n【视频模式 - 强制要求】\n"
-        "1. 你必须只输出一个 JSON 对象，不要输出任何 JSON 之外的文字、解释、markdown 或代码块标记。\n"
-        "2. 即使画面模糊、角度不佳、无法判断动作，也必须输出完整 JSON，将 phase 设为“不可分析”、confidence 设为 0。\n"
-        "3. 不要输出自然语言段落代替 JSON。不要在 JSON 前后添加任何说明。\n"
-        "4. 按视频片段内的秒数定位关键事件，不要编造逐帧 frame_id。\n"
-        "5. 优先使用 phase_segments 字段：\n"
-    )
-    example_good = json.dumps(
-        {
-            "phase_segments": [
-                {"start_sec": 0.2, "end_sec": 0.6, "phase": "准备", "observations": {}, "issues": [], "positives": [], "confidence": 0.8}
-            ],
-            "data_quality_hint": "good",
-            "camera_view": "side",
-            "camera_view_confidence": 0.8,
-            "action_phase_summary": {"detected_phases": ["跳跃"], "weakest_phase": "落冰", "strongest_phase": "跳跃"},
-            "overall_raw_text": "2-3句总结",
-        },
-        ensure_ascii=False,
-    )
-    example_poor = json.dumps(
-        {
-            "phase_segments": [],
-            "data_quality_hint": "poor",
-            "camera_view": "unknown",
-            "camera_view_confidence": 0.0,
-            "action_phase_summary": {"detected_phases": [], "weakest_phase": "", "strongest_phase": ""},
-            "overall_raw_text": "你对视频的观察总结",
-        },
-        ensure_ascii=False,
-    )
-    return (
-        user_prompt
-        + video_rules
-        + example_good
-        + "\n6. 如果完全无法分析，最低限度输出：\n"
-        + example_poor
-    )
-
 
 
 def _choose_phase_with_votes(
@@ -782,66 +708,8 @@ async def analyze_frames(
         logger.warning("Vision provider unavailable, using fallback: %s", exc)
         return _attach_quality_diagnostics(normalize_vision_payload(_fallback_unavailable_payload(frame_payloads, failure), frame_payloads))
 
-    system_prompt = VISION_SYSTEM_PROMPT if not memory_context else f"{VISION_SYSTEM_PROMPT}\n\n{memory_context}"
     max_tokens = min(8000, 400 + len(frame_payloads) * 250)
-
-    evidence_text = json.dumps(profile_evidence or {}, ensure_ascii=False)
-    jump_evidence_instruction = (
-        "JUMP_SUBTYPE_EVIDENCE: when profile is jump, prioritize profile_evidence.jump_subtype_evidence for subtype clues. "
-        "toe_pick_pulse indicates toe-assisted jumps; feet_together_at_takeoff supports Loop; "
-        "free_leg_swing_amplitude supports Salchow; approach_direction=forward supports Axel; "
-        "pre_takeoff_edge_score near 0 supports Lutz outside edge, near 1 supports Flip inside edge. "
-        "If evidence confidence is low or conflicts with image evidence, state the uncertainty explicitly.\n"
-    )
-    profile_key = (analysis_profile or "jump").strip().lower()
-    profile_hint = PROFILE_HINTS.get(profile_key, PROFILE_HINTS["jump"])
-    jump_chars = get_jump_characteristics(action_subtype)
-    user_prompt = (
-        f"分析以下【{action_type}】动作帧序列（共 {len(frame_payloads)} 帧，按时间顺序排列）。\n"
-        f"动作子类型：{action_subtype or '未指定'}\n"
-        f"分析 profile：{analysis_profile or 'unknown'}\n"
-        f"{profile_hint}\n"
-        f"规则证据：{evidence_text}\n"
-        f"{jump_evidence_instruction}"
-        "重要约束：如果是燕式滑行/螺旋线，不要误判为跳跃，除非存在清晰的起跳、腾空、落冰证据。\n\n"
-        "对每一帧，输出以下结构化数据：\n\n"
-        "{\n"
-        '  "frame_analysis": [\n'
-        "    {\n"
-        '      "frame_id": "frame_0001",\n'
-        '      "phase": "准备|起跳|腾空|落冰|滑出|旋转入|旋转中|旋转出|步法|不可分析",\n'
-        '      "observations": {\n'
-        '        "knee_bend": "充分|不足|过度|不适用",\n'
-        '        "arm_position": "正确|偏高|偏低|不对称|不适用",\n'
-        '        "axis_alignment": "垂直|前倾|后仰|侧倾|不适用",\n'
-        '        "blade_edge": "外刃|内刃|平刃|不适用",\n'
-        '        "core_stability": "稳定|轻微晃动|明显晃动|不适用",\n'
-        '        "landing_absorption": "良好|不足|过度|不适用"\n'
-        "      },\n"
-        '      "issues": ["问题描述1"],\n'
-        '      "positives": ["优点描述1"],\n'
-        '      "confidence": 0.0\n'
-        "    }\n"
-        "  ],\n"
-        '  "action_phase_summary": {\n'
-        '    "detected_phases": ["起跳", "腾空", "落冰"],\n'
-        '    "weakest_phase": "最需改进的阶段",\n'
-        '    "strongest_phase": "表现最好的阶段"\n'
-        "  },\n"
-        '  "overall_raw_text": "综合文字描述 2-3 句"\n'
-        "}\n\n"
-        "每帧的 issues 和 positives 各不超过 2 条，每条不超过 30 字。\n"
-        "必须只输出 JSON，禁止任何解释文字。"
-    )
-    if jump_chars and profile_key == "jump":
-        user_prompt += (
-            "\n跳跃类型专项信息：\n"
-            f"  起跳刃型：{jump_chars['takeoff_edge']}\n"
-            f"  方向特征：{jump_chars['direction']}\n"
-            f"  重点检查：{jump_chars['key_check']}\n"
-            f"  圈数说明：{jump_chars['rotation_note']}\n"
-        )
-
+    output_mode: Literal["frames", "video"] = "video" if mode == "video" and clip_path is not None else "frames"
     system_prompt, user_prompt = _build_specialized_prompts(
         action_type,
         action_subtype,
@@ -849,10 +717,10 @@ async def analyze_frames(
         profile_evidence,
         bio_data,
         motion_features,
+        output_mode=output_mode,
     )
     if memory_context:
         system_prompt = f"{system_prompt}\n\n{memory_context}"
-    video_prompt = _build_specialized_video_prompt(user_prompt)
 
     if mode == "video" and clip_path is not None:
         async def _single_video_call(video_provider: Any) -> dict[str, Any]:
@@ -861,7 +729,7 @@ async def analyze_frames(
                     video_provider,
                     video_path=clip_path,
                     system_prompt=system_prompt,
-                    user_prompt=video_prompt,
+                    user_prompt=user_prompt,
                     temperature=0.0,
                     max_tokens=max_tokens,
                     timeout=180.0,
@@ -871,7 +739,7 @@ async def analyze_frames(
                     video_provider,
                     video_path=clip_path,
                     system_prompt=system_prompt,
-                    user_prompt=video_prompt,
+                    user_prompt=user_prompt,
                     temperature=0.0,
                     max_tokens=max_tokens,
                     timeout=180.0,
@@ -881,7 +749,7 @@ async def analyze_frames(
                     video_provider,
                     video_path=clip_path,
                     system_prompt=system_prompt,
-                    user_prompt=video_prompt,
+                    user_prompt=user_prompt,
                     temperature=0.0,
                     max_tokens=max_tokens,
                     timeout=180.0,
@@ -974,6 +842,17 @@ async def analyze_frames(
             return normalized
 
         logger.warning("All vision native video providers failed, falling back to frames.")
+        system_prompt, user_prompt = _build_specialized_prompts(
+            action_type,
+            action_subtype,
+            analysis_profile,
+            profile_evidence,
+            bio_data,
+            motion_features,
+            output_mode="frames",
+        )
+        if memory_context:
+            system_prompt = f"{system_prompt}\n\n{memory_context}"
 
     vote_count = len(providers) if len(providers) > 1 else max(1, min(int(n_votes), 5))
     requested_providers = providers if len(providers) > 1 else [provider for _ in range(vote_count)]
