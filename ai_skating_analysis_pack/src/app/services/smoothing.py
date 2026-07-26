@@ -4,6 +4,7 @@
 输入: pose.py 输出的 frames 列表与有效采样帧率。
 输出: 保持原 payload 结构的平滑 frames，插值点会附加 interpolated 标记。
 """
+
 from __future__ import annotations
 
 import copy
@@ -24,7 +25,14 @@ class OneEuroFilter:
         min_cutoff: 静止或低速状态下的最小截止频率。
         beta: 速度自适应系数，动作越快保留越多高频变化。
         d_cutoff: 导数低通滤波截止频率。
+
+    Returns:
+        通过 filter() 返回单个平滑后的数值。
+
+    Raises:
+        无。
     """
+
     min_cutoff: float = 1.0
     beta: float = 0.05
     d_cutoff: float = 1.0
@@ -37,7 +45,18 @@ class OneEuroFilter:
         return 1.0 / (1.0 + tau / dt)
 
     def filter(self, x: float, t: float) -> float:
-        """Filter one numeric sample."""
+        """Filter one numeric sample.
+
+        Args:
+            x: Current raw sample.
+            t: Sample timestamp in seconds.
+
+        Returns:
+            Smoothed sample value.
+
+        Raises:
+            无。
+        """
         if self._prev_t is None or self._prev_x is None:
             self._prev_x = x
             self._prev_t = t
@@ -130,6 +149,9 @@ def smooth_keypoint_sequence(frames: list[dict[str, Any]], effective_fps: float)
 
     Returns:
         A deep-copied frame list with smoothed x/y coordinates and interpolation markers.
+
+    Raises:
+        无。
     """
     if not frames:
         return []

@@ -1,9 +1,3 @@
-"""骨架帧标注。
-
-职责: 在原始帧上叠加 MediaPipe 骨架线条 + 关键点 + 角度标签。
-输入: frame_paths、pose_by_stem。
-输出: 标注后的帧图片路径列表。
-"""
 from __future__ import annotations
 
 import logging
@@ -126,7 +120,11 @@ def annotate_frame(
     *,
     connections: list[list[int]] | None = None,
 ) -> Path:
-    """Write an annotated copy of a frame."""
+    """
+    Write an annotated copy of a frame.
+
+    Missing pose data or lost frames (keypoints=[]) are copied unchanged.
+    """
     keypoints = pose_frame.get("keypoints") if isinstance(pose_frame, dict) else None
     if not isinstance(keypoints, list) or not keypoints:
         return _copy_frame(frame_path, output_path)

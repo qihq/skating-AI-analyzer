@@ -7,10 +7,9 @@
 用法: cd skating-analyzer && python ai_skating_analysis_pack/_rebuild.py
 """
 import shutil
-import os
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "backend" / "app" / "services"
 DST = REPO_ROOT / "ai_skating_analysis_pack" / "src" / "app" / "services"
 
@@ -40,6 +39,7 @@ FILES = [
     "snowball.py",
     "memory_suggest.py",
     "plan.py",
+    "vision_prompt_templates.py",
 ]
 
 def main():

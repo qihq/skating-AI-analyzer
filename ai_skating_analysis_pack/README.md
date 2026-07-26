@@ -1,5 +1,9 @@
 # AI 花样滑冰视频分析模块
 
+> [!IMPORTANT]
+> 本目录是从仓库根目录 `backend/` 生成的审查/交付快照，不是线上运行源码。
+> 请勿直接修改 `src/app/services/` 或将 `configs/*_prompt.txt` 当作运行配置；功能修改应落在 `backend/`，然后运行 `python ai_skating_analysis_pack/_rebuild.py` 同步。
+
 版本：v1.1.11 | Pipeline 版本：`CURRENT_PIPELINE_VERSION = "v1.1.11"`
 
 ---
@@ -202,7 +206,7 @@ ai_skating_analysis_pack/
 │   ├── utils/                             # 旧版：providers.py, analysis_errors.py 等
 │   └── pipeline.py                        # 旧版流水线入口
 │
-├── configs/                               # 配置文件
+├── configs/                               # 提示词参考文本（非运行配置）
 │   ├── action_profiles.json               # 动作 profile 配置（采样参数、窗口大小）
 │   ├── vision_prompt.txt                  # 视觉分析 System Prompt（参考）
 │   ├── report_prompt.txt                  # 报告生成 System Prompt（参考）

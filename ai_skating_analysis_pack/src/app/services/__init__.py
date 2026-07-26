@@ -19,6 +19,7 @@ from app.services.frame_annotator import (
     build_pose_by_stem,
 )
 from app.services.report import SUBSCORE_KEYS, generate_report
+from app.services.provider_metrics import summarize_provider_metrics
 from app.services.video import FramePayload, build_timestamp_map
 from app.services.vision import analyze_frames
 from app.services.vision_dual import (
@@ -44,6 +45,7 @@ __all__ = [
     "analyze_path_a",
     "analyze_path_b",
     "sample_frames_path_b",
+    "summarize_provider_metrics",
     "cross_validate",
     "compute_blend_weights",
     "CrossValidationReport",

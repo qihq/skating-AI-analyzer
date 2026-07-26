@@ -1,7 +1,3 @@
-"""视觉投票配置持久化。
-
-职责: 管理 UI 选择的视觉投票 provider ID 配置。
-"""
 from __future__ import annotations
 
 import json
@@ -18,7 +14,18 @@ VISION_VOTE_CONFIG_PATH = DATA_DIR / "vision_vote_config.json"
 
 
 def load_vision_vote_config() -> dict[str, str | None]:
-    """Load the persisted UI-selected vision voting provider ids."""
+    """
+    Load the persisted UI-selected vision voting provider ids.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with primary_provider_id and secondary_provider_id.
+
+    Raises:
+        No exception is propagated; malformed config falls back to empty ids.
+    """
     if not VISION_VOTE_CONFIG_PATH.exists():
         return {"primary_provider_id": None, "secondary_provider_id": None}
 
@@ -38,7 +45,18 @@ def load_vision_vote_config() -> dict[str, str | None]:
 
 
 def save_vision_vote_config(payload: dict[str, Any]) -> dict[str, str | None]:
-    """Persist the UI-selected vision voting provider ids."""
+    """
+    Persist the UI-selected vision voting provider ids.
+
+    Args:
+        payload: Raw payload with primary_provider_id and secondary_provider_id.
+
+    Returns:
+        Normalized saved config.
+
+    Raises:
+        OSError: When the config file cannot be written.
+    """
     normalized = {
         "primary_provider_id": _optional_string(payload.get("primary_provider_id")),
         "secondary_provider_id": _optional_string(payload.get("secondary_provider_id")),

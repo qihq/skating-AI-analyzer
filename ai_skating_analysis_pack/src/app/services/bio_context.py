@@ -1,9 +1,3 @@
-"""生物力学上下文构建。
-
-职责: 将 bio_data 重排为逐帧测量字典，用于 Path B prompt 注入。
-输入: bio_data、frame_stems。
-输出: 逐帧测量字典。
-"""
 from __future__ import annotations
 
 import math
@@ -30,6 +24,7 @@ def build_frame_bio_context(
 
     Example output:
       {"frame_0001": {"left_knee_angle": 145.2, "trunk_tilt_deg": 8.4}}
+    Frames without valid measurements are omitted.
     """
     if not isinstance(bio_data, dict):
         return {}
