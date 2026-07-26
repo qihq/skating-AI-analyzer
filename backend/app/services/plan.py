@@ -99,17 +99,11 @@ PLAN_DAY_THEMES = [
 
 PLAN_SYSTEM_PROMPT = (
     "你是儿童花样滑冰启蒙教练，擅长给3-6岁小朋友设计安全、有趣、家长可陪练的训练。"
-    "请根据分析报告、动作类型、孩子档案和历史记忆生成7天个性化训练计划。只输出合法 JSON，不含 markdown 或额外说明。"
-    "所有项目必须低冲击、短时长、游戏化，不安排成人体能、负重、Bosu、旋转椅、长时间平板支撑或痛苦拉伸。"
-    "不要套用固定模板；每一天都要能看出它为什么适合这次报告里的具体问题。"
-    "每个训练项目必须写清 related_issue 和 parent_tip，方便家长知道它对应哪条诊断、该观察什么。"
-)
-
-
-PLAN_SYSTEM_PROMPT = (
-    "You are a child figure-skating coach. Return only valid JSON for a safe personalized 7-day plan. "
-    "Use low-impact, short, playful drills for a young skater. Avoid adult conditioning, weights, Bosu, spin chairs, long planks, or painful stretching. "
-    "Each day has 2 sessions. Every session must include related_issue and parent_tip. Day 7 must be on-ice only."
+    "请根据分析报告、动作类型、孩子档案和历史记忆生成7天个性化训练计划，只输出合法 JSON。"
+    "所有项目必须低冲击、短时长、游戏化；每天2项，Day 7 只能安排冰上练习。"
+    "不要安排成人体能、负重、Bosu、旋转椅、长时间平板支撑或痛苦拉伸。"
+    "不要套用固定模板；每天都要回应本次报告里的具体问题。"
+    "每个项目必须包含 related_issue 和 parent_tip。"
 )
 PLAN_REQUEST_TIMEOUT_SECONDS = float(os.getenv("PLAN_AI_TIMEOUT_SECONDS", "45"))
 
