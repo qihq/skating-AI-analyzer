@@ -61,11 +61,15 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
 
         import app.database as database
         import app.models as models
+        from app.services.auth import hash_pin
 
         self.database = database
         self.models = models
         database.ensure_storage_dirs()
         await database.init_db()
+        async with database.AsyncSessionLocal() as session:
+            session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
+            await session.commit()
 
     async def asyncTearDown(self) -> None:
         await self.database.engine.dispose()
@@ -77,7 +81,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.database.AsyncSessionLocal() as session:
             with self.assertRaises(HTTPException) as ctx:
-                await growth_router.create_chapter_facts("missing", "2026-07", session=session)
+                await growth_router.create_chapter_facts("missing", "2026-07", x_parent_pin="1234", session=session)
             self.assertEqual(ctx.exception.status_code, 404)
 
     async def test_invalid_year_month_returns_400_on_facts(self) -> None:
@@ -88,7 +92,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             session.add(self.models.Skater(id="skater-1", name="tantan"))
             await session.commit()
             with self.assertRaises(HTTPException) as ctx:
-                await growth_router.create_chapter_facts("skater-1", "2026-7", session=session)
+                await growth_router.create_chapter_facts("skater-1", "2026-7", x_parent_pin="1234", session=session)
             self.assertEqual(ctx.exception.status_code, 400)
 
     async def test_facts_creates_facts_ready_chapter(self) -> None:
@@ -99,7 +103,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
         self.assertEqual(chapter.status, "facts_ready")
         self.assertEqual(chapter.revision, 1)
         self.assertEqual(chapter.year_month, "2026-07")
@@ -115,13 +119,13 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
             chapter_id = chapter.id
 
         with patch("app.services.monthly_chapters.get_active_provider", AsyncMock(return_value=PROVIDER)), patch("app.services.monthly_chapters.request_text_completion", AsyncMock(side_effect=RuntimeError("boom"))):
             async with self.database.AsyncSessionLocal() as session:
                 with self.assertRaises(HTTPException) as ctx:
-                    await growth_router.generate_chapter(chapter_id, session=session)
+                    await growth_router.generate_chapter(chapter_id, x_parent_pin="1234", session=session)
                 self.assertIn(ctx.exception.status_code, {502, 503})
 
         async with self.database.AsyncSessionLocal() as session:
@@ -148,7 +152,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
             chapter_id = chapter.id
 
         payload = {
@@ -162,7 +166,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch("app.services.monthly_chapters.get_active_provider", AsyncMock(return_value=PROVIDER)), patch("app.services.monthly_chapters.request_text_completion", AsyncMock(return_value=__import__("json").dumps(payload, ensure_ascii=False))):
             async with self.database.AsyncSessionLocal() as session:
-                updated = await growth_router.generate_chapter(chapter_id, session=session)
+                updated = await growth_router.generate_chapter(chapter_id, x_parent_pin="1234", session=session)
         self.assertEqual(updated.status, "generated")
         self.assertEqual(updated.draft_text[:2], "七月")
         self.assertEqual(updated.generated_payload["title"], payload["title"])
@@ -177,7 +181,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
 
         bad_payload = {
             "title": "七月",
@@ -192,7 +196,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.monthly_chapters.get_active_provider", AsyncMock(return_value=PROVIDER)), patch("app.services.monthly_chapters.request_text_completion", AsyncMock(return_value=__import__("json").dumps(bad_payload, ensure_ascii=False))):
             async with self.database.AsyncSessionLocal() as session:
                 with self.assertRaises(HTTPException):
-                    await growth_router.generate_chapter(chapter.id, session=session)
+                    await growth_router.generate_chapter(chapter.id, x_parent_pin="1234", session=session)
 
     async def test_patch_final_text_for_nonpublished_chapter(self) -> None:
         import app.routers.growth as growth_router
@@ -203,12 +207,13 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
 
         async with self.database.AsyncSessionLocal() as session:
             updated = await growth_router.patch_chapter(
                 chapter.id,
                 MonthlyChapterPatchRequest(final_text="家长修改后的文字内容，保留本次成长记录。"),
+                x_parent_pin="1234",
                 session=session,
             )
         self.assertEqual(updated.final_text, "家长修改后的文字内容，保留本次成长记录。")
@@ -223,12 +228,12 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
 
         # publish without any text -> error
         async with self.database.AsyncSessionLocal() as session:
             with self.assertRaises(HTTPException) as ctx:
-                await growth_router.publish_chapter(chapter.id, session=session)
+                await growth_router.publish_chapter(chapter.id, x_parent_pin="1234", session=session)
             self.assertEqual(ctx.exception.status_code, 400)
 
         # set draft_text, then publish copies draft -> final
@@ -239,7 +244,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            published = await growth_router.publish_chapter(chapter.id, session=session)
+            published = await growth_router.publish_chapter(chapter.id, x_parent_pin="1234", session=session)
         self.assertEqual(published.status, "published")
         self.assertIsNotNone(published.published_at)
         self.assertEqual(published.final_text, "AI 生成的初稿文字内容。")
@@ -250,6 +255,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
                 await growth_router.patch_chapter(
                     chapter.id,
                     MonthlyChapterPatchRequest(final_text="尝试修改"),
+                    x_parent_pin="1234",
                     session=session,
                 )
             self.assertEqual(ctx.exception.status_code, 409)
@@ -262,14 +268,14 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            first = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            first = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
 
         async with self.database.AsyncSessionLocal() as session:
             listed = await growth_router.list_chapters("skater-1", "2026-07", session=session)
         self.assertEqual([c.id for c in listed if c.year_month == "2026-07"], [first.id])
 
         async with self.database.AsyncSessionLocal() as session:
-            second = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            second = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
         self.assertEqual(second.revision, 2)
         self.assertEqual(first.revision, 1)
         self.assertNotEqual(first.id, second.id)
@@ -282,7 +288,7 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
 
         async with self.database.AsyncSessionLocal() as session:
             row = await session.get(self.models.MonthlyChapter, chapter.id)
@@ -294,6 +300,6 @@ class GrowthChapterRouteTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
         async with self.database.AsyncSessionLocal() as session:
-            new_chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", session=session)
+            new_chapter = await growth_router.create_chapter_facts("skater-1", "2026-07", x_parent_pin="1234", session=session)
         self.assertEqual(new_chapter.revision, 2)
         self.assertEqual(new_chapter.status, "facts_ready")

@@ -11,6 +11,33 @@ from app.services.vision_prompt_templates import build_specialized_vision_prompt
 
 
 class VisionPromptTemplateTests(unittest.TestCase):
+    @staticmethod
+    def _schema_from_prompt(prompt: str) -> dict[str, object]:
+        return json.loads(prompt.split("JSON schema:\n", 1)[1])
+
+    def test_frame_and_video_contracts_share_subscores(self) -> None:
+        _, frame_prompt = build_specialized_vision_prompt(action_type="jump", output_mode="frames")
+        _, video_prompt = build_specialized_vision_prompt(action_type="jump", output_mode="video")
+
+        frame_schema = self._schema_from_prompt(frame_prompt)
+        video_schema = self._schema_from_prompt(video_prompt)
+
+        self.assertIn("frame_analysis", frame_schema)
+        self.assertNotIn("phase_segments", frame_schema)
+        self.assertIn("phase_segments", video_schema)
+        self.assertNotIn("frame_analysis", video_schema)
+        self.assertEqual(frame_schema["pure_vision_subscores"], video_schema["pure_vision_subscores"])
+        self.assertEqual(
+            set(frame_schema["pure_vision_subscores"]),
+            {
+                "takeoff_power",
+                "rotation_axis",
+                "arm_coordination",
+                "landing_absorption",
+                "core_stability",
+            },
+        )
+
     def test_specialized_prompt_contains_required_sections_and_schema(self) -> None:
         system_prompt, user_prompt = build_specialized_vision_prompt(
             action_type="jump",
@@ -41,6 +68,7 @@ class VisionPromptTemplateTests(unittest.TestCase):
         self.assertIn('"overall_raw_text": "2-3句中文总结"', user_prompt)
         self.assertIn('"frame_id": "frame_0004"', user_prompt)
         self.assertIn('"estimated_rotation_turns": 0.5', user_prompt)
+        self.assertIn('"toe_pick_pulse": 0.2', user_prompt)
 
     def test_jump_profile_rule_requires_unknown_edge_and_low_element_confidence(self) -> None:
         _, user_prompt = build_specialized_vision_prompt(
@@ -71,6 +99,19 @@ class VisionPromptTemplateTests(unittest.TestCase):
         self.assertIn("action_subtype: 未指定", first[1])
         self.assertIn("action_subtype=未指定", first[1])
         self.assertIn(json.dumps(args["motion_features"], ensure_ascii=False, indent=2, sort_keys=True), first[1])
+
+    def test_pure_visual_mode_omits_biomechanics_and_keyframe_sections(self) -> None:
+        system_prompt, user_prompt = build_specialized_vision_prompt(
+            action_type="jump",
+            candidate_key_frames=None,
+            biomechanics=None,
+            include_biomechanics=False,
+        )
+
+        self.assertIn("不引入骨架或测量数据", system_prompt)
+        self.assertNotIn("candidate_key_frames", user_prompt)
+        self.assertNotIn("biomechanics:", user_prompt)
+        self.assertNotIn("骨架数据", user_prompt)
 
 
 if __name__ == "__main__":

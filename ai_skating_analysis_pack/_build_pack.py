@@ -7,11 +7,10 @@
 用法: python _build_pack.py
 """
 import shutil
-import os
 from pathlib import Path
 
 # 仓库根目录
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_SERVICES = REPO_ROOT / "backend" / "app" / "services"
 BACKEND_APP = REPO_ROOT / "backend" / "app"
 BACKEND_TESTS = REPO_ROOT / "backend" / "tests"
@@ -47,6 +46,7 @@ AI_SERVICE_FILES = [
     "snowball.py",
     "memory_suggest.py",
     "plan.py",
+    "vision_prompt_templates.py",
     "__init__.py",
 ]
 

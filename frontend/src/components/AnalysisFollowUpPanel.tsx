@@ -721,7 +721,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     setIsRetryingAnalysis(true);
     setError(null);
     try {
-      await retryAnalysis(analysisId, { resetTargetLock: true });
+      await retryAnalysis(analysisId, { resetTargetLock: true, forceKeyframeRefresh: true });
       setIsRetryConfirmOpen(false);
       showNotice("已提交完整重新分析，将重新定位主人物并重新识别关键帧。");
       onAnalysisRetryQueued?.();

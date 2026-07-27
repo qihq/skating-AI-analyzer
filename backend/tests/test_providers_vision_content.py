@@ -127,7 +127,7 @@ class ProviderVisionContentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(content, '{"ok": true}')
         self.assertEqual(post_mock.await_args.kwargs["headers"]["Authorization"], "Bearer test-key")
-        self.assertEqual(post_mock.await_args.kwargs["headers"]["api-key"], "test-key")
+        self.assertNotIn("api-key", post_mock.await_args.kwargs["headers"])
         self.assertEqual(post_mock.await_args.args[0], "https://api.xiaomimimo.com/v1/chat/completions")
         payload = post_mock.await_args.kwargs["json"]
         self.assertEqual(payload["max_completion_tokens"], 128)

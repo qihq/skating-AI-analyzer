@@ -29,116 +29,27 @@ PATH_A_MAX_TOKENS_CAP = 10000
 PATH_A_RESPONSE_FORMAT = {"type": "json_object"}
 PATH_A_REPAIR_MAX_TOKENS = 3000
 
-PATH_A_SYSTEM = (
-    "你是拥有 10 年执教经验的花样滑冰专项教练，本次以场边肉眼观察的视角分析。"
-    "**不引入任何骨架或测量数据**，只基于画面给出第一直觉判断。"
-    "严格输出 JSON，禁止任何额外文字。"
-)
-
-
-def _build_user_prompt(
-    action_type: str,
-    action_subtype: str | None,
-    analysis_profile: str | None,
-    profile_evidence: dict[str, Any] | None,
-    n_frames: int,
-) -> str:
-    ev = json.dumps(profile_evidence or {}, ensure_ascii=False)
-    jump_evidence_instruction = (
-        "JUMP_SUBTYPE_EVIDENCE: prioritize profile_evidence.jump_subtype_evidence for Lutz/Flip/Loop/Salchow/Axel clues. "
-        "pre_takeoff_edge_score near 0 supports Lutz outside edge, near 1 supports Flip inside edge; low confidence means uncertain.\n"
-    )
-    return (
-        f"分析以下【{action_type}】动作帧序列（共 {n_frames} 帧，按时间顺序排列）。\n"
-        f"动作子类型：{action_subtype or '未指定'}\n"
-        f"分析 profile：{analysis_profile or 'unknown'}\n"
-        f"规则证据：{ev}\n"
-        f"{jump_evidence_instruction}"
-        "重要约束：燕式滑行/螺旋线不要误判为跳跃，除非存在清晰的起跳/腾空/落冰证据。\n\n"
-        "**纯视觉判断**（不要假设任何测量数据），每一帧输出以下结构化数据：\n\n"
-        '{"frame_analysis":[{"frame_id":"frame_0001",'
-        '"phase":"准备|起跳|腾空|落冰|滑出|旋转入|旋转中|旋转出|步法|不可分析",'
-        '"observations":{"knee_bend":"充分|不足|过度|不适用",'
-        '"arm_position":"正确|偏高|偏低|不对称|不适用",'
-        '"axis_alignment":"垂直|前倾|后仰|侧倾|不适用",'
-        '"blade_edge":"外刃|内刃|平刃|不适用",'
-        '"core_stability":"稳定|轻微晃动|明显晃动|不适用",'
-        '"landing_absorption":"良好|不足|过度|不适用"},'
-        '"issues":["问题描述"],"positives":["优点描述"],"confidence":0.0}],'
-        '"action_phase_summary":{"detected_phases":["起跳","腾空","落冰"],'
-        '"weakest_phase":"最需改进的阶段","strongest_phase":"表现最好的阶段"},'
-        '"pure_vision_subscores":{"takeoff_power":0,"rotation_axis":0,'
-        '"arm_coordination":0,"landing_absorption":0,"core_stability":0},'
-        '"overall_raw_text":"综合文字描述 2-3 句"}\n\n'
-        "必须只输出 JSON。"
-    )
-
-
-def _build_video_user_prompt(
-    action_type: str,
-    action_subtype: str | None,
-    analysis_profile: str | None,
-    profile_evidence: dict[str, Any] | None,
-    n_frames: int,
-) -> str:
-    base = _build_user_prompt(action_type, action_subtype, analysis_profile, profile_evidence, n_frames)
-    return (
-        base
-        + "\n\n视频模式要求：按视频片段内秒数定位关键事件，优先返回 phase_segments，而不是逐帧 frame_id。"
-        + "JSON schema: "
-        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
-        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
-        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
-        + '"pure_vision_subscores":{"takeoff_power":0,"rotation_axis":0,"arm_coordination":0,'
-        + '"landing_absorption":0,"core_stability":0},"overall_raw_text":"2-3句总结"}'
-    )
-
-
-def _candidate_key_frames_from_bio(bio_data: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(bio_data, dict):
-        return {}
-    candidates = bio_data.get("key_frame_candidates")
-    if isinstance(candidates, dict):
-        return candidates
-    key_frames = bio_data.get("key_frames")
-    if isinstance(key_frames, dict):
-        return key_frames
-    return {}
-
-
 def _build_specialized_prompts(
     action_type: str,
     action_subtype: str | None,
     analysis_profile: str | None,
-    profile_evidence: dict[str, Any] | None,
-    bio_data: dict[str, Any] | None,
     motion_features: dict[str, Any] | list[Any] | None,
     skill_category: str | None = None,
+    output_mode: Literal["frames", "video"] = "frames",
 ) -> tuple[str, str]:
     return build_specialized_vision_prompt(
         action_type=action_type,
         action_subtype=action_subtype,
         analysis_profile=analysis_profile,
-        candidate_key_frames=_candidate_key_frames_from_bio(bio_data),
+        candidate_key_frames=None,
         motion_features=motion_features,
-        biomechanics=bio_data,
-        profile_evidence=profile_evidence,
+        biomechanics=None,
+        profile_evidence=None,
         skill_category=skill_category,
+        output_mode=output_mode,
+        include_biomechanics=False,
+        include_profile_evidence=False,
     )
-
-
-def _build_specialized_video_user_prompt(user_prompt: str) -> str:
-    return (
-        user_prompt
-        + "\n\n视频模式要求：按视频片段内秒数定位关键事件，优先返回 phase_segments，而不是逐帧 frame_id。"
-        + "JSON schema: "
-        + '{"phase_segments":[{"start_sec":0.2,"end_sec":0.6,"phase":"准备",'
-        + '"observations":{},"issues":[],"positives":[],"confidence":0.8}],'
-        + '"action_phase_summary":{"detected_phases":["起跳"],"weakest_phase":"落冰","strongest_phase":"起跳"},'
-        + '"pure_vision_subscores":{"takeoff_power":0,"rotation_axis":0,"arm_coordination":0,'
-        + '"landing_absorption":0,"core_stability":0},"overall_raw_text":"2-3句总结"}'
-    )
-
 
 def _normalize_path_a_payload(
     parsed: dict[str, Any],
@@ -156,8 +67,6 @@ def _normalize_path_a_payload(
     normalized["path"] = "A"
     normalized["path_desc"] = "纯视觉判断（与 analyze_frames schema 兼容）"
     return normalized
-
-
 def _balanced_json_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for start, char in enumerate(text):
@@ -255,14 +164,16 @@ async def _repair_path_a_payload(
     *,
     raw_text: str,
     max_tokens: int,
+    output_mode: Literal["frames", "video"],
 ) -> dict[str, Any] | None:
     if not raw_text or not raw_text.strip():
         return None
 
+    carrier_field = "frame_analysis" if output_mode == "frames" else "phase_segments"
     repair_prompt = (
         "下面是一段花样滑冰 Path A 视觉分析模型输出，它本应是一个 JSON 对象，但可能有多余文字、截断、"
         "缺少逗号或括号不完整。请只修复 JSON 语法，不新增观察结论，不输出 Markdown。\n"
-        "必须保留可识别的 frame_analysis、action_phase_summary、pure_vision_subscores、overall_raw_text 字段。\n\n"
+        f"必须保留可识别的 {carrier_field}、action_phase_summary、pure_vision_subscores、overall_raw_text 字段。\n\n"
         f"原始输出：\n{raw_text[:6000]}"
     )
     try:
@@ -290,13 +201,19 @@ async def _parse_or_repair_path_a_payload(
     raw_text: str,
     *,
     max_tokens: int,
+    output_mode: Literal["frames", "video"] = "frames",
 ) -> dict[str, Any]:
     try:
         return _load_path_a_payload_or_raise(raw_text)
     except AnalysisPipelineError as exc:
         if exc.code != AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL:
             raise
-        repaired = await _repair_path_a_payload(provider, raw_text=raw_text, max_tokens=max_tokens)
+        repaired = await _repair_path_a_payload(
+            provider,
+            raw_text=raw_text,
+            max_tokens=max_tokens,
+            output_mode=output_mode,
+        )
         if repaired is not None:
             return repaired
         raise
@@ -338,12 +255,15 @@ async def analyze_path_a(
         action_type,
         action_subtype,
         analysis_profile,
-        profile_evidence,
-        bio_data,
         motion_features,
         skill_category=skill_category,
+        output_mode="video" if mode == "video" and clip_path is not None else "frames",
     )
-    context_block = format_video_context_prompt_block(video_context_by_frame)
+    context_block = format_video_context_prompt_block(
+        video_context_by_frame,
+        include_skeleton_provenance=False,
+        output_mode="video" if mode == "video" and clip_path is not None else "frames",
+    )
     if context_block:
         user_text = f"{user_text}{context_block}"
     if memory_context:
@@ -352,7 +272,7 @@ async def analyze_path_a(
     if mode == "video" and clip_path is not None:
         try:
             provider_name = getattr(provider, "provider", "")
-            video_user_prompt = _build_specialized_video_user_prompt(user_text)
+            video_user_prompt = user_text
             if provider_name == "qwen":
                 raw = await request_dashscope_video_completion(
                     provider,
@@ -379,7 +299,7 @@ async def analyze_path_a(
                     AnalysisErrorCode.UNKNOWN_ERROR,
                     f"Path A native video mode does not support provider={provider_name}.",
                 )
-            parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens)
+            parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens, output_mode="video")
             normalized = normalize_vision_payload(parsed, frame_payloads, window_start_sec=window_start_sec) | {
                 "pure_vision_subscores": parsed.get("pure_vision_subscores") if isinstance(parsed.get("pure_vision_subscores"), dict) else {},
                 "path": "A",
@@ -389,6 +309,23 @@ async def analyze_path_a(
             return normalized
         except Exception as exc:  # noqa: BLE001
             logger.warning("Path A native video mode failed, falling back to frames: %s", exc)
+            system_prompt, user_text = _build_specialized_prompts(
+                action_type,
+                action_subtype,
+                analysis_profile,
+                motion_features,
+                skill_category=skill_category,
+                output_mode="frames",
+            )
+            context_block = format_video_context_prompt_block(
+                video_context_by_frame,
+                include_skeleton_provenance=False,
+                output_mode="frames",
+            )
+            if context_block:
+                user_text = f"{user_text}{context_block}"
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n{memory_context}"
 
     content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
     for frame in frame_payloads:
@@ -410,7 +347,7 @@ async def analyze_path_a(
         ],
     )
 
-    parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens)
+    parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens, output_mode="frames")
 
     normalized = _normalize_path_a_payload(parsed, frame_payloads)
     if mode == "video" and clip_path is not None:

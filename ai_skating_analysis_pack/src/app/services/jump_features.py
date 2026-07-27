@@ -4,6 +4,7 @@
 输入: pose_data、key_frames 与有效采样帧率。
 输出: 可注入视觉 prompt 的 jump_subtype_evidence 字典。
 """
+
 from __future__ import annotations
 
 import math

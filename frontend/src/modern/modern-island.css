@@ -164,6 +164,7 @@
 .island-title { display:inline-flex; margin:0; color:#fffdf7; font-size:20px; line-height:1.2; font-weight:900; }
 .island-title span { display:inline-block; padding:11px 27px 11px 22px; background:var(--island-teal); clip-path:polygon(0 0,100% 0,91% 50%,100% 100%,0 100%,6% 50%); text-shadow:0 1px 0 rgba(0,0,0,.1); }
 .island-button { display:inline-flex; min-height:46px; align-items:center; justify-content:center; gap:8px; padding:0 20px; border-radius:999px; font-size:14px; font-weight:900; transition:transform .16s ease,box-shadow .16s ease; }
+.island-button__icon { width:18px; height:18px; flex:none; }
 .island-button--primary { border:2px solid #e1b837; color:#654f2f; background:var(--island-sun); box-shadow:0 5px 0 #bd9633; }
 .island-button--secondary { border:2px solid #cbbda5; color:#67543b; background:#fffaf0; box-shadow:0 3px 0 #d8cbb6; }
 .island-button--quiet { border:0; color:var(--island-teal-dark); background:#dff3ec; }

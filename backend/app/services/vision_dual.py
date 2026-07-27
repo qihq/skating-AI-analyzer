@@ -296,7 +296,16 @@ async def analyze_frames_dual(
     bio_ctx = build_frame_bio_context(bio_data, frame_stems)
     jump_metrics_text = summarize_jump_metrics(bio_data)
     motion_features = _motion_features_for_prompt(frame_motion_scores)
-    rendered_context = (
+    path_a_context = (
+        render_prompt_context(
+            prompt_context,
+            include_bio=False,
+            include_profile_evidence=False,
+        )
+        if prompt_context is not None
+        else memory_context
+    )
+    path_b_context = (
         render_prompt_context(prompt_context, include_bio=True)
         if prompt_context is not None
         else memory_context
@@ -309,10 +318,10 @@ async def analyze_frames_dual(
             provider=provider_path_a,
             action_subtype=action_subtype,
             analysis_profile=analysis_profile,
-            profile_evidence=profile_evidence,
+            profile_evidence=None,
             bio_data=bio_data,
             motion_features=motion_features,
-            memory_context=rendered_context,
+            memory_context=path_a_context,
             mode="video" if clip_path is not None else "frames",
             clip_path=clip_path,
             window_start_sec=window_start_sec,
@@ -338,7 +347,7 @@ async def analyze_frames_dual(
             action_subtype=action_subtype,
             analysis_profile=analysis_profile,
             profile_evidence=profile_evidence,
-            memory_context=rendered_context,
+            memory_context=path_b_context,
             skill_category=skill_category,
             video_context_by_frame=video_context_by_frame,
             preserve_all_frames=uses_semantic_keyframes,

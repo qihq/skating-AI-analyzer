@@ -97,6 +97,8 @@ class VisionVideoContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("刃面或入跳弧线不可见", prompt_text)
         self.assertIn("不要猜 Lutz/Flip 内外刃", prompt_text)
         self.assertIn("Axel", prompt_text)
+        self.assertNotIn("骨架", prompt_text)
+        self.assertIn("视频 AI 阶段区间", prompt_text)
         self.assertIn("video_context", content[2]["text"])
         self.assertEqual(result["frame_analysis"][0]["phase_verification"], "agree")
         self.assertFalse(result["frame_analysis"][0]["conflict_with_video_context"])

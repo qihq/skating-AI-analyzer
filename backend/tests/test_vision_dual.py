@@ -401,20 +401,30 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         assert decoded is not None
         self.assertLessEqual(decoded.shape[1], 640)
 
-    async def test_prompt_context_is_passed_to_both_paths(self) -> None:
+    async def test_prompt_context_keeps_pose_evidence_out_of_path_a(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
             provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
             mock_a = AsyncMock(return_value=_path_a_result())
             mock_b = AsyncMock(return_value=_path_b_result())
+            profile_evidence = {
+                "mixed_jump_gate_passed": True,
+                "airborne_frames_detected": 7,
+                "relative_vertical_range": 0.91,
+                "hip_rotation_signal": 0.73,
+                "jump_subtype_evidence": {
+                    "toe_pick_pulse": 0.2,
+                    "sentinel": "PATH_A_PROFILE_EVIDENCE_SENTINEL",
+                },
+            }
             context = AnalysisPromptContext(
                 action_type="跳跃",
                 action_subtype="Axel",
                 skill_category="前进燕式",
                 analysis_profile="jump",
-                profile_evidence={"source": "test"},
+                profile_evidence=profile_evidence,
                 motion_features={"sample_count": 32},
-                bio_data={"quality_flags": []},
+                bio_data={"quality_flags": [], "sentinel": "PATH_A_BIO_SENTINEL"},
                 user_note="今天起跳有点犹豫",
                 memory_context="长期训练目标：稳定落冰。",
             )
@@ -434,6 +444,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                     provider,
                     action_subtype="Axel",
                     analysis_profile="jump",
+                    profile_evidence=profile_evidence,
                     skill_category="前进燕式",
                     prompt_context=context,
                     annotated_dir=Path(tmp) / "annotated",
@@ -446,7 +457,17 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("skill_category: 前进燕式", context_text_a)
         self.assertIn("上传备注/额外 comments: 今天起跳有点犹豫", context_text_a)
         self.assertIn("长期训练目标：稳定落冰", context_text_a)
-        self.assertEqual(context_text_a, context_text_b)
+        self.assertNotIn("PATH_A_BIO_SENTINEL", context_text_a)
+        self.assertNotIn("PATH_A_PROFILE_EVIDENCE_SENTINEL", context_text_a)
+        self.assertNotIn("profile_evidence", context_text_a)
+        self.assertIn("PATH_A_BIO_SENTINEL", context_text_b)
+        self.assertIn("PATH_A_PROFILE_EVIDENCE_SENTINEL", context_text_b)
+        self.assertIn("profile_evidence", context_text_b)
+        self.assertIsNone(mock_a.await_args.kwargs["profile_evidence"])
+        self.assertEqual(
+            mock_b.await_args.kwargs["profile_evidence"]["hip_rotation_signal"],
+            0.73,
+        )
         self.assertEqual(mock_b.await_args.kwargs["skill_category"], "前进燕式")
 
 

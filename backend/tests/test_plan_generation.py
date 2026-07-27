@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -11,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.plan import PLAN_DAY_THEMES, PLAN_REQUEST_TIMEOUT_SECONDS, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
+import app.services.plan as plan_module
+from app.services.plan import PLAN_DAY_THEMES, PLAN_REQUEST_TIMEOUT_SECONDS, PLAN_SYSTEM_PROMPT, PlanGenerationError, _clean_plan_json_text, build_fallback_plan, extend_training_plan, generate_training_plan
 
 
 def _report() -> dict[str, object]:
@@ -130,7 +132,12 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["timeout"], PLAN_REQUEST_TIMEOUT_SECONDS)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
         messages = kwargs["messages"]
-        self.assertIn("child figure-skating coach", messages[0]["content"])
+        self.assertEqual(messages[0]["content"], PLAN_SYSTEM_PROMPT)
+        self.assertIn("3-6岁", messages[0]["content"])
+        self.assertIn("不要套用固定模板", messages[0]["content"])
+        self.assertIn("Day 7", messages[0]["content"])
+        self.assertIn("related_issue", messages[0]["content"])
+        self.assertIn("parent_tip", messages[0]["content"])
         payload = json.loads(messages[1]["content"])
         self.assertEqual(payload["skater"], "昭昭，4岁，初级")
         self.assertEqual(payload["variation_key"], "seed-123")
@@ -138,6 +145,15 @@ class PlanGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["report"]["user_note"], "孩子害怕落冰声音。")
         self.assertTrue(any("related_issue" in rule for rule in payload["rules"]))
         self.assertTrue(any("Day 7" in rule and "false" in rule for rule in payload["rules"]))
+
+    def test_plan_system_prompt_has_one_definition(self) -> None:
+        tree = ast.parse(Path(plan_module.__file__).read_text(encoding="utf-8"))
+        definitions = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "PLAN_SYSTEM_PROMPT" for target in node.targets)
+        ]
+        self.assertEqual(len(definitions), 1)
 
     async def test_generate_training_plan_raises_when_provider_setup_fails(self) -> None:
         with patch("app.services.plan.get_active_provider", AsyncMock(side_effect=RuntimeError("missing key"))):

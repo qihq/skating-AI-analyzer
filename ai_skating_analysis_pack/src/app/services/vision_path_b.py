@@ -1,18 +1,14 @@
-"""Path B: 骨架叠加帧 + 生物力学数值 grounding 分析。
-
-职责: 将标注帧和逐帧生物力学数值注入 LLM prompt，进行量化分析。
-输入: 标注帧图片 + bio_context 逐帧测量值。
-输出: frame_analysis + subscores + top_issues。
-"""
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.services.providers import ActiveProviderConfig, request_text_completion
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
+from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +24,13 @@ PATH_B_SYSTEM = (
     "你是花样滑冰生物力学分析专家。"
     "每帧图像已叠加 MediaPipe 骨架与角度数字（ASCII 标签：LKnee/RKnee/LElbow/RElbow）。"
     "请结合图像和文字测量值综合判断。"
-    "严格输出 JSON，禁止任何额外文字。"
+    "严格输出 JSON，禁止任何额外文字。\n\n"
+    "【评分校准 - 儿童初学者】\n"
+    "学员是儿童初学者（Free Skate 1），评分标准必须相应调整：\n"
+    "- subscores 评分：0.5 = 基本达标（初学者正常水平），0.3 = 略有不足但仍可接受，0.7+ = 表现良好。\n"
+    "- top_issues 应聚焦最需改进的 1-2 个核心问题，用建设性语言描述，不要列举所有不足。\n"
+    "- top_positives 应肯定学员做得好的地方，即使是很小的进步。\n"
+    "- 用鼓励性语言替代批评性语言，例如用'建议加强'代替'严重不足'。"
 )
 
 
@@ -90,6 +92,8 @@ def _build_user_prompt(
     profile_evidence: dict[str, Any] | None,
     jump_metrics_text: str,
     n_frames: int,
+    skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     blocks: list[str] = []
     if analysis_profile or profile_evidence:
@@ -107,7 +111,13 @@ def _build_user_prompt(
     body = (
         f"分析【{action_type}】动作（共 {n_frames} 帧，骨架已叠加，按时间顺序）。\n"
         f"动作子类型：{action_subtype or '未指定'}\n\n"
+        f"技能分类：{skill_category or '未指定'}\n\n"
         "每帧图像前附有该帧测量值，请结合数值和图像综合判断。\n\n"
+        "【subscores 评分标准（0-1 浮点数）】\n"
+        "0.6-0.7 = 基本达标（Free Skate 1 初学者正常水平）\n"
+        "0.4-0.5 = 略有不足，但动作流程完整\n"
+        "0.8+ = 表现良好\n"
+        "0.2-0.3 = 明显不足，需要重点改进\n\n"
         "输出严格符合下方 schema 的 JSON：\n"
         '{"frame_analysis":[{"frame_id":"frame_0001",'
         '"phase":"准备|起跳|腾空|落冰|滑出|旋转入|旋转中|旋转出|步法|不可分析",'
@@ -116,13 +126,13 @@ def _build_user_prompt(
         '"overall_bio_quality":"<=25字"},'
         '"confidence":0.0}],'
         '"action_phase_summary":{"detected_phases":[],"weakest_phase":"","strongest_phase":""},'
-        '"subscores":{"takeoff_power":0,"rotation_axis":0,'
-        '"arm_coordination":0,"landing_absorption":0,"core_stability":0},'
+        '"subscores":{"takeoff_power":0.5,"rotation_axis":0.5,'
+        '"arm_coordination":0.5,"landing_absorption":0.5,"core_stability":0.5},'
         '"top_issues":["最多3条，必须引用具体测量数值"],'
         '"top_positives":["最多2条，结合量化数据"]}\n\n'
         "必须只输出 JSON。"
     )
-    return grounding + body
+    return grounding + body + format_video_context_prompt_block(video_context_by_frame)
 
 
 def _fallback(error: str) -> dict[str, Any]:
@@ -137,6 +147,49 @@ def _fallback(error: str) -> dict[str, Any]:
     }
 
 
+def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
+    if not raw_text or not raw_text.strip():
+        return None
+
+    cleaned = clean_json_text(raw_text)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw_text, re.IGNORECASE)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+    for start, char in enumerate(raw_text):
+        if char != "{":
+            continue
+        depth = 0
+        for end in range(start, len(raw_text)):
+            if raw_text[end] == "{":
+                depth += 1
+            elif raw_text[end] == "}":
+                depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(raw_text[start : end + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    break
+    return None
+
+
+def _path_b_temperature(provider: ActiveProviderConfig) -> float:
+    if getattr(provider, "provider", "") == "mimo":
+        return 0.0
+    return PATH_B_TEMPERATURE
+
+
 async def analyze_path_b(
     action_type: str,
     annotated_frame_payloads: list[FramePayload],
@@ -149,8 +202,12 @@ async def analyze_path_b(
     analysis_profile: str | None = None,
     profile_evidence: dict[str, Any] | None = None,
     memory_context: str = "",
+    skill_category: str | None = None,
+    video_context_by_frame: dict[str, dict[str, Any]] | None = None,
+    preserve_all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Path B: annotated skeleton frames plus biomechanical numeric grounding.
+    """
+    Path B: annotated skeleton frames plus biomechanical numeric grounding.
 
     Soft-failure contract: any error returns a dict with an "error" field.
     """
@@ -158,7 +215,7 @@ async def analyze_path_b(
         return _fallback("no frames")
 
     try:
-        frames = sample_frames_path_b(annotated_frame_payloads, key_frame_stems)
+        frames = list(annotated_frame_payloads) if preserve_all_frames else sample_frames_path_b(annotated_frame_payloads, key_frame_stems)
         n_frames = len(frames)
         if n_frames == 0:
             return _fallback("sampling produced 0 frames")
@@ -170,7 +227,14 @@ async def analyze_path_b(
 
         system_prompt = PATH_B_SYSTEM if not memory_context else f"{PATH_B_SYSTEM}\n\n{memory_context}"
         user_text = _build_user_prompt(
-            action_type, action_subtype, analysis_profile, profile_evidence, jump_metrics_text, n_frames,
+            action_type,
+            action_subtype,
+            analysis_profile,
+            profile_evidence,
+            jump_metrics_text,
+            n_frames,
+            skill_category,
+            video_context_by_frame,
         )
 
         bio_context = frame_bio_context or {}
@@ -180,27 +244,29 @@ async def analyze_path_b(
             bio_text = _build_bio_text(bio_context.get(frame.frame_id))
             if bio_text:
                 label += "\n" + bio_text
+            context_label = video_context_label(frame.frame_id, video_context_by_frame)
+            if context_label:
+                label += "\n" + context_label
             content.append({"type": "text", "text": label})
             content.append({"type": "image_url", "image_url": {"url": frame.data_url}})
 
         raw = await request_text_completion(
             provider,
-            temperature=PATH_B_TEMPERATURE,
+            temperature=_path_b_temperature(provider),
             max_tokens=max_tokens,
             timeout=90.0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
         )
 
-        cleaned = clean_json_text(raw)
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            logger.warning("Path B JSON parse failed: %s; raw[:500]=%r", exc, cleaned[:500])
-            return _fallback(f"json_parse: {exc}")
-
+        parsed = _extract_json_object(raw)
+        if parsed is None:
+            cleaned = clean_json_text(raw)
+            logger.warning("Path B JSON parse failed; raw[:500]=%r", cleaned[:500])
+            return _fallback("json_parse: no valid JSON object found")
         if not isinstance(parsed, dict):
             return _fallback("response is not a dict")
 

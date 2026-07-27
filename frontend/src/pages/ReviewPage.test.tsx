@@ -92,4 +92,22 @@ describe("ReviewPage highlight quote", () => {
     expect(captured.get("highlight_quote")).toBeNull();
     expect(captured.get("quote_speaker")).toBeNull();
   });
+
+  it("选择视频后即显示可选时间区间，即使无法读取时长", async () => {
+    render(
+      <MemoryRouter>
+        <AppModeProvider>
+          <ReviewPage />
+        </AppModeProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("开始诊断");
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "source.mp4", { type: "video/mp4" })] },
+    });
+
+    expect(await screen.findByText("AI 输入片段（可选）")).toBeInTheDocument();
+  });
 });

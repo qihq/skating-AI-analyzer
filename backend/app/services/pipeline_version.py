@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 
-CURRENT_PIPELINE_VERSION = "v5.2.319"
+CURRENT_PIPELINE_VERSION = "v5.2.320"
 
+# v5.2.320: Unify vision prompt contracts, force fresh keyframes for full reanalysis, and restore manual upload windows.
 # v5.2.318: Re-export all-in-one Docker image from face-identity-target-lock branch.
 # v5.2.317: Export all-in-one Docker image from face-identity-target-lock branch with face identity features, fix CRLF start.sh for Linux container compat.
 # v5.2.316: Persist applied action/keyframe corrections back into analysis rows, backfill legacy applied corrections on startup, and refresh parent/chat workspaces immediately after correction confirmation.

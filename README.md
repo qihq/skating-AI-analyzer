@@ -8,7 +8,7 @@ AI-powered figure skating training analysis system built with React, FastAPI, Me
 
 Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
 
-The current pipeline version is `v5.2.319`.
+The current pipeline version is `v5.2.320`.
 
 ## Modern Animal Island UI
 
@@ -70,6 +70,7 @@ Year-end growth collections that compile monthly chapters into a downloadable PD
 
 ## Version History
 
+- `v5.2.320`: Consolidated the prompt contract so Path A consumes only its intended video and pose evidence, with consistent structured output and repair handling across vision calls. Full reanalysis requested from follow-up now resets the target lock and bypasses same-video historical T/A/L reuse, while clearly noting that identical source evidence can still yield the same result. Manual AI input windows are available as soon as a video is selected even when browser duration metadata is unavailable; the latest-plan Continue Training arrow is constrained to its intended size. MiMo/OpenCode requests use Bearer authentication only, and backend parallel-test dependencies are documented.
 - `v5.2.319`: P0 Growth Home dashboard with KPI radar, milestone timeline, skill evolution, and profile-aware action phases; P1 monthly growth chapters with highlight quotes, deterministic facts, structured generation, chapter workspace, and milestone share cards; P2 annual collections with chapter/milestone picker, preview, background PDF export, resume-on-restart, and download; removed redundant `api-key` header for MiMo/OpenCode compatibility; added golden overrides, diff baselines, and A/B eval runbook; improved person tracker relock and self-heal logic; enhanced keyframe arbitration diagnostics; debug golden labels capture tracking anchors and action window bounds.
 - `v5.2.318`: Applied action-label and keyframe correction cards are persisted back into `analyses`, legacy applied corrections are backfilled at startup, and the report/follow-up chat workspaces refresh their current analysis detail before showing correction success.
 - `v5.2.315`: Exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
@@ -138,7 +139,9 @@ npm run dev
 
 ```bash
 # Backend
-PYTHONPATH=backend pytest backend/tests -q
+cd backend
+pip install -r requirements-test.txt
+python -m pytest tests -q -n 4 --dist loadfile
 
 # Frontend
 cd frontend && npm test

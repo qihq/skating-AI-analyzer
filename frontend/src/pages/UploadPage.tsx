@@ -6,7 +6,7 @@ import { fetchSkaters, Skater, uploadAnalysis } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import TopNav from "../components/TopNav";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
-import { appendManualWindow, readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
+import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
 
 const ACTION_OPTIONS = ["跳跃", "旋转", "步法", "自由滑"];
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
@@ -280,9 +280,10 @@ export default function UploadPage() {
 
             {videoDurationSec != null ? <p className="mt-3 text-xs text-slate-300">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
 
-            {shouldShowManualWindow(videoDurationSec) ? (
+            {selectedFile ? (
               <div className="mt-4 rounded-[1.4rem] border border-amber-200/30 bg-amber-100/10 p-4">
-                <p className="text-sm font-semibold text-white">AI 输入片段</p>
+                <p className="text-sm font-semibold text-white">AI 输入片段（可选）</p>
+                <p className="mt-1 text-xs text-slate-300">{videoDurationSec == null ? "视频时长读取失败时仍可填写；服务端会校验范围。" : "留空则分析完整视频。"}</p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="space-y-2">
                     <span className="text-xs font-semibold text-slate-300">开始秒数</span>

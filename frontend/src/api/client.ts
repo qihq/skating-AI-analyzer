@@ -1101,6 +1101,7 @@ export async function retryAnalysis(
   options?: {
     retryFrom?: string | null;
     resetTargetLock?: boolean;
+    forceKeyframeRefresh?: boolean;
     manualActionWindowStartSec?: number | null;
     manualActionWindowEndSec?: number | null;
   },
@@ -1109,6 +1110,7 @@ export async function retryAnalysis(
     params: {
       retry_from: options?.retryFrom || undefined,
       reset_target_lock: options?.resetTargetLock || undefined,
+      force_keyframe_refresh: options?.forceKeyframeRefresh || undefined,
       manual_action_window_start_sec: options?.manualActionWindowStartSec ?? undefined,
       manual_action_window_end_sec: options?.manualActionWindowEndSec ?? undefined,
     },
