@@ -20,6 +20,7 @@ describe("CorrectionKeyframeReview", () => {
 
     expect(video.currentTime).toBe(2.4);
     expect(screen.getByText("正在 Review：T · 起跳")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "TAL 视频 Review" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "定位 L 落冰 --" })).toBeDisabled();
   });
 });

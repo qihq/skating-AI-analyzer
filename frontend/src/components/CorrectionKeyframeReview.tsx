@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { formatKeyframeTimestamp, type KeyframeEvidenceItem } from "../utils/keyframeEvidence";
 
@@ -10,9 +11,20 @@ type Props = {
 export default function CorrectionKeyframeReview({ analysisId, items }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [selected, setSelected] = useState<KeyframeEvidenceItem | null>(null);
+  const [frameReady, setFrameReady] = useState(false);
+
+  useEffect(() => {
+    if (!selected) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selected]);
 
   const seekToSelected = (item: KeyframeEvidenceItem) => {
     if (item.timestamp == null) return;
+    setFrameReady(false);
     setSelected(item);
     const video = videoRef.current;
     if (video) {
@@ -42,28 +54,43 @@ export default function CorrectionKeyframeReview({ analysisId, items }: Props) {
           );
         })}
       </div>
-      {selected ? (
-        <div className="mt-3 overflow-hidden rounded-[14px] bg-slate-950">
-          <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-slate-200">
-            <span className="font-semibold">正在 Review：{selected.key} · {selected.label}</span>
-            <span>{formatKeyframeTimestamp(selected.timestamp)}</span>
-          </div>
-          <video
-            ref={videoRef}
-            data-testid="correction-review-video"
-            controls
-            playsInline
-            preload="metadata"
-            src={`/api/analysis/${analysisId}/video`}
-            onLoadedMetadata={(event) => {
-              if (selected.timestamp != null) event.currentTarget.currentTime = selected.timestamp;
-            }}
-            className="aspect-video w-full bg-black object-contain"
-          />
-        </div>
-      ) : (
+      {!selected ? (
         <p className="mt-2 text-center text-[11px] leading-5 text-blue-700">点击 T / A / L，在原视频中定位 Review</p>
-      )}
+      ) : null}
+      {selected
+        ? createPortal(
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm tablet:p-6" role="dialog" aria-modal="true" aria-label="TAL 视频 Review">
+              <div className="w-full max-w-4xl overflow-hidden rounded-[22px] border border-white/10 bg-slate-950 shadow-2xl">
+                <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3 text-sm text-slate-100">
+                  <div>
+                    <p className="font-semibold">正在 Review：{selected.key} · {selected.label}</p>
+                    <p className="mt-1 text-xs text-slate-400">{formatKeyframeTimestamp(selected.timestamp)} · {selected.frameId ?? selected.value}</p>
+                  </div>
+                  <button type="button" onClick={() => setSelected(null)} className="min-h-[36px] rounded-full bg-white/10 px-4 text-xs font-semibold text-white hover:bg-white/15">关闭</button>
+                </div>
+                <div className="relative aspect-video bg-black">
+                  {!frameReady && selected.imageUrl ? <img src={selected.imageUrl} alt={`${selected.key} 定位预览`} className="absolute inset-0 z-10 h-full w-full object-contain" /> : null}
+                  {!frameReady ? <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 mx-auto w-fit rounded-full bg-slate-950/80 px-3 py-1 text-xs text-white">正在定位原视频…</div> : null}
+                  <video
+                    ref={videoRef}
+                    data-testid="correction-review-video"
+                    controls
+                    playsInline
+                    preload="auto"
+                    src={`/api/analysis/${analysisId}/video`}
+                    onLoadedMetadata={(event) => {
+                      if (selected.timestamp != null) event.currentTarget.currentTime = selected.timestamp;
+                    }}
+                    onSeeked={() => setFrameReady(true)}
+                    onCanPlay={() => setFrameReady(true)}
+                    className="h-full w-full bg-black object-contain"
+                  />
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

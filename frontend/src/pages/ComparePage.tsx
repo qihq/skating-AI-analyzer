@@ -218,6 +218,31 @@ function waitForVideoMetadata(video: HTMLVideoElement) {
   });
 }
 
+function waitForVideoReady(video: HTMLVideoElement, timeoutMs = 5000) {
+  if (video.readyState >= 3 && !video.seeking) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      video.removeEventListener("canplay", handleReady);
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("error", handleReady);
+    };
+    const handleReady = () => {
+      cleanup();
+      resolve();
+    };
+    const handleSeeked = () => {
+      if (video.readyState >= 2) handleReady();
+    };
+    const timer = window.setTimeout(handleReady, timeoutMs);
+    video.addEventListener("canplay", handleReady, { once: true });
+    video.addEventListener("seeked", handleSeeked);
+    video.addEventListener("error", handleReady, { once: true });
+  });
+}
+
 function seekVideoTo(video: HTMLVideoElement, value: number) {
   const duration = Number.isFinite(video.duration) ? video.duration : null;
   const clamped = duration ? Math.min(Math.max(0, value), Math.max(0, duration - 0.02)) : Math.max(0, value);
@@ -342,7 +367,7 @@ function VideoPane({
           <video
             ref={videoRef}
             src={side.video_url}
-            preload="metadata"
+            preload="auto"
             muted
             playsInline
             disablePictureInPicture
@@ -444,6 +469,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
           seekVideoTo(video, start + relativePosition);
         }
       });
+      await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
       hasUserPositionedPlaybackRef.current = true;
       window.setTimeout(() => {
         suppressMediaEventsRef.current = false;
@@ -471,6 +497,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
           seekVideoTo(video, start);
         }
       });
+      await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
       hasUserPositionedPlaybackRef.current = true;
       window.setTimeout(() => {
         suppressMediaEventsRef.current = false;
@@ -538,6 +565,7 @@ function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
         seekVideoTo(video, start);
       }
     });
+    await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
     if (shouldRestartFromWindowStart) {
       hasUserPositionedPlaybackRef.current = false;
     }

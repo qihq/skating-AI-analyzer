@@ -21,6 +21,7 @@ export default function ActionPhaseStrip({ analysis, pose, showVideo = true }: P
   const [isPlaying, setIsPlaying] = useState(false);
   const items = useMemo(() => buildCurrentKeyframeEvidenceItems(analysis), [analysis]);
   const frames = pose?.frames ?? [];
+  const poster = items.find((item) => item.imageUrl)?.imageUrl ?? undefined;
   const displayedTime = draftTime ?? currentTime;
 
   const commitSeek = (time: number) => {
@@ -45,7 +46,8 @@ export default function ActionPhaseStrip({ analysis, pose, showVideo = true }: P
             ref={videoRef}
             data-testid="phase-video"
             playsInline
-            preload="metadata"
+            preload="auto"
+            poster={poster}
             src={`/api/analysis/${analysis.id}/video`}
             onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
             onTimeUpdate={(event) => {
