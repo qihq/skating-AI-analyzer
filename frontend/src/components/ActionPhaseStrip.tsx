@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { AnalysisDetail, PoseResponse } from "../api/client";
 import { buildCurrentKeyframeEvidenceItems, formatKeyframeTimestamp, keyframeConfidenceLabel } from "../utils/keyframeEvidence";
 import PoseFrameCanvas from "./PoseFrameCanvas";
@@ -15,8 +15,22 @@ function frameKey(value: string) {
 
 export default function ActionPhaseStrip({ analysis, pose, showVideo = true }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [draftTime, setDraftTime] = useState<number | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
   const items = useMemo(() => buildCurrentKeyframeEvidenceItems(analysis), [analysis]);
   const frames = pose?.frames ?? [];
+  const displayedTime = draftTime ?? currentTime;
+
+  const commitSeek = (time: number) => {
+    const video = videoRef.current;
+    if (video) {
+      video.currentTime = time;
+    }
+    setCurrentTime(time);
+    setDraftTime(null);
+  };
 
   return (
     <section className="app-card overflow-hidden p-4 phone:p-5 tablet:p-6" aria-labelledby="action-phase-title">
@@ -26,14 +40,53 @@ export default function ActionPhaseStrip({ analysis, pose, showVideo = true }: P
         <p className="mt-2 text-sm leading-6 text-slate-500">这里展示实际姿态证据，不代表标准动作判定。</p>
       </div>
       {showVideo ? (
-        <video
-          ref={videoRef}
-          data-testid="phase-video"
-          controls
-          preload="metadata"
-          src={`/api/analysis/${analysis.id}/video`}
-          className="mt-5 aspect-video w-full rounded-[22px] bg-slate-950 object-contain"
-        />
+        <div className="mt-5 overflow-hidden rounded-[22px] bg-slate-950">
+          <video
+            ref={videoRef}
+            data-testid="phase-video"
+            playsInline
+            preload="metadata"
+            src={`/api/analysis/${analysis.id}/video`}
+            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+            onTimeUpdate={(event) => {
+              if (draftTime == null) setCurrentTime(event.currentTarget.currentTime);
+            }}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            className="aspect-video w-full bg-slate-950 object-contain"
+          />
+          <div className="grid gap-3 border-t border-white/10 bg-slate-900 px-4 py-3 tablet:grid-cols-[auto_minmax(0,1fr)_auto] tablet:items-center">
+            <button
+              type="button"
+              onClick={() => {
+                const video = videoRef.current;
+                if (!video) return;
+                if (video.paused) void video.play().catch(() => undefined);
+                else video.pause();
+              }}
+              className="min-h-[38px] rounded-full bg-white/10 px-4 text-sm font-semibold text-white hover:bg-white/15"
+            >
+              {isPlaying ? "暂停" : "播放"}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.01}
+              value={Math.min(displayedTime, duration || displayedTime)}
+              aria-label="视频播放进度"
+              onPointerDown={(event) => setDraftTime(Number(event.currentTarget.value))}
+              onChange={(event) => setDraftTime(Number(event.currentTarget.value))}
+              onPointerUp={(event) => commitSeek(Number(event.currentTarget.value))}
+              onPointerCancel={() => setDraftTime(null)}
+              onKeyUp={(event) => commitSeek(Number(event.currentTarget.value))}
+              className="min-w-0 w-full accent-blue-400"
+            />
+            <span className="text-sm font-medium text-slate-300 tablet:min-w-[108px] tablet:text-right">
+              {displayedTime.toFixed(2)}s / {duration ? duration.toFixed(2) : "--"}s
+            </span>
+          </div>
+        </div>
       ) : null}
       <div className="mt-5 flex snap-x gap-4 overflow-x-auto pb-2 tablet:grid tablet:grid-cols-3 tablet:overflow-visible">
         {items.map((item) => {

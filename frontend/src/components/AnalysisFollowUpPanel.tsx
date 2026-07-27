@@ -40,6 +40,7 @@ import {
   type KeyframeEvidenceItem,
 } from "../utils/keyframeEvidence";
 import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
+import CorrectionKeyframeReview from "./CorrectionKeyframeReview";
 import { Button, Loading } from "../modern/AnimalUi";
 
 const QUICK_PROMPTS = [
@@ -300,6 +301,7 @@ function CorrectionKeyframePreview({
           />
         ))}
       </div>
+      <CorrectionKeyframeReview analysisId={analysis.id} items={items} />
     </div>
   );
 }

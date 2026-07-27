@@ -34,4 +34,20 @@ describe("ActionPhaseStrip", () => {
 
     expect(video.currentTime).toBe(2.4);
   });
+
+  it("only seeks after the user finishes dragging the progress slider", () => {
+    render(<ActionPhaseStrip analysis={jump} pose={pose} showVideo />);
+    const video = screen.getByTestId("phase-video") as HTMLVideoElement;
+    const slider = screen.getByRole("slider", { name: "视频播放进度" });
+    Object.defineProperty(video, "duration", { value: 12, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true });
+    fireEvent.loadedMetadata(video);
+
+    fireEvent.pointerDown(slider);
+    fireEvent.change(slider, { target: { value: "7.5" } });
+    expect(video.currentTime).toBe(0);
+
+    fireEvent.pointerUp(slider, { currentTarget: { value: "7.5" } });
+    expect(video.currentTime).toBe(7.5);
+  });
 });
