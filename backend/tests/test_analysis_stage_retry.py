@@ -642,11 +642,11 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await session.commit()
 
-            queued: list[tuple[object, tuple[object, ...]]] = []
+            queued: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
 
             class _Tasks:
                 def add_task(self, func: object, *args: object, **kwargs: object) -> None:
-                    queued.append((func, args))
+                    queued.append((func, args, kwargs))
 
             async with database.AsyncSessionLocal() as session:
                 response = await analysis_router.retry_analysis(
@@ -654,12 +654,14 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                     _Tasks(),
                     retry_from=None,
                     reset_target_lock=True,
+                    force_keyframe_refresh=True,
                     session=session,
                 )
 
             self.assertEqual(response.message, "已重新提交分析。")
             self.assertEqual(len(queued), 1)
             self.assertEqual(queued[0][1], (analysis_id, None))
+            self.assertEqual(queued[0][2], {"force_keyframe_refresh": True})
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)
                 self.assertIsNotNone(saved)
@@ -1391,6 +1393,10 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.routers.analysis.extract_pose", side_effect=AssertionError("pose should not rerun")),
                 patch("app.routers.analysis.analyze_biomechanics", side_effect=AssertionError("biomechanics should not rerun")),
                 patch(
+                    "app.routers.analysis._reuse_matching_semantic_keyframes",
+                    AsyncMock(side_effect=AssertionError("forced refresh must not reuse old keyframes")),
+                ) as reuse_mock,
+                patch(
                     "app.routers.analysis.encode_frames",
                     AsyncMock(return_value=[SimpleNamespace(frame_id="frame_0001", data_url="data:image/jpeg;base64,AAA")]),
                 ),
@@ -1404,7 +1410,13 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.routers.analysis.sync_skater_progress", AsyncMock(return_value=None)),
                 patch("app.routers.analysis.suggest_memory_updates", AsyncMock(return_value=None)),
             ):
-                await analysis_router.process_analysis(analysis_id, retry_from="vision")
+                await analysis_router.process_analysis(
+                    analysis_id,
+                    retry_from="vision",
+                    force_keyframe_refresh=True,
+                )
+
+            reuse_mock.assert_not_awaited()
 
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)

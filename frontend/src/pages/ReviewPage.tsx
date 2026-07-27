@@ -21,7 +21,7 @@ import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey } from "../utils/datetime";
-import { appendManualWindow, readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
+import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -613,9 +613,10 @@ export default function ReviewPage() {
               {videoDurationSec != null ? <p className="mt-2 text-xs text-slate-500">视频时长：{videoDurationSec.toFixed(2)}s</p> : null}
             </div>
 
-            {shouldShowManualWindow(videoDurationSec) ? (
+            {selectedFile ? (
               <div className="mt-4 rounded-[24px] border border-amber-100 bg-amber-50/70 p-4">
-                <p className="text-sm font-semibold text-slate-900">AI 输入片段</p>
+                <p className="text-sm font-semibold text-slate-900">AI 输入片段（可选）</p>
+                <p className="mt-1 text-xs text-slate-500">{videoDurationSec == null ? "视频时长暂不可用，仍可填写；提交时会校验范围。" : "留空则分析完整视频。"}</p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="space-y-2">
                     <span className="text-xs font-semibold text-slate-500">开始秒数</span>

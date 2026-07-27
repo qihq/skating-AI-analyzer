@@ -24,7 +24,7 @@ export default function RetryAnalysisConfirmSheet({
     : isVideoKeyframes
       ? "将只让视频 AI 重新看完整原视频，并按当前动作类型定位关键帧阶段；不重跑主人物追踪、pose、生物力学或视觉报告。结果会生成关键帧修正卡，确认应用后才会生效。"
       : resetTargetLock
-        ? "将从主人物定位开始重新识别，不复用当前主人物锁定；会消耗一次 AI 调用额度，原有报告将被覆盖。"
+        ? "将从主人物定位开始重新识别，不复用当前主人物锁定或同视频历史 T/A/L；会消耗一次 AI 调用额度，原有报告将被覆盖。新结果也可能与原结果一致。"
         : "将消耗一次 AI 调用额度，原有报告将被覆盖。";
   const confirmLabel = isSubmitting ? "提交中…" : isReportOnly ? "确认生成" : isVideoKeyframes ? "生成修正卡" : "确认分析";
 

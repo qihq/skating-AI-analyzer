@@ -4228,7 +4228,12 @@ def _can_reuse_cached_extracted_frames(
     )
 
 
-async def process_analysis(analysis_id: str, retry_from: str | None = None) -> None:
+async def process_analysis(
+    analysis_id: str,
+    retry_from: str | None = None,
+    *,
+    force_keyframe_refresh: bool = False,
+) -> None:
     timings: dict[str, float] = {}
     total_start = time.monotonic()
     processing_frames_dir: Path | None = None
@@ -5112,18 +5117,20 @@ async def process_analysis(analysis_id: str, retry_from: str | None = None) -> N
             )
 
         if run_vision:
-            reused_resolved, reused_frames, reused_records, reused_video_temporal = await _reuse_matching_semantic_keyframes(
-                analysis_id=analysis_id,
-                video_path=video_path,
-                processing_frames_dir=processing_frames_dir,
-                video_identity=video_identity,
-                action_type=action_type,
-                action_subtype=action_subtype,
-                analysis_profile=analysis_profile,
-                motion_scores=motion_scores,
-                bio_data=bio_data,
-                video_temporal_result=video_temporal_result,
-            )
+            reused_resolved, reused_frames, reused_records, reused_video_temporal = (None, [], [], video_temporal_result)
+            if not force_keyframe_refresh:
+                reused_resolved, reused_frames, reused_records, reused_video_temporal = await _reuse_matching_semantic_keyframes(
+                    analysis_id=analysis_id,
+                    video_path=video_path,
+                    processing_frames_dir=processing_frames_dir,
+                    video_identity=video_identity,
+                    action_type=action_type,
+                    action_subtype=action_subtype,
+                    analysis_profile=analysis_profile,
+                    motion_scores=motion_scores,
+                    bio_data=bio_data,
+                    video_temporal_result=video_temporal_result,
+                )
             if reused_resolved is not None:
                 if video_temporal_task is not None and not video_temporal_task.done():
                     video_temporal_task.cancel()
@@ -9648,12 +9655,14 @@ async def retry_analysis(
     background_tasks: BackgroundTasks,
     retry_from: str | None = Query(default=None),
     reset_target_lock: bool = Query(default=False),
+    force_keyframe_refresh: bool = Query(default=False),
     manual_action_window_start_sec: float | None = Query(default=None),
     manual_action_window_end_sec: float | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
     retry_from_value = retry_from if isinstance(retry_from, str) and retry_from.strip() else None
     reset_target_lock_value = reset_target_lock if isinstance(reset_target_lock, bool) else False
+    force_keyframe_refresh_value = force_keyframe_refresh if isinstance(force_keyframe_refresh, bool) else False
     manual_window_start = manual_action_window_start_sec if isinstance(manual_action_window_start_sec, (int, float)) else None
     manual_window_end = manual_action_window_end_sec if isinstance(manual_action_window_end_sec, (int, float)) else None
 
@@ -9766,7 +9775,12 @@ async def retry_analysis(
     if refreshed is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
-    background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
+    background_tasks.add_task(
+        process_analysis,
+        analysis_id,
+        retry_from_stage,
+        force_keyframe_refresh=force_keyframe_refresh_value,
+    )
     if retry_from_stage:
         return AnalysisRetryResponse(message=f"已从 {retry_from_stage} 阶段重新提交分析。")
     return AnalysisRetryResponse(message="已重新提交分析。")

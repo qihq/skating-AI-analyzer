@@ -8,7 +8,7 @@
 
 Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
 
-当前分析管线版本为 `v5.2.319`。
+当前分析管线版本为 `v5.2.320`。
 
 ## 动森成长岛现代界面
 
@@ -70,6 +70,7 @@ Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分
 
 ## 版本历史
 
+- `v5.2.320`：统一视觉提示词契约，Path A 仅使用规定的视频与姿态证据，并让各视觉调用共用一致的结构化输出与修复处理。追问中的完整重新分析会重置主人物锁定、跳过同视频历史 T/A/L 复用并重新定位关键帧；若源视频证据与模型判断一致，结果仍可能相同。选择视频后即可填写可选 AI 输入时间区间，即使浏览器无法读取时长；“继续训练”箭头尺寸也已固定。MiMo/OpenCode 仅使用 Bearer 认证，并补充后端并行测试依赖说明。
 - `v5.2.319`：P0 成长看板，含 KPI 雷达图、里程碑时间线、技能演进和按类型展示阶段数据；P1 月度成长章节，含家庭金句、确定性事实聚合、结构化章节生成、章节工作台和里程碑分享卡；P2 年度合集，含章节/里程碑选择、预览、后台 PDF 导出、断点续传和下载；移除多余 `api-key` header 兼容 OpenCode 新 `sk-` 格式 Key；新增 golden overrides、diff baselines 和 A/B 评测手册；改进人物追踪重锁定和自愈逻辑；增强关键帧仲裁诊断；debug golden 标注支持跟踪锚点和动作窗口边界。
 - `v5.2.318`：已应用的动作识别和关键帧修正会写回 `analyses`；启动时自动回填历史已应用修正；报告/追问聊天工作台会在显示成功前刷新当前分析详情。
 - `v5.2.315`：从 `codex/face-identity-target-lock` 导出 all-in-one Docker 镜像，包含人脸身份模型层、滑行者人脸档案 API、目标诊断、父级 UI 及档案删除功能。
@@ -164,7 +165,9 @@ npm run dev
 
 ```bash
 # 后端
-PYTHONPATH=backend pytest backend/tests -q
+cd backend
+pip install -r requirements-test.txt
+python -m pytest tests -q -n 4 --dist loadfile
 
 # 前端
 cd frontend && npm test
