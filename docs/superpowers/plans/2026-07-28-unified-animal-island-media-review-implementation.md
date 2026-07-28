@@ -88,6 +88,12 @@ npm run build
 
 ## Task 3: Profile-Aware Dense Base Sampling
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `python -m pytest backend/tests/test_video_sampling_density.py backend/tests/test_analysis_profile_input.py -q` (27 passed).
+
+**Implementation notes:** Sampling now uses action-profile base counts and duration scaling on the normalized action timeline. The persisted motion payload records requested/resolved counts, cap, and policy so follow-up diagnostics can distinguish configured density from frames actually extracted. Manual windows use their approved dense caps, and free-skate inputs retain a bounded duration-based fallback.
+
 **Files:**
 
 - Modify: `backend/app/configs/action_profiles.json`

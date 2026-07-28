@@ -37,11 +37,11 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
 
     def test_profile_sampling_configuration_prefers_jump_over_defaults(self) -> None:
         self.assertEqual(get_frame_rate_for_profile("jump"), 16)
-        self.assertEqual(get_max_frames_for_profile("jump"), 32)
+        self.assertEqual(get_max_frames_for_profile("jump"), 48)
         self.assertEqual(get_window_seconds_for_profile("jump", "跳跃"), 3.5)
-        self.assertEqual(get_max_frames_for_profile("spin"), 28)
-        self.assertEqual(get_max_frames_for_profile("step"), 24)
-        self.assertEqual(get_max_frames_for_profile("spiral"), 20)
+        self.assertEqual(get_max_frames_for_profile("spin"), 36)
+        self.assertEqual(get_max_frames_for_profile("step"), 32)
+        self.assertEqual(get_max_frames_for_profile("spiral"), 28)
         self.assertEqual(get_frame_rate_for_profile("unknown"), 5)
 
     def test_motion_sampling_protects_top_two_peak_neighborhoods(self) -> None:
@@ -304,7 +304,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         detect_window_mock.assert_not_called()
-        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(len(sampled_frames), 48)
         self.assertEqual(sampling_metadata.action_window_start, 0.0)
         self.assertEqual(sampling_metadata.action_window_end, 30.0)
         self.assertEqual(motion_payload["input_window_mode"], "full_context")
@@ -353,12 +353,12 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         detect_window_mock.assert_not_called()
-        self.assertEqual(len(sampled_frames), 48)
+        self.assertEqual(len(sampled_frames), 64)
         self.assertEqual(motion_payload["frame_rate"], 24)
-        self.assertEqual(motion_payload["max_frames_for_profile"], 48)
+        self.assertEqual(motion_payload["max_frames_for_profile"], 64)
         self.assertEqual(motion_payload["sampling_profile_source"], "manual_window_dense")
         self.assertTrue(motion_payload["manual_window_dense_sampling"])
-        self.assertAlmostEqual(sampling_metadata.effective_fps, 23.5, places=2)
+        self.assertAlmostEqual(sampling_metadata.effective_fps, 31.5, places=2)
 
     async def test_jump_profile_uses_jump_frame_rate_during_sampling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -404,15 +404,15 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(motion_payload["analysis_profile_hint"], "jump")
         self.assertEqual(motion_payload["frame_rate"], 16)
-        self.assertEqual(motion_payload["max_frames_for_profile"], 32)
-        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(motion_payload["max_frames_for_profile"], 48)
+        self.assertEqual(len(sampled_frames), 48)
         self.assertIn(0.0, extracted_timestamps)
         self.assertTrue(all(abs(timestamp * 16 - round(timestamp * 16)) < 0.01 for timestamp in extracted_timestamps))
         self.assertEqual(sampling_metadata.action_window_start, 0.0)
         self.assertEqual(sampling_metadata.action_window_end, 2.0)
         self.assertEqual(sampling_metadata.window_start_sec, 0.0)
         self.assertEqual(sampling_metadata.window_end_sec, 2.0)
-        self.assertAlmostEqual(sampling_metadata.effective_fps, 15.5, places=2)
+        self.assertAlmostEqual(sampling_metadata.effective_fps, 23.5, places=2)
 
     async def test_slow_motion_sampling_spreads_timestamps_across_full_action_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -459,16 +459,16 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                     analysis_profile="jump",
                 )
 
-        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(len(sampled_frames), 48)
         self.assertEqual(motion_payload["slow_motion_scale"], 8.0)
         self.assertEqual(motion_payload["effective_window_duration"], 3.5)
         self.assertEqual(motion_payload["window_start_sec"], 0.0)
         self.assertEqual(motion_payload["window_end_sec"], 3.5)
-        self.assertAlmostEqual(float(motion_payload["effective_fps"]), 31 / 3.5, places=2)
+        self.assertAlmostEqual(float(motion_payload["effective_fps"]), 47 / 3.5, places=2)
         self.assertTrue(sampling_metadata.is_slow_motion)
         self.assertEqual(sampling_metadata.window_start_sec, 0.0)
         self.assertEqual(sampling_metadata.window_end_sec, 3.5)
-        self.assertAlmostEqual(sampling_metadata.effective_fps, 31 / 3.5, places=2)
+        self.assertAlmostEqual(sampling_metadata.effective_fps, 47 / 3.5, places=2)
         self.assertLess(min(extracted_timestamps), 4.0)
         self.assertTrue(any(8.0 <= timestamp <= 16.0 for timestamp in extracted_timestamps))
         self.assertGreater(max(extracted_timestamps), 20.0)
@@ -525,7 +525,7 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         detect_window_mock.assert_not_called()
-        self.assertEqual(len(sampled_frames), 32)
+        self.assertEqual(len(sampled_frames), 48)
         self.assertEqual(motion_payload["window_strategy"], "full_video_debug")
         self.assertEqual(motion_payload["selection_strategy"], "dense_peak_bursts")
         self.assertEqual(sampling_metadata.action_window_end, 12.0)
