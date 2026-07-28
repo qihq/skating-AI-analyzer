@@ -28,7 +28,7 @@ import {
 } from "../api/client";
 import AnalysisDebugLogPanel from "../components/AnalysisDebugLogPanel";
 import { useAppMode } from "../components/AppModeContext";
-import PoseViewer from "../components/PoseViewer";
+import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlayer";
 import ProviderMetricsPanel from "../components/ProviderMetricsPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
@@ -1064,7 +1064,7 @@ function DebugGoldenLabelPanel({
   connections: number[][];
   onSaved?: () => void;
 }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<IceMediaPlayerHandle | null>(null);
   const [frameNode, setFrameNode] = useState<HTMLDivElement | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [saveState, setSaveState] = useState<LoadState>("idle");
@@ -1190,16 +1190,9 @@ function DebugGoldenLabelPanel({
       setError("No timestamp available for video verification.");
       return;
     }
-    const video = videoRef.current;
-    if (!video) {
-      return;
-    }
     const nextTime = Math.max(0, timestamp);
-    video.currentTime = nextTime;
+    videoRef.current?.seek(nextTime, { play: options?.play });
     setVideoCursorTime(nextTime);
-    if (options?.play) {
-      void video.play().catch(() => undefined);
-    }
   };
 
   const setKeyframeFromSelected = (key: string) => {
@@ -1480,23 +1473,7 @@ function DebugGoldenLabelPanel({
                 </button>
               </div>
             </div>
-            {videoError ? (
-              <div className="flex aspect-video items-center justify-center bg-slate-950 px-4 text-center text-xs leading-6 text-slate-300">
-                当前 debug run 没有可用源视频。
-              </div>
-            ) : (
-              <video
-                ref={videoRef}
-                src={videoSrc}
-                controls
-                preload="metadata"
-                playsInline
-                onError={() => setVideoError(true)}
-                onSeeked={(event) => setVideoCursorTime(event.currentTarget.currentTime)}
-                onTimeUpdate={(event) => setVideoCursorTime(event.currentTarget.currentTime)}
-                className="aspect-video w-full bg-slate-950 object-contain"
-              />
-            )}
+            <IceMediaPlayer ref={videoRef} fallbackSrc={videoSrc} onTimeChange={setVideoCursorTime} />
           </section>
 
           <div className="rounded-[18px] border border-slate-200 bg-white p-3">
@@ -2408,7 +2385,7 @@ function DebugRunDetailPanel({
         {effectiveActiveTab === "frames" ? (
           <div className="space-y-5">
             {debugPose ? (
-              <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} />
+              <IceMediaPlayer fallbackSrc={`/api/debug/runs/${encodeURIComponent(run.id)}/video`} pose={debugPose} mode="overlay" />
             ) : (
               <PoseFrameStage
                 title="primary sampled frame"
@@ -2425,7 +2402,7 @@ function DebugRunDetailPanel({
 
         {effectiveActiveTab === "tracking" ? (
           <div className="space-y-4">
-            {debugPose ? <PoseViewer pose={debugPose} variant="debug" diagnosticsByFrame={trackerDiagnosticsByFrame} /> : null}
+            {debugPose ? <IceMediaPlayer fallbackSrc={`/api/debug/runs/${encodeURIComponent(run.id)}/video`} pose={debugPose} mode="overlay" /> : null}
             <div className="grid gap-3 lg:grid-cols-3">
               <JsonBlock value={{ selection_strategy: motionScores.selection_strategy, top_motion_peaks: motionScores.top_motion_peaks }} />
               <JsonBlock value={{ coverage_gaps: motionScores.coverage_gaps, sampling_metadata: result.sampling_metadata }} />

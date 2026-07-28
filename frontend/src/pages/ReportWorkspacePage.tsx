@@ -8,7 +8,8 @@ import AnalysisDebugLogPanel, { TargetPoseDebugPanel } from "../components/Analy
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
 import KeyframeEvidencePanel, { type KeyframeSyncPatch } from "../components/KeyframeEvidencePanel";
 import { useAppMode } from "../components/AppModeContext";
-import PoseViewer from "../components/PoseViewer";
+import { IceMediaPlayer } from "../media/IceMediaPlayer";
+import { poseFrameIndexAtTime } from "../media/poseTimeline";
 import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { parseApiDate, apiDateTimeFormatter } from "../utils/datetime";
@@ -230,7 +231,16 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
         <div className="grid min-w-0 gap-6 web:grid-cols-[minmax(0,1fr)_340px]">
           <section className="min-w-0 space-y-6">
             {pose?.frames?.length ? (
-              <PoseViewer pose={pose} activeFrameId={selectedPoseFrame} onFrameChange={setSelectedPoseFrame} variant="debug" />
+              <IceMediaPlayer
+                manifest={analysis.media_manifest}
+                fallbackSrc={`/api/analysis/${analysis.id}/video`}
+                pose={pose}
+                mode="overlay"
+                onTimeChange={(time) => {
+                  const index = poseFrameIndexAtTime(pose, time);
+                  if (index >= 0) setSelectedPoseFrame(pose.frames[index].frame.replace(/\.jpg$/i, ""));
+                }}
+              />
             ) : (
               <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-8 text-sm text-slate-500">当前分析没有可展示的姿态帧。</div>
             )}

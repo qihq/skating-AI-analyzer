@@ -14,6 +14,7 @@ function ranges(video: HTMLVideoElement): BufferedRange[] {
 export function useMediaController(manifest: MediaManifest | null | undefined) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const switchToken = useRef(0);
+  const pendingSeek = useRef<number | null>(null);
   const [state, setState] = useState<MediaControllerState>(initialState);
   const source = useMemo(() => qualitySource(manifest, state.quality), [manifest, state.quality]);
 
@@ -21,6 +22,7 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
   const commitSeek = useCallback((time: number) => {
     const video = videoRef.current;
     const next = Math.max(0, Math.min(time, Number.isFinite(video?.duration) ? video!.duration : time));
+    pendingSeek.current = next;
     if (video) video.currentTime = next;
     setState((current) => ({ ...current, currentTime: next, previewTime: null }));
   }, []);
@@ -30,6 +32,12 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
     if (!video) return;
     try { if (video.paused) await video.play(); else video.pause(); } catch { setState((current) => ({ ...current, error: "播放被浏览器阻止" })); }
   }, []);
+  const play = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video || !video.paused) return;
+    try { await video.play(); } catch { setState((current) => ({ ...current, error: "播放被浏览器阻止" })); }
+  }, []);
+  const pause = useCallback(() => { videoRef.current?.pause(); }, []);
   const setPlaybackRate = useCallback((playbackRate: number) => { if (videoRef.current) videoRef.current.playbackRate = playbackRate; setState((current) => ({ ...current, playbackRate })); }, []);
   const setVolume = useCallback((volume: number) => { const next = Math.max(0, Math.min(1, volume)); if (videoRef.current) videoRef.current.volume = next; setState((current) => ({ ...current, volume: next })); }, []);
   const setMuted = useCallback((muted: boolean) => { if (videoRef.current) videoRef.current.muted = muted; setState((current) => ({ ...current, muted })); }, []);
@@ -60,7 +68,15 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
     }
   }, [manifest, state.quality]);
 
-  const onLoadedMetadata = useCallback(() => { const video = videoRef.current; if (video) setState((current) => ({ ...current, duration: video.duration || 0, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate })); }, []);
+  const onLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (pendingSeek.current != null) {
+      video.currentTime = Math.min(pendingSeek.current, Number.isFinite(video.duration) ? video.duration : pendingSeek.current);
+      pendingSeek.current = null;
+    }
+    setState((current) => ({ ...current, duration: video.duration || 0, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate }));
+  }, []);
   const onTimeUpdate = useCallback(() => { const video = videoRef.current; if (video) setState((current) => current.previewTime == null ? { ...current, currentTime: video.currentTime, buffered: ranges(video) } : current); }, []);
   const onPlay = useCallback(() => setState((current) => ({ ...current, paused: false })), []);
   const onPause = useCallback(() => setState((current) => ({ ...current, paused: true })), []);
@@ -68,5 +84,5 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
   const onPlaying = useCallback(() => setState((current) => ({ ...current, buffering: false })), []);
   const onError = useCallback(() => setState((current) => ({ ...current, buffering: false, error: "视频无法播放" })), []);
   useEffect(() => () => { switchToken.current += 1; }, []);
-  return { state, source, bindVideo, commitSeek, previewSeek, togglePlay, setPlaybackRate, setVolume, setMuted, setQuality, mediaProps: { onLoadedMetadata, onTimeUpdate, onPlay, onPause, onWaiting, onPlaying, onError } };
+  return { state, source, bindVideo, commitSeek, previewSeek, togglePlay, play, pause, setPlaybackRate, setVolume, setMuted, setQuality, mediaProps: { onLoadedMetadata, onTimeUpdate, onPlay, onPause, onWaiting, onPlaying, onError } };
 }

@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState } from "react";
 
 import { AnalysisDetail } from "../api/client";
+import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlayer";
+import { analysisMediaMarkers } from "../media/analysisMarkers";
 import {
   buildCurrentKeyframeEvidenceItems,
   buildDraftKeyframeEvidenceItems,
@@ -32,10 +34,9 @@ type KeyframeEvidencePanelProps = {
 };
 
 export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSyncFrames, layout = "sidebar" }: KeyframeEvidencePanelProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playerRef = useRef<IceMediaPlayerHandle | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<SourceId>("current");
   const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
-  const [videoError, setVideoError] = useState(false);
 
   const sources = useMemo<KeyframeEvidenceSource[]>(() => {
     const selected = analysis.video_temporal_diagnostics?.selected_semantic_frames ?? [];
@@ -52,7 +53,6 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
   const expectedKeys = keyframeOrderForAnalysis(analysis);
   const canSyncToJumpForm = expectedKeys.every((key) => key === "T" || key === "A" || key === "L");
   const availableCount = activeSource.items.filter((item) => item.value).length;
-  const videoSrc = `/api/analysis/${encodeURIComponent(analysis.id)}/video`;
   const sourceTabsClass = layout === "wide"
     ? "mt-4 grid grid-cols-2 gap-2 tablet:grid-cols-4"
     : "mt-4 grid grid-cols-2 gap-2 tablet:grid-cols-4 xl:grid-cols-2 wide:grid-cols-4";
@@ -61,10 +61,10 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
     : "mt-4 flex snap-x gap-3 overflow-x-auto pb-1 tablet:grid tablet:grid-cols-3 tablet:overflow-visible xl:grid-cols-1 wide:grid-cols-3";
 
   const seekTo = (timestamp: number | null) => {
-    if (timestamp == null || !videoRef.current) {
+    if (timestamp == null) {
       return;
     }
-    videoRef.current.currentTime = Math.max(0, timestamp);
+    playerRef.current?.seek(timestamp);
   };
 
   const syncItem = (item: KeyframeEvidenceItem) => {
@@ -105,21 +105,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
       </div>
 
       <div className="mt-4 overflow-hidden rounded-[18px] bg-slate-950">
-        {videoError ? (
-          <div className="flex aspect-video items-center justify-center px-4 text-center text-xs leading-6 text-slate-300">
-            视频暂不可用
-          </div>
-        ) : (
-          <video
-            ref={videoRef}
-            src={videoSrc}
-            controls
-            preload="metadata"
-            playsInline
-            onError={() => setVideoError(true)}
-            className="aspect-video w-full bg-slate-950 object-contain"
-          />
-        )}
+        <IceMediaPlayer ref={playerRef} manifest={analysis.media_manifest} fallbackSrc={`/api/analysis/${encodeURIComponent(analysis.id)}/video`} markers={analysisMediaMarkers(analysis)} />
       </div>
 
       <div className={sourceTabsClass}>
@@ -203,7 +189,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
                   <button
                     type="button"
                     onClick={() => seekTo(item.timestamp)}
-                    disabled={item.timestamp == null || videoError}
+                    disabled={item.timestamp == null}
                     className="min-h-[34px] rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     定位

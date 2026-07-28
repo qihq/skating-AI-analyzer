@@ -14,7 +14,7 @@ describe("CorrectionKeyframeReview", () => {
     render(<CorrectionKeyframeReview analysisId="analysis-1" items={items} />);
 
     fireEvent.click(screen.getByRole("button", { name: "定位 T 起跳 2.400s" }));
-    const video = screen.getByTestId("correction-review-video") as HTMLVideoElement;
+    const video = screen.getByLabelText("分析视频") as HTMLVideoElement;
     Object.defineProperty(video, "currentTime", { value: 0, writable: true });
     fireEvent.loadedMetadata(video);
 

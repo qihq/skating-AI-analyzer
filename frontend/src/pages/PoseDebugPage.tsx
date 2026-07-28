@@ -6,7 +6,8 @@ import { AnalysisDetail, fetchAnalysis, fetchAnalysisPose, PoseFrame, PoseRespon
 import { normalizePoseDiagnosticFrames, TargetPoseDebugPanel } from "../components/AnalysisDebugLogPanel";
 import { useAppMode } from "../components/AppModeContext";
 import BiomechanicsPanel from "../components/BiomechanicsPanel";
-import PoseViewer from "../components/PoseViewer";
+import { IceMediaPlayer } from "../media/IceMediaPlayer";
+import { poseFrameIndexAtTime } from "../media/poseTimeline";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { parseApiDate } from "../utils/datetime";
 
@@ -162,7 +163,16 @@ export default function PoseDebugPage() {
           <section className="grid min-w-0 gap-5 web:grid-cols-[minmax(0,1fr)_340px] web:items-start">
             <div className="min-w-0">
               {pose?.frames?.length ? (
-                <PoseViewer pose={pose} activeFrameId={selectedPoseFrame} onFrameChange={setSelectedPoseFrame} variant="debug" />
+                <IceMediaPlayer
+                  manifest={analysis.media_manifest}
+                  fallbackSrc={`/api/analysis/${analysis.id}/video`}
+                  pose={pose}
+                  mode="overlay"
+                  onTimeChange={(time) => {
+                    const index = poseFrameIndexAtTime(pose, time);
+                    if (index >= 0) setSelectedPoseFrame(frameIdFromName(pose.frames[index].frame));
+                  }}
+                />
               ) : (
                 <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-8 text-sm text-slate-500">当前分析没有可展示的骨架帧。</div>
               )}

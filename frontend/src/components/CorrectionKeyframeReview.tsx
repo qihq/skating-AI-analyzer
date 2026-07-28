@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlayer";
 import { formatKeyframeTimestamp, type KeyframeEvidenceItem } from "../utils/keyframeEvidence";
 
 type Props = {
@@ -9,7 +10,7 @@ type Props = {
 };
 
 export default function CorrectionKeyframeReview({ analysisId, items }: Props) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playerRef = useRef<IceMediaPlayerHandle | null>(null);
   const [selected, setSelected] = useState<KeyframeEvidenceItem | null>(null);
   const [frameReady, setFrameReady] = useState(false);
 
@@ -26,11 +27,6 @@ export default function CorrectionKeyframeReview({ analysisId, items }: Props) {
     if (item.timestamp == null) return;
     setFrameReady(false);
     setSelected(item);
-    const video = videoRef.current;
-    if (video) {
-      video.currentTime = item.timestamp;
-      video.pause();
-    }
   };
 
   return (
@@ -68,22 +64,17 @@ export default function CorrectionKeyframeReview({ analysisId, items }: Props) {
                   </div>
                   <button type="button" onClick={() => setSelected(null)} className="min-h-[36px] rounded-full bg-white/10 px-4 text-xs font-semibold text-white hover:bg-white/15">关闭</button>
                 </div>
-                <div className="relative aspect-video bg-black">
+                <div className="relative bg-black">
                   {!frameReady && selected.imageUrl ? <img src={selected.imageUrl} alt={`${selected.key} 定位预览`} className="absolute inset-0 z-10 h-full w-full object-contain" /> : null}
                   {!frameReady ? <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 mx-auto w-fit rounded-full bg-slate-950/80 px-3 py-1 text-xs text-white">正在定位原视频…</div> : null}
-                  <video
-                    ref={videoRef}
-                    data-testid="correction-review-video"
-                    controls
-                    playsInline
-                    preload="auto"
-                    src={`/api/analysis/${analysisId}/video`}
-                    onLoadedMetadata={(event) => {
-                      if (selected.timestamp != null) event.currentTarget.currentTime = selected.timestamp;
+                  <IceMediaPlayer
+                    ref={playerRef}
+                    fallbackSrc={`/api/analysis/${analysisId}/video`}
+                    seekTime={selected.timestamp}
+                    markers={items.flatMap((item) => item.timestamp == null ? [] : [{ id: item.key, label: item.key, timestamp: item.timestamp }])}
+                    onTimeChange={(timestamp) => {
+                      if (selected.timestamp != null && Math.abs(timestamp - selected.timestamp) < 0.05) setFrameReady(true);
                     }}
-                    onSeeked={() => setFrameReady(true)}
-                    onCanPlay={() => setFrameReady(true)}
-                    className="h-full w-full bg-black object-contain"
                   />
                 </div>
               </div>

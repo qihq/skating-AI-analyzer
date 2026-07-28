@@ -28,7 +28,7 @@ describe("ActionPhaseStrip", () => {
 
   it("seeks the bundled video to the stored timestamp", () => {
     render(<ActionPhaseStrip analysis={jump} pose={pose} showVideo />);
-    const video = screen.getByTestId("phase-video") as HTMLVideoElement;
+    const video = screen.getByLabelText("分析视频") as HTMLVideoElement;
     Object.defineProperty(video, "currentTime", { value: 0, writable: true });
     fireEvent.click(screen.getByRole("button", { name: "查看起跳 2.400s" }));
 
@@ -37,8 +37,8 @@ describe("ActionPhaseStrip", () => {
 
   it("only seeks after the user finishes dragging the progress slider", () => {
     render(<ActionPhaseStrip analysis={jump} pose={pose} showVideo />);
-    const video = screen.getByTestId("phase-video") as HTMLVideoElement;
-    const slider = screen.getByRole("slider", { name: "视频播放进度" });
+    const video = screen.getByLabelText("分析视频") as HTMLVideoElement;
+    const slider = screen.getByRole("slider", { name: /播放进度/ });
     Object.defineProperty(video, "duration", { value: 12, configurable: true });
     Object.defineProperty(video, "currentTime", { value: 0, writable: true });
     fireEvent.loadedMetadata(video);

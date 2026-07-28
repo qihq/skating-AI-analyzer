@@ -372,6 +372,12 @@ npm test -- src/media/VideoSurface.test.tsx src/media/PoseSurface.test.tsx src/m
 
 ## Task 10: Analysis and Keyframe Player Migration
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/components/ActionPhaseStrip.test.tsx src/components/CorrectionKeyframeReview.test.tsx src/components/KeyframeEvidencePanel.test.tsx src/media/analysisMarkers.test.ts src/media/IceMediaPlayer.test.tsx` (7 passed); `npm run build` passed.
+
+**Implementation notes:** Added a shared analysis marker adapter that retains T/A/L, selected semantic, and partial-candidate evidence concurrently. Action phase, evidence review, correction modal, analysis workspace, pose debug, debug-run, and diagnostics media surfaces now compose `IceMediaPlayer`; imperative seeking preserves existing keyframe controls. The main analysis workspace uses one video-plus-pose overlay surface and derives frame selection from the unified controller timeline, replacing its separate video, range input, and animation loop. Legacy `PoseViewer` remains only in non-migrated compatibility consumers.
+
 **Files:**
 
 - Modify: `frontend/src/components/ModernAnalysisWorkspace.tsx`

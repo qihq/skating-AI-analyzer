@@ -3,6 +3,7 @@ import { useState } from "react";
 import { AnalysisLogEntry, PoseResponse, SelectedSemanticFrame, VideoTemporalDiagnostics } from "../api/client";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import ReportCard from "./ReportCard";
+import { IceMediaPlayer } from "../media/IceMediaPlayer";
 
 type NormalizedBBox = {
   x: number;
@@ -549,13 +550,7 @@ export default function AnalysisDebugLogPanel({
             ) : null}
             {videoTemporalDiagnostics.video_ai_video_url ? (
               <div className="mt-3 overflow-hidden rounded-[18px] border border-blue-100 bg-slate-950">
-                <video
-                  src={videoTemporalDiagnostics.video_ai_video_url}
-                  controls
-                  preload="metadata"
-                  playsInline
-                  className="aspect-video w-full object-contain"
-                />
+                <IceMediaPlayer fallbackSrc={videoTemporalDiagnostics.video_ai_video_url} />
                 <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 text-xs text-slate-500">
                   <span>Video AI source</span>
                   <span>{videoTemporalDiagnostics.video_ai_ran ? "ran" : "not run"}</span>
