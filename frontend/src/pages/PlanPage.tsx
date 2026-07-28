@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
 import { createPlan, extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSession } from "../api/client";
-import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { exportShareDocument } from "../utils/shareExport";
 import IslandShareDialog from "../modern/IslandShareDialog";
 
 const LOCATION_MODE_STORAGE_KEY = "plan_location_mode";
@@ -60,7 +61,7 @@ export default function PlanPage() {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
-  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview[]>([]);
   const [isSharing, setIsSharing] = useState(false);
   const [hasAppliedFocusTarget, setHasAppliedFocusTarget] = useState(false);
   const routeState = location.state as PlanLocationState;
@@ -284,7 +285,7 @@ export default function PlanPage() {
         body: session.description,
         meta: `${session.duration}${session.is_office_trainable ? " · 居家可练" : " · 需上冰"}`,
       })));
-      const result = await createAdaptiveSharePoster({
+      const result = await exportShareDocument({
         eyebrow: "Animal Island · 训练计划",
         title: plan.plan_json.title,
         subtitle: `训练聚焦：${plan.plan_json.focus_skill}`,
@@ -292,7 +293,7 @@ export default function PlanPage() {
         sections,
         filename: `training-plan-${plan.id}.jpg`,
       });
-      setSharePreview(createShareImagePreview(result, false));
+      setSharePreview(result.pages.map((page) => createShareImagePreview(page, false)));
     } finally {
       setIsSharing(false);
     }
@@ -513,7 +514,7 @@ export default function PlanPage() {
           )}
         </div>
       </section>
-      <IslandShareDialog preview={sharePreview} title="训练计划分享" onClose={() => setSharePreview(null)} />
+      <IslandShareDialog preview={null} previews={sharePreview} title="训练计划分享" onClose={() => setSharePreview([])} />
     </main>
   );
 }

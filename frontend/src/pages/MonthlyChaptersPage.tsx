@@ -18,7 +18,8 @@ import {
 import MonthlyFactPreview from "../components/MonthlyFactPreview";
 import MonthlyChapterEditor from "../components/MonthlyChapterEditor";
 import IslandShareDialog from "../modern/IslandShareDialog";
-import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { exportShareDocument } from "../utils/shareExport";
 import { Button, Card, Collapse, Input, Select, Tag } from "../modern/AnimalUi";
 import { useAppMode } from "../components/AppModeContext";
 import ModernConfirmModal from "../modern/ModernConfirmModal";
@@ -57,7 +58,7 @@ export default function MonthlyChaptersPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
-  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview[]>([]);
   const [recycled, setRecycled] = useState<MonthlyChapter[]>([]);
   const chapterRequestVersion = useRef(0);
 
@@ -205,7 +206,7 @@ export default function MonthlyChaptersPage() {
   const snapshot = selectedChapter?.fact_snapshot ?? null;
   const handleShareChapter = async () => {
     if (!selectedChapter) return;
-    const result = await createAdaptiveSharePoster({
+    const result = await exportShareDocument({
       eyebrow: "Animal Island · 月度故事",
       title: selectedChapter.year_month,
       subtitle: skaters.find((item) => item.id === selectedSkaterId)?.display_name || "成长记录",
@@ -213,7 +214,7 @@ export default function MonthlyChaptersPage() {
       sections: [{ label: "章节状态", title: statusLabel(selectedChapter.status), body: `第 ${selectedChapter.revision} 次修订`, meta: "每一步都值得被记住" }],
       filename: `monthly-story-${selectedChapter.year_month}.jpg`,
     });
-    setSharePreview(createShareImagePreview(result, false));
+    setSharePreview(result.pages.map((page) => createShareImagePreview(page, false)));
   };
 
   const handleRecycle = async () => {
@@ -328,7 +329,7 @@ export default function MonthlyChaptersPage() {
         </>
       ) : null}
       <Collapse question={`本月回收站（${recycled.length}）`} answer={recycled.length ? <div className="space-y-3">{recycled.map((item) => <Card key={item.id} pattern="default"><div className="flex flex-wrap items-center justify-between gap-3"><div><strong>{item.title}</strong><Tag color="brown">第 {item.revision} 版</Tag></div><div className="flex gap-2"><Button onClick={() => void handleRestore(item.id)} disabled={working || !online}>恢复</Button><Button danger onClick={() => confirmPermanentDelete(item.id)} disabled={working || !online}>永久删除</Button></div></div></Card>)}</div> : <p>回收站为空。</p>} />
-      <IslandShareDialog preview={sharePreview} title="月度故事分享" onClose={() => setSharePreview(null)} />
+      <IslandShareDialog preview={null} previews={sharePreview} title="月度故事分享" onClose={() => setSharePreview([])} />
       <ModernConfirmModal open={Boolean(confirmation)} title={confirmation?.title || "确认操作"} description={confirmation?.description || ""} confirmLabel={confirmation?.label || "确认"} danger={confirmation?.danger} loading={working} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation?.run; if (!action) return; void action().finally(() => setConfirmation(null)); }} />
     </div>
   );

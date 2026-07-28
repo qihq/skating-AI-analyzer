@@ -4,13 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { GrowthMilestone } from "../api/client";
 import MilestoneShareDialog from "./MilestoneShareDialog";
 
-vi.mock("../utils/milestoneShareCanvas", () => ({
-  createMilestoneShareImage: vi.fn().mockResolvedValue({
-    blob: new Blob(["fake"], { type: "image/jpeg" }),
-    filename: "milestone-test.jpg",
-    mimeType: "image/jpeg",
-    sizeBytes: 1000,
-    canNativeShare: false,
+vi.mock("../utils/shareExport", () => ({
+  exportShareDocument: vi.fn().mockResolvedValue({
+    pages: [{
+      blob: new Blob(["fake"], { type: "image/jpeg" }),
+      filename: "milestone-test.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1000,
+      canNativeShare: false,
+    }],
   }),
 }));
 
@@ -37,8 +39,8 @@ describe("MilestoneShareDialog", () => {
       />,
     );
 
-    expect(screen.getByText("正在生成分享图…")).toBeInTheDocument();
-    const img = await screen.findByAltText("里程碑分享预览");
+    expect(screen.getAllByText("正在生成…")).not.toHaveLength(0);
+    const img = await screen.findByAltText("分享里程碑预览");
     expect(img).toBeInTheDocument();
   });
 
@@ -52,9 +54,9 @@ describe("MilestoneShareDialog", () => {
       />,
     );
 
-    await screen.findByAltText("里程碑分享预览");
+    await screen.findByAltText("分享里程碑预览");
     expect(screen.getByRole("button", { name: "复制到剪贴板" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存图片" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "下载当前页" })).toBeInTheDocument();
   });
 
   it("calls onClose when clicking outside the dialog", async () => {
@@ -68,9 +70,9 @@ describe("MilestoneShareDialog", () => {
       />,
     );
 
-    await screen.findByAltText("里程碑分享预览");
-    const backdrop = screen.getByRole("dialog");
-    fireEvent.click(backdrop);
+    await screen.findByAltText("分享里程碑预览");
+    const backdrop = screen.getByRole("presentation");
+    fireEvent.mouseDown(backdrop);
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -85,8 +87,8 @@ describe("MilestoneShareDialog", () => {
       />,
     );
 
-    await screen.findByAltText("里程碑分享预览");
-    fireEvent.click(screen.getByText("✕"));
+    await screen.findByAltText("分享里程碑预览");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(onClose).toHaveBeenCalled();
   });
 

@@ -484,6 +484,12 @@ npm test -- src/utils/shareLayout.test.ts src/utils/shareExport.test.ts src/mode
 
 ## Task 13: Migrate Every Share Source
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/components/MilestoneShareDialog.test.tsx src/utils/shareLayout.test.ts src/utils/shareExport.test.ts src/pages/AnnualCollectionPage.test.tsx src/pages/MonthlyChaptersPage.test.tsx src/pages/ReviewPage.test.tsx` (6 files, 16 passed); `npm run build` passed.
+
+**Implementation notes:** All domain share sources now convert their content into the shared adaptive document model and use the multipage Animal Island dialog. Report and follow-up no longer own private Canvas layouts; the retired milestone renderer and its tests were removed after dialog coverage moved to the shared exporter.
+
 **Files:**
 
 - Modify: `frontend/src/pages/ReportPage.tsx`

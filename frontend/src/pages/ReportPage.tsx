@@ -31,18 +31,9 @@ import { useAppMode } from "../components/AppModeContext";
 import { getAnalysisProcessingStage, getAnalysisStageDescription, getAnalysisStatusLabel, isAnalysisInProgress } from "../constants/analysisStatus";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import ZodiacAvatar from "../components/ZodiacAvatar";
-import {
-  canvasToCompressedBlob,
-  copyImageBlobToClipboard,
-  createShareImagePreview,
-  createShareImageResult,
-  drawRoundRect,
-  drawWrappedText,
-  measureWrappedText,
-  normalizeShareText,
-  shareImageFile,
-  ShareImagePreview,
-} from "../utils/shareCanvas";
+import { createShareImagePreview, type ShareImagePreview } from "../utils/shareCanvas";
+import { exportShareDocument } from "../utils/shareExport";
+import IslandShareDialog from "../modern/IslandShareDialog";
 
 const STATUS_TEXT: Record<string, string> = {
   pending: "冰宝（IceBuddy）已收到视频，正在准备分析环境…",
@@ -223,218 +214,27 @@ function formatActionConfirmation(report: AnalysisDetail["report"] | null | unde
   return `${family}${confirmed}${confidence}`;
 }
 
-async function createReportShareImage(analysis: AnalysisDetail) {
-  const canvas = document.createElement("canvas");
-  const width = 1080;
-  const scale = 1;
-
+function buildReportShareDocument(analysis: AnalysisDetail) {
   const report = analysis.report;
   const score = analysis.force_score ?? 0;
-  const topIssue = report?.issues?.[0];
-  const secondIssue = report?.issues?.[1];
-  const topImprovement = report?.improvements?.[0];
-  const summary = normalizeShareText(report?.summary, "本次报告已生成，建议结合训练重点继续练习。");
-  const focus = normalizeShareText(report?.training_focus, "先把动作做稳，再慢慢加速度。");
-  const commentText = normalizeShareText(analysis.note, "");
-  const commentResponse = normalizeShareText(report?.user_note_response, "");
-  const commentShareText = [commentText ? `Comments: ${commentText}` : "", commentResponse ? `AI: ${commentResponse}` : ""].filter(Boolean).join("  ");
-  const issueText = normalizeShareText(
-    topIssue ? `${topIssue.category}：${topIssue.description}` : null,
-    "本次没有识别到明显高风险问题。",
-  );
-  const secondIssueText = secondIssue
-    ? normalizeShareText(`${secondIssue.category}：${secondIssue.description}`, "")
-    : null;
-  const improvementText = normalizeShareText(
-    topImprovement ? `${topImprovement.target}：${topImprovement.action}` : null,
-    "保持低冲击、短时间、多鼓励的练习节奏。",
-  );
-  const actionTitle = normalizeShareSnippet(analysis.action_type, "滑冰复盘", 22);
-
-  const measureCanvas = document.createElement("canvas");
-  const measureCtx = measureCanvas.getContext("2d");
-  if (!measureCtx) {
-    throw new Error("share_image_canvas_failed");
-  }
-  const contentWidth = 856;
-  const textWidth = 760;
-  measureCtx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const summaryHeight = measureWrappedText(measureCtx, summary, contentWidth, 46);
-  measureCtx.font = "600 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const commentHeight = commentShareText ? Math.max(118, 70 + measureWrappedText(measureCtx, commentShareText, textWidth, 34, 3)) : 0;
-  const sections = [
-    { label: "核心问题", title: issueText, sub: secondIssueText, color: "#F97316", bg: "#FFF7ED" },
-    { label: "训练重点", title: focus, sub: null, color: "#2563EB", bg: "#EFF6FF" },
-    { label: "下一步建议", title: improvementText, sub: null, color: "#059669", bg: "#ECFDF5" },
-  ];
-  measureCtx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const sectionHeights = sections.map((section) => {
-    const titleHeight = measureWrappedText(measureCtx, section.title, textWidth, 40);
-    const subHeight = section.sub ? measureWrappedText(measureCtx, section.sub, textWidth, 32) : 0;
-    return Math.max(section.sub ? 176 : 152, 88 + titleHeight + (section.sub ? 14 + subHeight : 0) + 34);
-  });
-  const shareSubscores = normalizeSubscores(report?.subscores) ?? normalizeSubscores(analysis.bio_data?.bio_subscores);
-  const subscoreItems = Object.entries(shareSubscores ?? {})
-    .filter(([, value]) => value != null)
-    .map(([key, value]) => ({ key, label: SUBSCORE_LABELS[key] ?? key, value: value as number }))
-    .sort((a, b) => b.value - a.value);
-  const visibleSubscores = subscoreItems.length <= 5
-    ? subscoreItems
-    : [
-        subscoreItems[0],
-        subscoreItems[subscoreItems.length - 1],
-        ...subscoreItems
-          .filter((item) => item.value < 76 && item.key !== subscoreItems[0].key && item.key !== subscoreItems[subscoreItems.length - 1].key)
-          .slice(0, 1),
-      ].filter((item, index, list) => item && list.findIndex((candidate) => candidate.key === item.key) === index);
-  const subscoreBlockHeight = visibleSubscores.length ? 82 + visibleSubscores.length * 42 : 0;
-  const height = Math.min(
-    6000,
-    Math.max(
-      1080,
-      64 + 312 + 70 + summaryHeight + (commentHeight ? 26 + commentHeight : 0) + 70 + sectionHeights.reduce((sum, item) => sum + item + 32, 0) + (subscoreBlockHeight ? 24 + subscoreBlockHeight : 0) + 140,
-    ),
-  );
-  canvas.width = width * scale;
-  canvas.height = height * scale;
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("share_image_canvas_failed");
-  }
-  ctx.scale(scale, scale);
-
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#F8FBFF");
-  gradient.addColorStop(0.5, "#EEF7F4");
-  gradient.addColorStop(1, "#FFF7ED");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(255,255,255,0.86)";
-  drawRoundRect(ctx, 64, 64, width - 128, height - 128, 48);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(148,163,184,0.32)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.fillStyle = "#2563EB";
-  ctx.font = "700 30px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("冰宝诊断分享", 112, 142);
-
-  ctx.fillStyle = "#0F172A";
-  ctx.font = "800 58px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  drawWrappedText(ctx, actionTitle, 112, 230, 520, 66, 2);
-
-  ctx.fillStyle = "#64748B";
-  ctx.font = "500 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const skaterLabel = analysis.skater_name ? `${analysis.skater_name} · ` : "";
-  ctx.fillText(`${skaterLabel}${formatShortDate(analysis.created_at)}`, 112, 336);
-
-  ctx.fillStyle = "#DBEAFE";
-  drawRoundRect(ctx, 710, 142, 220, 220, 110);
-  ctx.fill();
-  ctx.strokeStyle = "#93C5FD";
-  ctx.lineWidth = 5;
-  ctx.stroke();
-  ctx.fillStyle = "#1D4ED8";
-  ctx.font = "800 72px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(String(score), 820, 248);
-  ctx.font = "700 26px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("Force Score", 820, 292);
-  ctx.fillStyle = "#64748B";
-  ctx.font = "600 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText(scoreLevelText(score), 820, 326);
-  ctx.textAlign = "start";
-
-  ctx.fillStyle = "#F59E0B";
-  ctx.font = "700 34px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText(scoreStars(score), 112, 416);
-
-  ctx.fillStyle = "#334155";
-  ctx.font = "500 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const summaryUsedHeight = drawWrappedText(ctx, summary, 112, 486, contentWidth, 46);
-
-  let y = 486 + summaryUsedHeight + 70;
-  if (commentShareText) {
-    y -= 44;
-    ctx.fillStyle = "#F8FAFC";
-    drawRoundRect(ctx, 112, y, contentWidth, commentHeight, 26);
-    ctx.fill();
-    ctx.fillStyle = "#0F766E";
-    ctx.font = "800 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillText("Comments", 152, y + 42);
-    ctx.fillStyle = "#334155";
-    ctx.font = "600 25px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    drawWrappedText(ctx, commentShareText, 152, y + 78, textWidth, 34, 3);
-    y += commentHeight + 54;
-  }
-  sections.forEach((section, index) => {
-    ctx.fillStyle = section.bg;
-    const blockHeight = sectionHeights[index];
-    drawRoundRect(ctx, 112, y, contentWidth, blockHeight, 28);
-    ctx.fill();
-    ctx.fillStyle = section.color;
-    ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillText(section.label, 152, y + 48);
-    ctx.fillStyle = "#0F172A";
-    ctx.font = "700 31px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    const usedHeight = drawWrappedText(ctx, section.title, 152, y + 94, textWidth, 40);
-    if (section.sub) {
-      ctx.fillStyle = "#64748B";
-      ctx.font = "500 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      drawWrappedText(ctx, section.sub, 152, y + 112 + usedHeight, textWidth, 32);
-    }
-    y += blockHeight + 32;
-  });
-
-  if (visibleSubscores.length) {
-    ctx.fillStyle = "#F8FAFC";
-    drawRoundRect(ctx, 112, y, contentWidth, subscoreBlockHeight, 26);
-    ctx.fill();
-    ctx.fillStyle = "#2563EB";
-    ctx.font = "800 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-    ctx.fillText("SUBSCORES", 152, y + 42);
-    visibleSubscores.forEach((item, index) => {
-      const rowY = y + 76 + index * 42;
-      ctx.fillStyle = "#334155";
-      ctx.font = "700 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      ctx.fillText(item.label, 152, rowY);
-      ctx.fillStyle = "#DBEAFE";
-      drawRoundRect(ctx, 388, rowY - 24, 410, 20, 10);
-      ctx.fill();
-      ctx.fillStyle = "#2563EB";
-      drawRoundRect(ctx, 388, rowY - 24, Math.max(18, 410 * (item.value / 100)), 20, 10);
-      ctx.fill();
-      ctx.fillStyle = "#0F172A";
-      ctx.font = "800 24px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      ctx.fillText(String(item.value), 830, rowY);
-    });
-    y += subscoreBlockHeight + 32;
-  }
-
-  ctx.strokeStyle = "rgba(148,163,184,0.34)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(112, y + 26);
-  ctx.lineTo(968, y + 26);
-  ctx.stroke();
-
-  ctx.fillStyle = "#475569";
-  ctx.font = "600 28px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("由冰宝（IceBuddy）生成", 112, y + 86);
-  ctx.fillStyle = "#94A3B8";
-  ctx.font = "500 22px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.fillText("训练建议仅供复盘参考，冰上动作请在教练或家长陪同下完成", 112, y + 126);
-
-  const blob = await canvasToCompressedBlob(canvas, { type: "image/jpeg", quality: 0.82, maxBytes: 1_500_000 });
-  const filename = `icebuddy-report-${analysis.id.slice(0, 8)}.jpg`;
-  return createShareImageResult(blob, filename);
+  const subscores = normalizeSubscores(report?.subscores) ?? normalizeSubscores(analysis.bio_data?.bio_subscores);
+  return {
+    eyebrow: "Animal Island · 复盘报告",
+    title: analysis.action_type || "滑冰复盘",
+    subtitle: `${analysis.skater_name ?? "IceBuddy"} · ${formatShortDate(analysis.created_at)}`,
+    intro: report?.summary ?? "本次报告已生成，建议结合训练重点继续练习。",
+    sections: [
+      { label: "Force Score", title: `${score} · ${scoreLevelText(score)}`, body: "本次动作的综合稳定性参考分。" },
+      ...(report?.issues ?? []).map((issue, index) => ({ label: index === 0 ? "核心问题" : "补充观察", title: issue.category, body: issue.description })),
+      { label: "训练重点", title: report?.training_focus ?? "先把动作做稳，再慢慢加速度。", body: "按当前节奏练习，并在教练或家长陪同下复盘。" },
+      ...(report?.improvements ?? []).map((item) => ({ label: "下一步建议", title: item.target, body: item.action })),
+      ...(analysis.note ? [{ label: "训练备注", title: analysis.note, body: report?.user_note_response ?? "" }] : []),
+      ...Object.entries(subscores ?? {}).filter(([, value]) => value != null).map(([key, value]) => ({ label: "评分维度", title: SUBSCORE_LABELS[key] ?? key, body: `${value} / 100` })),
+    ],
+    footer: "训练建议仅供复盘参考，冰上动作请在教练或家长陪同下完成。",
+    filename: `icebuddy-report-${analysis.id.slice(0, 8)}.jpg`,
+  };
 }
-
 function formatDuration(value?: number | null) {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return null;
@@ -753,7 +553,7 @@ export default function ReportPage() {
   const [isRetryPinOpen, setIsRetryPinOpen] = useState(false);
   const [retryMode, setRetryMode] = useState<"analysis" | "report">("analysis");
   const [isSharing, setIsSharing] = useState(false);
-  const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview | null>(null);
+  const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview[]>([]);
   const deferredAnalysis = useDeferredValue(analysis);
   const rawReportSubscores = normalizeSubscores(deferredAnalysis?.report?.subscores);
   const rawBioSubscores = normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
@@ -833,14 +633,6 @@ export default function ReportPage() {
     const timer = window.setTimeout(() => setCelebrateSkillName(null), 1400);
     return () => window.clearTimeout(timer);
   }, [autoUnlockedSkill?.name, celebratedSkillId, deferredAnalysis?.auto_unlocked_skill, deferredAnalysis?.skill_category]);
-
-  useEffect(() => {
-    return () => {
-      if (shareImagePreview?.url) {
-        URL.revokeObjectURL(shareImagePreview.url);
-      }
-    };
-  }, [shareImagePreview?.url]);
 
   useEffect(() => {
     setHideRetryAfterMissingVideo(false);
@@ -1107,56 +899,19 @@ export default function ReportPage() {
   };
 
   const handleShareReport = async () => {
-    if (!id || !deferredAnalysis || deferredAnalysis.status !== "completed") {
-      return;
-    }
-
+    if (!id || !deferredAnalysis || deferredAnalysis.status !== "completed") return;
     setIsSharing(true);
     setError(null);
     try {
-      const result = await createReportShareImage(deferredAnalysis);
-      const copiedToClipboard = await copyImageBlobToClipboard(result.blob);
-      setShareImagePreview((current) => {
-        if (current?.url) {
-          URL.revokeObjectURL(current.url);
-        }
-        return createShareImagePreview(result, copiedToClipboard);
-      });
-      showNotice(copiedToClipboard ? "分享图已生成并复制" : "分享图已生成");
-    } catch (requestError) {
-      if (axios.isAxiosError(requestError)) {
-        setError(String(requestError.response?.data?.detail ?? "分享图生成失败，请稍后重试。"));
-      } else {
-        setError("分享图生成失败，请稍后重试。");
-      }
+      const result = await exportShareDocument(buildReportShareDocument(deferredAnalysis));
+      setShareImagePreview(result.pages.map((page) => createShareImagePreview(page, false)));
+      showNotice("分享图已生成");
+    } catch {
+      setError("分享图生成失败，请稍后重试。");
     } finally {
       setIsSharing(false);
     }
   };
-
-  const handleCopyShareImage = async () => {
-    if (!shareImagePreview) {
-      return;
-    }
-    const copied = await copyImageBlobToClipboard(shareImagePreview.blob);
-    if (!copied) {
-      setError("当前浏览器不能直接复制图片，请先下载后分享。");
-      return;
-    }
-    setShareImagePreview((current) => (current ? { ...current, copiedToClipboard: true } : current));
-    showNotice("分享图已复制");
-  };
-
-  const handleNativeShareImage = async () => {
-    if (!shareImagePreview) {
-      return;
-    }
-    const shared = await shareImageFile(shareImagePreview.blob, shareImagePreview.filename, "IceBuddy 报告分享图");
-    if (!shared) {
-      setError("当前浏览器不支持直接系统分享图片，请先下载后保存或发送。");
-    }
-  };
-
   const requestRetryAnalysis = (mode: "analysis" | "report" = "analysis") => {
     if (!deferredAnalysis || isAnalysisInProgress(deferredAnalysis.status) || isRetryingAnalysis) {
       return;
@@ -1551,63 +1306,9 @@ export default function ReportPage() {
         />
       ) : null}
 
-      {shareImagePreview ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/36 px-4 py-6 backdrop-blur-sm">
-          <section className="app-card max-h-[92vh] w-full max-w-3xl overflow-y-auto p-5 tablet:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Share Image</p>
-                <h2 className="mt-2 text-2xl font-semibold text-slate-900">报告分享图</h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  {shareImagePreview.copiedToClipboard
-                    ? "已复制到剪贴板，也可以用系统分享保存或发送。"
-                    : shareImagePreview.canNativeShare
-                      ? "可用系统分享保存到照片或发送给别人。"
-                      : "当前浏览器未开放图片分享能力，可下载后保存。"}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">{Math.max(1, Math.round(shareImagePreview.sizeBytes / 1024))} KB · JPEG</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShareImagePreview(null)}
-                className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
-              >
-                关闭
-              </button>
-            </div>
-
-            <div className="mt-5 overflow-hidden rounded-[28px] border border-slate-200 bg-slate-100">
-              <img src={shareImagePreview.url} alt="报告分享图预览" className="mx-auto block max-h-[62vh] w-auto max-w-full object-contain" />
-            </div>
-
-            <div className="mt-5 flex flex-wrap justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => void handleNativeShareImage()}
-                disabled={!shareImagePreview.canNativeShare}
-                className="min-h-[44px] rounded-full border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                系统分享/保存
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleCopyShareImage()}
-                className="min-h-[44px] rounded-full border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
-              >
-                复制图片
-              </button>
-              <a
-                href={shareImagePreview.url}
-                download={shareImagePreview.filename}
-                className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
-              >
-                下载图片
-              </a>
-            </div>
-          </section>
-        </div>
+      {shareImagePreview.length ? (
+        <IslandShareDialog preview={null} previews={shareImagePreview} title="报告分享图" onClose={() => setShareImagePreview([])} />
       ) : null}
-
       {celebrateSkillName ? <UnlockCelebration label={celebrateSkillName} /> : null}
     </div>
   );

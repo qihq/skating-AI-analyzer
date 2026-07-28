@@ -24,7 +24,8 @@ import AnnualChapterPicker from "../components/AnnualChapterPicker";
 import AnnualExportStatus from "../components/AnnualExportStatus";
 import AnnualMilestonePicker from "../components/AnnualMilestonePicker";
 import IslandShareDialog from "../modern/IslandShareDialog";
-import { createAdaptiveSharePoster, createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
+import { exportShareDocument } from "../utils/shareExport";
 import { Button, Card, Collapse, Input, Select, Table, Tag } from "../modern/AnimalUi";
 import { useAppMode } from "../components/AppModeContext";
 import ModernConfirmModal from "../modern/ModernConfirmModal";
@@ -51,7 +52,7 @@ export default function AnnualCollectionPage() {
   const [exportJob, setExportJob] = useState<AnnualExport | null>(null);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sharePreview, setSharePreview] = useState<ShareImagePreview | null>(null);
+  const [sharePreview, setSharePreview] = useState<ShareImagePreview[]>([]);
   const [collections, setCollections] = useState<AnnualCollection[]>([]);
   const [recycledCollections, setRecycledCollections] = useState<AnnualCollection[]>([]);
   const [editingCollection, setEditingCollection] = useState<AnnualCollection | null>(null);
@@ -170,7 +171,7 @@ export default function AnnualCollectionPage() {
     if (!exportJob || exportJob.status !== "completed") return;
     const skater = skaters.find((item) => item.id === skaterId);
     const highlights = chapters.slice(0, 4).map((chapter) => `${chapter.year_month}: ${chapter.final_text || chapter.draft_text || "月度记录"}`).join("\n");
-    const result = await createAdaptiveSharePoster({
+    const result = await exportShareDocument({
       eyebrow: "Animal Island · 年度合集",
       title: `${year} 年成长合集`,
       subtitle: skater?.display_name || skater?.name || "训练档案",
@@ -178,7 +179,7 @@ export default function AnnualCollectionPage() {
       sections: [{ label: "年度亮点", title: "这一年的小岛足迹", body: highlights || "每一次练习都值得被记录。", meta: "PDF 完整合集可下载分享" }],
       filename: `annual-collection-${year}.jpg`,
     });
-    setSharePreview(createShareImagePreview(result, false));
+    setSharePreview(result.pages.map((page) => createShareImagePreview(page, false)));
   };
 
   return (
@@ -203,9 +204,10 @@ export default function AnnualCollectionPage() {
       <Collapse question={`年度回收站（${recycledCollections.length}）`} answer={<div className="space-y-3">{recycledCollections.length ? recycledCollections.map((item) => <Card key={item.id} pattern="app-red"><div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title} · 第 {item.revision} 版</strong><div className="flex gap-2"><Button onClick={() => void restoreCollection(item.id)} disabled={working || !online}>恢复</Button><Button danger onClick={() => confirmPermanentDelete(item)} disabled={working || !online}>永久删除</Button></div></div></Card>) : <p>回收站为空。</p>}</div>} />
       {exportJob?.status === "completed" ? <Button type="primary" onClick={() => void handleShareAnnual()}>分享年度合集</Button> : null}
       <IslandShareDialog
-        preview={sharePreview}
+        preview={null}
+        previews={sharePreview}
         title="年度合集分享"
-        onClose={() => setSharePreview(null)}
+        onClose={() => setSharePreview([])}
         extraActions={exportJob?.status === "completed" ? <a className="island-button island-button--secondary" href={`/api/annual/exports/${exportJob.id}/download`} download={`annual-collection-${year}.pdf`}>下载 PDF</a> : null}
       />
       <ModernConfirmModal open={Boolean(confirmation)} title={confirmation?.title || "确认操作"} description={confirmation?.description || ""} confirmLabel={confirmation?.label || "确认"} danger loading={working} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation?.run; if (!action) return; void action().finally(() => setConfirmation(null)); }} />

@@ -32,14 +32,9 @@ import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlay
 import { useSynchronizedMediaGroup } from "../media/useSynchronizedMediaGroup";
 import ReportCard from "../components/ReportCard";
 import { parseApiDate } from "../utils/datetime";
-import {
-  copyImageBlobToClipboard,
-  createAdaptiveSharePoster,
-  createShareImagePreview,
-  normalizeShareText,
-  shareImageFile,
-  ShareImagePreview,
-} from "../utils/shareCanvas";
+import { createShareImagePreview, normalizeShareText, ShareImagePreview } from "../utils/shareCanvas";
+import { exportShareDocument } from "../utils/shareExport";
+import IslandShareDialog from "../modern/IslandShareDialog";
 
 const ISSUE_STYLES: Record<string, string> = {
   high: "border-rose-400/45 bg-rose-500/10",
@@ -192,7 +187,7 @@ function getRequestErrorMessage(requestError: unknown, fallback: string) {
   return fallback;
 }
 
-async function createCompareShareImage(data: AnalysisCompareResponse) {
+function createCompareShareDocument(data: AnalysisCompareResponse) {
   const before = data.analysis_a;
   const after = data.analysis_b;
   const actionTitle = normalizeShareSnippet(after.action_subtype || after.skill_category || after.action_type, "æ»‘å†°å¯¹æ¯”å¤ç›˜", 24);
@@ -267,18 +262,15 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
         ]
       : []),
   ];
-  return createAdaptiveSharePoster({
+  return {
     eyebrow: "å†°å®å¯¹æ¯”åˆ†äº«",
     title: `${actionTitle} è¿›æ­¥å¤ç›˜`,
     subtitle: `${skaterLabel} Â· ${formatShortDate(before.created_at)} â†’ ${formatShortDate(after.created_at)}`,
-    scoreLabel: "Score Î”",
-    scoreValue: `${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`,
-    scoreMeta: `${before.force_score ?? "--"} â†’ ${after.force_score ?? "--"}`,
     intro: narrative,
     sections,
     footer: "å¯¹æ¯”ç»“è®ºä»…ä¾›å¤ç›˜å‚è€ƒï¼Œå†°ä¸ŠåŠ¨ä½œè¯·åœ¨æ•™ç»ƒæˆ–å®¶é•¿é™ªåŒä¸‹å®Œæˆ",
     filename: `icebuddy-compare-${after.id.slice(0, 8)}.jpg`,
-  });
+  };
 }
 
 function VideoPane({ title, side, manifest, playerRef }: { title: string; side: CompareVideoSide; manifest: MediaManifest | null; playerRef: React.RefObject<IceMediaPlayerHandle | null> }) {
@@ -688,7 +680,7 @@ export default function ComparePage() {
   const [isRetrying, setIsRetrying] = useState(false);
   const [pollVersion, setPollVersion] = useState(0);
   const [isSharing, setIsSharing] = useState(false);
-  const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview | null>(null);
+  const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview[]>([]);
 
   useEffect(() => {
     if (comparison_id) {
@@ -761,14 +753,6 @@ export default function ComparePage() {
     };
   }, [comparison_id, pollVersion]);
 
-  useEffect(() => {
-    return () => {
-      if (shareImagePreview?.url) {
-        URL.revokeObjectURL(shareImagePreview.url);
-      }
-    };
-  }, [shareImagePreview?.url]);
-
   const hasContent = useMemo(() => Boolean(data && !error), [data, error]);
   const isWorking = comparison?.status === "pending" || comparison?.status === "processing";
   const canRetry = Boolean(comparison_id && comparison?.status === "failed");
@@ -798,51 +782,19 @@ export default function ComparePage() {
   };
 
   const handleShareCompare = async () => {
-    if (!data) {
-      return;
-    }
+    if (!data) return;
     setIsSharing(true);
     setError(null);
     try {
-      const result = await createCompareShareImage(data);
-      const copiedToClipboard = await copyImageBlobToClipboard(result.blob);
-      setShareImagePreview((current) => {
-        if (current?.url) {
-          URL.revokeObjectURL(current.url);
-        }
-        return createShareImagePreview(result, copiedToClipboard);
-      });
-      showNotice(copiedToClipboard ? "åˆ†äº«å›¾å·²ç”Ÿæˆå¹¶å¤åˆ¶" : "åˆ†äº«å›¾å·²ç”Ÿæˆ");
+      const result = await exportShareDocument(createCompareShareDocument(data));
+      setShareImagePreview(result.pages.map((page) => createShareImagePreview(page, false)));
+      showNotice("分享图已生成");
     } catch {
-      setError("åˆ†äº«å›¾ç”Ÿæˆå¤±è´¥ï¼Œè¯·ç¨åŽé‡è¯•ã€‚");
+      setError("分享图生成失败，请稍后重试。");
     } finally {
       setIsSharing(false);
     }
   };
-
-  const handleCopyShareImage = async () => {
-    if (!shareImagePreview) {
-      return;
-    }
-    const copied = await copyImageBlobToClipboard(shareImagePreview.blob);
-    if (!copied) {
-      setError("å½“å‰æµè§ˆå™¨ä¸èƒ½ç›´æŽ¥å¤åˆ¶å›¾ç‰‡ï¼Œè¯·å…ˆä¸‹è½½åŽåˆ†äº«ã€‚");
-      return;
-    }
-    setShareImagePreview((current) => (current ? { ...current, copiedToClipboard: true } : current));
-    showNotice("åˆ†äº«å›¾å·²å¤åˆ¶");
-  };
-
-  const handleNativeShareImage = async () => {
-    if (!shareImagePreview) {
-      return;
-    }
-    const shared = await shareImageFile(shareImagePreview.blob, shareImagePreview.filename, "IceBuddy å¯¹æ¯”åˆ†äº«å›¾");
-    if (!shared) {
-      setError("å½“å‰æµè§ˆå™¨ä¸æ”¯æŒç›´æŽ¥ç³»ç»Ÿåˆ†äº«å›¾ç‰‡ï¼Œè¯·å…ˆä¸‹è½½åŽä¿å­˜æˆ–å‘é€ã€‚");
-    }
-  };
-
   return (
     <div className="min-w-0 space-y-6 overflow-x-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -906,62 +858,7 @@ export default function ComparePage() {
         </div>
       ) : null}
 
-      {shareImagePreview ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/36 px-4 py-6 backdrop-blur-sm">
-          <section className="app-card max-h-[92vh] w-full max-w-3xl overflow-y-auto p-5 tablet:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Share Image</p>
-                <h2 className="mt-2 text-2xl font-semibold text-slate-900">å¯¹æ¯”åˆ†äº«å›¾</h2>
-                <p className="mt-2 text-sm text-slate-500">
-                  {shareImagePreview.copiedToClipboard
-                    ? "å·²å¤åˆ¶åˆ°å‰ªè´´æ¿ï¼Œä¹Ÿå¯ä»¥ç”¨ç³»ç»Ÿåˆ†äº«ä¿å­˜æˆ–å‘é€ã€‚"
-                    : shareImagePreview.canNativeShare
-                      ? "å¯ç”¨ç³»ç»Ÿåˆ†äº«ä¿å­˜åˆ°ç…§ç‰‡æˆ–å‘é€ç»™åˆ«äººã€‚"
-                      : "å½“å‰æµè§ˆå™¨æœªå¼€æ”¾å›¾ç‰‡åˆ†äº«èƒ½åŠ›ï¼Œå¯ä¸‹è½½åŽä¿å­˜ã€‚"}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">{Math.max(1, Math.round(shareImagePreview.sizeBytes / 1024))} KB Â· JPEG</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShareImagePreview(null)}
-                className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
-              >
-                å…³é—­
-              </button>
-            </div>
-
-            <div className="mt-5 max-h-[62vh] overflow-auto rounded-[28px] border border-slate-200 bg-slate-100">
-              <img src={shareImagePreview.url} alt="å¯¹æ¯”åˆ†äº«å›¾é¢„è§ˆ" className="mx-auto block h-auto w-full max-w-[720px]" />
-            </div>
-
-            <div className="mt-5 flex flex-wrap justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => void handleNativeShareImage()}
-                disabled={!shareImagePreview.canNativeShare}
-                className="min-h-[44px] rounded-full border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                ç³»ç»Ÿåˆ†äº«/ä¿å­˜
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleCopyShareImage()}
-                className="min-h-[44px] rounded-full border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
-              >
-                å¤åˆ¶å›¾ç‰‡
-              </button>
-              <a
-                href={shareImagePreview.url}
-                download={shareImagePreview.filename}
-                className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
-              >
-                ä¸‹è½½å›¾ç‰‡
-              </a>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <IslandShareDialog preview={null} previews={shareImagePreview} title="对比分享图" onClose={() => setShareImagePreview([])} />
     </div>
   );
 }
