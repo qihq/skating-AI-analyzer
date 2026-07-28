@@ -1,7 +1,9 @@
 # Unified Animal Island Media and Review Design
 
-**Date:** 2026-07-28  
-**Status:** Approved  
+**Date:** 2026-07-28
+
+**Status:** Approved
+
 **Scope:** Navigation selection, action-frame coverage, sharing, submit feedback, and all video/pose playback surfaces
 
 ## Goals
