@@ -51,6 +51,12 @@ npm test -- src/navigation.test.ts src/modern/ModernNavigation.test.tsx
 
 ## Task 2: Original-Library Adapter and Submit State Machine
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/hooks/useSubmitAction.test.tsx src/modern/SubmitButton.test.tsx` (4 passed); `npm run build` passed.
+
+**Implementation notes:** Added a shared duplicate-safe submit state machine and a `SubmitButton` backed by the installed Animal Island Button. It uses the package loading animation, emits original-library error notifications, and adds only the IceBuddy success check/bounce with a reduced-motion fallback. Page-by-page migration remains Task 14.
+
 **Files:**
 
 - Modify: `frontend/src/modern/AnimalUi.tsx`
