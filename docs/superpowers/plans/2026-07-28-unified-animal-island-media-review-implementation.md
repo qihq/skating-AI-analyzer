@@ -445,6 +445,12 @@ npm test -- src/media/useSynchronizedMediaGroup.test.tsx src/pages/ComparePage.t
 
 ## Task 12: Multipage Adaptive Share Engine
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/utils/shareLayout.test.ts src/utils/shareExport.test.ts src/modern/IslandShareDialog.test.tsx` (3 passed); `npm run build` passed.
+
+**Implementation notes:** Added a document-level share model with semantic-card pagination and a multi-page export adapter on top of the existing adaptive Canvas renderer, retaining its single-page API for compatibility. The Animal Island share dialog now accepts a page set, safely revokes every preview URL, supports per-page selection, current/all downloads, and multi-file native sharing when the browser supports it. Source-by-source adoption is deferred to Task 13.
+
 **Files:**
 
 - Refactor: `frontend/src/utils/shareCanvas.ts`

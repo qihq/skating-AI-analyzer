@@ -421,6 +421,18 @@ export async function shareImageFile(blob: Blob, filename: string, title = "IceB
   }
 }
 
+export async function shareImageFiles(items: Array<Pick<ShareImageResult, "blob" | "filename">>, title = "IceBuddy 分享图", text?: string) {
+  if (!navigator.share || !items.length) return false;
+  try {
+    const files = items.map((item) => new File([item.blob], item.filename, { type: item.blob.type }));
+    if (navigator.canShare && !navigator.canShare({ files })) return false;
+    await navigator.share({ title, text, files });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createShareImageResult(blob: Blob, filename: string): ShareImageResult {
   return {
     blob,
