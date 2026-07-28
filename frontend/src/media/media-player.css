@@ -1,0 +1,12 @@
+.ice-media-controls { display: grid; gap: .65rem; padding: .7rem; color: var(--island-text, #6f5a3d); }
+.ice-media-controls__row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
+.ice-media-controls__time { min-width: 7.5rem; font-variant-numeric: tabular-nums; }
+.ice-media-controls__loading { color: var(--island-teal-dark, #0b7e77); }
+.ice-media-controls__error { color: #b44d42; }
+.ice-media-timeline { position: relative; height: 2rem; display: grid; align-items: center; }
+.ice-media-timeline__buffer { position: absolute; left: .5rem; right: .5rem; height: .35rem; border-radius: 99px; background: #ded5c3; overflow: hidden; pointer-events: none; }
+.ice-media-timeline__buffer span { position: absolute; height: 100%; background: #9edfd8; }
+.ice-media-timeline__buffer i { position: absolute; width: .45rem; height: .45rem; margin-left: -.22rem; border-radius: 50%; background: var(--island-sun, #f3c84b); }
+.ice-media-timeline input { position: relative; width: 100%; min-height: 44px; accent-color: var(--island-teal, #19b9ab); }
+@media (max-width: 640px) { .ice-media-controls__time { order: -1; width: 100%; } .ice-media-controls__row > button { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .ice-media-controls * { transition: none !important; } }

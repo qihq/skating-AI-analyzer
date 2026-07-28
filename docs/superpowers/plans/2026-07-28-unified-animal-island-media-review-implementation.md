@@ -296,6 +296,12 @@ npm test -- src/media/useMediaController.test.tsx src/media/qualitySelection.tes
 
 ## Task 8: Timeline and Animal Island Media Controls
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/media/MediaTimeline.test.tsx src/media/MediaControls.test.tsx` (2 passed); `npm run build` passed.
+
+**Implementation notes:** Added an accessible Animal Island control strip with buffered timeline, drag-preview/release-commit behavior, marker jumps, five-second seeking, mute, rate, available-quality selection, loading/error state, 44px phone targets, and a reduced-motion path. The layout uses one semantic order and wraps at the phone breakpoint.
+
 **Files:**
 
 - Add: `frontend/src/media/MediaTimeline.tsx`
