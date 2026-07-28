@@ -257,6 +257,12 @@ python -m pytest backend/tests/test_media_renditions.py backend/tests/test_analy
 
 ## Task 7: Frontend Media Types and Controller
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/media/useMediaController.test.tsx src/media/qualitySelection.test.ts src/media/formatTime.test.ts` (3 passed); `npm run build` passed.
+
+**Implementation notes:** Frontend analysis types now expose the media manifest and refresh helper. The shared controller centralizes media state, separates drag preview from committed seeking, tracks buffering/buffered ranges and playback settings, and restores source state on failed quality changes. Auto quality selects from available renditions based on viewport/DPR; manual quality remains pinned.
+
 **Files:**
 
 - Modify: `frontend/src/api/client.ts`

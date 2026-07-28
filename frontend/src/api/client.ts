@@ -167,8 +167,27 @@ export interface AnalysisListItem {
 
 export type QuoteSpeaker = "skater" | "parent" | "coach";
 
+export type MediaQuality = "auto" | "original" | "1080p" | "720p" | "480p";
+
+export interface MediaSource {
+  quality: Exclude<MediaQuality, "auto">;
+  status: "pending" | "processing" | "ready" | "failed" | string;
+  width: number | null;
+  height: number | null;
+  url: string | null;
+  filename: string | null;
+  error: string | null;
+}
+
+export interface MediaManifest {
+  schema_version: string;
+  status: "processing" | "ready" | string;
+  sources: MediaSource[];
+}
+
 export interface AnalysisDetail extends AnalysisListItem {
   video_path: string;
+  media_manifest: MediaManifest | null;
   vision_raw: string | null;
   vision_structured: VisionStructuredData | null;
   vision_path_a: Record<string, unknown> | null;
@@ -1093,6 +1112,11 @@ export async function fetchAnalysis(id: string, options?: { isParentRequest?: bo
   const response = await apiClient.get<AnalysisDetail>(`/analysis/${id}`, {
     params: options?.isParentRequest ? { is_parent_request: true } : undefined,
   });
+  return response.data;
+}
+
+export async function fetchAnalysisMedia(id: string) {
+  const response = await apiClient.get<MediaManifest>(`/analysis/${id}/media`);
   return response.data;
 }
 
