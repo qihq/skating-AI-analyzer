@@ -412,6 +412,12 @@ npm run build
 
 ## Task 11: Synchronized Comparison Playback
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/media/useSynchronizedMediaGroup.test.tsx` (1 passed); `npm run build` passed.
+
+**Implementation notes:** Comparison playback now uses paired `IceMediaPlayer` instances, with a dedicated synchronized-media hook for normalized action-window seeks, T/A/L pair jumps, proportional rate compensation, play/pause, and conservative 800ms drift correction. Each analysis refreshes its own rendition manifest, so quality selection remains independently available while group commands stay synchronized.
+
 **Files:**
 
 - Add: `frontend/src/media/useSynchronizedMediaGroup.ts`

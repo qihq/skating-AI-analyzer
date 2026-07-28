@@ -14,7 +14,7 @@ export type IceMediaPlayerHandle = {
 
 type Props = { manifest?: MediaManifest | null; fallbackSrc?: string; pose?: PoseResponse | null; markers?: MediaMarker[]; mode?: "video" | "pose" | "overlay"; className?: string; onTimeChange?: (timestamp: number) => void; seekTime?: number | null };
 
-export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle, Props>(function IceMediaPlayer({ manifest, fallbackSrc, pose, markers = [], mode = "video", className = "", onTimeChange, seekTime }, forwardedRef) {
+export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(function IceMediaPlayer({ manifest, fallbackSrc, pose, markers = [], mode = "video", className = "", onTimeChange, seekTime }, forwardedRef) {
   const fallbackManifest: MediaManifest | null = manifest ?? (fallbackSrc ? { schema_version: "fallback", status: "ready", sources: [{ quality: "original", status: "ready", width: null, height: null, url: fallbackSrc, filename: null, error: null }] } : null);
   const controller = useMediaController(fallbackManifest);
   const videoRef = useRef<HTMLVideoElement | null>(null);

@@ -1,5 +1,5 @@
-import axios from "axios";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import axios from "axios";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Bar,
@@ -23,9 +23,13 @@ import {
   CompareKeyframeSide,
   CompareVideoSide,
   createAnalysisComparison,
+  fetchAnalysisMedia,
   fetchAnalysisComparison,
   retryAnalysisComparison,
+  type MediaManifest,
 } from "../api/client";
+import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlayer";
+import { useSynchronizedMediaGroup } from "../media/useSynchronizedMediaGroup";
 import ReportCard from "../components/ReportCard";
 import { parseApiDate } from "../utils/datetime";
 import {
@@ -44,18 +48,6 @@ const ISSUE_STYLES: Record<string, string> = {
 };
 
 const SPEED_OPTIONS = [0.25, 0.5, 1] as const;
-
-type VideoEntry = {
-  video: HTMLVideoElement;
-  side: CompareVideoSide;
-};
-
-function prepareVideoForSync(video: HTMLVideoElement) {
-  video.muted = true;
-  video.defaultMuted = true;
-  video.volume = 0;
-  video.playsInline = true;
-}
 
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -127,15 +119,15 @@ function videoAiDirectionTone(direction: string) {
 
 function videoAiDirectionLabel(direction: string) {
   if (direction === "improved") {
-    return "改善";
+    return "æ”¹å–„";
   }
   if (direction === "regressed") {
-    return "需关注";
+    return "éœ€å…³æ³¨";
   }
   if (direction === "unchanged") {
-    return "稳定";
+    return "ç¨³å®š";
   }
-  return "观察";
+  return "è§‚å¯Ÿ";
 }
 
 function deltaBarWidth(delta: number | null) {
@@ -157,21 +149,21 @@ function normalizeShareSnippet(value: string | null | undefined, fallback: strin
   if (!text) {
     return fallback;
   }
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}â€¦` : text;
 }
 
 function comparisonStatusLabel(status: string) {
   if (status === "pending") {
-    return "等待生成";
+    return "ç­‰å¾…ç”Ÿæˆ";
   }
   if (status === "processing") {
-    return "生成中";
+    return "ç”Ÿæˆä¸­";
   }
   if (status === "completed") {
-    return "已完成";
+    return "å·²å®Œæˆ";
   }
   if (status === "failed") {
-    return "生成失败";
+    return "ç”Ÿæˆå¤±è´¥";
   }
   return status;
 }
@@ -200,61 +192,12 @@ function getRequestErrorMessage(requestError: unknown, fallback: string) {
   return fallback;
 }
 
-function waitForVideoMetadata(video: HTMLVideoElement) {
-  if (video.readyState >= 1) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    const cleanup = () => {
-      video.removeEventListener("loadedmetadata", handleReady);
-      video.removeEventListener("error", handleReady);
-    };
-    const handleReady = () => {
-      cleanup();
-      resolve();
-    };
-    video.addEventListener("loadedmetadata", handleReady, { once: true });
-    video.addEventListener("error", handleReady, { once: true });
-  });
-}
-
-function waitForVideoReady(video: HTMLVideoElement, timeoutMs = 5000) {
-  if (video.readyState >= 3 && !video.seeking) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    const cleanup = () => {
-      window.clearTimeout(timer);
-      video.removeEventListener("canplay", handleReady);
-      video.removeEventListener("seeked", handleSeeked);
-      video.removeEventListener("error", handleReady);
-    };
-    const handleReady = () => {
-      cleanup();
-      resolve();
-    };
-    const handleSeeked = () => {
-      if (video.readyState >= 2) handleReady();
-    };
-    const timer = window.setTimeout(handleReady, timeoutMs);
-    video.addEventListener("canplay", handleReady, { once: true });
-    video.addEventListener("seeked", handleSeeked);
-    video.addEventListener("error", handleReady, { once: true });
-  });
-}
-
-function seekVideoTo(video: HTMLVideoElement, value: number) {
-  const duration = Number.isFinite(video.duration) ? video.duration : null;
-  const clamped = duration ? Math.min(Math.max(0, value), Math.max(0, duration - 0.02)) : Math.max(0, value);
-  video.currentTime = clamped;
-}
-
 async function createCompareShareImage(data: AnalysisCompareResponse) {
   const before = data.analysis_a;
   const after = data.analysis_b;
-  const actionTitle = normalizeShareSnippet(after.action_subtype || after.skill_category || after.action_type, "滑冰对比复盘", 24);
-  const skaterLabel = before.skater_name ?? after.skater_name ?? "小运动员";
-  const narrative = normalizeShareText(data.ai_narrative, "本次对比结果已生成，建议结合评分、关键帧和教练现场观察继续复盘。");
+  const actionTitle = normalizeShareSnippet(after.action_subtype || after.skill_category || after.action_type, "æ»‘å†°å¯¹æ¯”å¤ç›˜", 24);
+  const skaterLabel = before.skater_name ?? after.skater_name ?? "å°è¿åŠ¨å‘˜";
+  const narrative = normalizeShareText(data.ai_narrative, "æœ¬æ¬¡å¯¹æ¯”ç»“æžœå·²ç”Ÿæˆï¼Œå»ºè®®ç»“åˆè¯„åˆ†ã€å…³é”®å¸§å’Œæ•™ç»ƒçŽ°åœºè§‚å¯Ÿç»§ç»­å¤ç›˜ã€‚");
   const improved = data.summary.improved[0];
   const added = data.summary.added[0];
   const bestMetric = data.metric_deltas.find((item) => item.available && typeof item.delta === "number");
@@ -264,34 +207,34 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
     .map((item) => {
       const beforeText = item.before.timestamp != null ? `${item.before.timestamp.toFixed(2)}s` : "--";
       const afterText = item.after.timestamp != null ? `${item.after.timestamp.toFixed(2)}s` : "--";
-      const rhythm = item.relative_delta_seconds != null ? `，节奏 ${signedValue(item.relative_delta_seconds, "s")}` : "";
-      return `${item.label}：${beforeText} → ${afterText}${rhythm}`;
+      const rhythm = item.relative_delta_seconds != null ? `ï¼ŒèŠ‚å¥ ${signedValue(item.relative_delta_seconds, "s")}` : "";
+      return `${item.label}ï¼š${beforeText} â†’ ${afterText}${rhythm}`;
     })
-    .join("；");
+    .join("ï¼›");
   const sections = [
     {
-      label: "主要变化",
+      label: "ä¸»è¦å˜åŒ–",
       title: normalizeShareText(
-        improved ? `${improved.category}：${improved.description}` : null,
-        bestSubscore ? `${bestSubscore.label} ${signedValue(bestSubscore.delta, bestSubscore.unit)}` : "两次动作整体差异较小，适合继续观察稳定性。",
+        improved ? `${improved.category}ï¼š${improved.description}` : null,
+        bestSubscore ? `${bestSubscore.label} ${signedValue(bestSubscore.delta, bestSubscore.unit)}` : "ä¸¤æ¬¡åŠ¨ä½œæ•´ä½“å·®å¼‚è¾ƒå°ï¼Œé€‚åˆç»§ç»­è§‚å¯Ÿç¨³å®šæ€§ã€‚",
       ),
       color: "#059669",
       bg: "#ECFDF5",
     },
     {
-      label: "继续关注",
+      label: "ç»§ç»­å…³æ³¨",
       title: normalizeShareText(
-        added ? `${added.category}：${added.description}` : null,
-        data.summary.unchanged[0] ? `${data.summary.unchanged[0].category}：${data.summary.unchanged[0].description}` : "保持低冲击、短时间、多鼓励的训练节奏。",
+        added ? `${added.category}ï¼š${added.description}` : null,
+        data.summary.unchanged[0] ? `${data.summary.unchanged[0].category}ï¼š${data.summary.unchanged[0].description}` : "ä¿æŒä½Žå†²å‡»ã€çŸ­æ—¶é—´ã€å¤šé¼“åŠ±çš„è®­ç»ƒèŠ‚å¥ã€‚",
       ),
       color: "#F97316",
       bg: "#FFF7ED",
     },
     {
-      label: "量化参考",
+      label: "é‡åŒ–å‚è€ƒ",
       title: normalizeShareText(
-        bestMetric ? `${bestMetric.label} ${signedValue(bestMetric.delta, bestMetric.unit)}，${formatValue(bestMetric.before, bestMetric.unit)} → ${formatValue(bestMetric.after, bestMetric.unit)}` : null,
-        `${before.force_score ?? "--"} → ${after.force_score ?? "--"}，评分变化 ${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`,
+        bestMetric ? `${bestMetric.label} ${signedValue(bestMetric.delta, bestMetric.unit)}ï¼Œ${formatValue(bestMetric.before, bestMetric.unit)} â†’ ${formatValue(bestMetric.after, bestMetric.unit)}` : null,
+        `${before.force_score ?? "--"} â†’ ${after.force_score ?? "--"}ï¼Œè¯„åˆ†å˜åŒ– ${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`,
       ),
       color: "#2563EB",
       bg: "#EFF6FF",
@@ -299,11 +242,11 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
     ...(videoAi
       ? [
           {
-            label: "视频 AI 观察",
-            title: normalizeShareText(videoAi.summary, "视频 AI 宏观观察可作为评分和关键帧之外的辅助参考。"),
+            label: "è§†é¢‘ AI è§‚å¯Ÿ",
+            title: normalizeShareText(videoAi.summary, "è§†é¢‘ AI å®è§‚è§‚å¯Ÿå¯ä½œä¸ºè¯„åˆ†å’Œå…³é”®å¸§ä¹‹å¤–çš„è¾…åŠ©å‚è€ƒã€‚"),
             body: [
-              ...videoAi.changes.map((item) => `${item.category}：${item.description}`),
-              videoAi.training_focus ? `训练重点：${videoAi.training_focus}` : "",
+              ...videoAi.changes.map((item) => `${item.category}ï¼š${item.description}`),
+              videoAi.training_focus ? `è®­ç»ƒé‡ç‚¹ï¼š${videoAi.training_focus}` : "",
             ]
               .filter(Boolean)
               .join("\n"),
@@ -316,7 +259,7 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
     ...(keyframeSummary
       ? [
           {
-            label: "关键帧",
+            label: "å…³é”®å¸§",
             title: keyframeSummary,
             color: "#7C3AED",
             bg: "#F5F3FF",
@@ -325,351 +268,65 @@ async function createCompareShareImage(data: AnalysisCompareResponse) {
       : []),
   ];
   return createAdaptiveSharePoster({
-    eyebrow: "冰宝对比分享",
-    title: `${actionTitle} 进步复盘`,
-    subtitle: `${skaterLabel} · ${formatShortDate(before.created_at)} → ${formatShortDate(after.created_at)}`,
-    scoreLabel: "Score Δ",
+    eyebrow: "å†°å®å¯¹æ¯”åˆ†äº«",
+    title: `${actionTitle} è¿›æ­¥å¤ç›˜`,
+    subtitle: `${skaterLabel} Â· ${formatShortDate(before.created_at)} â†’ ${formatShortDate(after.created_at)}`,
+    scoreLabel: "Score Î”",
     scoreValue: `${data.score_delta >= 0 ? "+" : ""}${data.score_delta}`,
-    scoreMeta: `${before.force_score ?? "--"} → ${after.force_score ?? "--"}`,
+    scoreMeta: `${before.force_score ?? "--"} â†’ ${after.force_score ?? "--"}`,
     intro: narrative,
     sections,
-    footer: "对比结论仅供复盘参考，冰上动作请在教练或家长陪同下完成",
+    footer: "å¯¹æ¯”ç»“è®ºä»…ä¾›å¤ç›˜å‚è€ƒï¼Œå†°ä¸ŠåŠ¨ä½œè¯·åœ¨æ•™ç»ƒæˆ–å®¶é•¿é™ªåŒä¸‹å®Œæˆ",
     filename: `icebuddy-compare-${after.id.slice(0, 8)}.jpg`,
   });
 }
 
-function VideoPane({
-  title,
-  side,
-  videoRef,
-}: {
-  title: string;
-  side: CompareVideoSide;
-  videoRef: React.RefObject<HTMLVideoElement>;
-}) {
-  return (
-    <div className="min-w-0 overflow-hidden rounded-[22px] border border-slate-200 bg-white">
-      <div className="flex min-h-[68px] items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-        <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-blue-500">{title}</p>
-          <p className="mt-1 text-sm text-slate-500">
-            动作窗口 {formatValue(side.action_window_start, "s")} - {formatValue(side.action_window_end, "s")}
-          </p>
-        </div>
-        {side.is_slow_motion ? (
-          <span className="shrink-0 rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-600">
-            慢动作 {Math.round(side.source_fps ?? 0)}fps
-          </span>
-        ) : null}
-      </div>
-      <div className="aspect-video bg-slate-950">
-        {side.available && side.video_url ? (
-          <video
-            ref={videoRef}
-            src={side.video_url}
-            preload="auto"
-            muted
-            playsInline
-            disablePictureInPicture
-            controlsList="nodownload noplaybackrate"
-            className="h-full w-full object-contain"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-7 text-slate-400">
-            {side.missing_reason ?? "原视频不可用，仍可查看关键帧与量化对比。"}
-          </div>
-        )}
-      </div>
+function VideoPane({ title, side, manifest, playerRef }: { title: string; side: CompareVideoSide; manifest: MediaManifest | null; playerRef: React.RefObject<IceMediaPlayerHandle | null> }) {
+  return <div className="min-w-0 overflow-hidden rounded-[22px] border border-slate-200 bg-white">
+    <div className="flex min-h-[68px] items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+      <div><p className="text-xs uppercase tracking-[0.24em] text-blue-500">{title}</p><p className="mt-1 text-sm text-slate-500">动作窗口 {formatValue(side.action_window_start, "s")} - {formatValue(side.action_window_end, "s")}</p></div>
+      {side.is_slow_motion ? <span className="shrink-0 rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-600">慢动作 {Math.round(side.source_fps ?? 0)}fps</span> : null}
     </div>
-  );
+    {side.available && side.video_url ? <IceMediaPlayer ref={playerRef} manifest={manifest} fallbackSrc={side.video_url} /> : <div className="flex aspect-video items-center justify-center bg-slate-950 px-6 text-center text-sm leading-7 text-slate-400">{side.missing_reason ?? "原视频不可用，仍可查看关键帧与量化对比。"}</div>}
+  </div>;
 }
 
 function SyncedVideoSection({ data }: { data: AnalysisCompareResponse }) {
-  const beforeRef = useRef<HTMLVideoElement | null>(null);
-  const afterRef = useRef<HTMLVideoElement | null>(null);
-  const suppressMediaEventsRef = useRef(false);
-  const isPlayingRef = useRef(false);
-  const hasUserPositionedPlaybackRef = useRef(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState<(typeof SPEED_OPTIONS)[number]>(0.5);
+  const beforeRef = useRef<IceMediaPlayerHandle | null>(null);
+  const afterRef = useRef<IceMediaPlayerHandle | null>(null);
   const videoCompare = data.video_compare;
-
+  const [manifests, setManifests] = useState<{ before: MediaManifest | null; after: MediaManifest | null }>({ before: null, after: null });
+  const fallbackSide: CompareVideoSide = { analysis_id: "", video_url: null, available: false, missing_reason: null, action_window_start: null, action_window_end: null, action_window_duration: null, sync_start: null, sync_duration: null, is_slow_motion: false, source_fps: null };
+  const group = useSynchronizedMediaGroup(beforeRef, afterRef, videoCompare?.before ?? fallbackSide, videoCompare?.after ?? fallbackSide);
   useEffect(() => {
-    isPlayingRef.current = isPlaying;
-  }, [isPlaying]);
-
-  const getActionWindow = useCallback(
-    (side: CompareVideoSide) => {
-      const start = side.sync_start ?? side.action_window_start ?? 0;
-      const duration = side.sync_duration ?? side.action_window_duration ?? (side.action_window_end != null && side.action_window_start != null
-        ? side.action_window_end - side.action_window_start
-        : null);
-      return { start, duration: duration && duration > 0 ? duration : null };
-    },
-    [],
-  );
-
-  const isInsideActionWindow = useCallback(
-    (video: HTMLVideoElement, side: CompareVideoSide) => {
-      if (video.ended) {
-        return false;
-      }
-      const { start, duration } = getActionWindow(side);
-      const current = video.currentTime;
-      if (!Number.isFinite(current)) {
-        return false;
-      }
-      const tolerance = 0.08;
-      if (!duration) {
-        return current >= start - tolerance;
-      }
-      return current >= start - tolerance && current < start + duration - tolerance;
-    },
-    [getActionWindow],
-  );
-
-  const getPlayableEntries = useCallback((): VideoEntry[] => {
-    if (!videoCompare) {
-      return [];
-    }
-    const entries = [
-      { video: beforeRef.current, side: videoCompare.before },
-      { video: afterRef.current, side: videoCompare.after },
-    ].filter((entry): entry is VideoEntry => Boolean(entry.video && entry.side.available && entry.side.video_url));
-    entries.forEach(({ video }) => prepareVideoForSync(video));
-    return entries;
+    if (!videoCompare) return;
+    let cancelled = false;
+    void Promise.all([fetchAnalysisMedia(videoCompare.before.analysis_id), fetchAnalysisMedia(videoCompare.after.analysis_id)])
+      .then(([before, after]) => { if (!cancelled) setManifests({ before, after }); })
+      .catch(() => { if (!cancelled) setManifests({ before: null, after: null }); });
+    return () => { cancelled = true; };
   }, [videoCompare]);
+  if (!videoCompare) return null;
 
-  useEffect(() => {
-    getPlayableEntries();
-  }, [getPlayableEntries]);
-
-  const pauseEntries = useCallback((entries: VideoEntry[]) => {
-    suppressMediaEventsRef.current = true;
-    entries.forEach(({ video }) => video.pause());
-    setIsPlaying(false);
-    window.setTimeout(() => {
-      suppressMediaEventsRef.current = false;
-    }, 0);
-  }, []);
-
-  const seekBoth = useCallback(
-    async (relativePosition: number) => {
-      if (!videoCompare) {
-        return;
-      }
-      const entries = getPlayableEntries();
-      suppressMediaEventsRef.current = true;
-      await Promise.all(entries.map(({ video }) => waitForVideoMetadata(video)));
-      entries.forEach(({ video, side }) => {
-        const { start, duration } = getActionWindow(side);
-        if (duration) {
-          seekVideoTo(video, start + relativePosition * duration);
-        } else {
-          seekVideoTo(video, start + relativePosition);
-        }
-      });
-      await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
-      hasUserPositionedPlaybackRef.current = true;
-      window.setTimeout(() => {
-        suppressMediaEventsRef.current = false;
-      }, 0);
-    },
-    [videoCompare, getPlayableEntries, getActionWindow],
-  );
-
-  const seekKeyframe = useCallback(
-    async (pair: CompareKeyframePair) => {
-      if (!videoCompare) {
-        return;
-      }
-      const entries = [
-        { video: beforeRef.current as HTMLVideoElement | null, side: videoCompare.before, timestamp: pair.before.timestamp },
-        { video: afterRef.current as HTMLVideoElement | null, side: videoCompare.after, timestamp: pair.after.timestamp },
-      ].filter((entry): entry is VideoEntry & { timestamp: number | null } => Boolean(entry.video && entry.side.available && entry.side.video_url));
-      suppressMediaEventsRef.current = true;
-      await Promise.all(entries.map(({ video }) => waitForVideoMetadata(video)));
-      entries.forEach(({ video, side, timestamp }) => {
-        if (timestamp != null) {
-          seekVideoTo(video, timestamp);
-        } else {
-          const { start } = getActionWindow(side);
-          seekVideoTo(video, start);
-        }
-      });
-      await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
-      hasUserPositionedPlaybackRef.current = true;
-      window.setTimeout(() => {
-        suppressMediaEventsRef.current = false;
-      }, 0);
-    },
-    [videoCompare, getActionWindow],
-  );
-
-  const applyProportionalRates = useCallback(
-    (baseSpeed: number, options?: { fromCurrentPosition?: boolean }) => {
-      if (!videoCompare) {
-        return;
-      }
-      const entries = getPlayableEntries();
-      const comparableDurations = entries
-        .map(({ video, side }) => {
-          const { start, duration } = getActionWindow(side);
-          if (!duration) {
-            return null;
-          }
-          if (!options?.fromCurrentPosition) {
-            return duration;
-          }
-          return Math.max(0.1, start + duration - Math.max(video.currentTime, start));
-        })
-        .filter((duration): duration is number => typeof duration === "number" && Number.isFinite(duration) && duration > 0);
-      const maxDuration = Math.max(...comparableDurations, 1);
-
-      entries.forEach(({ video, side }) => {
-        prepareVideoForSync(video);
-        const { start, duration } = getActionWindow(side);
-        const comparableDuration = options?.fromCurrentPosition && duration
-          ? Math.max(0.1, start + duration - Math.max(video.currentTime, start))
-          : duration;
-        video.playbackRate = comparableDuration ? baseSpeed * (comparableDuration / maxDuration) : baseSpeed;
-      });
-    },
-    [videoCompare, getActionWindow, getPlayableEntries],
-  );
-
-  const setPlaybackRate = useCallback(
-    (nextSpeed: (typeof SPEED_OPTIONS)[number]) => {
-      setSpeed(nextSpeed);
-      applyProportionalRates(nextSpeed, { fromCurrentPosition: true });
-    },
-    [applyProportionalRates],
-  );
-
-  const togglePlayback = useCallback(async () => {
-    const entries = getPlayableEntries();
-    if (!entries.length) {
-      return;
-    }
-    if (isPlaying) {
-      pauseEntries(entries);
-      return;
-    }
-    suppressMediaEventsRef.current = true;
-    await Promise.all(entries.map(({ video }) => waitForVideoMetadata(video)));
-    const shouldRestartFromWindowStart = entries.some(({ video }) => video.ended);
-    entries.forEach(({ video, side }) => {
-      prepareVideoForSync(video);
-      if (shouldRestartFromWindowStart || (!hasUserPositionedPlaybackRef.current && !isInsideActionWindow(video, side))) {
-        const { start } = getActionWindow(side);
-        seekVideoTo(video, start);
-      }
-    });
-    await Promise.all(entries.map(({ video }) => waitForVideoReady(video)));
-    if (shouldRestartFromWindowStart) {
-      hasUserPositionedPlaybackRef.current = false;
-    }
-    applyProportionalRates(speed, { fromCurrentPosition: true });
-    const results = await Promise.allSettled(entries.map(({ video }) => video.play()));
-    suppressMediaEventsRef.current = false;
-    const allStarted = results.every((result) => result.status === "fulfilled");
-    if (!allStarted) {
-      pauseEntries(entries);
-      setIsPlaying(false);
-      return;
-    }
-    hasUserPositionedPlaybackRef.current = true;
-    setIsPlaying(true);
-  }, [applyProportionalRates, getActionWindow, getPlayableEntries, isInsideActionWindow, isPlaying, pauseEntries, speed]);
-
-  useEffect(() => {
-    const entries = getPlayableEntries();
-    const handleEnded = () => {
-      pauseEntries(entries);
-    };
-    const handlePause = () => {
-      if (suppressMediaEventsRef.current) {
-        return;
-      }
-      if (isPlayingRef.current) {
-        pauseEntries(entries);
-        return;
-      }
-      setIsPlaying(entries.every(({ video }) => !video.paused && !video.ended));
-    };
-    entries.forEach(({ video }) => {
-      video.addEventListener("ended", handleEnded);
-      video.addEventListener("pause", handlePause);
-    });
-    return () => {
-      entries.forEach(({ video }) => {
-        video.removeEventListener("ended", handleEnded);
-        video.removeEventListener("pause", handlePause);
-      });
-    };
-  }, [getPlayableEntries, pauseEntries, speed]);
-
-  useEffect(() => {
-    applyProportionalRates(speed, { fromCurrentPosition: isPlayingRef.current || hasUserPositionedPlaybackRef.current });
-  }, [applyProportionalRates, speed]);
-
-  if (!videoCompare) {
-    return null;
-  }
-
-  return (
-    <ReportCard title="同步回放" eyebrow="Video Sync">
-      <div className="grid gap-4 lg:grid-cols-2">
-        <VideoPane title="之前" side={videoCompare.before} videoRef={beforeRef} />
-        <VideoPane title="现在" side={videoCompare.after} videoRef={afterRef} />
-      </div>
-
-      <div className="mt-4 rounded-[22px] border border-slate-200 bg-slate-50 p-3 tablet:p-4">
-        <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void togglePlayback()}
-              className="min-h-[44px] rounded-full bg-blue-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-600"
-            >
-              {isPlaying ? "暂停" : "同步播放"}
-            </button>
-            <button type="button" onClick={() => void seekBoth(0)} className="pill-link">
-              跳到动作开始
-            </button>
-            <span className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">全程静音</span>
-          </div>
-
-          <div className="flex w-fit rounded-full border border-slate-200 bg-white p-1">
-            {SPEED_OPTIONS.map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => setPlaybackRate(option)}
-                className={`min-h-[34px] rounded-full px-3 text-xs font-semibold transition ${
-                  speed === option ? "bg-blue-500 text-white" : "text-slate-500 hover:bg-slate-100"
-                }`}
-              >
-                {option}x
-              </button>
-            ))}
-          </div>
+  return <ReportCard title="同步回放" eyebrow="Video Sync">
+    <div className="grid gap-4 lg:grid-cols-2">
+      <VideoPane title="之前" side={videoCompare.before} manifest={manifests.before} playerRef={beforeRef} />
+      <VideoPane title="现在" side={videoCompare.after} manifest={manifests.after} playerRef={afterRef} />
+    </div>
+    <div className="mt-4 rounded-[22px] border border-slate-200 bg-slate-50 p-3 tablet:p-4">
+      <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => void group.togglePlayback()} className="min-h-[44px] rounded-full bg-blue-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-600">{group.isPlaying ? "暂停" : "同步播放"}</button>
+          <button type="button" onClick={() => group.seekRelative(0)} className="pill-link">跳到动作开始</button>
+          <span className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">全程静音</span>
         </div>
-
-        {data.keyframe_compare.length ? (
-          <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-200 pt-3">
-            {data.keyframe_compare.map((item) => {
-              return (
-                <button key={item.key} type="button" onClick={() => void seekKeyframe(item)} className="pill-link">
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
+        <div className="flex w-fit rounded-full border border-slate-200 bg-white p-1">
+          {SPEED_OPTIONS.map((option) => <button key={option} type="button" onClick={() => group.setSpeed(option)} className={`min-h-[34px] rounded-full px-3 text-xs font-semibold transition ${group.speed === option ? "bg-blue-500 text-white" : "text-slate-500 hover:bg-slate-100"}`}>{option}x</button>)}
+        </div>
       </div>
-    </ReportCard>
-  );
+      {data.keyframe_compare.length ? <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-200 pt-3">{data.keyframe_compare.map((item) => <button key={item.key} type="button" onClick={() => group.seekKeyframe(item)} className="pill-link">{item.label}</button>)}</div> : null}
+    </div>
+  </ReportCard>;
 }
 
 function VideoAiInsightSection({ data }: { data: AnalysisCompareResponse }) {
@@ -678,29 +335,29 @@ function VideoAiInsightSection({ data }: { data: AnalysisCompareResponse }) {
     return null;
   }
 
-  const statusLabel = report.status === "completed" ? "完整视频已分析" : report.status === "partial" ? "部分视频已分析" : "视频 AI 辅助观察";
-  const modelLabel = [report.provider, report.model].filter(Boolean).join(" / ") || "vision 模型";
+  const statusLabel = report.status === "completed" ? "å®Œæ•´è§†é¢‘å·²åˆ†æž" : report.status === "partial" ? "éƒ¨åˆ†è§†é¢‘å·²åˆ†æž" : "è§†é¢‘ AI è¾…åŠ©è§‚å¯Ÿ";
+  const modelLabel = [report.provider, report.model].filter(Boolean).join(" / ") || "vision æ¨¡åž‹";
   const primaryChange = report.changes[0];
 
   return (
-    <ReportCard title="视频 AI 观察" eyebrow="Full Video">
+    <ReportCard title="è§†é¢‘ AI è§‚å¯Ÿ" eyebrow="Full Video">
       <div className="space-y-5">
         <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
           <div>
             <p className="text-sm font-semibold text-slate-900">{statusLabel}</p>
             <p className="mt-1 text-sm text-slate-500">
-              {modelLabel} · 平均置信度 {formatPercent(report.average_confidence)}
+              {modelLabel} Â· å¹³å‡ç½®ä¿¡åº¦ {formatPercent(report.average_confidence)}
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs font-semibold text-slate-500">
-            <span className="rounded-full bg-slate-100 px-3 py-1">之前 {formatPercent(report.before_confidence)}</span>
-            <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">现在 {formatPercent(report.after_confidence)}</span>
+            <span className="rounded-full bg-slate-100 px-3 py-1">ä¹‹å‰ {formatPercent(report.before_confidence)}</span>
+            <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">çŽ°åœ¨ {formatPercent(report.after_confidence)}</span>
           </div>
         </div>
 
         <section className="rounded-[24px] border border-cyan-100 bg-cyan-50/70 p-5">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-900">视频级变化</h3>
+            <h3 className="text-lg font-semibold text-slate-900">è§†é¢‘çº§å˜åŒ–</h3>
             {primaryChange ? (
               <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${videoAiDirectionTone(primaryChange.direction)}`}>
                 {videoAiDirectionLabel(primaryChange.direction)}
@@ -717,11 +374,11 @@ function VideoAiInsightSection({ data }: { data: AnalysisCompareResponse }) {
               <p className="text-sm font-semibold text-slate-900">{item.label}</p>
               <div className="mt-3 space-y-3 text-sm leading-6">
                 <p className="text-slate-500">
-                  <span className="font-medium text-slate-700">之前：</span>
+                  <span className="font-medium text-slate-700">ä¹‹å‰ï¼š</span>
                   {item.before || "--"}
                 </p>
                 <p className="text-slate-500">
-                  <span className="font-medium text-blue-700">现在：</span>
+                  <span className="font-medium text-blue-700">çŽ°åœ¨ï¼š</span>
                   {item.after || "--"}
                 </p>
               </div>
@@ -744,7 +401,7 @@ function VideoAiInsightSection({ data }: { data: AnalysisCompareResponse }) {
         ) : null}
 
         <div className="rounded-[22px] border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-800">
-          <span className="font-semibold">下一次训练重点：</span>
+          <span className="font-semibold">ä¸‹ä¸€æ¬¡è®­ç»ƒé‡ç‚¹ï¼š</span>
           {report.training_focus}
         </div>
 
@@ -765,7 +422,7 @@ function KeyframeImage({ side, title }: { side: CompareKeyframeSide; title: stri
         <p className="text-sm font-semibold text-slate-900">{title}</p>
         <p className="text-xs text-slate-400">
           {side.timestamp != null ? `${side.timestamp.toFixed(2)}s` : "--"}
-          {side.confidence != null ? ` · ${(side.confidence * 100).toFixed(0)}%` : ""}
+          {side.confidence != null ? ` Â· ${(side.confidence * 100).toFixed(0)}%` : ""}
         </p>
       </div>
       <div className="aspect-video bg-slate-950">
@@ -773,24 +430,24 @@ function KeyframeImage({ side, title }: { side: CompareKeyframeSide; title: stri
           <img src={side.frame_url} alt={`${title} ${side.frame_id ?? ""}`} className="h-full w-full object-contain" />
         ) : (
           <div className="flex h-full items-center justify-center px-4 text-center text-sm leading-6 text-slate-400">
-            {side.missing_reason ?? "该阶段未可靠识别"}
+            {side.missing_reason ?? "è¯¥é˜¶æ®µæœªå¯é è¯†åˆ«"}
           </div>
         )}
       </div>
       <div className="space-y-1 px-4 py-3 text-xs text-slate-400">
-        <p>{side.frame_id ?? "无关键帧"}</p>
+        <p>{side.frame_id ?? "æ— å…³é”®å¸§"}</p>
         {side.source || side.phase_label || side.selection_reason ? (
           <p>
-            {side.source ? `来源：${side.source}` : ""}
-            {side.phase_label ? ` · 阶段：${side.phase_label}` : ""}
-            {side.selection_reason ? ` · ${side.selection_reason}` : ""}
+            {side.source ? `æ¥æºï¼š${side.source}` : ""}
+            {side.phase_label ? ` Â· é˜¶æ®µï¼š${side.phase_label}` : ""}
+            {side.selection_reason ? ` Â· ${side.selection_reason}` : ""}
           </p>
         ) : null}
         {side.refinement_method ? (
           <p>
-            精修：{side.refinement_method}
-            {side.refinement_delta_sec != null ? ` · ${signedValue(side.refinement_delta_sec, "s")}` : ""}
-            {side.pre_refine_timestamp != null ? ` · 原 ${side.pre_refine_timestamp.toFixed(2)}s` : ""}
+            ç²¾ä¿®ï¼š{side.refinement_method}
+            {side.refinement_delta_sec != null ? ` Â· ${signedValue(side.refinement_delta_sec, "s")}` : ""}
+            {side.pre_refine_timestamp != null ? ` Â· åŽŸ ${side.pre_refine_timestamp.toFixed(2)}s` : ""}
           </p>
         ) : null}
       </div>
@@ -804,7 +461,7 @@ function KeyframeCompareSection({ data }: { data: AnalysisCompareResponse }) {
   }
 
   return (
-    <ReportCard title="关键帧姿态对照" eyebrow="Pose Frames">
+    <ReportCard title="å…³é”®å¸§å§¿æ€å¯¹ç…§" eyebrow="Pose Frames">
       <div className="space-y-5">
         {data.keyframe_compare.map((item) => (
           <section key={item.key} className="rounded-[28px] border border-slate-200 bg-slate-50 p-4">
@@ -825,8 +482,8 @@ function KeyframeCompareSection({ data }: { data: AnalysisCompareResponse }) {
               </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <KeyframeImage side={item.before} title="之前" />
-              <KeyframeImage side={item.after} title="现在" />
+              <KeyframeImage side={item.before} title="ä¹‹å‰" />
+              <KeyframeImage side={item.after} title="çŽ°åœ¨" />
             </div>
           </section>
         ))}
@@ -847,8 +504,8 @@ function SubscoreRadar({ items }: { items: CompareDelta[] }) {
         <RadarChart data={chartData}>
           <PolarGrid stroke="rgba(226,232,240,0.5)" />
           <PolarAngleAxis dataKey="label" tick={{ fill: "#64748b", fontSize: 12 }} />
-          <Radar name="之前" dataKey="before" stroke="#94a3b8" fill="#94a3b8" fillOpacity={0.18} />
-          <Radar name="现在" dataKey="after" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.28} />
+          <Radar name="ä¹‹å‰" dataKey="before" stroke="#94a3b8" fill="#94a3b8" fillOpacity={0.18} />
+          <Radar name="çŽ°åœ¨" dataKey="after" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.28} />
           <Tooltip
             contentStyle={{
               background: "#ffffff",
@@ -873,8 +530,8 @@ function DeltaBars({ items }: { items: CompareDelta[] }) {
             <p className={`text-sm font-semibold ${trendClass(item.delta)}`}>{signedValue(item.delta, item.unit)}</p>
           </div>
           <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
-            <span>之前 {formatValue(item.before, item.unit)}</span>
-            <span>现在 {formatValue(item.after, item.unit)}</span>
+            <span>ä¹‹å‰ {formatValue(item.before, item.unit)}</span>
+            <span>çŽ°åœ¨ {formatValue(item.after, item.unit)}</span>
           </div>
           <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
             <div
@@ -891,7 +548,7 @@ function DeltaBars({ items }: { items: CompareDelta[] }) {
 function MetricChart({ items }: { items: CompareDelta[] }) {
   const available = items.filter((item) => item.available);
   if (!available.length) {
-    return <p className="text-sm leading-7 text-slate-500">当前两条记录缺少可直接比较的生物力学指标。</p>;
+    return <p className="text-sm leading-7 text-slate-500">å½“å‰ä¸¤æ¡è®°å½•ç¼ºå°‘å¯ç›´æŽ¥æ¯”è¾ƒçš„ç”Ÿç‰©åŠ›å­¦æŒ‡æ ‡ã€‚</p>;
   }
   const chartData = available.map((item) => ({
     label: item.label,
@@ -922,14 +579,14 @@ function MetricChart({ items }: { items: CompareDelta[] }) {
 function MetricsSection({ data }: { data: AnalysisCompareResponse }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
-      <ReportCard title="分项评分变化" eyebrow="Subscores">
+      <ReportCard title="åˆ†é¡¹è¯„åˆ†å˜åŒ–" eyebrow="Subscores">
         <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
           <SubscoreRadar items={data.subscore_deltas} />
           <DeltaBars items={data.subscore_deltas} />
         </div>
       </ReportCard>
 
-      <ReportCard title="生物力学指标变化" eyebrow="Biomechanics">
+      <ReportCard title="ç”Ÿç‰©åŠ›å­¦æŒ‡æ ‡å˜åŒ–" eyebrow="Biomechanics">
         <MetricChart items={data.metric_deltas} />
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           {data.metric_deltas.map((item) => (
@@ -937,7 +594,7 @@ function MetricsSection({ data }: { data: AnalysisCompareResponse }) {
               <p className="text-sm text-slate-500">{item.label}</p>
               <p className={`mt-2 text-2xl font-semibold ${trendClass(item.delta)}`}>{signedValue(item.delta, item.unit)}</p>
               <p className="mt-2 text-xs text-slate-400">
-                {formatValue(item.before, item.unit)} → {formatValue(item.after, item.unit)}
+                {formatValue(item.before, item.unit)} â†’ {formatValue(item.after, item.unit)}
               </p>
             </article>
           ))}
@@ -964,14 +621,14 @@ function SummaryGroup({
             <article key={`${item.category}-${index}`} className="rounded-[24px] border border-slate-200 bg-slate-50 p-4">
               <div className="flex flex-wrap items-center gap-3">
                 <h3 className="text-base font-medium text-slate-900">{item.category}</h3>
-                {item.before_severity ? <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500">之前 {item.before_severity}</span> : null}
-                {item.after_severity ? <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500">现在 {item.after_severity}</span> : null}
+                {item.before_severity ? <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500">ä¹‹å‰ {item.before_severity}</span> : null}
+                {item.after_severity ? <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500">çŽ°åœ¨ {item.after_severity}</span> : null}
               </div>
               <p className="mt-3 text-sm leading-7 text-slate-600">{item.description}</p>
             </article>
           ))
         ) : (
-          <p className="text-sm text-slate-500">当前没有该分类变化。</p>
+          <p className="text-sm text-slate-500">å½“å‰æ²¡æœ‰è¯¥åˆ†ç±»å˜åŒ–ã€‚</p>
         )}
       </div>
     </ReportCard>
@@ -987,10 +644,10 @@ function HeroSummary({ data }: { data: AnalysisCompareResponse }) {
       <div className="grid gap-6 lg:grid-cols-[1fr_260px] lg:items-center">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Compare Review</p>
-          <h1 className="mt-3 text-3xl font-semibold text-slate-900 sm:text-4xl">{actionName} 进步复盘</h1>
+          <h1 className="mt-3 text-3xl font-semibold text-slate-900 sm:text-4xl">{actionName} è¿›æ­¥å¤ç›˜</h1>
           <div className="mt-4 flex flex-wrap gap-3 text-sm text-slate-500">
-            <span>{before.skater_name ?? after.skater_name ?? "小运动员"}</span>
-            <span>{formatDate(before.created_at)} → {formatDate(after.created_at)}</span>
+            <span>{before.skater_name ?? after.skater_name ?? "å°è¿åŠ¨å‘˜"}</span>
+            <span>{formatDate(before.created_at)} â†’ {formatDate(after.created_at)}</span>
             <span>{after.action_type}</span>
           </div>
           {data.ai_narrative ? <p className="mt-5 max-w-4xl text-base leading-8 text-slate-600">{data.ai_narrative}</p> : null}
@@ -1001,18 +658,18 @@ function HeroSummary({ data }: { data: AnalysisCompareResponse }) {
           ) : null}
           {data.quality?.subtype_mismatch || data.quality?.skill_mismatch ? (
             <div className="mt-3 rounded-[22px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-700">
-              已允许同一动作大类下的跨小项对比；本页结论更适合看长期趋势，不用于判定某个细项技术优劣。
+              å·²å…è®¸åŒä¸€åŠ¨ä½œå¤§ç±»ä¸‹çš„è·¨å°é¡¹å¯¹æ¯”ï¼›æœ¬é¡µç»“è®ºæ›´é€‚åˆçœ‹é•¿æœŸè¶‹åŠ¿ï¼Œä¸ç”¨äºŽåˆ¤å®šæŸä¸ªç»†é¡¹æŠ€æœ¯ä¼˜åŠ£ã€‚
             </div>
           ) : null}
         </div>
         <div className={`rounded-[28px] border p-5 text-center ${scoreTone(data.score_delta)}`}>
-          <p className="text-sm uppercase tracking-[0.24em] opacity-80">评分变化</p>
+          <p className="text-sm uppercase tracking-[0.24em] opacity-80">è¯„åˆ†å˜åŒ–</p>
           <p className="mt-3 text-5xl font-semibold">
             {data.score_delta >= 0 ? "+" : ""}
             {data.score_delta}
           </p>
           <p className="mt-3 text-sm opacity-80">
-            {before.force_score ?? "--"} → {after.force_score ?? "--"}
+            {before.force_score ?? "--"} â†’ {after.force_score ?? "--"}
           </p>
         </div>
       </div>
@@ -1038,7 +695,7 @@ export default function ComparePage() {
       return;
     }
     if (!id_a || !id_b) {
-      setError("无效的对比参数。");
+      setError("æ— æ•ˆçš„å¯¹æ¯”å‚æ•°ã€‚");
       setIsLoading(false);
       return;
     }
@@ -1053,7 +710,7 @@ export default function ComparePage() {
         }
       } catch (requestError) {
         if (!cancelled) {
-          setError(getRequestErrorMessage(requestError, "对比任务创建失败，请返回历史记录页重试。"));
+          setError(getRequestErrorMessage(requestError, "å¯¹æ¯”ä»»åŠ¡åˆ›å»ºå¤±è´¥ï¼Œè¯·è¿”å›žåŽ†å²è®°å½•é¡µé‡è¯•ã€‚"));
           setIsLoading(false);
         }
       }
@@ -1088,7 +745,7 @@ export default function ComparePage() {
         }
       } catch (requestError) {
         if (!cancelled) {
-          setError(getRequestErrorMessage(requestError, "对比结果加载失败，请返回历史记录页重试。"));
+          setError(getRequestErrorMessage(requestError, "å¯¹æ¯”ç»“æžœåŠ è½½å¤±è´¥ï¼Œè¯·è¿”å›žåŽ†å²è®°å½•é¡µé‡è¯•ã€‚"));
           setIsLoading(false);
         }
       }
@@ -1132,9 +789,9 @@ export default function ComparePage() {
       setComparison(detail);
       setData(detail.result);
       setPollVersion((current) => current + 1);
-      showNotice("已重新提交对比任务");
+      showNotice("å·²é‡æ–°æäº¤å¯¹æ¯”ä»»åŠ¡");
     } catch (requestError) {
-      setError(getRequestErrorMessage(requestError, "对比任务重试失败，请稍后再试。"));
+      setError(getRequestErrorMessage(requestError, "å¯¹æ¯”ä»»åŠ¡é‡è¯•å¤±è´¥ï¼Œè¯·ç¨åŽå†è¯•ã€‚"));
     } finally {
       setIsRetrying(false);
     }
@@ -1155,9 +812,9 @@ export default function ComparePage() {
         }
         return createShareImagePreview(result, copiedToClipboard);
       });
-      showNotice(copiedToClipboard ? "分享图已生成并复制" : "分享图已生成");
+      showNotice(copiedToClipboard ? "åˆ†äº«å›¾å·²ç”Ÿæˆå¹¶å¤åˆ¶" : "åˆ†äº«å›¾å·²ç”Ÿæˆ");
     } catch {
-      setError("分享图生成失败，请稍后重试。");
+      setError("åˆ†äº«å›¾ç”Ÿæˆå¤±è´¥ï¼Œè¯·ç¨åŽé‡è¯•ã€‚");
     } finally {
       setIsSharing(false);
     }
@@ -1169,20 +826,20 @@ export default function ComparePage() {
     }
     const copied = await copyImageBlobToClipboard(shareImagePreview.blob);
     if (!copied) {
-      setError("当前浏览器不能直接复制图片，请先下载后分享。");
+      setError("å½“å‰æµè§ˆå™¨ä¸èƒ½ç›´æŽ¥å¤åˆ¶å›¾ç‰‡ï¼Œè¯·å…ˆä¸‹è½½åŽåˆ†äº«ã€‚");
       return;
     }
     setShareImagePreview((current) => (current ? { ...current, copiedToClipboard: true } : current));
-    showNotice("分享图已复制");
+    showNotice("åˆ†äº«å›¾å·²å¤åˆ¶");
   };
 
   const handleNativeShareImage = async () => {
     if (!shareImagePreview) {
       return;
     }
-    const shared = await shareImageFile(shareImagePreview.blob, shareImagePreview.filename, "IceBuddy 对比分享图");
+    const shared = await shareImageFile(shareImagePreview.blob, shareImagePreview.filename, "IceBuddy å¯¹æ¯”åˆ†äº«å›¾");
     if (!shared) {
-      setError("当前浏览器不支持直接系统分享图片，请先下载后保存或发送。");
+      setError("å½“å‰æµè§ˆå™¨ä¸æ”¯æŒç›´æŽ¥ç³»ç»Ÿåˆ†äº«å›¾ç‰‡ï¼Œè¯·å…ˆä¸‹è½½åŽä¿å­˜æˆ–å‘é€ã€‚");
     }
   };
 
@@ -1190,7 +847,7 @@ export default function ComparePage() {
     <div className="min-w-0 space-y-6 overflow-x-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Link to="/history" className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-200 hover:text-blue-600">
-          ← 返回历史记录
+          â† è¿”å›žåŽ†å²è®°å½•
         </Link>
         {data ? (
           <div className="flex flex-wrap gap-3">
@@ -1200,10 +857,10 @@ export default function ComparePage() {
               disabled={isSharing}
               className="rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isSharing ? "生成中…" : "分享对比图"}
+              {isSharing ? "ç”Ÿæˆä¸­â€¦" : "åˆ†äº«å¯¹æ¯”å›¾"}
             </button>
             <Link to={`/report/${data.analysis_b.id}`} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-200 hover:text-blue-600">
-              查看最新报告
+              æŸ¥çœ‹æœ€æ–°æŠ¥å‘Š
             </Link>
           </div>
         ) : null}
@@ -1211,14 +868,14 @@ export default function ComparePage() {
 
       {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] bg-rose-50 px-5 py-4 text-sm text-rose-500">{error}</div> : null}
-      {isLoading ? <div className="rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在打开对比工作台…</div> : null}
+      {isLoading ? <div className="rounded-[28px] bg-slate-50 px-5 py-6 text-sm text-slate-500">æ­£åœ¨æ‰“å¼€å¯¹æ¯”å·¥ä½œå°â€¦</div> : null}
       {!isLoading && comparison ? (
         <section className={`rounded-[28px] border px-5 py-4 text-sm ${comparisonStatusTone(comparison.status)}`}>
           <div className="flex flex-col gap-3 tablet:flex-row tablet:items-center tablet:justify-between">
             <div>
-              <p className="font-semibold">对比状态：{comparisonStatusLabel(comparison.status)}</p>
-              {isWorking ? <p className="mt-1 opacity-80">两个完整视频正在后台分析，结果会自动刷新。</p> : null}
-              {comparison.status === "failed" ? <p className="mt-1 opacity-80">{comparison.error_message || "对比生成失败，请重试。"}</p> : null}
+              <p className="font-semibold">å¯¹æ¯”çŠ¶æ€ï¼š{comparisonStatusLabel(comparison.status)}</p>
+              {isWorking ? <p className="mt-1 opacity-80">ä¸¤ä¸ªå®Œæ•´è§†é¢‘æ­£åœ¨åŽå°åˆ†æžï¼Œç»“æžœä¼šè‡ªåŠ¨åˆ·æ–°ã€‚</p> : null}
+              {comparison.status === "failed" ? <p className="mt-1 opacity-80">{comparison.error_message || "å¯¹æ¯”ç”Ÿæˆå¤±è´¥ï¼Œè¯·é‡è¯•ã€‚"}</p> : null}
             </div>
             {canRetry ? (
               <button
@@ -1227,7 +884,7 @@ export default function ComparePage() {
                 disabled={isRetrying}
                 className="w-fit rounded-full bg-white px-4 py-2 text-sm font-semibold text-rose-600 shadow-sm transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isRetrying ? "重新提交中…" : "重试生成"}
+                {isRetrying ? "é‡æ–°æäº¤ä¸­â€¦" : "é‡è¯•ç”Ÿæˆ"}
               </button>
             ) : null}
           </div>
@@ -1242,9 +899,9 @@ export default function ComparePage() {
           <MetricsSection data={data} />
           <KeyframeCompareSection data={data} />
           <div className="grid gap-6 lg:grid-cols-3">
-            <SummaryGroup title="改善项" items={data.summary.improved} tone="border border-emerald-200 bg-emerald-50/70" />
-            <SummaryGroup title="新增项" items={data.summary.added} tone="border border-rose-200 bg-rose-50/70" />
-            <SummaryGroup title="未变化" items={data.summary.unchanged} tone="border border-slate-200 bg-slate-50/80" />
+            <SummaryGroup title="æ”¹å–„é¡¹" items={data.summary.improved} tone="border border-emerald-200 bg-emerald-50/70" />
+            <SummaryGroup title="æ–°å¢žé¡¹" items={data.summary.added} tone="border border-rose-200 bg-rose-50/70" />
+            <SummaryGroup title="æœªå˜åŒ–" items={data.summary.unchanged} tone="border border-slate-200 bg-slate-50/80" />
           </div>
         </div>
       ) : null}
@@ -1255,27 +912,27 @@ export default function ComparePage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.32em] text-blue-500">Share Image</p>
-                <h2 className="mt-2 text-2xl font-semibold text-slate-900">对比分享图</h2>
+                <h2 className="mt-2 text-2xl font-semibold text-slate-900">å¯¹æ¯”åˆ†äº«å›¾</h2>
                 <p className="mt-2 text-sm text-slate-500">
                   {shareImagePreview.copiedToClipboard
-                    ? "已复制到剪贴板，也可以用系统分享保存或发送。"
+                    ? "å·²å¤åˆ¶åˆ°å‰ªè´´æ¿ï¼Œä¹Ÿå¯ä»¥ç”¨ç³»ç»Ÿåˆ†äº«ä¿å­˜æˆ–å‘é€ã€‚"
                     : shareImagePreview.canNativeShare
-                      ? "可用系统分享保存到照片或发送给别人。"
-                      : "当前浏览器未开放图片分享能力，可下载后保存。"}
+                      ? "å¯ç”¨ç³»ç»Ÿåˆ†äº«ä¿å­˜åˆ°ç…§ç‰‡æˆ–å‘é€ç»™åˆ«äººã€‚"
+                      : "å½“å‰æµè§ˆå™¨æœªå¼€æ”¾å›¾ç‰‡åˆ†äº«èƒ½åŠ›ï¼Œå¯ä¸‹è½½åŽä¿å­˜ã€‚"}
                 </p>
-                <p className="mt-1 text-xs text-slate-400">{Math.max(1, Math.round(shareImagePreview.sizeBytes / 1024))} KB · JPEG</p>
+                <p className="mt-1 text-xs text-slate-400">{Math.max(1, Math.round(shareImagePreview.sizeBytes / 1024))} KB Â· JPEG</p>
               </div>
               <button
                 type="button"
                 onClick={() => setShareImagePreview(null)}
                 className="min-h-[40px] rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
               >
-                关闭
+                å…³é—­
               </button>
             </div>
 
             <div className="mt-5 max-h-[62vh] overflow-auto rounded-[28px] border border-slate-200 bg-slate-100">
-              <img src={shareImagePreview.url} alt="对比分享图预览" className="mx-auto block h-auto w-full max-w-[720px]" />
+              <img src={shareImagePreview.url} alt="å¯¹æ¯”åˆ†äº«å›¾é¢„è§ˆ" className="mx-auto block h-auto w-full max-w-[720px]" />
             </div>
 
             <div className="mt-5 flex flex-wrap justify-end gap-3">
@@ -1285,21 +942,21 @@ export default function ComparePage() {
                 disabled={!shareImagePreview.canNativeShare}
                 className="min-h-[44px] rounded-full border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                系统分享/保存
+                ç³»ç»Ÿåˆ†äº«/ä¿å­˜
               </button>
               <button
                 type="button"
                 onClick={() => void handleCopyShareImage()}
                 className="min-h-[44px] rounded-full border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >
-                复制图片
+                å¤åˆ¶å›¾ç‰‡
               </button>
               <a
                 href={shareImagePreview.url}
                 download={shareImagePreview.filename}
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600"
               >
-                下载图片
+                ä¸‹è½½å›¾ç‰‡
               </a>
             </div>
           </section>
