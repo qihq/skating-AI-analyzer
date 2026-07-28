@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.video import FramePayload
-from app.services.vision_path_b import analyze_path_b, sample_frames_path_b
+from app.services.vision_path_b import analyze_path_b, sample_frames_path_b, select_stage_balanced_frames
 
 
 def _frames(count: int) -> list[FramePayload]:
@@ -150,19 +150,57 @@ class VisionPathBSamplingTests(unittest.TestCase):
             ["frame_0019", "frame_0020", "frame_0021", "frame_0022", "frame_0023"],
         )
 
-    def test_uniform_sampling_caps_to_ten_frames(self) -> None:
+    def test_uniform_sampling_caps_to_configured_safety_limit(self) -> None:
         result = sample_frames_path_b(_frames(30), None)
 
-        self.assertEqual(len(result), 10)
+        self.assertEqual(len(result), 16)
         self.assertEqual(result[0].frame_id, "frame_0001")
-        self.assertEqual(result[-1].frame_id, "frame_0028")
+        self.assertEqual(result[-1].frame_id, "frame_0029")
 
     def test_key_frame_sampling_falls_back_to_uniform_when_no_match(self) -> None:
         result = sample_frames_path_b(_frames(30), {"frame_9999"})
 
-        self.assertEqual(len(result), 10)
+        self.assertEqual(len(result), 16)
         self.assertEqual(result[0].frame_id, "frame_0001")
-        self.assertEqual(result[-1].frame_id, "frame_0028")
+        self.assertEqual(result[-1].frame_id, "frame_0029")
+
+    def test_stage_quota_preserves_tal_after_preparation_heavy_evidence(self) -> None:
+        frames = _frames(30)
+        evidence = {
+            "records": [
+                *[
+                    {"timestamp": index * 0.1, "source": "mimo_phase", "phase": "preparation"}
+                    for index in range(1, 16)
+                ],
+                {"timestamp": 2.0, "source": "mimo_key_moment", "phase": "takeoff", "selection_reason": "mimo_key_moment_window"},
+                {"timestamp": 2.2, "source": "mimo_key_moment", "phase": "air", "selection_reason": "mimo_key_moment_window"},
+                {"timestamp": 2.4, "source": "mimo_key_moment", "phase": "landing", "selection_reason": "mimo_key_moment_window"},
+            ]
+        }
+
+        selection = select_stage_balanced_frames(frames, evidence, analysis_profile="jump", max_frames=6)
+
+        self.assertEqual(selection.per_stage_count, {"takeoff": 1, "air": 1, "landing": 1})
+        self.assertTrue({"frame_0021", "frame_0023", "frame_0025"}.issubset({frame.frame_id for frame in selection.frames}))
+        self.assertEqual(selection.cap_reason, "stage_quota_cap")
+
+    def test_stage_quota_keeps_distinct_mimo_and_pose_candidate_windows(self) -> None:
+        frames = _frames(40)
+        evidence = {
+            "records": [
+                {"timestamp": 1.0, "source": "mimo_key_moment", "phase": "takeoff"},
+                {"timestamp": 1.3, "source": "pose_candidate", "phase": "takeoff"},
+                {"timestamp": 1.6, "source": "mimo_key_moment", "phase": "air"},
+                {"timestamp": 1.9, "source": "pose_candidate", "phase": "air"},
+                {"timestamp": 2.2, "source": "mimo_key_moment", "phase": "landing"},
+                {"timestamp": 2.5, "source": "pose_candidate", "phase": "landing"},
+            ]
+        }
+
+        selection = select_stage_balanced_frames(frames, evidence, analysis_profile="jump", max_frames=9)
+
+        self.assertEqual(selection.per_stage_count, {"takeoff": 2, "air": 2, "landing": 2})
+        self.assertEqual(set(selection.sources), {"mimo_key_moment", "pose_candidate"})
 
 
 if __name__ == "__main__":

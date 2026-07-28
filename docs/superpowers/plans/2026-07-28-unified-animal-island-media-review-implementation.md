@@ -170,6 +170,12 @@ python -m pytest backend/tests/test_evidence_frames.py backend/tests/test_semant
 
 ## Task 5: Stage-Balanced Path B Input
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `python -m pytest backend/tests/test_vision_path_b.py backend/tests/test_vision_dual.py backend/tests/test_vision_weighted_fusion_integration.py -q` (24 passed).
+
+**Implementation notes:** Path B now uses a configurable 16-frame safety cap (`PATH_B_MAX_FRAMES`) and reserves up to three frames for each required action stage before adding chronological context. Distinct MiMo and pose candidate windows are retained unless they resolve to the same sampled timestamp. Prompt labels expose evidence source/phase/reason, and dual-path metadata records stage counts, evidence sources, omitted context, and the cap reason. Uniform sampling remains only when phase-aware evidence is unavailable.
+
 **Files:**
 
 - Modify: `backend/app/services/vision_path_b.py`

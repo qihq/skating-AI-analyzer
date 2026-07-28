@@ -105,6 +105,40 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         json.dumps(result.dual_path_meta, ensure_ascii=False)
         json.dumps(dual_path_summary(result), ensure_ascii=False)
 
+    async def test_path_b_metadata_reports_stage_balanced_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 30)
+            provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
+            payloads = _payloads(30)
+            evidence = {
+                "records": [
+                    {"timestamp": 1.0, "source": "mimo_key_moment", "phase": "takeoff"},
+                    {"timestamp": 1.2, "source": "pose_candidate", "phase": "air"},
+                    {"timestamp": 1.4, "source": "mimo_key_moment", "phase": "landing"},
+                ]
+            }
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    payloads,
+                    pose_data=None,
+                    bio_data=None,
+                    provider_path_a=provider,
+                    provider_path_b=provider,
+                    annotated_dir=Path(tmp) / "annotated",
+                    analysis_profile="jump",
+                    frame_motion_scores={"evidence_frames_v1": evidence},
+                    timestamps={payload.frame_id: payload.timestamp_sec for payload in payloads},
+                )
+
+        self.assertEqual(result.dual_path_meta["path_b_stage_counts"], {"takeoff": 1, "air": 1, "landing": 1})
+        self.assertEqual(result.dual_path_meta["path_b_evidence_sources"], ["mimo_key_moment", "pose_candidate"])
+        self.assertTrue(result.dual_path_meta["path_b_cap_reason"].startswith("stage_quota"))
+
     async def test_path_b_error_is_soft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
@@ -325,7 +359,7 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 32)
             provider = SimpleNamespace(api_key="key", base_url="https://example.com/v1", model_id="model")
-            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 10})
+            mock_b = AsyncMock(return_value={**_path_b_result(), "n_frames": 16})
 
             with (
                 patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
@@ -343,8 +377,8 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
                     annotated_dir=Path(tmp) / "annotated",
                 )
 
-        self.assertEqual(len(mock_b.await_args.kwargs["annotated_frame_payloads"]), 10)
-        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 10)
+        self.assertEqual(len(mock_b.await_args.kwargs["annotated_frame_payloads"]), 16)
+        self.assertEqual(result.dual_path_meta["annotated_frame_count"], 16)
         self.assertEqual(result.dual_path_meta["annotated_frame_count_raw"], 32)
 
     async def test_path_b_payloads_are_compressed_without_changing_count(self) -> None:
