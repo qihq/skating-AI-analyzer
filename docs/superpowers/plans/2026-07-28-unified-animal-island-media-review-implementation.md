@@ -205,6 +205,12 @@ python -m pytest backend/tests/test_vision_path_b.py backend/tests/test_vision_d
 
 ## Task 6: Media Rendition Manifest and Transcoding
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `python -m pytest backend/tests/test_media_renditions.py backend/tests/test_analysis_media_routes.py backend/tests/test_analysis_video_temporal_pipeline.py -q` (70 existing temporal/media-route tests passed; the initial focused run exposed and corrected the 1080p no-upscale expectation). Final focused rendition/route suite: 5 passed; Python compilation passed.
+
+**Implementation notes:** Each video now has an atomically written `media-manifest.json` beside it. The manifest always exposes Original, skips redundant same-size/upscaled renditions, tracks each rendition independently, and records partial failures without affecting the analysis. `GET /media` lazily creates an Original-only legacy manifest; `GET /video?quality=original|1080p|720p|480p` validates requested quality, preserves no-query Original behavior and byte-range headers, and resolves paths strictly under the analysis directory. Analysis and rendition tasks run concurrently with isolated failures.
+
 **Files:**
 
 - Add: `backend/app/services/media_renditions.py`

@@ -150,6 +150,22 @@ class AnalysisListItem(BaseModel):
     updated_at: datetime
 
 
+class MediaSource(BaseModel):
+    quality: str
+    status: str
+    width: int | None = None
+    height: int | None = None
+    url: str | None = None
+    filename: str | None = None
+    error: str | None = None
+
+
+class MediaManifest(BaseModel):
+    schema_version: str
+    status: str
+    sources: list[MediaSource] = Field(default_factory=list)
+
+
 class AnalysisDetail(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -164,6 +180,7 @@ class AnalysisDetail(BaseModel):
     retry_from_stage: str | None = None
     pipeline_version: str | None = None
     video_path: str
+    media_manifest: MediaManifest | None = None
     status: str
     vision_raw: str | None = None
     vision_structured: dict[str, Any] | None = None

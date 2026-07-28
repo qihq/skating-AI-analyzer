@@ -65,6 +65,7 @@ from app.schemas import (
     GoldenOverrideApplyRequest,
     GoldenOverrideApplyResponse,
     NoteUpdateRequest,
+    MediaManifest,
     ProgressPoint,
     ProgressResponse,
     ProgressStats,
@@ -188,6 +189,12 @@ from app.services.semantic_keyframe_pipeline import (
     validate_semantic_keyframes_against_current_evidence,
 )
 from app.services.evidence_frames import materialize_supplemental_evidence_frames
+from app.services.media_renditions import (
+    MEDIA_QUALITIES,
+    generate_media_renditions,
+    read_or_create_manifest,
+    resolve_media_source,
+)
 from app.services.video_temporal import (
     resolved_keyframes_accept_insufficient_pose_low_visibility_fallback,
     semantic_keyframes_are_reliable,
@@ -5673,6 +5680,27 @@ async def process_analysis(
         cleanup_processing_dir(analysis_id)
 
 
+async def process_analysis_with_media_renditions(
+    analysis_id: str,
+    retry_from_stage: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """Run analysis and independent video renditions without coupling their outcomes."""
+    async with AsyncSessionLocal() as session:
+        analysis = await session.get(Analysis, analysis_id)
+        video_path = _safe_video_response_path(analysis) if analysis is not None else None
+    rendition_task = (
+        asyncio.create_task(generate_media_renditions(video_path, analysis_id))
+        if video_path is not None
+        else None
+    )
+    analysis_task = asyncio.create_task(process_analysis(analysis_id, retry_from_stage, **kwargs))
+    tasks = [analysis_task, *( [rendition_task] if rendition_task is not None else [])]
+    for result in await asyncio.gather(*tasks, return_exceptions=True):
+        if isinstance(result, Exception):
+            logger.warning("Analysis %s concurrent media work failed without changing analysis status: %s", analysis_id, result)
+
+
 def _normalize_optional_text(value: str | None) -> str | None:
     if value is None:
         return None
@@ -5952,6 +5980,13 @@ def _detail_from_analysis(
     include_error_detail: bool = False,
 ) -> AnalysisDetail:
     input_window = _input_window_payload_for_saved_analysis(analysis)
+    video_path = _safe_video_response_path(analysis)
+    media_manifest = None
+    if video_path is not None:
+        try:
+            media_manifest = MediaManifest.model_validate(read_or_create_manifest(video_path, analysis.id))
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not load media manifest for analysis %s", analysis.id, exc_info=True)
     return AnalysisDetail(
         id=analysis.id,
         skater_id=analysis.skater_id,
@@ -5965,6 +6000,7 @@ def _detail_from_analysis(
         retry_from_stage=analysis.retry_from_stage,
         pipeline_version=analysis.pipeline_version,
         video_path=analysis.video_path,
+        media_manifest=media_manifest,
         status=analysis.status,
         vision_raw=analysis.vision_raw,
         vision_structured=analysis.vision_structured,
@@ -8401,7 +8437,7 @@ async def upload_analysis(
         video_path.unlink(missing_ok=True)
         raise
 
-    background_tasks.add_task(process_analysis, analysis_id)
+    background_tasks.add_task(process_analysis_with_media_renditions, analysis_id)
     return AnalysisUploadResponse(id=analysis_id, status="pending")
 
 
@@ -9621,12 +9657,30 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     return _build_pose_response(analysis_id, analysis.pose_data)
 
 
-@router.get("/{analysis_id}/video")
-async def get_analysis_video(analysis_id: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
+@router.get("/{analysis_id}/media", response_model=MediaManifest)
+async def get_analysis_media(analysis_id: str, session: AsyncSession = Depends(get_session)) -> MediaManifest:
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
     video_path = _safe_video_response_path(analysis)
+    if video_path is None:
+        raise HTTPException(status_code=404, detail="原视频已清理或不可用。")
+    return MediaManifest.model_validate(read_or_create_manifest(video_path, analysis_id))
+
+
+@router.get("/{analysis_id}/video")
+async def get_analysis_video(
+    analysis_id: str,
+    quality: str = Query(default="original"),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    if quality not in MEDIA_QUALITIES:
+        raise HTTPException(status_code=422, detail="quality must be original, 1080p, 720p, or 480p.")
+    analysis = await session.get(Analysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="未找到该分析记录。")
+    original_path = _safe_video_response_path(analysis)
+    video_path = resolve_media_source(original_path, analysis_id, quality) if original_path is not None else None
     if video_path is None:
         raise HTTPException(status_code=404, detail="原视频已清理或不可用。")
     return FileResponse(
@@ -9805,7 +9859,7 @@ async def retry_analysis(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
     background_tasks.add_task(
-        process_analysis,
+        process_analysis_with_media_renditions,
         analysis_id,
         retry_from_stage,
         force_keyframe_refresh=force_keyframe_refresh_value,
@@ -9919,7 +9973,7 @@ async def apply_golden_overrides_and_retry(
     label["applied_revision"] = current_revision
     label["applied_at"] = override["applied_at"]
     label_path.write_text(json.dumps(label, ensure_ascii=False, indent=2), encoding="utf-8")
-    background_tasks.add_task(process_analysis, analysis_id, retry_from_stage)
+    background_tasks.add_task(process_analysis_with_media_renditions, analysis_id, retry_from_stage)
     return GoldenOverrideApplyResponse(
         analysis_id=analysis_id,
         status="pending",
@@ -10001,7 +10055,7 @@ async def confirm_target_lock(
     analysis.updated_at = datetime.now(timezone.utc)
     await session.commit()
 
-    background_tasks.add_task(process_analysis, analysis_id)
+    background_tasks.add_task(process_analysis_with_media_renditions, analysis_id)
 
     skater_name = None
     if analysis.skater_id:
@@ -10175,6 +10229,7 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     if not (
         filename.startswith("frame_")
         or filename.startswith("semantic_")
+        or filename.startswith("evidence_")
         or filename.startswith("semantic_video_ai_rerun_")
         or filename.startswith("partial_semantic_")
         or filename.startswith("golden_")
