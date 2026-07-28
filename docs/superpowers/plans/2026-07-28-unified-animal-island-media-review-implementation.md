@@ -333,6 +333,12 @@ npm run build
 
 ## Task 9: Video and Pose Surfaces
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/media/VideoSurface.test.tsx src/media/poseTimeline.test.ts src/media/IceMediaPlayer.test.tsx src/utils/poseCanvas.test.ts` (5 passed); `npm run build` passed.
+
+**Implementation notes:** The shared player now owns its HTML video through `VideoSurface`, resolves pose timestamps through binary search in `PoseSurface`, and composes video, pose overlay/pose-only rendering, markers, and Animal Island controls in `IceMediaPlayer`. Existing `PoseViewer` remains as a compatibility component while pages migrate one-by-one.
+
 **Files:**
 
 - Add: `frontend/src/media/VideoSurface.tsx`
