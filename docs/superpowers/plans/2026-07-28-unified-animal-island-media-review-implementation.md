@@ -19,6 +19,12 @@
 
 ## Task 1: Baseline Characterization and Navigation State
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `npm test -- src/navigation.test.ts src/modern/ModernNavigation.test.tsx` (6 passed); `npm run build` passed.
+
+**Implementation notes:** Inactive Start Review no longer owns a primary border, fill, or raised shadow. The yellow primary treatment now applies only with `is-active` on both the mobile dock and desktop rail.
+
 **Files:**
 
 - Modify: `frontend/src/navigation.test.ts`

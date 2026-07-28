@@ -32,8 +32,13 @@ describe("modern island navigation", () => {
   });
 
   it("folds legacy routes into their modern parent spaces", () => {
+    expect(modernSpaceForPath("/review")).toBe("review");
+    expect(modernSpaceForPath("/analysis/analysis-1")).toBe("review");
     expect(modernSpaceForPath("/report/analysis-1/workspace")).toBe("review");
     expect(modernSpaceForPath("/analysis-chat")).toBe("review");
+    expect(modernSpaceForPath("/home")).toBe("home");
+    expect(modernSpaceForPath("/growth")).toBe("growth");
+    expect(modernSpaceForPath("/me")).toBe("me");
     expect(modernSpaceForPath("/chapters")).toBe("growth");
     expect(modernSpaceForPath("/plan/plan-1")).toBe("growth");
     expect(modernSpaceForPath("/settings/api")).toBe("me");

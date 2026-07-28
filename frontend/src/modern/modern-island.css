@@ -142,8 +142,6 @@
 .island-dock__icon svg { width:23px; height:23px; }
 .island-dock__icon .island-art-icon { width:32px; height:32px; object-fit:contain; }
 .island-dock__item.is-active .island-dock__icon { background:#fffdf6; transform:scale(1.04); box-shadow:0 3px 0 rgba(21,139,127,.2); }
-.island-dock__item--primary { color:#8d7c64; }
-.island-dock__item--primary .island-dock__icon { background:#f2ecdf; }
 .island-dock__item--primary.is-active { color:#665130; background:#fff1b8; box-shadow:inset 0 0 0 2px rgba(205,164,48,.16),0 4px 10px rgba(121,91,31,.12); }
 .island-dock__item--primary.is-active::after { background:#e2b733; }
 .island-dock__item--primary.is-active .island-dock__icon { background:var(--island-sun); box-shadow:0 4px 0 #bd9633; }
@@ -290,8 +288,7 @@
   .island-rail__item { display:flex; min-height:64px; align-items:center; gap:12px; padding:8px 12px; border-radius:21px; color:#8d7a62; }
   .island-rail__item:hover { background:#f0ebda; }
   .island-rail__item.is-active { color:#fff; background:var(--island-teal); box-shadow:0 5px 0 #0d8a82; }
-  .island-rail__item--primary { margin-block:4px; border:2px solid #ded3bf; color:#8d7a62; background:#f3eddf; box-shadow:0 3px 0 #d4c7b2; }
-  .island-rail__item--primary.is-active { color:#665130; background:#f5cf55; box-shadow:0 5px 0 #bd9633; }
+  .island-rail__item--primary.is-active { margin-block:4px; color:#665130; background:#f5cf55; box-shadow:0 5px 0 #bd9633; }
   .island-rail__icon { display:grid; width:38px; height:38px; flex:none; place-items:center; border-radius:14px; background:rgba(255,255,255,.34); }
   .island-rail__icon svg { width:23px; height:23px; }
   .island-rail__icon .island-art-icon { width:34px; height:34px; object-fit:contain; }
