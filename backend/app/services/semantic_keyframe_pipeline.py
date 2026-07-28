@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineError
+from app.services.evidence_frames import build_evidence_frames
 from app.services.person_tracker import detect_person_candidates
 from app.services.video import (
     VideoInputWindow,
@@ -696,12 +697,24 @@ def merge_frame_motion_payload(
     *,
     video_temporal: dict[str, Any] | None = None,
     resolved_keyframes: dict[str, Any] | None = None,
+    bio_data: dict[str, Any] | None = None,
+    analysis_profile: str | None = None,
+    source_fps: float | None = None,
 ) -> dict[str, object]:
     merged: dict[str, object] = dict(motion_scores)
     if isinstance(video_temporal, dict):
         merged["video_temporal"] = video_temporal
     if isinstance(resolved_keyframes, dict):
         merged["resolved_keyframes"] = resolved_keyframes
+    if bio_data is not None or analysis_profile is not None:
+        merged["evidence_frames_v1"] = build_evidence_frames(
+            merged,
+            video_temporal=video_temporal,
+            resolved_keyframes=resolved_keyframes,
+            bio_data=bio_data,
+            analysis_profile=analysis_profile,
+            source_fps=float(source_fps or merged.get("source_fps") or 30.0),
+        )
     return merged
 
 

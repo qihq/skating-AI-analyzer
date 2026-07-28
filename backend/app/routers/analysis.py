@@ -187,6 +187,7 @@ from app.services.semantic_keyframe_pipeline import (
     start_video_temporal_task,
     validate_semantic_keyframes_against_current_evidence,
 )
+from app.services.evidence_frames import materialize_supplemental_evidence_frames
 from app.services.video_temporal import (
     resolved_keyframes_accept_insufficient_pose_low_visibility_fallback,
     semantic_keyframes_are_reliable,
@@ -840,11 +841,17 @@ def _merge_frame_motion_payload(
     *,
     video_temporal: dict[str, Any] | None = None,
     resolved_keyframes: dict[str, Any] | None = None,
+    bio_data: dict[str, Any] | None = None,
+    analysis_profile: str | None = None,
+    source_fps: float | None = None,
 ) -> dict[str, object]:
     return merge_frame_motion_payload(
         motion_scores,
         video_temporal=video_temporal,
         resolved_keyframes=resolved_keyframes,
+        bio_data=bio_data,
+        analysis_profile=analysis_profile,
+        source_fps=source_fps,
     )
 
 
@@ -5203,6 +5210,9 @@ async def process_analysis(
                 motion_scores,
                 video_temporal=video_temporal_result,
                 resolved_keyframes=resolved_keyframes,
+                bio_data=bio_data,
+                analysis_profile=analysis_profile,
+                source_fps=sampling_metadata.source_fps,
             )
             analysis_profile, bio_data, profile_evidence = _apply_resolved_video_ai_profile_override_to_bio_data(
                 action_type=action_type,
@@ -5366,16 +5376,35 @@ async def process_analysis(
                     frame_motion_scores=motion_scores if isinstance(motion_scores, dict) else None,
                     analysis_profile=analysis_profile,
                 )
-                motion_scores = _merge_frame_motion_payload(
-                    motion_scores,
-                    video_temporal=video_temporal_result,
-                    resolved_keyframes=resolved_keyframes,
-                )
                 bio_data = sync_key_frames_from_resolved_keyframes(
                     bio_data,
                     resolved_keyframes if isinstance(resolved_keyframes, dict) else None,
                     analysis_profile=analysis_profile,
                 )
+                motion_scores = _merge_frame_motion_payload(
+                    motion_scores,
+                    video_temporal=video_temporal_result,
+                    resolved_keyframes=resolved_keyframes,
+                    bio_data=bio_data,
+                    analysis_profile=analysis_profile,
+                    source_fps=sampling_metadata.source_fps,
+                )
+                evidence_payload = motion_scores.get("evidence_frames_v1") if isinstance(motion_scores, dict) else None
+                if isinstance(evidence_payload, dict):
+                    try:
+                        await materialize_supplemental_evidence_frames(
+                            video_path,
+                            processing_frames_dir.parent / "semantic_frames",
+                            evidence_payload,
+                            base_records=motion_scores.get("selected", []) if isinstance(motion_scores.get("selected"), list) else [],
+                            source_fps=sampling_metadata.source_fps,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("Analysis %s could not materialize supplemental evidence frames", analysis_id, exc_info=True)
+                        evidence_payload["supplemental_frames"] = []
+                        diagnostics = evidence_payload.get("diagnostics")
+                        if isinstance(diagnostics, dict):
+                            diagnostics["stage_evidence_insufficient"] = True
                 cross_validation = _attach_auto_eval(
                     cross_validation,
                     bio_data=bio_data,

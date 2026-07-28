@@ -126,6 +126,12 @@ python -m pytest backend/tests/test_video_sampling_density.py backend/tests/test
 
 ## Task 4: Temporal Supplemental Frames and Coverage Diagnostics
 
+**Status:** Complete (2026-07-28)
+
+**Verification:** `python -m pytest backend/tests/test_evidence_frames.py backend/tests/test_semantic_keyframe_pipeline.py backend/tests/test_analysis_video_temporal_pipeline.py -q` (233 passed, 4 subtests passed).
+
+**Implementation notes:** A versioned `evidence_frames_v1` ledger now retains base motion frames, MiMo phase/key-moment windows, resolved/partial semantic frames, and pose T/A/L candidates as separate evidence groups, even when they conflict. It records action-window coverage, maximum temporal gap, per-stage completeness, T/A/L ordering, source diversity, and insufficiency. Non-base timestamps are deduplicated against sampled frames by source-FPS tolerance and materialized once into `semantic_frames/`; any unavailable stage remains explicitly marked insufficient instead of silently discarded.
+
 **Files:**
 
 - Add: `backend/app/services/evidence_frames.py`
