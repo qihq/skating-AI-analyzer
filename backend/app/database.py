@@ -37,8 +37,8 @@ def _resolve_runtime_path(raw_path: str | Path, fallback: Path) -> Path:
 
 
 DATA_DIR = _resolve_runtime_path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)), DEFAULT_DATA_DIR)
-UPLOADS_DIR = DATA_DIR / "uploads"
-ARCHIVE_DIR = DATA_DIR / "archive"
+UPLOADS_DIR = _resolve_runtime_path(os.getenv("UPLOADS_DIR", str(DATA_DIR / "uploads")), DATA_DIR / "uploads")
+ARCHIVE_DIR = _resolve_runtime_path(os.getenv("ARCHIVE_DIR", str(DATA_DIR / "archive")), DATA_DIR / "archive")
 BACKUPS_DIR = _resolve_runtime_path(os.getenv("BACKUPS_DIR", str(DEFAULT_BACKUPS_DIR)), DEFAULT_BACKUPS_DIR)
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{DATA_DIR / 'skating-analyzer.db'}")
 SQLITE_BUSY_TIMEOUT_SECONDS = float(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "30"))
@@ -266,6 +266,9 @@ def ensure_storage_dirs() -> None:
     (UPLOADS_DIR / "_debug").mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    if DATABASE_URL.startswith("sqlite"):
+        database_path = DATABASE_URL.removeprefix("sqlite+aiosqlite:///")
+        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 def _quote_identifier(identifier: str) -> str:

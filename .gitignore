@@ -1,6 +1,7 @@
 # Runtime data and secrets
 data/
 .env
+.env.v2.local
 backups/*.db
 backups/*.db-*
 backups/*.tmp-journal

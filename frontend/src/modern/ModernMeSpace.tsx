@@ -10,9 +10,10 @@ import SectionNav from "./SectionNav";
 const ApiSettingsPage = lazy(() => import("../pages/ApiSettingsPage"));
 const DebugPage = lazy(() => import("../pages/DebugPage"));
 const SettingsPage = lazy(() => import("../pages/SettingsPage"));
+const ShadowStatusCard = lazy(() => import("../analysis-v2/components/ShadowStatusCard"));
 
 export type MeView = "overview" | "family" | "appearance" | "advanced" | "about";
-type AdvancedTool = "providers" | "debug" | "golden";
+type AdvancedTool = "providers" | "debug" | "golden" | "shadow";
 
 const ITEMS = [
   { id: "overview", label: "总览", to: "/me" },
@@ -43,7 +44,7 @@ function AboutPanel() {
 function AdvancedOverview() {
   const { isParentMode, enterParentMode } = useAppMode();
   if (!isParentMode) return <IslandCard className="modern-me-panel modern-lock-panel" tone="sun"><IslandIcon name="lock"/><h2>高级工具需要家长模式</h2><p>API 配置、调试和 Golden 标注会影响分析结果，需要家长确认后使用。</p><button className="island-button island-button--primary" onClick={()=>void enterParentMode()}>进入家长模式</button></IslandCard>;
-  return <div className="modern-tool-grid"><Link to="/me/advanced?tool=providers"><span>🔌</span><strong>模型与 API</strong><small>供应商和连接配置</small></Link><Link to="/me/advanced?tool=debug"><span>🧭</span><strong>诊断调试</strong><small>管线、日志和运行状态</small></Link><Link to="/me/advanced?tool=golden"><span>🏷️</span><strong>Golden 标注</strong><small>高精度目标与关键帧</small></Link></div>;
+  return <div className="modern-tool-grid"><Link to="/me/advanced?tool=providers"><span>🔌</span><strong>模型与 API</strong><small>供应商和连接配置</small></Link><Link to="/me/advanced?tool=debug"><span>🧭</span><strong>诊断调试</strong><small>管线、日志和运行状态</small></Link><Link to="/me/advanced?tool=golden"><span>🏷️</span><strong>Golden 标注</strong><small>高精度目标与关键帧</small></Link><Link to="/me/advanced?tool=shadow"><span>🌒</span><strong>Shadow 状态</strong><small>隔离模式与零写入边界</small></Link></div>;
 }
 
 export default function ModernMeSpace() {
@@ -57,6 +58,6 @@ export default function ModernMeSpace() {
 export function ModernAdvancedTool({ initialTool }: { initialTool?: AdvancedTool } = {}) {
   const [params] = useSearchParams();
   const tool=(params.get("tool") as AdvancedTool|null)??initialTool??"providers";
-  const content:Record<AdvancedTool,ReactNode>={providers:<ApiSettingsPage/>,debug:<DebugPage/>,golden:<DebugPage workspace="golden"/>};
-  return <MeFrame view="advanced"><div className="modern-advanced-tabs"><Link className={tool==="providers"?"is-active":""} to="/me/advanced?tool=providers">模型与 API</Link><Link className={tool==="debug"?"is-active":""} to="/me/advanced?tool=debug">诊断调试</Link><Link className={tool==="golden"?"is-active":""} to="/me/advanced?tool=golden">Golden 标注</Link></div><div className="modern-legacy-surface"><Suspense fallback={<div className="island-route-loading">正在加载高级工具…</div>}>{content[tool]??content.providers}</Suspense></div></MeFrame>;
+  const content:Record<AdvancedTool,ReactNode>={providers:<ApiSettingsPage/>,debug:<DebugPage/>,golden:<DebugPage workspace="golden"/>,shadow:<ShadowStatusCard/>};
+  return <MeFrame view="advanced"><div className="modern-advanced-tabs"><Link className={tool==="providers"?"is-active":""} to="/me/advanced?tool=providers">模型与 API</Link><Link className={tool==="debug"?"is-active":""} to="/me/advanced?tool=debug">诊断调试</Link><Link className={tool==="golden"?"is-active":""} to="/me/advanced?tool=golden">Golden 标注</Link><Link className={tool==="shadow"?"is-active":""} to="/me/advanced?tool=shadow">Shadow 状态</Link></div><div className="modern-legacy-surface"><Suspense fallback={<div className="island-route-loading">正在加载高级工具…</div>}>{content[tool]??content.providers}</Suspense></div></MeFrame>;
 }

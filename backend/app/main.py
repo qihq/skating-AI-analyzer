@@ -14,7 +14,17 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(ROOT_DIR / ".env")
+load_dotenv()
+
+from app.analysis_v2.config import apply_runtime_environment, load_runtime_config
+
+runtime_config = load_runtime_config(os.environ, project_root=ROOT_DIR)
+apply_runtime_environment(runtime_config, os.environ)
+
 from app.database import AsyncSessionLocal, ensure_storage_dirs, init_db
+from app.routers.capabilities import configure_runtime_capabilities, router as capabilities_router
 from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
@@ -34,9 +44,6 @@ from app.services.skills import seed_skill_catalog, sync_all_skater_progress
 from app.services.snowball import seed_default_memories
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT_DIR / ".env")
-load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 scheduler = AsyncIOScheduler()
 logger = logging.getLogger(__name__)
@@ -146,6 +153,8 @@ app.include_router(session_router)
 app.include_router(system_router)
 app.include_router(admin_router)
 app.include_router(snowball_router)
+configure_runtime_capabilities(runtime_config)
+app.include_router(capabilities_router)
 
 
 @app.get("/api/health", response_model=HealthResponse)

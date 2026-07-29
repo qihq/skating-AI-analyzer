@@ -1,0 +1,31 @@
+{
+  "schema_version": "iteration-0-runtime-baseline.v1",
+  "source_commit": "c291324c62bcc930f96f3429dcdc9521e060b516",
+  "pipeline_default": "legacy",
+  "dependency_manifests": {
+    "backend": "backend/requirements.txt",
+    "frontend": "package-lock.json"
+  },
+  "provider_identity": {
+    "storage": "ai_providers table with encrypted api_key",
+    "slots": ["vision", "vision_path_a", "vision_path_b", "report"],
+    "secret_policy": "identities and fingerprints may be diagnostic; keys never enter capability payloads or Git"
+  },
+  "pose_runtime": {
+    "modes": ["mediapipe fallback single pose", "task model multi-pose"],
+    "environment": ["MEDIAPIPE_POSE_TASK_PATH", "POSE_NUM_POSES"],
+    "missing_model_behavior": "fallback status remains visible and legacy remains runnable"
+  },
+  "person_tracking_runtime": {
+    "providers": ["YOLO person detector", "ByteTrack via supervision"],
+    "environment_prefix": "PERSON_TRACKER_",
+    "model_environment": "YOLO_PERSON_MODEL_PATH",
+    "dependency_manifests": ["torch", "torchvision", "ultralytics", "supervision"],
+    "policy": "all current options remain characterized in legacy mode; V2 mapping begins in Iteration 7"
+  },
+  "deployment": {
+    "entrypoints": ["docker-compose.yml", "backend/Dockerfile", "frontend/Dockerfile", "docker/allinone/Dockerfile", "docker/allinone/start.sh", "ai_skating_analysis_pack"],
+    "ds918_mounts": ["/data", "/backups", "/app/models"],
+    "iteration_0_status": "inventoried; resource gate belongs to Iteration 16"
+  }
+}

@@ -54,7 +54,12 @@ MIN_VIDEO_WIDTH = 320
 MIN_VIDEO_HEIGHT = 180
 BLANK_FRAME_VARIANCE_THRESHOLD = 5.0
 MIN_FILTERED_FRAMES = 3
-PROCESSING_ROOT = Path("/tmp/skating-analyzer") if Path("/tmp").exists() else UPLOADS_DIR / "_processing"
+PROCESSING_ROOT = Path(
+    os.getenv(
+        "VIDEO_PROCESSING_ROOT",
+        str(Path("/tmp/skating-analyzer") if Path("/tmp").exists() else UPLOADS_DIR / "_processing"),
+    )
+)
 
 ACTION_WINDOW_SIZES: dict[str, float | None] = {
     "跳跃": 3.0,
