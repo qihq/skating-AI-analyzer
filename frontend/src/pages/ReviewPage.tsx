@@ -22,6 +22,7 @@ import { getAnalysisProcessingStage, isAnalysisInProgress } from "../constants/a
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey } from "../utils/datetime";
 import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
+import SubmitButton from "../modern/SubmitButton";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -571,14 +572,15 @@ export default function ReviewPage() {
             </div>
           </div>
           <div className="flex flex-col gap-2 phone:flex-row tablet:justify-end">
-            <button
-              type="button"
+            <SubmitButton
               onClick={() => void handleSubmit()}
-              disabled={!selectedFile || isSubmitting}
+              disabled={!selectedFile}
+              status={isSubmitting ? "submitting" : "idle"}
+              loadingLabel="诊断中..."
               className="min-h-[44px] rounded-full bg-blue-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-55"
             >
-              {isSubmitting ? "诊断中..." : "开始诊断"}
-            </button>
+              开始诊断
+            </SubmitButton>
             <button type="button" onClick={handleSaveDraft} className="app-pill min-h-[44px] px-4 text-sm font-semibold">
               保存草稿
             </button>
@@ -935,14 +937,14 @@ export default function ReviewPage() {
                   </label>
 
                   <div className="flex flex-col gap-3 tablet:flex-row">
-                    <button
-                      type="button"
+                    <SubmitButton
                       onClick={() => void handleCreateSession()}
-                      disabled={isCreatingSession}
+                      status={isCreatingSession ? "submitting" : "idle"}
+                      loadingLabel="创建中..."
                       className="min-h-[48px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      {isCreatingSession ? "创建中..." : "保存并关联本次复盘"}
-                    </button>
+                      保存并关联本次复盘
+                    </SubmitButton>
                     <button
                       type="button"
                       onClick={() => {

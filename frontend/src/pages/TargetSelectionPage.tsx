@@ -2,6 +2,7 @@ import { PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { confirmTargetLock, fetchAnalysis, fetchTargetPreview, TargetBBox, TargetCandidate, TargetPreviewResponse } from "../api/client";
+import SubmitButton from "../modern/SubmitButton";
 
 const AUTO_CONFIRM_THRESHOLD = 0.72;
 const MIN_BBOX_SIZE = 0.02;
@@ -502,14 +503,16 @@ export default function TargetSelectionPage({ hideHeader = false }: { hideHeader
         {error ? <div className="mt-5 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</div> : null}
 
         <div className="mt-6 flex flex-col gap-3 phone:flex-row phone:flex-wrap">
-          <button
-            type="button"
+          <SubmitButton
             onClick={handleConfirm}
-            disabled={isSubmitting || (!manualBBox && !selectedCandidateId)}
+            disabled={!manualBBox && !selectedCandidateId}
+            status={isSubmitting ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="确认中..."
             className="app-pill min-h-[52px] justify-center px-5 font-semibold text-blue-600 disabled:opacity-60"
           >
-            {isSubmitting ? "确认中..." : preview && preview.lock_confidence >= AUTO_CONFIRM_THRESHOLD ? "确认并继续分析" : "锁定目标并继续分析"}
-          </button>
+            {preview && preview.lock_confidence >= AUTO_CONFIRM_THRESHOLD ? "确认并继续分析" : "锁定目标并继续分析"}
+          </SubmitButton>
           <button type="button" onClick={() => navigate(`/report/${id}`)} className="app-pill min-h-[52px] justify-center px-5 font-semibold text-slate-600">
             返回报告页
           </button>

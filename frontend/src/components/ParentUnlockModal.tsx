@@ -1,5 +1,6 @@
 import PinInput from "./PinInput";
 import IslandDialog from "../modern/IslandDialog";
+import SubmitButton from "../modern/SubmitButton";
 
 type ParentUnlockModalProps = {
   pin: string;
@@ -27,7 +28,7 @@ export default function ParentUnlockModal({
   onSubmit,
 }: ParentUnlockModalProps) {
   return (
-    <IslandDialog title="输入家长 PIN" description="验证后可上传训练视频、管理技能解锁与查看完整诊断细节。" icon="me" onClose={onClose} className="island-dialog__panel--compact" footer={<><button type="button" onClick={onClose} className="island-button island-button--secondary">取消</button><button type="button" onClick={onSubmit} disabled={isSubmitting || locked || pin.length !== pinLength} className="island-button island-button--primary">{isSubmitting ? <><span className="island-leaf-spinner" />验证中…</> : "进入家长模式"}</button></>}>
+    <IslandDialog title="输入家长 PIN" description="验证后可上传训练视频、管理技能解锁与查看完整诊断细节。" icon="me" onClose={onClose} className="island-dialog__panel--compact" footer={<><button type="button" onClick={onClose} className="island-button island-button--secondary">取消</button><SubmitButton onClick={onSubmit} disabled={locked || pin.length !== pinLength} status={isSubmitting ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="验证中…" className="island-button island-button--primary">进入家长模式</SubmitButton></>}>
         <div className="island-pin-house"><div className="island-pin-house__roof" aria-hidden="true" /><p>打开居民服务处的家长钥匙</p>
           <PinInput
             length={pinLength}

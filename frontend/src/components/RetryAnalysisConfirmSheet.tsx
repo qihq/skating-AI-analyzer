@@ -49,16 +49,17 @@ export default function RetryAnalysisConfirmSheet({
           <button type="button" onClick={onClose} disabled={isSubmitting} className="app-pill">
             取消
           </button>
-          <button
-            type="button"
+          <SubmitButton
             onClick={onConfirm}
-            disabled={isSubmitting}
+            status={isSubmitting ? "submitting" : "idle"}
+            loadingLabel="提交中…"
             className="min-h-[44px] rounded-full bg-amber-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {confirmLabel}
-          </button>
+            {isReportOnly ? "确认生成" : isVideoKeyframes ? "生成修正卡" : "确认分析"}
+          </SubmitButton>
         </div>
       </section>
     </div>
   );
 }
+import SubmitButton from "../modern/SubmitButton";

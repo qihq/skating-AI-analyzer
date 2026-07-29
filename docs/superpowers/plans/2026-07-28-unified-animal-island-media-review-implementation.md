@@ -526,6 +526,12 @@ Delete `frontend/src/utils/milestoneShareCanvas.test.ts` together with the retir
 
 ## Task 14: Migrate Asynchronous Submit and Save Buttons
 
+**Status:** Complete (2026-07-29)
+
+**Implementation notes:** Classified native submit and local loading-state call sites. Migrated data-changing actions across uploads, target confirmation, review/report, comparison creation/retry, plans, monthly/annual publishing and export, settings/parent PIN, follow-up corrections/sharing, history/archive retries, IceBuddy memory, and debug workspaces to `SubmitButton`. Navigation, filter/selection, playback, pagination, and dialog-close controls remain ordinary buttons. Existing confirmation wrappers now provide the same loading treatment. Failure paths retain form state and surface the shared Animal Island notification contract.
+
+**Verification:** `npm test -- src/hooks/useSubmitAction.test.tsx src/modern/SubmitButton.test.tsx src/pages/ReviewPage.test.tsx src/pages/AnnualCollectionPage.test.tsx src/pages/MonthlyChaptersPage.test.tsx` (5 files, 13 passed); `npm run build` passed; `git diff --check` passed. The full `npm test` run was attempted earlier but exceeded the 120-second command limit without emitting a failure, so it is not recorded as passing.
+
 **Files:**
 
 - Modify: `frontend/src/pages/UploadPage.tsx`
@@ -542,6 +548,9 @@ Delete `frontend/src/utils/milestoneShareCanvas.test.ts` together with the retir
 - Modify: `frontend/src/components/ParentUnlockModal.tsx`
 - Modify: `frontend/src/components/RetryAnalysisConfirmSheet.tsx`
 - Modify: `frontend/src/components/DeleteAnalysisModal.tsx`
+- Modify: `frontend/src/components/MonthlyChapterEditor.tsx`
+- Modify: `frontend/src/components/AnnualExportStatus.tsx`
+- Modify: `frontend/src/modern/ModernConfirmModal.tsx`
 - Inspect and migrate when asynchronous: `frontend/src/pages/ArchivePage.tsx`, `frontend/src/pages/HistoryPage.tsx`, `frontend/src/pages/ReportPage.tsx`, `frontend/src/pages/ReviewPage.tsx`, `frontend/src/pages/SnowballPage.tsx`, `frontend/src/pages/DebugPage.tsx`, and `frontend/src/components/AppModeContext.tsx`
 - Add: `frontend/src/test/submitActions.test.tsx` or focused tests beside complex forms.
 - Remove obsolete `.island-button` rules from `frontend/src/modern/modern-island.css` after the final call-site search.

@@ -7,6 +7,7 @@ import { ArchiveResponse, fetchArchive, fetchArchiveSummary, fetchSkaters, retry
 import { useAppMode } from "../components/AppModeContext";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
+import SubmitButton from "../modern/SubmitButton";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey, parseApiDate } from "../utils/datetime";
@@ -750,16 +751,17 @@ export default function ArchivePage() {
                 ) : null}
 
                 {entry.status === "failed" && !hideRetry ? (
-                  <button
-                    type="button"
+                  <SubmitButton
                     onClick={() => void handleRetryEntry(entry)}
-                    disabled={isRetrying}
+                    status={isRetrying ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="重试中..."
                     title="分析失败，点击重试"
                     aria-label="分析失败，点击重试"
                     className={`${actionIconClassName} border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100`}
                   >
                     {isRetrying ? "…" : "❌"}
-                  </button>
+                  </SubmitButton>
                 ) : null}
               </div>
 

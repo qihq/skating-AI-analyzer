@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { verifyPin } from "../api/client";
 import PinInput from "./PinInput";
 import IslandDialog from "../modern/IslandDialog";
+import SubmitButton from "../modern/SubmitButton";
 
 const LOCK_SECONDS = 30;
 
@@ -93,7 +94,7 @@ export default function ParentPinVerifyModal({
   };
 
   return (
-    <IslandDialog title={title} description={description} icon="me" onClose={onClose} className="island-dialog__panel--compact" footer={<><button type="button" onClick={onClose} className="island-button island-button--secondary">取消</button><button type="button" onClick={() => void handleSubmit()} disabled={isSubmitting || isLocked || pin.length !== pinLength} className="island-button island-button--primary">{isSubmitting ? <><span className="island-leaf-spinner" />验证中…</> : confirmLabel}</button></>}>
+    <IslandDialog title={title} description={description} icon="me" onClose={onClose} className="island-dialog__panel--compact" footer={<><button type="button" onClick={onClose} className="island-button island-button--secondary">取消</button><SubmitButton onClick={() => void handleSubmit()} disabled={isLocked || pin.length !== pinLength} status={isSubmitting ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="验证中…" className="island-button island-button--primary">{confirmLabel}</SubmitButton></>}>
         <div className="island-pin-house"><div className="island-pin-house__roof" aria-hidden="true" /><p>只有家长知道的小屋钥匙</p>
           <PinInput
             length={pinLength}

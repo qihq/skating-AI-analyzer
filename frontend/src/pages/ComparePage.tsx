@@ -35,6 +35,7 @@ import { parseApiDate } from "../utils/datetime";
 import { createShareImagePreview, normalizeShareText, ShareImagePreview } from "../utils/shareCanvas";
 import { exportShareDocument } from "../utils/shareExport";
 import IslandShareDialog from "../modern/IslandShareDialog";
+import SubmitButton from "../modern/SubmitButton";
 
 const ISSUE_STYLES: Record<string, string> = {
   high: "border-rose-400/45 bg-rose-500/10",
@@ -803,14 +804,15 @@ export default function ComparePage() {
         </Link>
         {data ? (
           <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
+            <SubmitButton
               onClick={() => void handleShareCompare()}
-              disabled={isSharing}
+              status={isSharing ? "submitting" : error ? "error" : "idle"}
+              error={error}
+              loadingLabel="生成中..."
               className="rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isSharing ? "ç”Ÿæˆä¸­â€¦" : "åˆ†äº«å¯¹æ¯”å›¾"}
-            </button>
+            </SubmitButton>
             <Link to={`/report/${data.analysis_b.id}`} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-200 hover:text-blue-600">
               æŸ¥çœ‹æœ€æ–°æŠ¥å‘Š
             </Link>
@@ -830,14 +832,15 @@ export default function ComparePage() {
               {comparison.status === "failed" ? <p className="mt-1 opacity-80">{comparison.error_message || "å¯¹æ¯”ç”Ÿæˆå¤±è´¥ï¼Œè¯·é‡è¯•ã€‚"}</p> : null}
             </div>
             {canRetry ? (
-              <button
-                type="button"
+              <SubmitButton
                 onClick={() => void handleRetry()}
-                disabled={isRetrying}
+                status={isRetrying ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="重新提交中..."
                 className="w-fit rounded-full bg-white px-4 py-2 text-sm font-semibold text-rose-600 shadow-sm transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isRetrying ? "é‡æ–°æäº¤ä¸­â€¦" : "é‡è¯•ç”Ÿæˆ"}
-              </button>
+              </SubmitButton>
             ) : null}
           </div>
         </section>

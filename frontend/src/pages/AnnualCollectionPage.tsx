@@ -30,6 +30,7 @@ import { Button, Card, Collapse, Input, Select, Table, Tag } from "../modern/Ani
 import { useAppMode } from "../components/AppModeContext";
 import ModernConfirmModal from "../modern/ModernConfirmModal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import SubmitButton from "../modern/SubmitButton";
 
 function initialYear(): number { return new Date().getFullYear(); }
 function message(error: unknown): string {
@@ -53,6 +54,7 @@ export default function AnnualCollectionPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharePreview, setSharePreview] = useState<ShareImagePreview[]>([]);
+  const [isSharing, setIsSharing] = useState(false);
   const [collections, setCollections] = useState<AnnualCollection[]>([]);
   const [recycledCollections, setRecycledCollections] = useState<AnnualCollection[]>([]);
   const [editingCollection, setEditingCollection] = useState<AnnualCollection | null>(null);
@@ -169,6 +171,9 @@ export default function AnnualCollectionPage() {
 
   const handleShareAnnual = async () => {
     if (!exportJob || exportJob.status !== "completed") return;
+    setIsSharing(true);
+    setError(null);
+    try {
     const skater = skaters.find((item) => item.id === skaterId);
     const highlights = chapters.slice(0, 4).map((chapter) => `${chapter.year_month}: ${chapter.final_text || chapter.draft_text || "月度记录"}`).join("\n");
     const result = await exportShareDocument({
@@ -180,6 +185,11 @@ export default function AnnualCollectionPage() {
       filename: `annual-collection-${year}.jpg`,
     });
     setSharePreview(result.pages.map((page) => createShareImagePreview(page, false)));
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setIsSharing(false);
+    }
   };
 
   return (
@@ -197,12 +207,12 @@ export default function AnnualCollectionPage() {
       {error ? <p role="alert" className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p> : null}
       {!online ? <p role="status" className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800">当前离线：可以查看已缓存报告，编辑、删除、恢复和 PDF 操作暂不可用。</p> : null}
       <section className="app-card p-5 tablet:p-6"><AnnualChapterPicker chapters={chapters} selectedIds={selectedIds} onChange={setSelectedIds} /><AnnualMilestonePicker milestones={milestones} selectedIds={selectedMilestoneIds} onChange={setSelectedMilestoneIds} /></section>
-      <section className="app-card flex flex-wrap items-center gap-3 p-5"><p className="mr-auto text-sm text-slate-600">已选择 {selectionSummary}{editingCollection ? ` · 正在编辑第 ${editingCollection.revision} 版` : ""}</p><Button disabled={!canExport} onClick={() => void handlePreview()}>预览合集</Button><Button type="primary" loading={working} disabled={!canExport} onClick={() => void handleExport()}>{editingCollection ? "保存新版本并生成 PDF" : "生成年度 PDF"}</Button></section>
+      <section className="app-card flex flex-wrap items-center gap-3 p-5"><p className="mr-auto text-sm text-slate-600">已选择 {selectionSummary}{editingCollection ? ` · 正在编辑第 ${editingCollection.revision} 版` : ""}</p><SubmitButton disabled={!canExport} onClick={() => void handlePreview()} status={working ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="预览中...">预览合集</SubmitButton><SubmitButton type="primary" disabled={!canExport} onClick={() => void handleExport()} status={working ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="生成中...">{editingCollection ? "保存新版本并生成 PDF" : "生成年度 PDF"}</SubmitButton></section>
       {preview ? <section className="rounded-2xl bg-blue-50 px-5 py-4 text-sm leading-7 text-blue-800">预览：{preview.coverage.published_chapter_count} 个已发布章节，其中 {preview.coverage.text_only_chapter_count} 个将以文字版呈现。</section> : null}
       <AnnualExportStatus exportJob={exportJob} onRetry={() => void handleRetryExport()} onRegenerate={() => void handleRetryExport()} retrying={working} />
       <Collapse question={`年度版本历史（${collections.length}）`} defaultExpanded answer={<>{collections.length ? <><div className="hidden tablet:block"><Table columns={historyColumns} dataSource={tableRows} rowKey="id" striped /></div><div className="space-y-3 tablet:hidden">{collections.map((item) => <Card key={item.id} pattern="default"><div className="space-y-3"><div><strong>{item.title}</strong><Tag color="app-teal">第 {item.revision} 版</Tag><p className="text-sm">{item.selected_chapter_ids.length} 个月报 · {item.selected_milestone_ids.length} 个里程碑</p></div><div className="flex flex-wrap gap-2"><Button onClick={() => loadForEdit(item)} disabled={!online}>修改为新版本</Button><Button danger onClick={() => confirmRecycle(item)} disabled={working || !online}>移入回收站</Button></div></div></Card>)}</div></> : <p>暂无年度版本。</p>}</>} />
       <Collapse question={`年度回收站（${recycledCollections.length}）`} answer={<div className="space-y-3">{recycledCollections.length ? recycledCollections.map((item) => <Card key={item.id} pattern="app-red"><div className="flex flex-wrap items-center justify-between gap-3"><strong>{item.title} · 第 {item.revision} 版</strong><div className="flex gap-2"><Button onClick={() => void restoreCollection(item.id)} disabled={working || !online}>恢复</Button><Button danger onClick={() => confirmPermanentDelete(item)} disabled={working || !online}>永久删除</Button></div></div></Card>) : <p>回收站为空。</p>}</div>} />
-      {exportJob?.status === "completed" ? <Button type="primary" onClick={() => void handleShareAnnual()}>分享年度合集</Button> : null}
+      {exportJob?.status === "completed" ? <SubmitButton type="primary" onClick={() => void handleShareAnnual()} status={isSharing ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="生成中...">分享年度合集</SubmitButton> : null}
       <IslandShareDialog
         preview={null}
         previews={sharePreview}

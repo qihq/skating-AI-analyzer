@@ -34,6 +34,7 @@ import ZodiacAvatar from "../components/ZodiacAvatar";
 import { createShareImagePreview, type ShareImagePreview } from "../utils/shareCanvas";
 import { exportShareDocument } from "../utils/shareExport";
 import IslandShareDialog from "../modern/IslandShareDialog";
+import SubmitButton from "../modern/SubmitButton";
 
 const STATUS_TEXT: Record<string, string> = {
   pending: "冰宝（IceBuddy）已收到视频，正在准备分析环境…",
@@ -1043,24 +1044,26 @@ export default function ReportPage() {
                     {planButtonText}
                   </Link>
                 ) : (
-                  <button
-                    type="button"
+                  <SubmitButton
                     onClick={handleCreatePlan}
-                    disabled={isCreatingPlan}
+                    status={isCreatingPlan ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="生成中..."
                     className="min-h-[44px] rounded-full bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {isCreatingPlan ? "生成中..." : planButtonText}
-                  </button>
+                    {planButtonText}
+                  </SubmitButton>
                 )}
                 {isParentMode ? (
-                  <button
-                    type="button"
+                  <SubmitButton
                     onClick={() => void handleShareReport()}
-                    disabled={isSharing}
+                    status={isSharing ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="生成中..."
                     className="min-h-[44px] rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {isSharing ? "生成中..." : "生成分享图"}
-                  </button>
+                    生成分享图
+                  </SubmitButton>
                 ) : (
                   <button type="button" onClick={() => void enterParentMode()} className="min-h-[44px] rounded-full border border-blue-200 bg-white px-4 py-2 text-sm font-semibold text-blue-600 transition hover:bg-blue-50">
                     家长模式

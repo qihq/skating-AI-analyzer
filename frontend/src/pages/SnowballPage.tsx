@@ -23,6 +23,7 @@ import { useAppMode } from "../components/AppModeContext";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 import { parseApiDate } from "../utils/datetime";
+import SubmitButton from "../modern/SubmitButton";
 
 const WELCOME_MESSAGE = "嗨！我是冰宝（IceBuddy） ☃️ 今天想练什么？";
 const CATEGORY_OPTIONS = ["目标", "偏好", "总结", "卡点", "其他"] as const;
@@ -190,6 +191,7 @@ export default function SnowballPage() {
   const [isMutatingSuggestion, setIsMutatingSuggestion] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSavingMemory, setIsSavingMemory] = useState(false);
+  const [mutatingMemoryId, setMutatingMemoryId] = useState<string | null>(null);
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
   const [draftMemory, setDraftMemory] = useState<DraftMemory>(EMPTY_MEMORY);
   const historyRef = useRef<HTMLDivElement | null>(null);
@@ -426,12 +428,16 @@ export default function SnowballPage() {
       return;
     }
 
+    setMutatingMemoryId(memory.id);
+    setMemoryError(null);
     try {
       await deleteMemory(selectedSkaterId, memory.id);
       setMemories((current) => current.filter((item) => item.id !== memory.id));
       showNotice("冰宝（IceBuddy）记忆已删除。");
     } catch {
       setMemoryError("删除失败了，请稍后再试。");
+    } finally {
+      setMutatingMemoryId(null);
     }
   };
 
@@ -440,12 +446,16 @@ export default function SnowballPage() {
       return;
     }
 
+    setMutatingMemoryId(memory.id);
+    setMemoryError(null);
     try {
       const updated = await toggleMemoryPin(selectedSkaterId, memory.id, !memory.is_pinned);
       setMemories((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       showNotice(updated.is_pinned ? "这条记忆已固定给冰宝（IceBuddy）。" : "这条记忆已取消固定。");
     } catch {
       setMemoryError("固定状态更新失败，请稍后再试。");
+    } finally {
+      setMutatingMemoryId(null);
     }
   };
 
@@ -598,13 +608,16 @@ export default function SnowballPage() {
                 />
                 <p className="text-xs text-slate-400">建议一条消息只问一个重点，冰宝的回答会更清楚。</p>
               </div>
-              <button
-                type="submit"
-                disabled={!input.trim() || isChatting}
+              <SubmitButton
+                htmlType="submit"
+                disabled={!input.trim()}
+                status={isChatting ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="发送中..."
                 className="min-h-[52px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-55"
               >
                 {isChatting ? "发送中..." : "发给冰宝（IceBuddy）"}
-              </button>
+              </SubmitButton>
             </div>
           </form>
         </section>
@@ -668,22 +681,24 @@ export default function SnowballPage() {
                             <p className="mt-2 text-sm leading-7 text-slate-600">「{card.content}」</p>
                             {card.category ? <p className="mt-2 text-xs text-slate-500">分类：{card.category}</p> : null}
                             <div className="mt-4 flex flex-wrap gap-3">
-                              <button
-                                type="button"
+                              <SubmitButton
                                 onClick={() => void handleApplySuggestion(card)}
-                                disabled={busy}
+                                status={busy ? "submitting" : memoryError ? "error" : "idle"}
+                                error={memoryError}
+                                loadingLabel="处理中..."
                                 className="min-h-[42px] rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-60"
                               >
                                 {busy ? "处理中..." : "✅ 采纳"}
-                              </button>
-                              <button
-                                type="button"
+                              </SubmitButton>
+                              <SubmitButton
                                 onClick={() => void handleDismissSuggestion(card)}
-                                disabled={busy}
+                                status={busy ? "submitting" : memoryError ? "error" : "idle"}
+                                error={memoryError}
+                                loadingLabel="处理中..."
                                 className="min-h-[42px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
                               >
                                 ❌ 忽略
-                              </button>
+                              </SubmitButton>
                             </div>
                           </article>
                         );
@@ -709,15 +724,17 @@ export default function SnowballPage() {
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                           {!memory.is_expired ? (
-                            <button
-                              type="button"
+                            <SubmitButton
                               onClick={() => handleTogglePin(memory)}
+                              status={mutatingMemoryId === memory.id ? "submitting" : memoryError ? "error" : "idle"}
+                              error={memoryError}
+                              loadingLabel="更新中..."
                               className={`rounded-full px-3 py-1 text-xs font-semibold ${
                                 memory.is_pinned ? "bg-blue-50 text-blue-600" : "bg-slate-100 text-slate-500"
                               }`}
                             >
                               {memory.is_pinned ? "固定" : "未固定"}
-                            </button>
+                            </SubmitButton>
                           ) : (
                             <span className="rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-500">已过期</span>
                           )}
@@ -732,13 +749,15 @@ export default function SnowballPage() {
                         <button type="button" onClick={() => openEditModal(memory)} className="app-pill text-sm font-semibold">
                           编辑
                         </button>
-                        <button
-                          type="button"
+                        <SubmitButton
                           onClick={() => handleDeleteMemory(memory)}
+                          status={mutatingMemoryId === memory.id ? "submitting" : memoryError ? "error" : "idle"}
+                          error={memoryError}
+                          loadingLabel="删除中..."
                           className="rounded-full border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-100"
                         >
                           删除
-                        </button>
+                        </SubmitButton>
                       </div>
                     </article>
                   ))
@@ -855,13 +874,16 @@ export default function SnowballPage() {
                 <button type="button" onClick={resetMemoryModal} className="app-pill px-5 text-sm font-semibold">
                   取消
                 </button>
-                <button
-                  type="submit"
-                  disabled={!draftMemory.title.trim() || !draftMemory.content.trim() || isSavingMemory}
+                <SubmitButton
+                  htmlType="submit"
+                  disabled={!draftMemory.title.trim() || !draftMemory.content.trim()}
+                  status={isSavingMemory ? "submitting" : memoryError ? "error" : "idle"}
+                  error={memoryError}
+                  loadingLabel="保存中..."
                   className="min-h-[48px] rounded-full bg-blue-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   {isSavingMemory ? "保存中..." : editingMemoryId ? "保存记忆" : "新增记忆"}
-                </button>
+                </SubmitButton>
               </div>
             </form>
           </div>

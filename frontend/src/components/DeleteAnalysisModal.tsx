@@ -1,4 +1,5 @@
 import PinInput from "./PinInput";
+import SubmitButton from "../modern/SubmitButton";
 
 type DeleteAnalysisModalProps = {
   step: "confirm" | "pin";
@@ -68,14 +69,16 @@ export default function DeleteAnalysisModal({
               <button type="button" onClick={onClose} className="app-pill">
                 取消
               </button>
-              <button
-                type="button"
+              <SubmitButton
                 onClick={onSubmitPin}
-                disabled={isSubmitting || pin.length !== pinLength}
+                disabled={pin.length !== pinLength}
+                status={isSubmitting ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="删除中..."
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isSubmitting ? "删除中..." : "确认删除"}
-              </button>
+                确认删除
+              </SubmitButton>
             </div>
           </>
         )}

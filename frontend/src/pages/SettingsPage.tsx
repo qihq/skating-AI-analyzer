@@ -27,6 +27,7 @@ import AdvancedToolsLinks from "../components/AdvancedToolsLinks";
 import PinInput from "../components/PinInput";
 import { getAnalysisErrorMessage } from "../constants/analysisErrors";
 import { parseApiDate } from "../utils/datetime";
+import SubmitButton from "../modern/SubmitButton";
 
 type PinLengthOption = 4 | 5 | 6;
 
@@ -693,14 +694,14 @@ export default function SettingsPage() {
 
                   <div className="settings-row mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px]">
                     <p className="text-sm text-slate-500">内部名：{skater.name}</p>
-                    <button
-                      type="button"
+                    <SubmitButton
                       onClick={() => void handleSkaterSave(skater)}
-                      disabled={savingSkaterId === skater.id}
+                      status={savingSkaterId === skater.id ? "submitting" : "idle"}
+                      loadingLabel="保存中..."
                       className="min-h-[44px] rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {savingSkaterId === skater.id ? "保存中..." : "保存"}
-                    </button>
+                    </SubmitButton>
                   </div>
                 </article>
               ))}
@@ -716,14 +717,14 @@ export default function SettingsPage() {
                 <h2 className="mt-2 text-2xl font-semibold text-slate-900">备份与恢复</h2>
                 <p className="mt-3 text-sm leading-7 text-slate-500">支持手动触发备份，也可以从已有备份恢复本地 data 数据。</p>
               </div>
-              <button
-                type="button"
+              <SubmitButton
                 onClick={() => void handleCreateBackup()}
-                disabled={isCreatingBackup}
+                status={isCreatingBackup ? "submitting" : "idle"}
+                loadingLabel="备份中..."
                 className="min-h-[46px] rounded-full bg-blue-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isCreatingBackup ? "备份中..." : "立即备份"}
-              </button>
+                立即备份
+              </SubmitButton>
             </div>
 
             <div className="mt-5 space-y-3">
@@ -737,14 +738,14 @@ export default function SettingsPage() {
                           {formatDate(backup.created_at)} · {formatBytes(backup.size_bytes)}
                         </p>
                       </div>
-                      <button
-                        type="button"
+                      <SubmitButton
                         onClick={() => void handleRestoreBackup(backup.filename)}
-                        disabled={restoringFilename === backup.filename}
+                        status={restoringFilename === backup.filename ? "submitting" : "idle"}
+                        loadingLabel="恢复中..."
                         className="min-h-[42px] rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {restoringFilename === backup.filename ? "恢复中..." : "恢复"}
-                      </button>
+                      </SubmitButton>
                     </div>
                   </article>
                 ))
@@ -856,14 +857,16 @@ export default function SettingsPage() {
               <button type="button" onClick={closePinModal} className="app-pill">
                 取消
               </button>
-              <button
-                type="button"
+              <SubmitButton
                 onClick={() => void handleSavePin()}
-                disabled={isSavingPin || oldPin.length !== pinLength || newPin.length !== newPinLength || confirmNewPin.length !== newPinLength}
+                disabled={oldPin.length !== pinLength || newPin.length !== newPinLength || confirmNewPin.length !== newPinLength}
+                status={isSavingPin ? "submitting" : pinError ? "error" : "idle"}
+                error={pinError}
+                loadingLabel="保存中..."
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isSavingPin ? "保存中..." : "保存"}
-              </button>
+                保存
+              </SubmitButton>
             </div>
           </section>
         </div>

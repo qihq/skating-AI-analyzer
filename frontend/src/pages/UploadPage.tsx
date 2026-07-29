@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { fetchSkaters, Skater, uploadAnalysis } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
+import SubmitButton from "../modern/SubmitButton";
 import TopNav from "../components/TopNav";
 import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childView";
 import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
@@ -371,14 +372,15 @@ export default function UploadPage() {
               </div>
             ) : null}
 
-            <button
-              type="button"
+            <SubmitButton
               onClick={handleSubmit}
-              disabled={isSubmitting}
+              status={isSubmitting ? "submitting" : error ? "error" : "idle"}
+              error={error}
+              loadingLabel="视频上传中..."
               className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-cyan-300 px-5 py-4 text-base font-semibold text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isSubmitting ? "视频上传中..." : "开始分析"}
-            </button>
+              开始分析
+            </SubmitButton>
           </section>
         </div>
       </section>

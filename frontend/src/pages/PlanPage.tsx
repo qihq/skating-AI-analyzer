@@ -6,6 +6,7 @@ import { createPlan, extendPlan, fetchPlan, TrainingPlanDetail, updatePlanSessio
 import { createShareImagePreview, ShareImagePreview } from "../utils/shareCanvas";
 import { exportShareDocument } from "../utils/shareExport";
 import IslandShareDialog from "../modern/IslandShareDialog";
+import SubmitButton from "../modern/SubmitButton";
 
 const LOCATION_MODE_STORAGE_KEY = "plan_location_mode";
 
@@ -309,16 +310,18 @@ export default function PlanPage() {
             </Link>
             <div className="flex w-full flex-col gap-3 phone:flex-row phone:flex-wrap tablet:w-auto tablet:items-center">
               {plan ? (
-                <button
-                  type="button"
+                <SubmitButton
                   onClick={handleRegeneratePlan}
-                  disabled={isRegenerating || isExtending}
+                  disabled={isExtending}
+                  status={isRegenerating ? "submitting" : error ? "error" : "idle"}
+                  error={error}
+                  loadingLabel="重新生成中..."
                   className="island-button island-button--secondary min-h-[44px] w-full phone:w-auto"
                 >
-                  {isRegenerating ? "重新生成中..." : "重新生成"}
-                </button>
+                  重新生成
+                </SubmitButton>
               ) : null}
-              {plan ? <button type="button" className="island-button island-button--primary min-h-[44px] w-full phone:w-auto" onClick={() => void handleSharePlan()} disabled={isSharing}>{isSharing ? "生成中..." : "分享计划"}</button> : null}
+              {plan ? <SubmitButton className="island-button island-button--primary min-h-[44px] w-full phone:w-auto" onClick={() => void handleSharePlan()} status={isSharing ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="生成中...">分享计划</SubmitButton> : null}
               <div className="rounded-full border border-slate-200 bg-white/90 px-4 py-2 text-center text-sm font-medium text-slate-600 shadow-sm">
                 整体进度 {progress.completed}/{progress.total}
               </div>
@@ -498,14 +501,15 @@ export default function PlanPage() {
 
               {canExtendPlan ? (
                 <div className="app-card border border-blue-100 bg-white/90 p-6">
-                  <button
-                    type="button"
+                  <SubmitButton
                     onClick={handleExtendPlan}
-                    disabled={isExtending}
+                    status={isExtending ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="续期中..."
                     className="min-h-[44px] rounded-full border border-blue-300 bg-white px-5 py-3 text-sm font-semibold text-blue-600 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isExtending ? "续期中..." : "📅 根据进度续期计划"}
-                  </button>
+                  </SubmitButton>
                 </div>
               ) : null}
             </>

@@ -1,4 +1,5 @@
 import type { AnnualExport } from "../api/client";
+import SubmitButton from "../modern/SubmitButton";
 
 interface AnnualExportStatusProps {
   exportJob: AnnualExport | null;
@@ -14,7 +15,7 @@ export default function AnnualExportStatus({ exportJob, onRetry, onRegenerate, r
       <div className="island-card rounded-2xl px-4 py-4 text-sm text-emerald-900">
         <p>年度 PDF 已生成（{exportJob.page_count ?? "?"} 页）。</p>
         <a className="island-button island-button--secondary mt-3 inline-flex" href={`/api/annual/exports/${exportJob.id}/download`}>下载年度 PDF</a>
-        {onRegenerate ? <button type="button" className="island-button island-button--primary ml-2 mt-3" disabled={retrying} onClick={onRegenerate}>{retrying ? "生成中…" : "重新生成年度 PDF"}</button> : null}
+        {onRegenerate ? <SubmitButton className="island-button island-button--primary ml-2 mt-3" status={retrying ? "submitting" : "idle"} loadingLabel="生成中..." onClick={onRegenerate}>重新生成年度 PDF</SubmitButton> : null}
       </div>
     );
   }
@@ -22,7 +23,7 @@ export default function AnnualExportStatus({ exportJob, onRetry, onRegenerate, r
     return (
       <div role="alert" className="island-card rounded-2xl px-4 py-3 text-sm text-rose-900">
         <p>{exportJob.error_message || "年度 PDF 生成失败，请检查字体配置后重试。"}</p>
-        {onRetry ? <button type="button" className="island-button island-button--primary mt-3" disabled={retrying} onClick={onRetry}>{retrying ? "生成中..." : "重新生成年度 PDF"}</button> : null}
+        {onRetry ? <SubmitButton className="island-button island-button--primary mt-3" status={retrying ? "submitting" : "idle"} loadingLabel="生成中..." onClick={onRetry}>重新生成年度 PDF</SubmitButton> : null}
       </div>
     );
   }

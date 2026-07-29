@@ -33,6 +33,7 @@ import ProviderMetricsPanel from "../components/ProviderMetricsPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 import { readVideoDuration, shouldShowManualWindow, validateManualWindow } from "../utils/videoMetadata";
+import SubmitButton from "../modern/SubmitButton";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type DebugSource = "analysis" | "upload";
@@ -943,14 +944,15 @@ function DebugTargetSelectionPanel({
         </p>
       ) : null}
       {error ? <p className="mt-3 text-sm text-rose-600">{error}</p> : null}
-      <button
-        type="button"
+      <SubmitButton
         onClick={() => void handleSubmit()}
-        disabled={submitting}
+        status={submitting ? "submitting" : error ? "error" : "idle"}
+        error={error}
+        loadingLabel="提交中..."
         className="mt-4 min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {submitting ? "提交中..." : "确认主要人物并继续 debug"}
-      </button>
+      </SubmitButton>
     </div>
   );
 }
@@ -1663,22 +1665,26 @@ function DebugGoldenLabelPanel({
             更新同一个分析报告。
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <button
-              type="button"
+            <SubmitButton
               onClick={() => void handleSave()}
-              disabled={saveState === "loading" || applyState === "loading"}
+              disabled={applyState === "loading"}
+              status={saveState === "loading" ? "submitting" : error ? "error" : "idle"}
+              error={error}
+              loadingLabel="保存中..."
               className="min-h-[46px] w-full rounded-full border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {saveState === "loading" ? "保存中..." : "保存草稿"}
-            </button>
-            <button
-              type="button"
+            </SubmitButton>
+            <SubmitButton
               onClick={() => void handleApplyAndRetry()}
-              disabled={applyState === "loading" || !run.analysis_id}
+              disabled={!run.analysis_id}
+              status={applyState === "loading" ? "submitting" : error ? "error" : "idle"}
+              error={error}
+              loadingLabel="应用中..."
               className="min-h-[46px] w-full rounded-full bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {applyState === "loading" ? "正在应用并重新分析..." : "应用 GOLD 并重新分析"}
-            </button>
+            </SubmitButton>
           </div>
         </div>
       </div>
@@ -2099,13 +2105,15 @@ function DebugRunForm({
       </div>
 
       {error ? <p className="mt-3 text-sm text-rose-600">{error}</p> : null}
-      <button
-        type="submit"
-        disabled={state === "loading"}
+      <SubmitButton
+        htmlType="submit"
+        status={state === "loading" ? "submitting" : error ? "error" : "idle"}
+        error={error}
+        loadingLabel="创建中..."
         className="mt-5 min-h-[44px] w-full rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {state === "loading" ? "创建中..." : "运行调试入口"}
-      </button>
+      </SubmitButton>
     </form>
   );
 }

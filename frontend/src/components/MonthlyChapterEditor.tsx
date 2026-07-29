@@ -3,6 +3,7 @@ import { useState } from "react";
 import { MonthlyChapter } from "../api/client";
 import { Button, Input } from "../modern/AnimalUi";
 import ModernConfirmModal from "../modern/ModernConfirmModal";
+import SubmitButton from "../modern/SubmitButton";
 
 const FINAL_TEXT_MAX_LEN = 2400;
 
@@ -65,13 +66,14 @@ export default function MonthlyChapterEditor({
       {error ? <p role="alert" className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{error}</p> : null}
 
       <div className="mt-5 flex flex-wrap gap-3">
-        <Button
+        <SubmitButton
           onClick={() => void onSaveDraft(draft, title)}
-          disabled={saving}
-          loading={saving}
+          status={saving ? "submitting" : error ? "error" : "idle"}
+          error={error}
+          loadingLabel="保存中..."
         >
-          {saving ? "保存中…" : isPublished ? "创建新版本" : "保存修改"}
-        </Button>
+          {isPublished ? "创建新版本" : "保存修改"}
+        </SubmitButton>
         <Button
           type="primary"
           onClick={() => setConfirmPublish(true)}

@@ -1,4 +1,5 @@
 import { Button, Modal } from "./AnimalUi";
+import SubmitButton from "./SubmitButton";
 
 interface ModernConfirmModalProps {
   open: boolean;
@@ -19,7 +20,7 @@ export default function ModernConfirmModal({ open, title, description, confirmLa
       typewriter={false}
       maskClosable={!loading}
       onClose={loading ? undefined : onCancel}
-      footer={<div className="flex justify-end gap-3"><Button onClick={onCancel} disabled={loading}>取消</Button><Button type="primary" danger={danger} loading={loading} onClick={onConfirm}>{confirmLabel}</Button></div>}
+      footer={<div className="flex justify-end gap-3"><Button onClick={onCancel} disabled={loading}>取消</Button><SubmitButton type="primary" danger={danger} status={loading ? "submitting" : "idle"} loadingLabel="处理中..." onClick={onConfirm}>{confirmLabel}</SubmitButton></div>}
     >
       <p className="py-3 text-sm leading-7 text-slate-700">{description}</p>
     </Modal>

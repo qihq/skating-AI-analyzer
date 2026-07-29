@@ -33,6 +33,7 @@ import {
 import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
 import CorrectionKeyframeReview from "./CorrectionKeyframeReview";
 import { Button, Loading } from "../modern/AnimalUi";
+import SubmitButton from "../modern/SubmitButton";
 
 const QUICK_PROMPTS = [
   "我的 comments 有没有被考虑？",
@@ -841,15 +842,17 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             {prompt}
           </button>
         ))}
-        <button
-          type="button"
+        <SubmitButton
           onClick={() => setIsVideoKeyframeConfirmOpen(true)}
-          disabled={isSending || isRerunningVideoKeyframes}
+          disabled={isSending}
+          status={isRerunningVideoKeyframes ? "submitting" : error ? "error" : "idle"}
+          error={error}
+          loadingLabel="处理中..."
           className="min-h-[36px] shrink-0 rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold leading-5 text-amber-700 transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
           title="不重跑主人物追踪，只生成关键帧修正卡"
         >
           视频 AI 重识别关键帧
-        </button>
+        </SubmitButton>
       </div>
     </div>
   );
@@ -915,22 +918,24 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
           placeholder="修正理由"
         />
         <div className="grid gap-2 phone:grid-cols-2 xl:grid-cols-1">
-          <button
-            type="button"
+          <SubmitButton
             onClick={() => void submitManualCorrection("action_label")}
-            disabled={isMutating}
+            status={isMutating ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="生成中..."
             className="min-h-[40px] rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
           >
             生成动作修正卡
-          </button>
-          <button
-            type="button"
+          </SubmitButton>
+          <SubmitButton
             onClick={() => void submitManualCorrection("keyframes")}
-            disabled={isMutating}
+            status={isMutating ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="生成中..."
             className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             生成关键帧修正卡
-          </button>
+          </SubmitButton>
         </div>
       </div>
     </div>
@@ -939,14 +944,16 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     <div className="rounded-[24px] border border-slate-200 bg-white p-4">
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-slate-900">修正卡</h3>
-        <button
-          type="button"
+        <SubmitButton
           onClick={() => void mutateCorrection(() => regenerateReportFromCorrections(analysisId), "已按修正重新生成有效报告。")}
-          disabled={isMutating || !appliedCorrections.length}
+          disabled={!appliedCorrections.length}
+          status={isMutating ? "submitting" : error ? "error" : "idle"}
+          error={error}
+          loadingLabel="生成中..."
           className="min-h-[36px] rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           重新生成报告
-        </button>
+        </SubmitButton>
       </div>
       <div className={`mt-3 grid gap-3 ${isWorkspace ? "web:grid-cols-2 wide:grid-cols-3" : ""}`}>
         {activeCorrections.length ? (
@@ -973,22 +980,24 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
               {correction.kind === "keyframes" ? <CorrectionKeyframePreview analysis={analysis} correction={correction} layout={isWorkspace ? "workspace" : "sidebar"} /> : null}
               {correction.status === "proposed" ? (
                 <div className="mt-2 flex gap-2 border-t border-slate-200 pt-2">
-                  <button
-                    type="button"
+                  <SubmitButton
                     onClick={() => void mutateCorrection(() => applyAnalysisCorrection(analysisId, correction.id), "修正已应用到有效数据。")}
-                    disabled={isMutating}
+                    status={isMutating ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="应用中..."
                     className="min-h-[32px] flex-1 rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     应用
-                  </button>
-                  <button
-                    type="button"
+                  </SubmitButton>
+                  <SubmitButton
                     onClick={() => void mutateCorrection(() => dismissAnalysisCorrection(analysisId, correction.id), "已忽略该修正。")}
-                    disabled={isMutating}
+                    status={isMutating ? "submitting" : error ? "error" : "idle"}
+                    error={error}
+                    loadingLabel="处理中..."
                     className="min-h-[32px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     忽略
-                  </button>
+                  </SubmitButton>
                 </div>
               ) : null}
             </article>
@@ -1023,14 +1032,16 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             <h2 className="mt-2 text-xl font-semibold text-slate-900">AI 追问</h2>
             <p className="mt-1 text-sm leading-6 text-slate-500">基于已保存证据回答；修正需要人工确认后才会生效。</p>
           </div>
-          <button
-            type="button"
+          <SubmitButton
             onClick={() => void handleShare()}
-            disabled={isSharing || analysis.status !== "completed"}
+            disabled={analysis.status !== "completed"}
+            status={isSharing ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="生成中..."
             className="min-h-[40px] rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isSharing ? "生成中..." : "分享追问"}
-          </button>
+          </SubmitButton>
         </div>
       ) : null}
 
@@ -1062,14 +1073,16 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             </div>
             <div className="flex flex-col gap-2 phone:flex-row tablet:items-center tablet:justify-end">
               {modelSelector}
-              <button
-                type="button"
+              <SubmitButton
                 onClick={() => void handleShare()}
-                disabled={isSharing || analysis.status !== "completed"}
+                disabled={analysis.status !== "completed"}
+                status={isSharing ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="生成中..."
                 className="min-h-[38px] rounded-full border border-teal-200 bg-teal-50 px-4 py-1.5 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isSharing ? "生成中..." : "分享追问"}
-              </button>
+              </SubmitButton>
             </div>
           </div>
           <div className="mt-3">
@@ -1148,15 +1161,17 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
             {error ? <p className="text-sm leading-6 text-rose-600">{error}</p> : null}
             <div className="flex flex-col gap-3 phone:flex-row phone:items-center phone:justify-between">
               <span className="text-xs text-slate-400">{input.length}/4000</span>
-              <Button
+              <SubmitButton
                 htmlType="submit"
                 type="primary"
-                loading={isSending}
-                disabled={isSending || !input.trim() || analysis.status !== "completed"}
+                status={isSending ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="发送中…"
+                disabled={!input.trim() || analysis.status !== "completed"}
                 className="min-h-[44px] w-full phone:w-auto"
               >
-                {isSending ? "发送中…" : "发送"}
-              </Button>
+                发送
+              </SubmitButton>
             </div>
           </form>
         </div>

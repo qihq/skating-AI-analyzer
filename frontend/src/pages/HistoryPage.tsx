@@ -17,6 +17,7 @@ import DeleteAnalysisModal from "../components/DeleteAnalysisModal";
 import { useAppMode } from "../components/AppModeContext";
 import ParentPinVerifyModal from "../components/ParentPinVerifyModal";
 import RetryAnalysisConfirmSheet from "../components/RetryAnalysisConfirmSheet";
+import SubmitButton from "../modern/SubmitButton";
 import ZodiacAvatar from "../components/ZodiacAvatar";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkaterIdForChildView } from "../utils/childView";
@@ -649,16 +650,17 @@ export default function HistoryPage() {
                         ) : null}
 
                         {record.status === "failed" && !hideRetry ? (
-                          <button
-                            type="button"
+                          <SubmitButton
                             onClick={() => void handleRetryRecord(record)}
-                            disabled={isRetrying}
+                            status={isRetrying ? "submitting" : error ? "error" : "idle"}
+                            error={error}
+                            loadingLabel="重试中..."
                             title="分析失败，点击重试"
                             aria-label="分析失败，点击重试"
                             className={`${actionIconClassName} border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100`}
                           >
                             {isRetrying ? "…" : "❌"}
-                          </button>
+                          </SubmitButton>
                         ) : null}
                       </div>
 
@@ -741,14 +743,16 @@ export default function HistoryPage() {
               <p className="text-sm font-medium text-slate-900">已选择 {selectedIds.length}/2 条记录</p>
               <p className="mt-1 text-sm text-slate-500">只能选择同动作类型的 completed 记录进行对比。</p>
             </div>
-            <button
-              type="button"
+            <SubmitButton
               disabled={selectedRecords.length !== 2}
               onClick={() => void handleStartComparison()}
+              status={isCreatingComparison ? "submitting" : error ? "error" : "idle"}
+              error={error}
+              loadingLabel="创建中..."
               className="rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isCreatingComparison ? "正在创建…" : "开始对比"}
-            </button>
+            </SubmitButton>
           </div>
         </div>
       ) : null}

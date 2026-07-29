@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { setupPin } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import PinInput from "../components/PinInput";
+import SubmitButton from "../modern/SubmitButton";
 
 type PinLengthOption = 4 | 5 | 6;
 
@@ -96,14 +97,16 @@ export default function ParentSetupPage() {
             {error ? <div className="mt-5 rounded-[24px] bg-rose-50 px-4 py-3 text-sm text-rose-500">{error}</div> : null}
 
             <div className="mt-6 flex flex-wrap gap-3">
-              <button
-                type="button"
+              <SubmitButton
                 onClick={handleSubmit}
-                disabled={isSubmitting || pin.length !== pinLength || confirmPin.length !== pinLength}
+                disabled={pin.length !== pinLength || confirmPin.length !== pinLength}
+                status={isSubmitting ? "submitting" : error ? "error" : "idle"}
+                error={error}
+                loadingLabel="设置中..."
                 className="min-h-[44px] rounded-full bg-blue-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isSubmitting ? "设置中..." : "保存 PIN"}
-              </button>
+                保存 PIN
+              </SubmitButton>
               <button type="button" onClick={() => navigate("/path")} className="app-pill">
                 稍后设置
               </button>

@@ -24,6 +24,7 @@ import { Button, Card, Collapse, Input, Select, Tag } from "../modern/AnimalUi";
 import { useAppMode } from "../components/AppModeContext";
 import ModernConfirmModal from "../modern/ModernConfirmModal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import SubmitButton from "../modern/SubmitButton";
 
 const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -59,6 +60,7 @@ export default function MonthlyChaptersPage() {
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [sharePreview, setSharePreview] = useState<ShareImagePreview[]>([]);
+  const [isSharing, setIsSharing] = useState(false);
   const [recycled, setRecycled] = useState<MonthlyChapter[]>([]);
   const chapterRequestVersion = useRef(0);
 
@@ -206,6 +208,9 @@ export default function MonthlyChaptersPage() {
   const snapshot = selectedChapter?.fact_snapshot ?? null;
   const handleShareChapter = async () => {
     if (!selectedChapter) return;
+    setIsSharing(true);
+    setError(null);
+    try {
     const result = await exportShareDocument({
       eyebrow: "Animal Island · 月度故事",
       title: selectedChapter.year_month,
@@ -215,6 +220,11 @@ export default function MonthlyChaptersPage() {
       filename: `monthly-story-${selectedChapter.year_month}.jpg`,
     });
     setSharePreview(result.pages.map((page) => createShareImagePreview(page, false)));
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setIsSharing(false);
+    }
   };
 
   const handleRecycle = async () => {
@@ -285,22 +295,26 @@ export default function MonthlyChaptersPage() {
       <section className="app-card p-5">
         <h2 className="text-lg font-semibold text-slate-900">章节修订流程</h2>
         <div className="mt-4 flex flex-wrap gap-3">
-          <Button onClick={() => void handleShareChapter()} disabled={!selectedChapter}>分享月度故事</Button>
-          <Button
+          <SubmitButton onClick={() => void handleShareChapter()} disabled={!selectedChapter} status={isSharing ? "submitting" : error ? "error" : "idle"} error={error} loadingLabel="生成中...">分享月度故事</SubmitButton>
+          <SubmitButton
             onClick={() => void handleGatherFacts()}
-            disabled={!selectedSkaterId || monthInvalid || working || !online}
-            loading={working}
+            disabled={!selectedSkaterId || monthInvalid || !online}
+            status={working ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="整理中..."
           >
             整理本月事实
-          </Button>
-          <Button
+          </SubmitButton>
+          <SubmitButton
             type="primary"
             onClick={() => void handleGenerate()}
-            disabled={!selectedChapter || selectedChapter.status === "published" || working || !online}
-            loading={working}
+            disabled={!selectedChapter || selectedChapter.status === "published" || !online}
+            status={working ? "submitting" : error ? "error" : "idle"}
+            error={error}
+            loadingLabel="生成中..."
           >
             生成叙事初稿
-          </Button>
+          </SubmitButton>
         </div>
 
         {revisionOptions.length > 0 ? (
