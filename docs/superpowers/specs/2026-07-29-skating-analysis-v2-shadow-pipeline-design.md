@@ -211,6 +211,35 @@ Jump T/A/L definitions are fixed and versioned. Spin, step, and spiral use their
 
 Reports may explain an `EvidenceClaim`; they may not invent a new technical fact absent from the fused claim set.
 
+### `AnalysisExperienceV2`
+
+The backend exposes a presentation contract between internal evidence and the family-facing frontend. Pages do not read `TrackState`, raw Path A/B payloads, or loosely typed legacy dictionaries directly.
+
+The contract contains:
+
+- `schema_version` and compatibility capabilities;
+- pipeline mode and public analysis status;
+- one or more display-ready action events;
+- event intervals and profile-specific moments on the source timeline;
+- family-safe confidence, observability, and review-task states;
+- pose availability and provenance summary;
+- rotation value, range, or refusal state without false precision;
+- traceable report claims and next actions;
+- optional parent-only diagnostics references, never raw provider output.
+
+An additive backend presenter creates this response for legacy, shadow, and V2 analyses. The frontend therefore consumes one stable experience model during migration instead of detecting dozens of old fields inside components.
+
+The experience envelope also declares one authoritative rendering source:
+
+- `authority`: `legacy | v2`;
+- `source_pipeline_fingerprint`;
+- `capabilities`;
+- `compatibility_notes`;
+- `review_tasks`;
+- `events` and all downstream display data from the same authority.
+
+There is no field-level legacy/V2 fallback inside one ordinary response. In shadow mode, the family response is entirely legacy-authoritative and the V2 result is available only from a separate parent-authorized comparison endpoint. After V2 cutover, a missing V2 claim is displayed as unavailable or unobservable; it is not silently filled with a legacy value. Historical legacy analyses are adapted wholesale into `AnalysisExperienceV2`, so they remain readable without mixing their evidence into a new V2 analysis.
+
 ## Component Design
 
 ### Timebase and media layer
@@ -298,6 +327,98 @@ The estimator must detect aliasing and reject an answer when sampling or visibil
 - An identity conflict blocks downstream authoritative pose and technical claims for that interval.
 - A rotation conflict returns an interval or uncertain class, not a falsely precise number.
 - The UI exposes concise uncertainty and a review action without exposing internal Path A/B implementation names in normal family-facing views.
+
+## Frontend Experience and Entry Points
+
+### Product-language boundary
+
+Internal V2 states map to clear family language:
+
+| Internal state | Family-facing meaning | Normal UI behavior |
+|---|---|---|
+| `confirmed` | 已确认 | Show the result and its evidence normally |
+| `uncertain` | 需要确认 | Show the limited result and one concrete review action |
+| `lost` | 这段没有跟清楚 | Do not show pose or technical conclusions for the interval |
+| `unobservable` | 画面不足，暂不判断 | Explain what is unavailable without treating it as a technique defect |
+| `shadow` | Hidden from ordinary users | Visible only in parent-authorized advanced review |
+
+The frontend never translates confidence into certainty merely to fill a card. It avoids technical names such as Path A, Path B, ReID, identity margin, pipeline hash, or optical-flow aliasing outside advanced tools.
+
+### Animal Island continuity
+
+V2 extends the current Animal Island/family-growth theme instead of creating a parallel engineering interface:
+
+- reuse the four primary spaces: 首页、开始复盘、成长、我的;
+- reuse `IslandCard`, `IslandPageHeader`, `SectionNav`, shared media controls, spacing, rounded surfaces, natural colors, and day-period themes;
+- use calm, actionable language rather than red/green telemetry dashboards;
+- preserve parent/child information-density differences;
+- keep warning colors semantically stable across island time themes;
+- preserve keyboard, reduced-motion, contrast, touch-target, tablet, desktop, and mobile behavior.
+
+### Entry-point changes
+
+The route hierarchy remains recognizable and backward compatible:
+
+- `/home`: the latest-analysis card shows `processing`, `needs_confirmation`, `completed`, or `partially_observable`, and sends the parent to the next useful action.
+- `/review`: remains the primary "冰场小屋" entry for upload and analysis. It also becomes the inbox for pending main-skater, action-window, or ambiguity confirmation generated during an analysis.
+- `/analysis/:id`: remains the stable analysis-detail route. It supports multiple events through an event selector and source-time timeline while retaining the current sections: 总结、关键时刻、身体与姿态、追问、更多.
+- `/growth`: consumes only compatible confirmed claims. Uncertain, unobservable, changed-definition, or insufficient-coverage values do not silently enter trends, comparisons, milestones, chapters, or annual exports.
+- `/me/advanced`: remains parent-authorized. Model/API, diagnostics, Golden labeling, and a new Shadow review tool live here.
+- `/golden`, `/debug`, existing `/report/:id` links, and old stored report URLs remain compatible through redirects or presenters during migration.
+
+No fifth primary navigation destination named V2, AI, Shadow, Golden, or Algorithms is introduced.
+
+### Analysis-detail experience
+
+For a video with several events, the detail page provides:
+
+- an overview summarizing which events were found and which require review;
+- a shared video timeline with event intervals and profile-specific key moments;
+- an event selector that keeps video position, summary, moments, pose, and questions synchronized;
+- per-event observability and confidence language;
+- pose overlays only where identity and joints are authorized;
+- measured/smoothed presentation without treating interpolated data as technical evidence;
+- rotation as an estimate or range with the relevant convention, never an unsupported exact number;
+- a single next action when an anchor, interval, or label needs confirmation.
+
+Legacy single-action analyses are presented as one event, so historical reports do not require database rewrites.
+
+### Advanced review experience
+
+The parent-only Shadow workspace may display:
+
+- legacy and V2 results side by side;
+- the first divergent stage;
+- identity conflict intervals and candidate evidence;
+- measured/interpolated pose provenance;
+- action, key-moment, rotation, Path A/B, and fused-claim differences;
+- pipeline/model/config/prompt fingerprints;
+- Golden evaluation status and gate evidence.
+
+This workspace is diagnostic and cannot silently promote a shadow result into the family report. Promotion or correction requires a separately confirmed, audited action.
+
+### API compatibility
+
+- Existing `AnalysisDetail` fields remain readable during migration.
+- A dedicated versioned `AnalysisExperienceV2` endpoint becomes the modern frontend's primary contract for both historical and V2 analyses; raw legacy analysis fields remain only for bounded compatibility consumers during retirement.
+- The backend owns normalization from stored legacy/V2 evidence to the experience model.
+- Frontend TypeScript types are generated or contract-checked against the backend schema; production components do not use `Record<string, unknown>` for V2 experience fields.
+- Capabilities and schema versions control rendering. Components do not infer pipeline generation from incidental field presence.
+- Shadow artifacts and private Golden labels are never returned by ordinary family endpoints.
+- API and UI caches include schema and pipeline compatibility keys so rollback cannot show stale V2 data over a legacy response.
+
+### Synchronized vertical delivery
+
+V2 is a full-system refactor. Each implementation iteration ships one coherent vertical slice:
+
+1. internal backend evidence or behavior;
+2. persisted schema and API presenter behavior;
+3. typed frontend contract and selector;
+4. Animal Island user or parent-authorized diagnostic experience;
+5. legacy/history compatibility behavior;
+6. backend contract, frontend component, route, accessibility, and visual-regression tests.
+
+An iteration is incomplete if a new backend state has no intentional frontend representation, if a frontend component must inspect both legacy and V2 raw fields, or if an ordinary page exposes partially migrated engineering data. Backend-only shadow computation is allowed only when the same iteration adds its parent-authorized Shadow visualization and keeps it absent from family endpoints.
 
 ## Golden Dataset Strategy for Limited Family Videos
 
@@ -428,37 +549,42 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Import newly selected videos, detect accidental duplicates, and build the first Golden manifest.
 - Fix evaluator semantics before using it for architectural decisions.
 - Freeze a legacy baseline and store its version fingerprints.
+- Deliver the parent-authorized Animal Island Golden catalog, annotation, evaluator, and gate surfaces together with their backend states.
 
 ### Phase 1: Contracts and source time
 
 - Introduce canonical types and adapters.
 - Build exact source-PTS observation streams.
-- Keep legacy outputs unchanged while producing V2 diagnostics.
+- Introduce the versioned experience presenter and migrate the affected Animal Island surfaces in the same vertical slices.
+- Keep ordinary family responses wholly legacy-authoritative while producing V2 diagnostics in parent-authorized tools.
 
 ### Phase 2: Tracking and pose
 
 - Shadow identity V2 beside legacy tracking.
-- Generate V2 pose only from V2-confirmed identity in shadow artifacts; do not switch the user-facing authoritative pose until the tracking and pose gates pass.
-- Switch tracking and pose consumers only after their individual gates pass.
+- Generate V2 pose only from V2-confirmed identity in shadow artifacts; ordinary family responses remain wholly legacy-authoritative.
+- Passing tracking and pose gates makes those stages eligible for the complete V2 candidate; it does not switch individual fields inside an ordinary response.
 
 ### Phase 3: Events and key moments
 
 - Add multi-event proposals and classifiers.
 - Refine events on source frames.
 - Shadow profile-specific key moments and compare with legacy results.
+- Extend the same analysis-detail event selector, source timeline, and review inbox; do not create profile-specific parallel pages.
 
 ### Phase 4: Rotation and A/B redesign
 
 - Add multi-signal rotation estimation and observability.
 - Adapt Path A and Path B to consume their new bounded evidence.
 - Add claim-level fusion and constrain reporting.
+- Complete the presenter-backed family report, pose, rotation, growth eligibility, and parent Shadow comparison views as one authority-consistent experience.
 
 ### Phase 5: Calibration and retirement
 
 - Calibrate confidence and identity margins on validation data.
 - Run frozen-test and DS918+ operational gates.
-- Enable V2 by layer, retaining rollback flags.
+- Enable V2 only for selected whole analyses/cohorts, retaining whole-experience rollback to legacy.
 - Remove legacy rules only after ablation shows no required benefit.
+- Remove raw mixed-source reads and obsolete frontend paths only after the four-space route, historical-link, theme, responsive, and accessibility matrix passes.
 
 ## Error Handling and Safety
 
@@ -477,12 +603,17 @@ Initial numeric thresholds are release gates to validate against the first real 
 ## Testing Strategy
 
 - Unit tests for each canonical type, invariant, state transition, and observability policy.
+- Backend schema fixtures checked against the TypeScript `AnalysisExperienceV2` contract and exhaustive selectors.
 - Property tests for PTS monotonicity, coordinate transforms, and temporal ordering.
 - Synthetic tests for camera pan, zoom, crossing, occlusion, left/right swap, dropped frames, and variable frame rate.
 - Golden end-to-end tests stratified by scene and action profile.
 - Metamorphic tests: equivalent transcode and frame-rate representations should preserve source-time events within tolerance.
 - Determinism tests for repeated runs under fixed fingerprints.
 - Shadow-diff tests that identify exactly which stage changed a downstream claim.
+- Frontend component and route tests for legacy authority, V2 authority, Shadow isolation, historical records, multi-event selection, review tasks, growth eligibility, and rollback cache invalidation.
+- Desktop, tablet, mobile, keyboard, screen-reader semantics, contrast, reduced-motion, touch-target, loading, empty, error, uncertain, and unobservable checks for every affected Animal Island surface.
+- Static import-boundary tests proving migrated ordinary components cannot read raw legacy biomechanics, pose dictionaries, Path A/B payloads, or combine authorities.
+- Production frontend build and visual-regression coverage for the four primary spaces, analysis detail, Golden, Shadow, diagnostics, and historical reports.
 - Resource tests on the deployment-class host.
 
 Existing legacy tests remain during migration. They are characterization coverage, not substitutes for Golden evaluation.
@@ -498,4 +629,4 @@ Existing legacy tests remain during migration. They are characterization coverag
 
 ## Acceptance of the Design
 
-This design is complete when implementation can be decomposed into independently testable iterations, each produces shadow evidence, and no layer is switched to authoritative use without a measurable Golden gate and rollback path.
+This design is complete when implementation can be decomposed into independently testable full-stack iterations, each backend state has an intentional Animal Island or parent-authorized diagnostic representation, and no ordinary response switches to V2 authority until every required Golden, experience, operational, and rollback gate passes.
