@@ -1,4 +1,4 @@
-# Skating Analysis V2 Shadow Pipeline Iteration Plan
+# Skating Analyzer V2 Full-System Shadow Rebuild Iteration Plan
 
 Date: 2026-07-29
 
@@ -8,7 +8,7 @@ This document supersedes the execution order and unchecked algorithm tasks in th
 
 ## Outcome
 
-Deliver an identity-safe, timestamp-correct V2 skating-analysis pipeline for main-skater tracking, pose, multi-event action recognition, profile-specific key moments, and rotation count. V2 runs in shadow mode until a newly collected, private Golden dataset and deployment-class operational tests pass. Development happens in a separate Git worktree and nothing is merged into the main worktree until the complete program is accepted.
+Deliver an identity-safe, timestamp-correct V2 skating-analysis pipeline for main-skater tracking, pose, multi-event action recognition, profile-specific key moments, and rotation count, while preserving and correctly reconnecting every current product feature, setting, model/runtime path, generated artifact, background job, and historical entry point. V2 runs in shadow mode until a newly collected, private Golden dataset plus full-product and deployment-class operational gates pass. Development happens in a separate Git worktree and nothing is merged into the main worktree until the complete program is accepted.
 
 ## Scope and Non-Negotiable Constraints
 
@@ -26,6 +26,10 @@ Deliver an identity-safe, timestamp-correct V2 skating-analysis pipeline for mai
 - Preserve the current Animal Island/family-growth theme and four primary spaces. V2 does not create a new engineering-style primary navigation area.
 - Keep frontend routes and historical reports backward compatible through a backend-owned presentation adapter.
 - Keep Shadow, Golden, provider, and raw pipeline diagnostics behind parent-authorized advanced tools.
+- Preserve the complete current product: analysis lifecycle, media, chat/corrections, plans, sessions, growth, skills, memories, chapters, annual collections/PDF, comparisons, shares/exports, settings, providers/models, diagnostics, backup/restore, background jobs, packaging, and historical links.
+- Treat an existing capability as preserved only when its reads, writes, permissions, regeneration/revision behavior, background work, artifacts, and rollback behavior pass—not merely when its route renders.
+- Make backend downstream consumers use `AnalysisFactsV2` from the same authority as `AnalysisExperienceV2`; do not move raw legacy/V2 mixing from the frontend into services.
+- Keep Pose multi-person and YOLO+ByteTrack model/runtime configuration visible and testable in Resident Services. Any optional ReID/face/alternate-pose model remains a gated, fingerprinted experiment until accuracy, privacy, and DS918+ gates pass.
 - No authoritative rollout occurs before every required gate passes on a frozen dataset.
 
 ## Worktree and Integration Policy
@@ -154,6 +158,9 @@ frontend/src/analysis-v2/
 | UX1 Experience contract | Legacy/V2 presenter, schema compatibility, fixtures, and route fallback pass | Modern frontend consumption of V2 |
 | UX2 Core V2 experience | Multi-event timeline, uncertainty, pose, rotation, and confirmation flows pass | Family-facing V2 rollout |
 | UX3 Entry and theme | Four-space navigation, advanced-tool isolation, Animal Island visual/accessibility matrix pass | Final candidate approval |
+| FP1 Feature inventory | Every current route/API/job/model/setting/artifact has an owner, fixture, and rollback expectation | Iteration 1 and any capability retirement |
+| FP2 Downstream facts | Chat, corrections, plans, compare, growth, skills, memories, monthly/annual, shares, and exports consume same-authority facts | V2 family authority |
+| FP3 Full-product parity | Complete route/API/write/job/settings/model/data-safety/packaging matrix passes in legacy, shadow, V2, and rollback modes as applicable | Controlled candidate deployment |
 
 Percentage gates always include the numerator, denominator, rejection rate, confidence interval, and per-stratum breakdown. A percentage based on too few samples does not satisfy a gate by itself.
 
@@ -204,7 +211,8 @@ This is a full-system refactor, not a backend project followed by a frontend por
 ```text
 algorithm/state
   -> persistence and schema
-  -> AnalysisExperience presenter
+  -> AnalysisFacts projection and AnalysisExperience presenter
+  -> downstream service consumers and background jobs
   -> typed TypeScript contract and selectors
   -> Animal Island page/component
   -> compatibility behavior
@@ -221,6 +229,15 @@ algorithm/state
 - Frontend components never combine `analysis.bio_data`, `vision_path_a`, `vision_path_b`, legacy pose dictionaries, and V2 claims themselves.
 - Raw legacy fields remain available only to backend adapters, legacy export compatibility, and parent-authorized diagnostics during migration.
 
+### Single downstream authority
+
+- `AnalysisFactsV2` is the only analysis-semantic input for migrated chat, correction, plan, compare, progress, growth, skill, memory, chapter, annual, share, and export services.
+- Every fact carries authority, pipeline fingerprint, definition version, unit/convention, observability, confidence, provenance, event identity, and allowed-use flags.
+- Shadow facts cannot create or alter a family artifact, plan, skill state, memory suggestion, trend, chapter, annual collection, share, or export.
+- Aggregation and comparison require compatible definitions, units, conventions, and confirmed coverage; incompatible data stays visible as excluded context, not a fabricated trend.
+- Generated artifacts store their input fact hash and generation fingerprint. Existing published/completed artifacts remain immutable snapshots unless the current explicit revision or regeneration workflow is used.
+- Static dependency-boundary tests prevent migrated backend consumers from reading `Analysis.bio_data`, `Analysis.report`, raw Path A/B, or incidental legacy columns directly.
+
 ### Iteration completion checklist
 
 Each iteration report must include:
@@ -230,9 +247,13 @@ Each iteration report must include:
 - frontend types, selectors, components, and entry-point changes;
 - Animal Island theme and family-language review;
 - legacy/history behavior;
+- affected downstream services, mutations, generated artifacts, and background-job behavior;
+- settings/provider/model/runtime behavior and configuration fingerprints when affected;
+- data migration, deletion, backup/restore, privacy, and rollback behavior when affected;
 - desktop, tablet, mobile, keyboard, contrast, loading, empty, error, uncertain, and rollback states as applicable;
 - backend tests, frontend tests, production build, and contract-fixture evidence;
 - confirmation that no ordinary component reads mixed raw sources.
+- confirmation that no migrated backend consumer bypasses `AnalysisFactsV2`.
 
 If an iteration is intentionally invisible to ordinary users, it must still provide a complete parent-authorized Golden/Shadow/diagnostic experience in the same iteration. A backend-only state with no discoverable review surface fails the iteration.
 
@@ -260,8 +281,44 @@ If an iteration is intentionally invisible to ordinary users, it must still prov
 | `/golden` | 1-4 | Provide the complete private themed catalog, annotation, evaluator, and frozen-gate workflow | Existing access checks and links remain valid |
 | `/debug` | 0, 7, 15-17 | Link to bounded observation/pipeline diagnostics without becoming a second report UI | Raw artifacts remain parent-authorized and are not ordinary-page fallbacks |
 | `/report/:id`, archives, compare, and shared historical links | 5, 14, 17, 19 | Route through the same presenter and family-safe claim language | Stored historical evidence is never rewritten or blended with V2 |
+| `/analysis-chat` and analysis 追问 section | 5, 10-14, 17 | Use selected-event, same-authority facts; retain history, multi-question replies, provider identity, suggestions, rerun actions, and sharing | Existing chat snapshots remain readable; new V2 corrections cannot mutate legacy dictionaries or another event |
+| Correction and report regeneration flows | 5, 8, 10-14, 17, 19 | Replace raw overlays with revisioned event/claim/anchor/moment corrections and regenerate from the resulting fact revision | Applied legacy corrections are adapted as a complete legacy fact revision; no startup backfill rewrites V2 evidence |
+| `/plan/:plan_id` and `GrowthPlanHub` | 5, 11-14, 17-19 | Generate/regenerate/fallback/extend from confirmed coachable facts with source hash; retain completion state and share | Existing plans remain immutable historical snapshots until explicitly regenerated |
+| Training sessions and analysis/session links | 0, 5, 17-19 | Preserve create/read/update/delete and linkage independent of pipeline mode | Analysis authority changes cannot detach or duplicate a session |
+| `/growth`, `/archive`, `/history`, `/progress` | 5, 11-14, 17-19 | Build counts, focus, metrics, media, filters, and timeline from compatible facts | Counts remain defined; incompatible technical metrics are excluded with reasons rather than mixed |
+| `/compare` and `GrowthCompareHub` | 5, 6, 10-14, 17-19 | Compare event-aligned claims/moments/media only when definitions are compatible; retain persisted jobs and retry | Legacy-to-legacy remains available; cross-authority comparison is labeled and refuses incompatible deltas |
+| `/path`, skills, milestones, XP/streak/avatar | 5, 11, 14, 17-19 | Preserve manual lock/unlock and learning path; auto-unlock only from eligible confirmed facts under versioned rules | Existing unlock history remains; no Shadow, uncertain, changed score, or unobservable claim auto-unlocks |
+| `/chapters` and monthly facts | 5, 11-14, 17-19 | Preserve fact preview, generation, edit, revision, publish, recycle/restore/delete and representative media from compatible facts | Published revisions and hashes remain immutable; legacy/V2 facts cannot silently share a metric bucket |
+| `/annual` and annual PDF | 5, 14, 16-19 | Preserve preview, chapter/milestone selection, revision, recycle/restore/delete, resumable export/download and media provenance | Existing annual snapshots/PDFs remain reproducible; new exports retain source authority/definition metadata |
+| `/snowball` memories and suggestions | 5, 14, 17-19 | Preserve memory CRUD/pin/expiry/chat; suggestions use confirmed family-safe facts and remain parent-reviewed | Existing memories are not rewritten; Shadow/uncertain technical claims cannot become memory |
+| Shares and exports | 5, 6, 12-14, 17-19 | Preserve analysis text export, chat share, milestone/share images, plan shares, report links and annual PDF using authoritative snapshots | Previously generated artifacts remain readable; new artifacts record source fact hash/schema |
+| `/me` family/profile/appearance | 0, 5, 17-19 | Preserve PIN setup/verify/change, parent/child mode, skater identity/avatar, classic compatibility, time theme and UI preference | Permissions never weaken; theme/preferences survive mode and pipeline changes |
+| Provider/API settings | 0, 5, 14-19 | Preserve provider CRUD/activate/delete/test, encrypted keys, all slots, vote config, specialties, metrics, API health and prompt/model fingerprints | Secret values never enter experience/diagnostic payloads or sanitized reports |
+| Pose and multi-person tracking settings | 0, 7-9, 15-19 | Preserve MediaPipe single/multi-pose status, task path/pose count, YOLO path/weights/download, ByteTrack dependencies and candidate/target tools; add V2 model fingerprint/status | Legacy mode remains runnable; model changes invalidate only dependent V2 artifacts and require measured gates |
+| System/storage/backup operations | 0, 15-19 | Preserve health/system/storage, scheduler, startup seed/backfill/recovery, archive cleanup, backup list/create/restore/retention and V2 artifact policy | Backup/restore covers schema and durable V2/user artifacts while rebuildable caches stay optional; no live-data experiment |
+| Docker, all-in-one, DS918+, standalone pack | 0, 5-7, 14-19 | Keep dependency/model mounts, API/frontend routing, generated core adapter, clean install, upgrade, restart and rollback verified | No independently edited V2 algorithm copy and no package/runtime contract drift |
+| Compatibility routes | 0, 5, 14, 17-19 | Preserve `/upload`, `/skills`, `/progress`, `/parent/setup`, `/settings`, `/settings/api`, `/report/:id/workspace`, `/report/:id/pose-debug`, `/report/:id/target`, `/compare/:id_a/:id_b`, and `/compare/results/:comparison_id` | Redirects retain query/deep-link intent, parent gating, selected analysis/event, and historical result semantics |
 
 The owning iteration must update every listed surface affected by its contract change. Later iterations extend the same components; they do not introduce parallel legacy and V2 component trees.
+
+### Full-system preservation ledger
+
+Iteration 0 creates a checked `feature-preservation` ledger from all current frontend routes, exported API client operations, backend routes, persistence models, scheduled/startup jobs, environment/model settings, generated artifacts, Docker/package entry points, and existing focused tests. Each entry must have exactly one owning iteration and these states:
+
+```text
+inventoried -> characterized -> adapted -> verified -> retirement-approved (optional)
+```
+
+- CI fails if a production route/API/job/model setting disappears without an approved ledger change.
+- `retirement-approved` is never inferred from low use or duplicate appearance; it requires explicit owner approval after replacement and migration proof.
+- Iteration 17 must report zero unowned or merely inventoried entries. Iteration 19 may remove only entries marked `retirement-approved`.
+
+### Treatment rule
+
+- Semantic consumers are migrated to `AnalysisFactsV2` inside their owning iterations.
+- Independent domains are not rewritten merely for uniformity; their existing behavior is characterized and protected across legacy, Shadow, V2, restart, backup/restore, and rollback.
+- Operational domains integrate with V2 fingerprints, invalidation, privacy, persistence, model availability, and recovery.
+- Any implementation change outside these three treatments requires a separately stated reason tied to a preservation-ledger entry.
 
 ## Iteration 0: Isolated Development Foundation
 
@@ -277,6 +334,10 @@ Create a safe V2 development environment without modifying the current productio
 - Add a no-op shadow orchestrator interface that records no user data yet.
 - Record the baseline dependency versions, model paths, provider identities, and source commit.
 - Document how to start legacy and shadow modes locally without touching the main data store.
+- Generate the initial feature-preservation ledger from all current frontend routes/API client operations, backend routes, database models, startup/scheduled jobs, environment/model settings, exports, Docker/package entry points, and existing focused tests.
+- Capture read/write characterization fixtures for chat/corrections, plans, sessions, growth, skills, memories, monthly/annual, comparison, shares/exports, settings, providers, runtime status, backup/restore, and historical URLs before changing their inputs.
+- Inventory durable versus rebuildable data, including source videos, analyses, chat/corrections, plans, sessions, skills, memories, chapters, annual exports, Golden labels, V2 artifacts, caches, model files, provider secrets, and UI preferences.
+- Record Pose and person-tracker runtime baselines: MediaPipe mode/task path/pose count, YOLO resolved source/path/existence/download behavior, ByteTrack and dependency readiness, relevant tracking configuration, and DS918+ mounts.
 
 ### API and Animal Island delivery
 
@@ -294,6 +355,7 @@ Create a safe V2 development environment without modifying the current productio
 - Existing focused backend tests and frontend production build pass.
 - Capability API fixture, TypeScript decoding, boot fallback, four-space route, parent/child authorization, responsive, keyboard, loading, and error-state tests pass.
 - The migrated boot/navigation code passes the raw-source import-boundary check.
+- Current feature-preservation fixtures pass unchanged in isolated legacy mode, including settings, provider, model-runtime, backup/restore-on-a-copy, startup jobs, and all historical route smoke tests.
 
 ### Gate G0
 
@@ -301,6 +363,7 @@ Create a safe V2 development environment without modifying the current productio
 - One legacy analysis produces the same public result shape as before.
 - One no-op shadow run cannot mutate legacy evidence.
 - The capability response and advanced status card agree on mode/authority, and the production frontend build passes without changing the four primary entries.
+- FP1 inventory has zero unowned current capabilities and every entry has an owning Iteration 0-19, compatibility expectation, and focused test or explicit new-test task.
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
 ### Stop condition
@@ -530,12 +593,16 @@ Establish stable boundaries before writing new algorithms.
 - Add a pipeline fingerprint covering source commit, model files, configuration, provider/model identity, prompt version, and contract version.
 - Add an immutable `RunManifest` linking stage inputs and outputs by content hash.
 - Add adapters from legacy sampled frames, tracks, pose, and keyframes for shadow comparison only.
+- Implement backend `AnalysisFactsV2` projections from the same legacy/V2 authority as `AnalysisExperienceV2`, with use permissions for display, coaching, aggregation, comparison, correction, automation, share, and export.
+- Add source fact hash/revision, authority, definition/unit/convention compatibility, observability, confidence, and provenance to all new downstream artifact contracts.
 
 ### API and Animal Island delivery
 
 - Implement the backend-owned `AnalysisExperienceV2` presenter and versioned endpoint as the only modern frontend analysis contract.
 - Generate or contract-check `frontend/src/analysis-v2/contracts.ts`; add typed transport, capability negotiation, selectors, status language, and a whole-record legacy adapter owned by the backend presenter.
 - Migrate the `/analysis/:id` shell, latest-analysis card, review inbox shell, growth ingestion boundary, archives, and historical report routing to that experience model before adding V2 fields.
+- Add bounded fact-consumer interfaces for follow-up/corrections, plans, comparison, progress/growth, skills, memories, chapters/annual, shares, and exports. Initially their legacy projection must reproduce characterized behavior before V2 facts are enabled.
+- Add source fact schema/hash/fingerprint fields to new plan, comparison, chapter, annual, share/export, chat-context, correction, skill-automation, and memory-suggestion writes without rewriting historical snapshots.
 - Every ordinary envelope declares exactly one `authority`. Shadow returns a separate parent-authorized comparison resource and cannot be selected by ordinary-page code.
 - Preserve the existing single-event legacy layout, sections, Animal Island components, parent/child modes, and stable URLs through the wholesale adapter.
 
@@ -547,12 +614,14 @@ Establish stable boundaries before writing new algorithms.
 - Output hashes change when a relevant model/config/prompt changes and remain stable otherwise.
 - Legacy adapters cannot mutate source legacy dictionaries.
 - Backend/OpenAPI and TypeScript fixtures reject contract drift, unsupported schema versions, mixed-authority events, or cross-authority review tasks.
+- Backend dependency-boundary tests reject direct raw-field reads from every migrated downstream service, while legacy adapters remain the only bounded exception.
+- Characterization fixtures prove legacy chat/corrections, plan/session, growth/skills, memory, chapter/annual, compare, share/export, settings, providers, runtimes, backup/restore, and startup jobs retain behavior through their adapters.
 - Component and route tests prove a legacy record renders completely, a missing V2 claim stays unavailable, Shadow is absent from ordinary endpoints, and historical links still open.
 - Production build, responsive/accessibility/loading/error/empty tests, cache-key rollback tests, and a static import-boundary test forbidding migrated production components from raw Path A/B, `bio_data`, and legacy pose fields pass.
 
 ### Iteration gate
 
-UX1: a contract-complete V2 package and presenter-backed modern frontend with no changed legacy-visible conclusions.
+UX1 plus the first half of FP2: a contract-complete V2 package, presenter-backed modern frontend, and downstream fact boundary with no changed legacy-visible conclusions or lost capability.
 
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
@@ -571,6 +640,7 @@ Replace derived uniform timing with exact source timing everywhere in V2.
 - Represent decode gaps and discontinuities explicitly.
 - Provide transforms between source frame, tracking proxy, target crop, and annotated display coordinates.
 - Prohibit V2 physical metrics from accepting `effective_fps` without timestamps.
+- Migrate comparison playback, representative-frame selection, analysis/chat shares, report/export frame links, and annual media resolution to canonical source PTS/frame references while retaining legacy approximate references.
 
 ### API and Animal Island delivery
 
@@ -578,6 +648,7 @@ Replace derived uniform timing with exact source timing everywhere in V2.
 - Upgrade the shared media player and `/analysis/:id` timeline to exact seek/frame-step behavior while retaining the Animal Island controls and existing section navigation.
 - Show decode gaps, timestamp unavailability, rotation metadata, and approximate legacy timing as explicit presentation states; an approximate legacy marker is never presented as exact V2 evidence.
 - Reuse the exact-time player in `/golden` and parent diagnostics so annotation, evidence review, and family playback point to the same source frame.
+- Preserve media quality selection/renditions, synchronized before/after playback, share/export thumbnails, source-video authorization, and cleanup behavior across legacy, Shadow, and V2 artifacts.
 
 ### Tests
 
@@ -603,7 +674,8 @@ Build reusable observations without yet making identity decisions.
 
 ### Changes
 
-- Wrap current detector and ByteTrack as candidate providers.
+- Preserve and wrap the current YOLO model resolution policy, mounted/default/downloaded weights behavior, ByteTrack/supervision/torchvision dependencies, preview candidate selection, manual target lock, and person-tracker diagnostics as versioned candidate providers.
+- Inventory every current `PERSON_TRACKER_*` option. Keep it functional and characterized in legacy mode; map only evidence-backed V2 choices into the typed fingerprinted tracking configuration, and mark any redundant scenario option for Iteration 19 review rather than silently dropping it.
 - Preserve all plausible skater candidates and short tracks, not just one selected box.
 - Estimate camera pan, zoom, and shake from background features while masking detected people.
 - Score blur, clipping, full-body visibility, crowd overlap, and candidate quality.
@@ -616,6 +688,7 @@ Build reusable observations without yet making identity decisions.
 - Add an Animal Island-styled observation panel under `/me/advanced` or `/debug` showing candidate boxes/short tracks, camera-motion reliability, quality strata, anchor suggestions, and `not_run | running | unavailable | failed | complete` states.
 - Use restrained diagnostic overlays and expandable technical detail; child mode and the four primary navigation labels remain unchanged.
 - Anchor suggestions are review aids only and cannot alter an analysis or Golden label in this iteration.
+- Expand Resident Services model/runtime diagnostics to show configured versus active detector/tracker, model hash/source, dependency readiness, legacy/V2 use, invalidation scope, and DS918+ compatibility without exposing private paths in ordinary UI.
 
 ### Tests
 
@@ -689,6 +762,8 @@ Convert candidates into an identity-authoritative `confirmed | uncertain | lost`
 
 If HSV/body-shape evidence cannot pass G4, benchmark a lightweight ReID or face embedding as an additional signal. Adopt it only if the frozen protocol shows a meaningful gain without violating privacy or DS918+ limits. Do not introduce it merely because it is available.
 
+Any optional identity model receives a settings/runtime status, model/config fingerprint, privacy/retention declaration, resource result, enable/disable/rollback control, and Shadow-only badge before it can be considered. Disabling it must leave YOLO+ByteTrack candidate generation operational.
+
 ## Iteration 9: Pose V2 and Joint Provenance
 
 ### Objective
@@ -697,7 +772,7 @@ Produce trustworthy target-only pose observations without hiding uncertainty thr
 
 ### Changes
 
-- Run the existing pose model on confirmed target crops with configurable context margin.
+- Preserve both current MediaPipe fallback single-pose and task-based multi-pose modes, `POSE_NUM_POSES`, task model path resolution, runtime status, and model-missing behavior behind the V2 pose-provider interface; run the selected provider only on confirmed target crops with configurable context margin.
 - Map joints into source coordinates.
 - Record joint confidence, visibility, crop clipping, body scale, and source method.
 - Apply gap-aware smoothing using PTS.
@@ -712,6 +787,7 @@ Produce trustworthy target-only pose observations without hiding uncertainty thr
 - Update `PoseViewer` and the 身体与姿态 section to distinguish measured, smoothed, interpolated-display-only, missing, clipped, and identity-blocked states without implying that smoothing creates evidence.
 - Synchronize pose overlays with selected event and source PTS. Do not display a skeleton for uncertain/lost target intervals.
 - Growth and report selectors cannot consume interpolated-only or identity-blocked biomechanical claims.
+- Update Resident Services Pose runtime status to distinguish configured, active, fallback, missing model, model hash/version, pose count, legacy/V2 use, and dependent-artifact invalidation.
 
 ### Model bakeoff
 
@@ -759,6 +835,8 @@ Detect all plausible action intervals with high recall before forcing a class.
 - Add the multi-event overview, shared source-time event timeline, and event selector to `/analysis/:id`; selection keeps playback, summary, moments, pose, questions, and URL/deep-link state synchronized.
 - Add pending action-window confirmations to the `/review` inbox with merge/split/ignore actions and an explicit ordinary-skating/unknown outcome.
 - In Shadow mode these V2 proposals remain only in the parent comparison workspace; ordinary pages continue to render the complete legacy experience.
+- Extend follow-up/chat, corrections, compare jobs, list/archive filters, highlight/share deep links, and retry/rerun actions with stable event IDs. A multi-event mutation must name one event or explicitly name the whole analysis.
+- Preserve the current analysis note, highlight quote, session link, delete, list/status/log, and completed-analysis semantics while adding `partially_observable` as experience state rather than breaking stored status queries.
 
 ### Tests
 
@@ -797,6 +875,9 @@ Classify proposals without coupling all action families into one fallback-heavy 
 - Render action state in the event selector, summary, and `/review` inbox with family language; never relabel unknown as step or hide ambiguity behind a generic confidence badge.
 - Keep profile-specific cards modular so jump, spin, step, and spiral can expose different supported fields without conditionals leaking into page shells.
 - Admit an event to growth only when its profile/definition is confirmed and compatible; show excluded counts and reasons to the parent.
+- Migrate action corrections from whole-analysis legacy field overlays to revisioned event-label facts; retain existing propose/apply/dismiss and human provenance.
+- Make training-plan selection, analysis filters, progress grouping, compare eligibility, skill matching, monthly facts, and memory suggestions consume confirmed event profiles through `AnalysisFactsV2`; unknown/ambiguous events cannot silently become another family.
+- Preserve manual skill lock/unlock and existing unlock history. Automatic action-based unlock remains disabled for V2 facts until the claim/score eligibility rules pass Iteration 14.
 
 ### Small-data policy
 
@@ -843,6 +924,9 @@ Localize technical moments on original source frames with fixed, versioned defin
 - Replace jump-only assumptions in `ActionPhaseStrip`: jump shows T/A/L, spin shows entry/main/exit, spiral shows entry/hold/exit, and step shows sequence interval plus representative moments.
 - Keep 关键时刻, media markers, selected event, thumbnails, and seek position synchronized; absent stages show unavailable/incomplete instead of synthesized markers.
 - Add moment/interval confirmation tasks to `/review` only when a parent decision can resolve ambiguity.
+- Migrate legacy keyframe corrections and video-keyframe rerun into revisioned, event-scoped moment proposals. Preserve propose/apply/dismiss, exact before/after snapshots, and report-regeneration trigger behavior.
+- Migrate keyframe chips in follow-up, representative frames in monthly/annual, compare moment pairs, report/share thumbnails, pose-debug links, and evidence exports to profile-specific moment selectors.
+- Preserve historical T/A/L chat/correction/share snapshots through the legacy fact adapter; never reinterpret their stored frames as a new V2 definition.
 
 ### Tests
 
@@ -883,6 +967,8 @@ Replace 2D shoulder-angle multiplication with an observable, profile-aware rotat
 - In the summary and key-moment sections show a supported value, a bounded range, or `画面不足，暂不判断`; visually distinguish airborne rotation from competition naming when relevant.
 - Never round an uncertain interval into a confident turn count, substitute a legacy value, or turn unobservable into a technique warning.
 - Add ambiguous rotation review to `/review` and the Golden workflow with exact source-time playback and double-review status.
+- Add definition-compatible rotation facts for compare/progress/monthly/annual selectors. Only confirmed estimates with matching convention and unit may form a delta or trend; ranges and refusals remain contextual evidence.
+- Preserve current jump metric labels in historical artifacts, but version and rename V2 metrics where semantics changed so old and new values cannot occupy one bucket.
 
 ### Label protocol
 
@@ -945,6 +1031,25 @@ Retain the useful dual-review design while preventing either language-model path
 - Let `/growth` consume only confirmed, definition-compatible claims and show why uncertain, changed-definition, or low-coverage values are excluded.
 - Add claim conflicts and raw A/B evidence to the parent Shadow workspace only; preserve a single concrete review action rather than exposing competing prose to the family page.
 
+### Complete downstream feature migration
+
+This iteration completes FP2. All family artifacts below consume `AnalysisFactsV2` from exactly the authority used by the analysis experience.
+
+- **Follow-up chat:** preserve analysis selection, history, multi-question replies, provider/model identity answers, event/moment chips, full-rerun and video-keyframe-rerun actions, context snapshots, empty/error/retry states, and chat sharing. New messages name the selected event or whole analysis and store authority/fact hash. The model receives only family-safe supported facts plus explicit unknown/conflict states, never raw Path A/B or legacy `bio_data`.
+- **Corrections:** preserve propose/apply/dismiss, manual and chat suggestions, target/action/moment/report-note corrections, before/after snapshots, report regeneration, and audit history. Applying a V2 correction creates an event/claim/anchor/moment fact revision and invalidates dependent artifacts; it never mutates legacy dictionaries. Applied historical corrections are projected as one legacy revision.
+- **Training plans:** preserve create/read/regenerate, AI failure fallback, day/session completion, extension, latest-plan entry, sharing, and existing completed state. Generation uses only confirmed coachable claims and stores source fact hash/schema/authority/prompt/provider fingerprint. Existing plans remain historical snapshots; changed facts show `source_updated` and require explicit regeneration.
+- **Training sessions:** preserve CRUD and analysis/session linking. Session identity, completion, notes, duration, coach flag, and linkage do not change when an analysis authority changes or a report is regenerated.
+- **Growth/home/archive/progress:** preserve counts, current focus, timeline, filters, KPIs, milestones, latest analysis, representative media, and history. Counts may span authorities under a stable definition; technical trends require compatible fact definitions and expose excluded/rejected coverage.
+- **Comparison:** preserve immediate and persisted comparison flows, status/retry, before/after synchronized media, score/metric/moment/quality changes, and semantic summary. Match by event/profile and compatibility group; label legacy-to-V2 definition changes and refuse unsupported deltas instead of aligning unrelated events.
+- **Skills/learning path:** preserve catalog, manual lock/unlock, attempt/best state, milestones, XP/streak/avatar, and source analysis links. Automatic unlock requires an eligible confirmed fact and versioned score/rule definition; Shadow, uncertain, unobservable, corrected-but-unconfirmed, or definition-incompatible evidence cannot unlock.
+- **Snowball memory:** preserve memory CRUD, pin, expiry, chat, suggestion review/apply/dismiss, and existing memory text. New technical suggestions require confirmed family-safe facts and remain parent-reviewed; changed analysis facts do not rewrite accepted memories.
+- **Monthly chapters:** preserve facts preview, generation, editing, revision, publish, recycle/restore/permanent-delete, quote facts, representative frames, source hash, and provider provenance. Metrics, recurring observations, focus, milestones, and frames come from eligible fact projections; published revisions stay immutable.
+- **Annual collections:** preserve preview, chapter/milestone selection, creation/revision, recycle/restore/permanent-delete, resumable PDF generation/status/download, fonts, source hash, and representative media. It consumes immutable chapter/milestone snapshots and records their authority/definition coverage without rewriting old annual books.
+- **Shares and exports:** preserve analysis text export, report links, chat share, plan/milestone/share images, compare media, and annual PDF. New artifacts record experience/fact schema, authority, source hash, and renderer version; previously generated artifacts and URLs remain readable.
+- **Providers and prompts:** preserve provider CRUD/activate/delete/test, encrypted credentials, metrics/specialties, vote config, and `vision`, `vision_path_a`, `vision_path_b`, `report` compatibility slots. Map V2 review roles explicitly, fingerprint the chosen provider/model/prompt, and keep legacy-only vote settings labeled rather than silently applying them to V2 fusion.
+
+Ordinary frontend surfaces render these capabilities inside the existing Animal Island spaces. Parent-only mutations and provider/model details stay in Resident Services or existing parent gates; no capability is moved into child mode merely to simplify routing.
+
 ### Tests
 
 - Path A prompt has no pose/biomechanics/computed-rotation leakage.
@@ -954,6 +1059,12 @@ Retain the useful dual-review design while preventing either language-model path
 - Path A or Path B timeout leaves deterministic evidence retryable.
 - Provider/model/prompt changes update fingerprints.
 - Claim/report API fixtures, generated/checked TypeScript claims, unsupported-claim and authority invariants, all analysis/report/archive/compare/growth routes, family-language and parent/child tests, desktop/tablet/mobile/accessibility/loading/error/unobservable/conflict states, visual regression, production build, and raw-source import-boundary checks pass.
+- Follow-up tests cover selected-event context, history, multiple questions, identity response, raw-evidence exclusion, all correction mutations, rerun actions, regeneration invalidation, shares, and legacy snapshots.
+- Plan/session tests cover generation, fallback, explicit regeneration, stale-source indication, completion, extension, latest lookup, linkage, share, and legacy plan immutability.
+- Growth/compare/skill tests cover compatible/incompatible definitions, coverage/refusal, persisted job retry, media synchronization, manual skill actions, automatic-unlock eligibility, XP/streak preservation, and Shadow exclusion.
+- Memory/monthly/annual tests cover every current mutation, revision and recycle state, immutable hashes, representative source PTS, provider failure/retry, startup PDF recovery, existing PDF download, and Shadow/unconfirmed exclusion.
+- Export/share/provider tests cover all artifact types and historical URLs, source hash/fingerprint, secret redaction, provider slot compatibility, activation/test/metrics, vote-setting scope, and legacy/V2 rollback.
+- Static backend boundary audit reports zero direct raw analysis-field reads in migrated downstream services; static frontend audit covers every migrated page/component, not only analysis detail.
 
 ### Gate G10
 
@@ -962,6 +1073,7 @@ Retain the useful dual-review design while preventing either language-model path
 - Conflicts and unobservable states survive into user-visible summaries.
 - A/B repeatability and provider failure behavior are documented.
 - UX2 passes: the ordinary V2 experience is complete for multi-event action, moments, pose, rotation, reports, and review without a mixed-source read.
+- FP2 passes: every analysis-semantic downstream service listed above consumes the same-authority fact projection, and all existing writes/revisions/artifacts remain functional.
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
 ## Iteration 15: End-to-End Shadow Orchestration
@@ -979,6 +1091,7 @@ Run legacy and V2 on the same analysis without changing the user's authoritative
 - Add restart/resume and cache invalidation when source/model/config/prompt changes.
 - Add a reviewer view for conflicts and largest metric deltas.
 - Ensure deleting rebuildable V2 artifacts never deletes source video or Golden labels.
+- Run a Shadow contamination sentinel across plans, chat/corrections, comparisons, progress, skills, memories, chapters, annual collections, shares, exports, and notifications; creating Shadow artifacts must leave every family table and artifact hash unchanged.
 
 ### API and Animal Island delivery
 
@@ -987,6 +1100,7 @@ Run legacy and V2 on the same analysis without changing the user's authoritative
 - Keep the workspace visually part of Resident Services/Animal Island while allowing denser parent diagnostics; it is not added to primary navigation and is inaccessible in child mode.
 - Comparison is read-only by default. Any correction or candidate promotion is an explicit, authorized, audited action and cannot rewrite the legacy report.
 - Ordinary `/home`, `/review`, `/analysis/:id`, and `/growth` continue to receive only the legacy-authoritative response while mode is `shadow`.
+- Show downstream impact in the parent Shadow workspace as a dry-run list (`would_change`, `excluded`, `incompatible`, `unchanged`) without executing plan regeneration, skill unlock, memory suggestion, chapter/annual changes, or exports.
 
 ### Tests
 
@@ -996,6 +1110,7 @@ Run legacy and V2 on the same analysis without changing the user's authoritative
 - Changing a report prompt does not rerun tracking.
 - Duplicate shadow requests coalesce safely.
 - Storage cleanup respects source/label retention.
+- Shadow execution leaves all existing downstream rows, completed artifacts, published revisions, parent settings, provider activation, and backup inventory byte/logically unchanged except the isolated Shadow audit tables.
 - Shadow API fixtures, TypeScript stage/diff contracts, authorization, side-by-side synchronization, retry/resume/cache, review-decision, route and ordinary-endpoint isolation tests, responsive/accessibility/loading/partial-failure states, visual regression, production build, and raw-source import-boundary checks pass.
 
 ### Gate G11
@@ -1022,6 +1137,9 @@ Calibrate uncertainty and prove the complete V2 is operationally safe on the dep
 - Establish local concurrency caps, model-loading strategy, cache limits, and cleanup policy.
 - Add privacy review for crops, embeddings, logs, and exports.
 - Write operator runbooks for enable, disable, resume, rollback, and artifact cleanup.
+- Define durable/backup-required versus rebuildable/cache V2 artifacts; version database migrations and downgrade/read behavior for every new fact, correction, plan, comparison, and audit record.
+- Validate startup initialization, correction compatibility backfill, skater/skill/memory seed idempotence, optional progress sync, archive scheduler, media cleanup, interrupted annual-export recovery, health checks, and background task shutdown with the new schemas.
+- Validate provider secrets/encryption and every provider role, vote configuration scope, provider metrics, API test, model/task/weights mounts, clean/offline startup behavior, and fingerprint-driven cache invalidation.
 
 ### API and Animal Island delivery
 
@@ -1029,6 +1147,7 @@ Calibrate uncertainty and prove the complete V2 is operationally safe on the dep
 - Add a pipeline/status workspace under `/me/advanced` and synchronize entry badges on `/home` and `/review` to user-relevant states only: processing, needs confirmation, completed, partially observable, delayed, or failed.
 - Separate family actions from operator actions: family pages may retry/continue an analysis where safe; only the parent advanced workspace may change candidate mode, concurrency, retention, or rollback controls.
 - Cache keys include experience schema and authority. Switching mode or rolling back invalidates incompatible frontend caches before rendering another authority.
+- Complete Resident Services surfaces for system/storage, backups, skater/profile/avatar, PIN, appearance, Provider/API, Pose runtime, detector/tracker/optional identity models, queue/resources, Golden, Shadow, and diagnostics without changing parent authorization.
 
 ### Operational targets
 
@@ -1040,6 +1159,8 @@ Exact latency and memory budgets are measured during this iteration and approved
 - failed external review calls can retry without rerunning local vision;
 - legacy mode remains immediately selectable;
 - V2 artifacts have predictable retention and disk growth.
+- Backup creation/restoration on a copied data root preserves all durable legacy and V2 user data, provider configuration/secrets, correction/chat/plan/session/skill/memory/chapter/annual state, and source references; rebuildable caches are documented and safe to omit.
+- Clean install, copied-database upgrade, downgrade/read compatibility, Docker frontend/backend/all-in-one routing, model mounts, annual fonts/PDF, standalone pack generation, offline dependency/model behavior, and DS918+ restart pass.
 - Operations API fixtures, TypeScript status state machines, queue/resource/admin authorization, home/review entry synchronization, cache invalidation/rollback, responsive/accessibility/loading/stale/offline/error states, visual regression, production build, and raw-source import-boundary checks pass.
 
 ### Gate G12
@@ -1048,6 +1169,7 @@ Exact latency and memory budgets are measured during this iteration and approved
 - DS918+ restart, queue, memory, storage, and cleanup tests pass.
 - Privacy and sanitized-export checks pass.
 - Rollback to legacy is demonstrated without database restoration.
+- Resident Services and every setting/model/runtime write/read path pass parent authorization, secret redaction, restart persistence, invalidation, unavailable-model, and rollback tests.
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
 ## Iteration 17: Pre-Release Review
@@ -1071,6 +1193,9 @@ Decide whether the completed V2 branch is safe enough to build and deploy as a c
 - List of legacy modules retained and retirement rationale.
 - Full frontend migration inventory showing every analysis-facing route/component, its presenter selector, authority behavior, legacy fixture, V2 fixture, and parent/child visibility.
 - Screenshots or visual-regression baselines for the four primary Animal Island spaces, analysis detail, Golden, Shadow, diagnostics, historical reports, and every consequential state.
+- Final feature-preservation ledger covering every frontend route/API client operation, backend route, data model, startup/scheduled job, setting/model/env surface, generated artifact, Docker/package path, and focused test; no entry may remain merely `inventoried` or unowned.
+- Full downstream provenance report for chat/corrections, plans/sessions, growth/compare, skills/memories, monthly/annual, shares/exports, showing fact authority/hash, compatibility rules, immutable-history behavior, and Shadow exclusion.
+- Resident Services matrix for PIN/profile/theme, Provider/API, vote config, provider metrics, Pose single/multi mode, YOLO/ByteTrack/dependencies, optional identity models, health/storage, backups, model mounts, and rollback.
 
 ### Final verification
 
@@ -1083,7 +1208,10 @@ Decide whether the completed V2 branch is safe enough to build and deploy as a c
 - Run backend schema fixtures against checked TypeScript contracts and all frontend route/component tests.
 - Run the full desktop/tablet/mobile, keyboard, screen-reader semantics, contrast, reduced-motion, loading, empty, error, uncertain, unobservable, authorization, and rollback matrix.
 - Run the static import-boundary audit and manually inspect migrated components for raw `bio_data`, Path A/B, legacy pose, or field-level fallback reads.
+- Run the backend dependency-boundary audit for downstream raw-field reads and verify the exception list contains only legacy presenters/export readers scheduled for Iteration 19 review.
 - Verify no fifth primary navigation entry exists and the Animal Island theme remains coherent in both parent and child modes.
+- Exercise every mutating API at least once on copied test data: upload/target/retry/note/session/delete, chat/corrections/regeneration, plans/sessions, compare, skills, memories, chapters/annual/export, PIN/profile, providers/vote config, backup/restore, Golden/Shadow/admin controls.
+- Exercise startup/scheduled/recovery paths, every model-runtime status combination, Docker/all-in-one/standalone packaging, and DS918+ clean install/upgrade/restart/rollback.
 
 ### Candidate deployment rule
 
@@ -1095,6 +1223,7 @@ Build the controlled candidate from the exact V2 worktree commit only if:
 - the exact tested commit is the controlled-deployment candidate;
 - rollback is documented and tested.
 - UX3 passes with one authority per ordinary page and complete entry-point synchronization.
+- FP3 passes with zero missing current capabilities, zero unowned ledger entries, zero unauthorized permission changes, zero Shadow family mutations, and zero unexplained historical-artifact regressions.
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
 Otherwise keep the V2 branch/worktree intact, record the failed gate, and continue there without modifying main. Passing this review still does not authorize a main-worktree merge.
@@ -1117,8 +1246,10 @@ This iteration deploys an artifact built directly from the approved V2 worktree 
 
 - The rollout control lives only in `/me/advanced`; it shows the exact candidate fingerprint, current mode, selected analyses, compatibility status, and one-step rollback.
 - For a selected `v2` analysis, `/home`, `/review`, `/analysis/:id`, `/growth`, archives, reports, and share routes all switch through the same authority decision. No page or card may retain a cached legacy field beside V2.
+- The same selection applies atomically to follow-up/corrections, plan regeneration, compare, progress/growth, eligible skill automation, memory suggestions, future monthly facts, annual inputs, and new shares/exports. Existing snapshots remain tied to their recorded authority and hash.
 - Before each expansion, run automated route probes and a parent/child visual/accessibility smoke matrix; store results with the rollout evidence.
 - If an experience schema is unsupported, the analysis is not selected for V2 and the UI presents a coherent legacy experience or an explicit unavailable state according to the rollout policy.
+- Rollout smoke tests cover Resident Services and all non-analysis features too; a candidate cannot expand if Provider/Pose/tracker settings, PIN, profile/theme, sessions, memories, chapters/annual, backups, or background jobs regress.
 
 ### Iteration gate
 
@@ -1133,6 +1264,7 @@ This iteration deploys an artifact built directly from the approved V2 worktree 
 - queue, memory, storage, or restart instability;
 - missing source/label data;
 - a material stratum regression not represented in the Golden gate.
+- any missing current capability, permission regression, historical artifact change, Shadow leak into a family artifact, incompatible cross-authority trend, automatic skill/memory mutation from ineligible evidence, backup/restore loss, or runtime/model setting drift.
 
 ## Iteration 19: Legacy Retirement
 
@@ -1148,12 +1280,15 @@ Remove complexity only after V2 has real controlled-deployment evidence, then pr
 - Remove duplicated standalone implementations and retain generated adapters/snapshots only.
 - Migrate old stored analyses through read adapters rather than rewriting their historical evidence.
 - Update documentation to distinguish legacy historical results from V2 results.
+- Reconcile the preservation ledger against the final source tree. Retain compatibility code for every non-retired historical route, API, stored artifact, model setting, job, or package entry.
 
 ### Frontend and compatibility cleanup
 
 - Remove direct raw legacy/V2 reads, duplicate normalizers, parallel analysis-detail implementations, and obsolete feature flags from migrated production components.
 - Retain one backend legacy presenter for historical records and explicitly bounded parent diagnostics; keep stable routes and Animal Island presentation.
 - Remove obsolete UI only after route analytics/inventory and fixtures prove no stored or shared link depends on it; redirects must land on the canonical presenter-backed experience.
+- Remove raw downstream legacy adapters only after chat/corrections, plans, compare, growth, skills, memories, monthly/annual, shares, and exports have same-authority facts plus historical fixtures; retain immutable snapshot readers as needed.
+- Do not remove MediaPipe fallback, YOLO+ByteTrack provider/runtime visibility, provider slots, settings, backup/restore, or packaging support unless a separately approved replacement/retirement entry exists.
 - Update family help text and parent advanced documentation so historical legacy conclusions and current V2 conclusions are clearly identified without exposing unnecessary implementation jargon.
 
 ### Gate
@@ -1163,6 +1298,7 @@ Remove complexity only after V2 has real controlled-deployment evidence, then pr
 - Deployment artifact shrinks or complexity measurably decreases.
 - Legacy rollback is retired only after an explicitly approved observation period.
 - Final backend/API and TypeScript fixtures, all frontend routes/components, historical-link migration, responsive/accessibility/visual regression, production build, and a zero-violation raw-source import-boundary audit pass.
+- The final preservation ledger has no unapproved deletions; every retained feature passes its complete read/write/job/artifact/permission/rollback contract.
 - Full-stack gate evidence includes backend/API contract fixtures, checked TypeScript contracts/selectors, affected frontend component and route tests, the production build, responsive/accessibility states, and a zero-violation mixed raw-source import audit.
 
 ### Final merge rule
@@ -1210,6 +1346,9 @@ Do not manufacture balance by repeatedly clipping the same attempt. Diversity ac
 | Rotation | Human source-frame review with observability and convention |
 | Path A/B quality | Agreement with supported Golden/fused claims, not prose similarity |
 | Report correctness | Claim traceability and unsupported-claim rate |
+| Downstream coaching/aggregation | `AnalysisFactsV2` eligible claims plus artifact source hash and definition compatibility |
+| Feature preservation | Checked preservation ledger plus characterization/mutation/history/permission/job/artifact tests |
+| Settings and models | Runtime/config/provider/model fingerprints plus Resident Services state and restart checks |
 | Operations | Runtime telemetry from the exact deployment artifact |
 
 ## Test Pyramid
@@ -1218,12 +1357,15 @@ Do not manufacture balance by repeatedly clipping the same attempt. Diversity ac
 
 - Focused unit and contract tests for changed modules.
 - Static type/lint checks already used by the repository.
+- Affected preservation-ledger entries and backend/frontend dependency-boundary tests.
 - No external model calls in ordinary unit tests.
 
 ### Per iteration
 
 - Relevant legacy characterization tests.
 - V2 integration fixtures.
+- Affected downstream read/write/artifact/background-job and settings/model-runtime fixtures.
+- Frontend route/component and production build for every affected Animal Island or advanced surface.
 - Private development/validation evaluation where allowed.
 - Artifact fingerprint and privacy checks.
 
@@ -1232,11 +1374,14 @@ Do not manufacture balance by repeatedly clipping the same attempt. Diversity ac
 - Gate-specific Golden evaluation.
 - Sanitized report generation and review.
 - Repeatability run.
+- Same-authority downstream, Shadow-contamination, historical-snapshot, authorization, backup/restore, and rollback checks when affected.
 - No threshold edits after viewing frozen-test results; a failure returns to development/validation and requires a new production-candidate cycle.
 
 ### Final
 
 - Complete backend/frontend/package verification.
+- Zero unowned preservation-ledger entries and zero raw-field dependency-boundary violations.
+- Complete route/API/mutation/job/artifact/settings/model/history/permission matrix.
 - Exact deployment artifact Golden run.
 - DS918+ operational and restart run.
 
@@ -1246,7 +1391,7 @@ For any failed gate:
 
 1. Record the exact fingerprint, metric, numerator/denominator, strata, and affected aliases.
 2. Locate the first divergent stage rather than patching the final report.
-3. Classify the cause as label ambiguity, source/timebase, candidate coverage, identity, pose, event, key moment, rotation, review, fusion, or operations.
+3. Classify the cause as label ambiguity, source/timebase, candidate coverage, identity, pose, event, key moment, rotation, review, fusion, downstream facts, feature compatibility, settings/models, data safety, packaging, or operations.
 4. Verify labels without exposing frozen-test content to tuning when possible.
 5. Create one bounded corrective experiment on development data.
 6. Validate on validation data.
@@ -1260,6 +1405,7 @@ Request explicit review at these checkpoints:
 - after Iteration 4: dataset and baseline are trustworthy;
 - after Iteration 8: identity tracking is safe enough to authorize pose;
 - after Iteration 13: all five core algorithm outputs have measurable V2 results;
+- after Iteration 14: all semantic downstream features consume same-authority facts without functional loss;
 - after Iteration 15: end-to-end shadow behavior is stable;
 - after Iteration 17: controlled candidate deployment decision;
 - after the rollout observation period: legacy retirement and final merge decision.
@@ -1273,8 +1419,12 @@ The V2 program is complete only when:
 - tracking, pose, action, key-moment, and rotation gates pass;
 - Path A/B consume bounded evidence and final reports are claim-traceable;
 - shadow mode is restartable, diffable, fingerprinted, and cannot mutate legacy results;
+- every current capability is present in the preservation ledger, has an owning iteration, and passes its read/write/job/artifact/permission/history/rollback contract or has explicit retirement approval;
+- chat/corrections, plans/sessions, comparisons/growth, skills/memories, monthly/annual, shares/exports consume same-authority facts and never admit Shadow or incompatible evidence;
+- Parent PIN/profile/theme, Provider/API/vote/metrics, MediaPipe single/multi-pose, YOLO+ByteTrack/dependencies, optional-model gates, system/storage, backup/restore, startup/scheduled work, annual recovery, and historical routes remain functional;
 - frozen metrics include coverage, refusal, raw counts, confidence intervals, and strata;
 - the exact deployment artifact passes DS918+ operational tests;
+- clean install, copied-database upgrade/downgrade-read, Docker/all-in-one routing, standalone-pack generation, model mounts, restart, background jobs, and rollback pass;
 - all repository tests/builds required by the final verification pass;
 - no unresolved P0/P1 finding remains;
 - rollback is demonstrated;

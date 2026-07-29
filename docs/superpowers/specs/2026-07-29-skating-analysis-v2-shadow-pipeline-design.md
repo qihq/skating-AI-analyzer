@@ -1,4 +1,4 @@
-# Skating Analysis V2 Shadow Pipeline Design
+# Skating Analyzer V2 Full-System Shadow Rebuild Design
 
 Date: 2026-07-29
 
@@ -12,7 +12,7 @@ Rebuild the skating-analysis algorithm around a timestamped, identity-safe evide
 4. key-moment localization;
 5. rotation-count estimation.
 
-The new pipeline must run beside the current implementation until frozen Golden evaluation proves that each replacement is safer and more accurate. Existing scenario-specific rules remain available as a legacy baseline and failure-mode catalog, but no new rules are added to the legacy identity or semantic decision maze.
+The algorithm is the center of a full-product compatibility rebuild. Every existing feature that reads, changes, summarizes, exports, configures, or protects analysis data must migrate with the evidence contract. The new pipeline must run beside the current implementation until frozen Golden evaluation proves that each replacement is safer and more accurate. Existing scenario-specific rules remain available as a legacy baseline and failure-mode catalog, but no new rules are added to the legacy identity or semantic decision maze.
 
 ## Confirmed Product Decisions
 
@@ -26,6 +26,9 @@ The new pipeline must run beside the current implementation until frozen Golden 
 - Build the formal Golden dataset only from newly selected videos. Historical debug videos and outputs are excluded from development, validation, frozen-test, calibration, and release metrics.
 - Prefer an explicit `uncertain` or `unobservable` result over a confident wrong-person or wrong-rotation result.
 - Deployment constraints include a Synology DS918+ class host. Large ReID, pose, or temporal models are optional only after measured benefit and resource validation.
+- Preserve every current product capability unless the owner explicitly approves its retirement after an inventory, replacement, migration, and rollback review.
+- Treat training plans, follow-up chat/corrections, comparisons, progress, skills, memories, monthly chapters, annual collections, exports, settings, providers, runtime diagnostics, backups, and parent access as first-class V2 consumers or protected compatibility domains.
+- A page opening successfully is not feature preservation. Its reads, writes, regeneration, background jobs, provenance, permissions, exports, and historical behavior must remain correct.
 
 ## Relationship to Earlier Plans
 
@@ -240,6 +243,58 @@ The experience envelope also declares one authoritative rendering source:
 
 There is no field-level legacy/V2 fallback inside one ordinary response. In shadow mode, the family response is entirely legacy-authoritative and the V2 result is available only from a separate parent-authorized comparison endpoint. After V2 cutover, a missing V2 claim is displayed as unavailable or unobservable; it is not silently filled with a legacy value. Historical legacy analyses are adapted wholesale into `AnalysisExperienceV2`, so they remain readable without mixing their evidence into a new V2 analysis.
 
+### `AnalysisFactsV2`
+
+`AnalysisExperienceV2` is the family-facing read model. Backend consumers use a sibling backend-owned `AnalysisFactsV2` projection built from the same single-authority evidence. Training plans, follow-up chat, corrections, comparisons, growth, monthly/annual stories, skill automation, memory suggestions, exports, and shares do not read `Analysis.bio_data`, `Analysis.report`, raw Path A/B, or incidental legacy columns directly after migration.
+
+Each fact carries:
+
+- analysis and event identity;
+- `authority: legacy | v2` and source pipeline fingerprint;
+- claim/metric definition version and unit;
+- status, observability, confidence, and human-confirmation provenance;
+- source event/moment references and compatibility group;
+- permissions for family display, aggregation, comparison, coaching, correction, and export.
+
+Downstream rules:
+
+- a generated artifact stores the source fact hash, schema version, authority, and generation fingerprint;
+- regeneration uses the current authoritative fact revision only after an explicit action;
+- published monthly chapters, annual collections, completed plans, chat history, shares, and exports remain immutable historical snapshots unless their existing revision flow is used;
+- cross-analysis aggregation requires matching metric definition, unit, convention, and sufficient confirmed coverage;
+- `uncertain`, `lost`, `unobservable`, interpolated-only, or definition-incompatible facts cannot unlock skills, create progress trends, become technical memory, or produce confident plan instructions;
+- Shadow facts are diagnostic only and cannot enter any family artifact or automation.
+
+### Feature-preservation registry
+
+The implementation maintains a machine-readable registry of current product surfaces. Each entry records route/API ownership, read and write models, parent/child access, background jobs, artifacts, legacy fixtures, V2 fixtures, rollback behavior, and owning iteration. A capability cannot disappear merely because it was missed by a new page shell. Any proposed retirement requires explicit owner approval and an independently reviewed migration plan.
+
+The required registry covers:
+
+| Domain | Existing capabilities that must remain |
+|---|---|
+| Analysis lifecycle | upload, target preview/lock, action window, notes/highlight quote, session link, status/logs, retry/rerun, delete, list/detail, auto-eval, Golden override compatibility |
+| Media and evidence | original/rendition playback, quality selection, exact seek, frame/pose overlays, synchronized compare media, text/image/PDF exports |
+| Follow-up and corrections | per-analysis chat history, multi-question replies, provider identity, action/moment/report/target correction proposals, apply/dismiss, regenerate report, video-keyframe rerun, chat sharing |
+| Plans and practice | generate/regenerate plan, fallback plan, plan detail, session completion, extension, latest-plan entry, training-session CRUD and analysis/session linking |
+| Growth and history | home KPIs, archive/history, progress/trends, compare creation/status/retry/result, milestones, manual skill lock/unlock, learning path, XP/streak/profile/avatar |
+| Long-form growth | monthly fact preview/generation/edit/revision/publish/recycle/restore/permanent delete; annual preview/selection/revision/recycle/restore/permanent delete; resumable PDF export/download |
+| Memories | Snowball memory CRUD/pin/expiry, suggestion review/apply/dismiss, Snowball chat, parent/child visibility |
+| Family and appearance | parent PIN setup/verify/change, parent/child mode, skater settings, four-space navigation, classic-route compatibility, Animal Island time/theme preference |
+| Providers and models | provider CRUD/activate/test, encrypted keys, vision/report/Path A/Path B slots, vote configuration, provider metrics/specialties, model/prompt/config fingerprints, API health test |
+| Local vision runtime | MediaPipe single/multi-pose status, `POSE_NUM_POSES`, pose task path, YOLO weights/path/download state, ByteTrack/supervision/torchvision readiness, multi-person tracking, candidate selection, optional ReID/face experiment status |
+| Operations and data safety | health/system/storage status, queue/resource telemetry, startup seeds/backfills/progress sync, archive scheduler, media cleanup, backup list/create/restore/retention, annual-export recovery, DB migration/downgrade, standalone analysis pack, Docker/all-in-one/DS918+ packaging |
+
+Routes may be redirected into the four canonical spaces, but the capability, authorization, historical URL, and result semantics must remain. Classic UI may become a compatibility shell only after every function is reachable in the Animal Island experience and route tests prove the redirect.
+
+Full-product scope has three treatment levels:
+
+1. **Semantic migration:** features that consume or mutate analysis conclusions move to `AnalysisFactsV2` and versioned derived artifacts.
+2. **Protected preservation:** independent features such as training-session CRUD, PIN, profile, and appearance keep their implementation unless integration requires change, but receive characterization, authorization, data, route, and rollback tests.
+3. **Operational integration:** providers, local models, settings, background jobs, storage, backup/restore, packaging, and deployment integrate with V2 fingerprints, invalidation, persistence, privacy, and recovery.
+
+This is a full-system contract and verification refactor, not a mandate to rewrite stable independent code without a measured reason.
+
 ## Component Design
 
 ### Timebase and media layer
@@ -365,6 +420,7 @@ The route hierarchy remains recognizable and backward compatible:
 - `/growth`: consumes only compatible confirmed claims. Uncertain, unobservable, changed-definition, or insufficient-coverage values do not silently enter trends, comparisons, milestones, chapters, or annual exports.
 - `/me/advanced`: remains parent-authorized. Model/API, diagnostics, Golden labeling, and a new Shadow review tool live here.
 - `/golden`, `/debug`, existing `/report/:id` links, and old stored report URLs remain compatible through redirects or presenters during migration.
+- Compatibility routes remain explicit: `/upload` redirects to `/review`; `/skills` to `/path`; `/progress` to `/archive`; `/parent/setup` keeps PIN onboarding; `/settings` and `/settings/api` retain family/model settings; `/report/:id/workspace`, `/report/:id/pose-debug`, and `/report/:id/target` land on their canonical report/review sections; `/compare/results/:comparison_id` retains persisted comparison results.
 
 No fifth primary navigation destination named V2, AI, Shadow, Golden, or Algorithms is introduced.
 
@@ -407,18 +463,45 @@ This workspace is diagnostic and cannot silently promote a shadow result into th
 - Shadow artifacts and private Golden labels are never returned by ordinary family endpoints.
 - API and UI caches include schema and pipeline compatibility keys so rollback cannot show stale V2 data over a legacy response.
 
+### Downstream product behavior
+
+- **Follow-up and correction:** chat context is event-aware and uses `AnalysisFactsV2`; it preserves history, multiple questions, provider identity, rerun actions, correction proposal/apply/dismiss, report regeneration, and sharing. A correction creates a versioned fact revision and invalidates named descendants rather than mutating raw V2 evidence or unrelated events.
+- **Training plans and sessions:** generation, AI fallback, regeneration, extension, completion, latest-plan links, shares, session CRUD, and analysis/session links remain. Plans store their source fact hash and do not silently change when an analysis is corrected; the parent chooses regeneration.
+- **Growth, history, comparison, and skills:** stable counts can span authorities, but technical deltas/trends require compatible definitions and confirmed coverage. Comparison aligns events, not just analyses. Automatic skill unlock uses versioned eligible facts; manual lock/unlock and historical milestones remain intact.
+- **Memories:** existing Snowball memories, expiry, pinning, chat, and review flow remain. Technical memory suggestions use confirmed family-safe facts and require the current parent-review workflow; Shadow and uncertain evidence are excluded.
+- **Monthly and annual:** monthly fact generation reads compatible facts and preserves fact hashes, editing, revisions, publishing, recycling, media, and provider provenance. Annual selection/revision/recycling and resumable PDF export consume immutable monthly/milestone snapshots and keep old exports reproducible.
+- **Shares and exports:** analysis, report, chat, plan, milestone, comparison, and annual artifacts store their source schema/authority/hash/renderer where applicable. Existing URLs and generated files remain readable.
+
+### Settings, models, and operations
+
+Resident Services remains the management boundary for:
+
+- parent PIN setup/verification/change and parent/child content density;
+- skater identity, display name, avatar, birth year, level, and appearance/theme preference;
+- Provider/API CRUD, activation, testing, encrypted keys, specialties, metrics, vote configuration, and separate legacy/V2 role mapping;
+- MediaPipe fallback single-pose and task-based multi-pose status, model path/hash/version, `POSE_NUM_POSES`, active/fallback reason, and dependent-artifact invalidation;
+- YOLO person model path/source/hash/existence/download state, ByteTrack and dependency readiness, candidate/target tools, V2 tracking use, and DS918+ resource result;
+- current `YOLO_PERSON_MODEL_PATH`, `MEDIAPIPE_POSE_TASK_PATH`, `POSE_NUM_POSES`, and `PERSON_TRACKER_*` environment compatibility in legacy mode; V2 maps relevant choices into one typed, fingerprinted configuration and retires an option only through the preservation ledger;
+- optional ReID, face, alternate detector, pose, or temporal models only as disabled/Shadow candidates until Golden, privacy, and resource gates approve them;
+- health, system/storage usage, queue/resources, backup list/create/restore, retention, cleanup, and rollback.
+
+Model configuration is operational state, not an incidental environment detail. Every active model/provider/config/prompt is fingerprinted into the stages it affects. A change invalidates only dependent V2 artifacts, remains visible in the parent UI, survives/reappears correctly after restart, and cannot silently alter a published historical artifact.
+
+Startup and scheduled behavior are also product features: database initialization/migration, applied-correction compatibility, preset skater/memory/skill seeding, optional progress sync, archive cleanup, media retention, interrupted annual-export recovery, task shutdown, Docker/all-in-one routing, standalone-pack generation, model mounts, clean install, upgrade, and DS918+ restart all remain explicitly verified.
+
 ### Synchronized vertical delivery
 
 V2 is a full-system refactor. Each implementation iteration ships one coherent vertical slice:
 
 1. internal backend evidence or behavior;
 2. persisted schema and API presenter behavior;
-3. typed frontend contract and selector;
-4. Animal Island user or parent-authorized diagnostic experience;
-5. legacy/history compatibility behavior;
-6. backend contract, frontend component, route, accessibility, and visual-regression tests.
+3. same-authority downstream fact consumers and jobs;
+4. typed frontend contract and selector;
+5. Animal Island user or parent-authorized diagnostic experience;
+6. legacy/history/settings/model/data-safety compatibility behavior;
+7. backend contract/dependency, frontend component/route, accessibility, visual-regression, packaging, and rollback tests.
 
-An iteration is incomplete if a new backend state has no intentional frontend representation, if a frontend component must inspect both legacy and V2 raw fields, or if an ordinary page exposes partially migrated engineering data. Backend-only shadow computation is allowed only when the same iteration adds its parent-authorized Shadow visualization and keeps it absent from family endpoints.
+An iteration is incomplete if a new backend state has no intentional frontend representation, if a frontend or downstream service must inspect mixed raw legacy/V2 fields, if an ordinary page exposes partially migrated engineering data, or if an existing capability loses a read/write/job/artifact/permission behavior. Backend-only shadow computation is allowed only when the same iteration adds its parent-authorized Shadow visualization, proves zero mutation of family artifacts, and keeps it absent from family endpoints.
 
 ## Golden Dataset Strategy for Limited Family Videos
 
@@ -554,6 +637,7 @@ Initial numeric thresholds are release gates to validate against the first real 
 ### Phase 1: Contracts and source time
 
 - Introduce canonical types and adapters.
+- Introduce `AnalysisFactsV2`, the feature-preservation registry, and same-authority downstream interfaces before any consumer switches.
 - Build exact source-PTS observation streams.
 - Introduce the versioned experience presenter and migrate the affected Animal Island surfaces in the same vertical slices.
 - Keep ordinary family responses wholly legacy-authoritative while producing V2 diagnostics in parent-authorized tools.
@@ -570,6 +654,7 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Refine events on source frames.
 - Shadow profile-specific key moments and compare with legacy results.
 - Extend the same analysis-detail event selector, source timeline, and review inbox; do not create profile-specific parallel pages.
+- Migrate event-aware chat/corrections, plan/compare selectors, growth/skill eligibility, and monthly/annual representative moments without changing historical snapshots.
 
 ### Phase 4: Rotation and A/B redesign
 
@@ -577,6 +662,7 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Adapt Path A and Path B to consume their new bounded evidence.
 - Add claim-level fusion and constrain reporting.
 - Complete the presenter-backed family report, pose, rotation, growth eligibility, and parent Shadow comparison views as one authority-consistent experience.
+- Complete every semantic downstream consumer: follow-up, corrections, plans, compare, progress, skills, memories, monthly/annual, shares, and exports.
 
 ### Phase 5: Calibration and retirement
 
@@ -585,6 +671,7 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Enable V2 only for selected whole analyses/cohorts, retaining whole-experience rollback to legacy.
 - Remove legacy rules only after ablation shows no required benefit.
 - Remove raw mixed-source reads and obsolete frontend paths only after the four-space route, historical-link, theme, responsive, and accessibility matrix passes.
+- Validate Resident Services, Provider/API roles, Pose and multi-person tracker models, optional model gates, backup/restore, startup/scheduled work, Docker/all-in-one/standalone packaging, and DS918+ operations before candidate rollout.
 
 ## Error Handling and Safety
 
@@ -599,6 +686,11 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Path B failure: continue with deterministic evidence and Path A if safe.
 - A/B disagreement: preserve the conflict and downgrade only affected claims.
 - Report provider failure: retain structured evidence so report generation can be retried without rerunning the full algorithm.
+- Downstream stale source: keep the existing plan/chapter/export/chat snapshot and show that newer facts exist; regenerate only through its explicit workflow.
+- Incompatible metric/action definition: exclude it from comparison, trend, milestone, or annual aggregation and state the reason.
+- Shadow contamination attempt: reject the write, record an audit event, and leave the family artifact unchanged.
+- Provider/model setting unavailable: surface configured versus active/fallback status, preserve legacy availability, and invalidate only dependent V2 artifacts.
+- Backup/restore or migration failure: stop candidate startup safely, retain the copied/pre-migration data, and never continue with a partially migrated authority.
 
 ## Testing Strategy
 
@@ -613,8 +705,13 @@ Initial numeric thresholds are release gates to validate against the first real 
 - Frontend component and route tests for legacy authority, V2 authority, Shadow isolation, historical records, multi-event selection, review tasks, growth eligibility, and rollback cache invalidation.
 - Desktop, tablet, mobile, keyboard, screen-reader semantics, contrast, reduced-motion, touch-target, loading, empty, error, uncertain, and unobservable checks for every affected Animal Island surface.
 - Static import-boundary tests proving migrated ordinary components cannot read raw legacy biomechanics, pose dictionaries, Path A/B payloads, or combine authorities.
+- Backend dependency-boundary tests proving chat, corrections, plans, compare, growth, skills, memory, chapters, annual, share, and export services cannot bypass `AnalysisFactsV2`.
+- Feature-preservation contract tests for every current frontend route/API client operation, backend route/mutation, data model, startup/scheduled job, setting/model state, generated artifact, and package entry.
+- Historical snapshot tests for chat/corrections, plans, comparisons, skills, memories, published chapters, annual collections/PDFs, shares, exports, backups, and legacy routes.
+- Settings/runtime tests for parent PIN and permissions, skater/profile/theme, provider secrets/slots/vote config/metrics, MediaPipe single/multi-pose, YOLO/ByteTrack/dependencies, optional model disabled/Shadow states, storage, backup/restore, and restart persistence.
+- Shadow contamination tests proving no family-facing downstream row or generated artifact changes during Shadow execution.
 - Production frontend build and visual-regression coverage for the four primary spaces, analysis detail, Golden, Shadow, diagnostics, and historical reports.
-- Resource tests on the deployment-class host.
+- Clean install, copied-database upgrade/downgrade-read, Docker/all-in-one routing, standalone-pack generation, startup/recovery/scheduler, and resource tests on the deployment-class host.
 
 Existing legacy tests remain during migration. They are characterization coverage, not substitutes for Golden evaluation.
 
@@ -629,4 +726,4 @@ Existing legacy tests remain during migration. They are characterization coverag
 
 ## Acceptance of the Design
 
-This design is complete when implementation can be decomposed into independently testable full-stack iterations, each backend state has an intentional Animal Island or parent-authorized diagnostic representation, and no ordinary response switches to V2 authority until every required Golden, experience, operational, and rollback gate passes.
+This design is complete when implementation can be decomposed into independently testable full-stack iterations, each backend state has an intentional Animal Island or parent-authorized diagnostic representation, every current product capability is owned by the feature-preservation registry, all semantic consumers use same-authority facts, settings/models/data-safety/package behavior is verified, historical artifacts remain readable, and no ordinary response switches to V2 authority until every required Golden, feature-parity, experience, operational, and rollback gate passes.
