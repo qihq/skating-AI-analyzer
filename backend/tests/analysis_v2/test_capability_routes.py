@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.analysis_v2.config import load_runtime_config
-from app.routers import capabilities
+from app.routers import capabilities, golden_v2
 
 
 def test_public_capability_route_uses_configured_runtime(tmp_path: Path) -> None:
@@ -45,3 +45,30 @@ def test_advanced_capability_route_returns_no_private_paths(tmp_path: Path) -> N
         payload = asyncio.run(capabilities.advanced_capabilities("1234", session, config))
 
     assert str(tmp_path) not in payload.model_dump_json()
+
+
+def test_golden_v2_routes_require_parent_pin(tmp_path: Path) -> None:
+    config = load_runtime_config(
+        {"SKATING_ANALYSIS_PIPELINE": "shadow", "V2_RUNTIME_ROOT": str(tmp_path / "runtime")},
+        project_root=tmp_path,
+    )
+    session = AsyncMock()
+    store = golden_v2.GoldenCatalogStore(config.runtime_paths["golden"])
+
+    async def reject_parent(*_args: object) -> None:
+        raise HTTPException(status_code=403, detail="parent required")
+
+    with patch.object(golden_v2, "require_parent_pin", new=reject_parent):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(golden_v2.require_golden_parent(None, session))
+
+    assert error.value.status_code == 403
+    with patch.object(golden_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        payload = asyncio.run(golden_v2.get_golden_catalog(None, store))
+    assert payload.status == "empty"
+
+
+def test_golden_v2_ordinary_capabilities_do_not_disclose_catalog(tmp_path: Path) -> None:
+    config = load_runtime_config({}, project_root=tmp_path)
+    payload = asyncio.run(capabilities.public_capabilities(config))
+    assert "golden-v2" not in payload.model_dump_json()

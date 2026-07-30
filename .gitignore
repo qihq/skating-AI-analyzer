@@ -2,6 +2,7 @@
 data/
 .env
 .env.v2.local
+golden/
 backups/*.db
 backups/*.db-*
 backups/*.tmp-journal

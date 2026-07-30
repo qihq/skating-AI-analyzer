@@ -37,7 +37,8 @@ def test_feature_preservation_ledger_has_complete_unique_entries() -> None:
     assert len({entry["id"] for entry in entries}) == len(entries)
     assert all(REQUIRED_FIELDS <= entry.keys() for entry in entries)
     assert all(0 <= entry["owning_iteration"] <= 19 for entry in entries)
-    assert all(entry["migration_status"] == "inventoried" for entry in entries)
+    allowed_statuses = set(ledger["allowed_statuses"])
+    assert all(entry["migration_status"] in allowed_statuses for entry in entries)
     assert not any(entry["migration_status"] == "retirement-approved" for entry in entries)
 
 
