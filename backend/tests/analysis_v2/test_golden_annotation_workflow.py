@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
 from app.routers import golden_v2
@@ -79,3 +80,80 @@ def test_private_media_and_frame_identity_require_parent_and_never_return_paths(
             response = asyncio.run(golden_v2.get_golden_frame_identity(HASH, 4, None, store))
     assert response.source_frame_index == 4
     assert str(tmp_path) not in response.model_dump_json()
+
+
+def test_import_rejects_invalid_session_identifier_before_reading_media(tmp_path: Path) -> None:
+    app = FastAPI()
+    app.include_router(golden_v2.router)
+    app.dependency_overrides[golden_v2.require_golden_parent] = lambda: None
+    app.dependency_overrides[golden_v2.get_golden_store] = lambda: GoldenCatalogStore(tmp_path / "golden")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/golden/v2/sources/import",
+            files={"file": ("private.mp4", b"not-a-video", "video/mp4")},
+            data={
+                "recording_session_id": "invalid session path",
+                "grouping_id": "group-1",
+                "redacted_alias": "source-001",
+                "expected_revision": "1",
+                "annotator_alias": "owner",
+            },
+        )
+
+    assert response.status_code == 422
+    assert "recording_session_id" in response.text
+
+
+def test_deleting_source_cascades_current_labels_and_invalidates_evaluator(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    initial = store.ensure_initialized()
+    seeded = golden_v2._next_dataset(
+        initial,
+        1,
+        "owner",
+        "seed",
+        sources=[_source()],
+        events=[_event("event-a", start=1, end=2)],
+        tracks=[],
+        poses=[],
+    )
+    store.save(seeded, expected_revision=1)
+    media = store.videos_dir / "private.mp4"
+    media.write_bytes(b"private")
+    evaluator = golden_v2.get_pilot_store(store)
+    evaluator._write(evaluator.sanitized_report_path, {"stale": True})
+
+    request = golden_v2.GoldenSourceDeleteRequest(
+        expected_revision=2,
+        annotator_alias="owner",
+        confirmation="delete_source_and_labels",
+    )
+    workspace = asyncio.run(golden_v2.delete_golden_source(HASH, request, None, store))
+
+    assert workspace.sources == []
+    assert workspace.events == []
+    assert not media.exists()
+    assert not evaluator.sanitized_report_path.exists()
+    assert evaluator.status()["status"] == "not_run"
+    assert store.event_history("event-a")
+
+
+def test_updating_source_grouping_preserves_existing_label_revision(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    initial = store.ensure_initialized()
+    seeded = golden_v2._next_dataset(initial, 1, "owner", "seed", sources=[_source()], events=[_event("event-a", start=1, end=2)], tracks=[], poses=[])
+    store.save(seeded, expected_revision=1)
+    previous_event_revision = store.read().events[0].revision.revision
+    request = golden_v2.GoldenSourceUpdateRequest(
+        expected_revision=2,
+        annotator_alias="owner",
+        recording_session_id="session-2",
+        grouping_id="group-2",
+        redacted_alias="source-renamed",
+    )
+
+    workspace = asyncio.run(golden_v2.update_golden_source(HASH, request, None, store))
+
+    assert workspace.sources[0].redacted_alias == "source-renamed"
+    assert store.read().events[0].revision.revision == previous_event_revision

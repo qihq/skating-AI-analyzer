@@ -1,16 +1,55 @@
 import axios from "axios";
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppMode } from "../../components/AppModeContext";
 import { IceMediaPlayer } from "../../media/IceMediaPlayer";
 import { IslandButton, IslandCard, IslandTitle } from "../../modern/IslandSurface";
-import { attestGoldenReview, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations } from "../api";
+import { attestGoldenReview, deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations, updateGoldenSource } from "../api";
 import type { ChallengeInterval, GoldenEvent, GoldenObservability, GoldenPose, GoldenProfile, GoldenReviewItem, GoldenTrack, GoldenWorkspace, IntervalDetails, JumpDetails, PhaseInterval, RotationLabel, SourceMoment, SpinDetails } from "../golden-contracts";
 
 const profiles: GoldenProfile[] = ["jump", "spin", "step", "spiral", "unknown"];
 const joints = ["nose", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"] as const;
 const uid = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const numberValue = (value: string) => Number(value);
+const profileNames: Record<GoldenProfile, string> = { jump: "跳跃", spin: "旋转", step: "步法", spiral: "燕式/螺旋线", unknown: "暂时不确定" };
+const jointConnections: Array<[typeof joints[number], typeof joints[number]]> = [
+  ["left_shoulder", "right_shoulder"], ["left_shoulder", "left_elbow"], ["left_elbow", "left_wrist"],
+  ["right_shoulder", "right_elbow"], ["right_elbow", "right_wrist"], ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"], ["left_hip", "right_hip"], ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"], ["right_hip", "right_knee"], ["right_knee", "right_ankle"],
+];
+
+type Point = { x: number; y: number };
+type BBox = { left: number; top: number; right: number; bottom: number };
+
+function sourceToDisplay(point: Point, rotation: 0 | 90 | 180 | 270): Point {
+  if (rotation === 90) return { x: 1 - point.y, y: point.x };
+  if (rotation === 180) return { x: 1 - point.x, y: 1 - point.y };
+  if (rotation === 270) return { x: point.y, y: 1 - point.x };
+  return point;
+}
+
+function displayToSource(point: Point, rotation: 0 | 90 | 180 | 270): Point {
+  if (rotation === 90) return { x: point.y, y: 1 - point.x };
+  if (rotation === 180) return { x: 1 - point.x, y: 1 - point.y };
+  if (rotation === 270) return { x: 1 - point.y, y: point.x };
+  return point;
+}
+
+function sourceBoxToDisplay(box: BBox, rotation: 0 | 90 | 180 | 270): BBox {
+  const corners = [
+    sourceToDisplay({ x: box.left, y: box.top }, rotation),
+    sourceToDisplay({ x: box.right, y: box.top }, rotation),
+    sourceToDisplay({ x: box.left, y: box.bottom }, rotation),
+    sourceToDisplay({ x: box.right, y: box.bottom }, rotation),
+  ];
+  return {
+    left: Math.min(...corners.map((point) => point.x)),
+    top: Math.min(...corners.map((point) => point.y)),
+    right: Math.max(...corners.map((point) => point.x)),
+    bottom: Math.max(...corners.map((point) => point.y)),
+  };
+}
 
 function blankEvent(sourceHash: string, now: number): GoldenEvent {
   return { event_id: uid("event"), source_sha256: sourceHash, start_pts: Math.max(0, now), end_pts: Math.max(0.1, now + 1), profile: "unknown", subtype: null, observability: "uncertain", strata: [], ambiguity_tags: [], failure_tags: [], annotator_confidence: 0.5, main_skater_confirmed: false, split: null, challenge_intervals: [] };
@@ -37,17 +76,28 @@ export default function GoldenAnnotationWorkspace() {
   const [annotator, setAnnotator] = useState("owner");
   const [sessionAlias, setSessionAlias] = useState("");
   const [groupAlias, setGroupAlias] = useState("");
+  const [sourceAlias, setSourceAlias] = useState("");
+  const [sourceSession, setSourceSession] = useState("");
+  const [sourceGroup, setSourceGroup] = useState("");
+  const [changeNote, setChangeNote] = useState("");
   const [reviewType, setReviewType] = useState<"delayed_relabel" | "ambiguous_rotation" | "frozen_identity_crossing">("delayed_relabel");
   const [boxDraft, setBoxDraft] = useState({ left: "", top: "", right: "", bottom: "", state: "confirmed" as GoldenTrack["state"] });
   const [poseDraft, setPoseDraft] = useState({ joint: "nose" as typeof joints[number], x: "", y: "", visibility: "1", observability: "observable" as GoldenPose["observability"] });
+  const [drawingBox, setDrawingBox] = useState(false);
+  const [boxStart, setBoxStart] = useState<{ x: number; y: number } | null>(null);
+  const [boxPreview, setBoxPreview] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null);
+  const editGeneration = useRef(0);
+  const markDirty = () => { editGeneration.current += 1; setDirty(true); };
 
-  const load = async () => {
+  const load = async (preferredSourceHash?: string) => {
     if (!parentPin) return;
+    const requestedGeneration = editGeneration.current;
     try {
       const [next, queue] = await Promise.all([fetchGoldenWorkspace(parentPin), fetchGoldenReviewQueue(parentPin)]);
+      if (editGeneration.current !== requestedGeneration) return;
       const requested = next.events.find((event) => event.event_id === params.get("event"));
       setWorkspace(next); setReview(queue);
-      setSourceHash((previous) => requested?.source_sha256 ?? previous ?? next.sources[0]?.source_sha256 ?? null);
+      setSourceHash((previous) => preferredSourceHash ?? requested?.source_sha256 ?? previous ?? next.sources[0]?.source_sha256 ?? null);
       setSelectedEvent((previous) => requested?.event_id ?? previous);
       if (requested && Number.isFinite(Number(params.get("pts")))) setTime(Number(params.get("pts")));
     } catch { setMessage("Private annotation workspace is unavailable. Retry when the connection is restored."); }
@@ -73,6 +123,74 @@ export default function GoldenAnnotationWorkspace() {
   const poses = useMemo(() => workspace?.poses.filter((item) => item.event_id === selectedEvent) ?? [], [workspace, selectedEvent]);
   const frameIndex = frame?.sourceFrameIndex ?? Math.max(0, Math.round(time * (source?.source_frame_count && source.duration_pts ? source.source_frame_count / source.duration_pts : 30)));
   const currentMoment = (): SourceMoment | null => frame ? { pts: frame.pts, source_frame_index: frame.sourceFrameIndex } : null;
+  useEffect(() => {
+    setSourceAlias(source?.redacted_alias ?? "");
+    setSourceSession(source?.recording_session_id ?? "");
+    setSourceGroup(source?.grouping_id ?? "");
+  }, [source?.source_sha256]);
+
+  const currentTracks = tracks.filter((item) => item.source_frame_index === frame?.sourceFrameIndex);
+  const currentPoses = poses.filter((item) => item.source_frame_index === frame?.sourceFrameIndex);
+  const displayWidth = source && [90, 270].includes(source.display_rotation_degrees) ? source.height : source?.width;
+  const displayHeight = source && [90, 270].includes(source.display_rotation_degrees) ? source.width : source?.height;
+  const markers = useMemo(() => {
+    const output = events.flatMap((event) => [
+      { id: `${event.event_id}-start`, timestamp: event.start_pts, label: `${profileNames[event.profile]}开始` },
+      { id: `${event.event_id}-end`, timestamp: event.end_pts, label: `${profileNames[event.profile]}结束` },
+    ]);
+    if (selected?.jump) {
+      for (const [key, label] of [["takeoff", "起跳"], ["apex", "最高点"], ["landing", "落冰"]] as const) {
+        const moment = selected.jump[key];
+        if (moment) output.push({ id: `${selected.event_id}-${key}`, timestamp: moment.pts, label });
+      }
+    }
+    return output;
+  }, [events, selected]);
+
+  const pointerPosition = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (!source || !displayWidth || !displayHeight) return null;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const scale = Math.min(rect.width / displayWidth, rect.height / displayHeight);
+    const renderedWidth = displayWidth * scale; const renderedHeight = displayHeight * scale;
+    const offsetX = (rect.width - renderedWidth) / 2; const offsetY = (rect.height - renderedHeight) / 2;
+    const x = (event.clientX - rect.left - offsetX) / renderedWidth;
+    const y = (event.clientY - rect.top - offsetY) / renderedHeight;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return displayToSource({ x, y }, source.display_rotation_degrees);
+  };
+  const startBox = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (!drawingBox || !frame) return;
+    const point = pointerPosition(event); if (!point) return;
+    event.currentTarget.setPointerCapture(event.pointerId); setBoxStart(point); setBoxPreview({ left: point.x, top: point.y, right: point.x, bottom: point.y });
+  };
+  const moveBox = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (!drawingBox || !boxStart) return;
+    const point = pointerPosition(event); if (!point) return;
+    setBoxPreview({ left: Math.min(boxStart.x, point.x), top: Math.min(boxStart.y, point.y), right: Math.max(boxStart.x, point.x), bottom: Math.max(boxStart.y, point.y) });
+  };
+  const finishBox = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (!drawingBox || !boxStart) return;
+    const point = pointerPosition(event); setBoxStart(null); setDrawingBox(false);
+    if (!point) { setBoxPreview(null); return; }
+    const bbox = { left: Math.min(boxStart.x, point.x), top: Math.min(boxStart.y, point.y), right: Math.max(boxStart.x, point.x), bottom: Math.max(boxStart.y, point.y) };
+    if (bbox.right - bbox.left < .005 || bbox.bottom - bbox.top < .005) { setBoxPreview(null); setMessage("人物框太小，请重新拖拽。"); return; }
+    setBoxPreview(bbox); setBoxDraft({ ...boxDraft, left: bbox.left.toFixed(4), top: bbox.top.toFixed(4), right: bbox.right.toFixed(4), bottom: bbox.bottom.toFixed(4) }); setMessage("人物框已画好。确认位置后点击“添加到当前帧”。");
+  };
+
+  const annotationOverlay = source && frame && displayWidth && displayHeight ? <svg className={`golden-annotation__overlay${drawingBox ? " is-drawing" : ""}`} viewBox={`0 0 ${displayWidth} ${displayHeight}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="当前帧 Golden 标注叠加结果" onPointerDown={startBox} onPointerMove={moveBox} onPointerUp={finishBox} onPointerCancel={() => { setBoxStart(null); setBoxPreview(null); setDrawingBox(false); }}>
+    {currentTracks.map((track) => { const box = sourceBoxToDisplay(track.bbox, source.display_rotation_degrees); return <g key={track.label_id} className={`golden-annotation__track golden-annotation__track--${track.state}`}>
+      <rect x={box.left * displayWidth} y={box.top * displayHeight} width={(box.right - box.left) * displayWidth} height={(box.bottom - box.top) * displayHeight} />
+      <text x={box.left * displayWidth + 6} y={Math.max(20, box.top * displayHeight - 6)}>主滑手 · {track.state}</text>
+    </g>; })}
+    {currentPoses.map((pose) => {
+      const byName = new Map(pose.joints.map((joint) => [joint.joint, joint]));
+      return <g key={pose.label_id} className="golden-annotation__pose">
+        {jointConnections.map(([from, to]) => { const left = byName.get(from); const right = byName.get(to); if (!left || !right) return null; const displayLeft = sourceToDisplay(left, source.display_rotation_degrees); const displayRight = sourceToDisplay(right, source.display_rotation_degrees); return <line key={`${from}-${to}`} x1={displayLeft.x * displayWidth} y1={displayLeft.y * displayHeight} x2={displayRight.x * displayWidth} y2={displayRight.y * displayHeight} />; })}
+        {pose.joints.map((joint) => { const point = sourceToDisplay(joint, source.display_rotation_degrees); return <circle key={joint.joint} cx={point.x * displayWidth} cy={point.y * displayHeight} r={Math.max(4, displayWidth / 240)} />; })}
+      </g>;
+    })}
+    {boxPreview ? (() => { const box = sourceBoxToDisplay(boxPreview, source.display_rotation_degrees); return <rect className="golden-annotation__box-preview" x={box.left * displayWidth} y={box.top * displayHeight} width={(box.right - box.left) * displayWidth} height={(box.bottom - box.top) * displayHeight} />; })() : null}
+  </svg> : null;
   const requireSourceFrame = () => {
     if (frame) return true;
     setMessage("Step to the exact private source frame before capturing a moment, box, or pose joint.");
@@ -85,17 +203,30 @@ export default function GoldenAnnotationWorkspace() {
   };
   const updateEvent = (change: Partial<GoldenEvent>) => {
     if (!workspace || !selected) return;
-    setWorkspace({ ...workspace, events: workspace.events.map((event) => event.event_id === selected.event_id ? { ...event, ...change } : event) }); setDirty(true);
+    setWorkspace({ ...workspace, events: workspace.events.map((event) => event.event_id === selected.event_id ? { ...event, ...change } : event) }); markDirty();
   };
   const updateTrack = (labelId: string, change: Partial<GoldenTrack>) => {
     if (!workspace) return;
-    setWorkspace({ ...workspace, tracks: workspace.tracks.map((item) => item.label_id === labelId ? { ...item, ...change } : item) }); setDirty(true);
+    setWorkspace({ ...workspace, tracks: workspace.tracks.map((item) => item.label_id === labelId ? { ...item, ...change } : item) }); markDirty();
   };
   const updatePose = (labelId: string, change: Partial<GoldenPose>) => {
     if (!workspace) return;
-    setWorkspace({ ...workspace, poses: workspace.poses.map((item) => item.label_id === labelId ? { ...item, ...change } : item) }); setDirty(true);
+    setWorkspace({ ...workspace, poses: workspace.poses.map((item) => item.label_id === labelId ? { ...item, ...change } : item) }); markDirty();
   };
-  const createEvent = () => { if (!workspace || !source) return; const event = blankEvent(source.source_sha256, time); setWorkspace({ ...workspace, events: [...workspace.events, event] }); setSelectedEvent(event.event_id); setDirty(true); };
+  const deleteEvent = () => {
+    if (!workspace || !selected) return;
+    if (!window.confirm(`删除这个${profileNames[selected.profile]}事件及其人物框、姿态点吗？保存后生效。`)) return;
+    setWorkspace({
+      ...workspace,
+      events: workspace.events.filter((event) => event.event_id !== selected.event_id),
+      tracks: workspace.tracks.filter((track) => track.event_id !== selected.event_id),
+      poses: workspace.poses.filter((pose) => pose.event_id !== selected.event_id),
+    });
+    setSelectedEvent(null); markDirty(); setMessage("事件已从草稿移除。点击保存后才会写入新 revision。");
+  };
+  const deleteTrack = (labelId: string) => { if (!workspace) return; setWorkspace({ ...workspace, tracks: workspace.tracks.filter((item) => item.label_id !== labelId) }); markDirty(); };
+  const deletePose = (labelId: string) => { if (!workspace) return; setWorkspace({ ...workspace, poses: workspace.poses.filter((item) => item.label_id !== labelId) }); markDirty(); };
+  const createEvent = () => { if (!workspace || !source) return; const event = blankEvent(source.source_sha256, time); setWorkspace({ ...workspace, events: [...workspace.events, event] }); setSelectedEvent(event.event_id); markDirty(); };
   const selectProfile = (profile: GoldenProfile) => updateEvent({ profile, jump: null, spin: null, step: null, spiral: null });
   const intervalProfile = selected?.profile === "step" || selected?.profile === "spiral" ? selected.profile : null;
   const intervalDetails = intervalProfile ? selected?.[intervalProfile] as IntervalDetails | null | undefined : null;
@@ -130,7 +261,7 @@ export default function GoldenAnnotationWorkspace() {
     if (!requireSourceFrame() || !frame) return;
     const bbox = { left: numberValue(boxDraft.left), top: numberValue(boxDraft.top), right: numberValue(boxDraft.right), bottom: numberValue(boxDraft.bottom) };
     if (Object.values(bbox).some((value) => !Number.isFinite(value)) || bbox.left < 0 || bbox.top < 0 || bbox.right > 1 || bbox.bottom > 1 || bbox.right <= bbox.left || bbox.bottom <= bbox.top) { setMessage("Enter a real normalized box (0 to 1, with positive area) before adding it."); return; }
-    setWorkspace({ ...workspace, tracks: [...workspace.tracks, { label_id: uid("track"), event_id: selected.event_id, source_sha256: selected.source_sha256, source_frame_index: frame.sourceFrameIndex, pts: frame.pts, bbox, state: boxDraft.state }] }); setDirty(true); setMessage(null);
+    setWorkspace({ ...workspace, tracks: [...workspace.tracks, { label_id: uid("track"), event_id: selected.event_id, source_sha256: selected.source_sha256, source_frame_index: frame.sourceFrameIndex, pts: frame.pts, bbox, state: boxDraft.state }] }); markDirty(); setBoxPreview(null); setMessage(null);
   };
   const addPoseJoint = () => {
     if (!workspace || !selected) return;
@@ -140,39 +271,70 @@ export default function GoldenAnnotationWorkspace() {
     const existing = workspace.poses.find((item) => item.event_id === selected.event_id && item.source_frame_index === frame.sourceFrameIndex);
     if (existing && existing.joints.some((joint) => joint.joint === poseDraft.joint)) { setMessage("That joint already exists on this source frame. Edit it below instead."); return; }
     const joint = { joint: poseDraft.joint, x, y, visibility };
-    setWorkspace({ ...workspace, poses: existing ? workspace.poses.map((item) => item.label_id === existing.label_id ? { ...item, joints: [...item.joints, joint] } : item) : [...workspace.poses, { label_id: uid("pose"), event_id: selected.event_id, source_sha256: selected.source_sha256, source_frame_index: frame.sourceFrameIndex, pts: frame.pts, observability: poseDraft.observability, joints: [joint] }] }); setDirty(true); setMessage(null);
+    setWorkspace({ ...workspace, poses: existing ? workspace.poses.map((item) => item.label_id === existing.label_id ? { ...item, joints: [...item.joints, joint] } : item) : [...workspace.poses, { label_id: uid("pose"), event_id: selected.event_id, source_sha256: selected.source_sha256, source_frame_index: frame.sourceFrameIndex, pts: frame.pts, observability: poseDraft.observability, joints: [joint] }] }); markDirty(); setMessage(null);
   };
   const save = async () => {
     if (!workspace || !parentPin || offline) return;
+    const savedGeneration = editGeneration.current;
     setSaving(true); setMessage(null);
-    try { const next = await saveGoldenAnnotations(parentPin, { expected_revision: workspace.revision, annotator_alias: annotator, events: workspace.events, tracks: workspace.tracks, poses: workspace.poses }); setWorkspace(next); setDirty(false); setReview(await fetchGoldenReviewQueue(parentPin)); setMessage("Confirmed Ground Truth saved with a new revision."); }
+    try {
+      const next = await saveGoldenAnnotations(parentPin, { expected_revision: workspace.revision, annotator_alias: annotator, change_note: changeNote.trim() || null, events: workspace.events, tracks: workspace.tracks, poses: workspace.poses });
+      if (editGeneration.current === savedGeneration) {
+        setWorkspace(next); setDirty(false); setChangeNote(""); setMessage("已保存为新的 Golden revision；旧版本仍保留在审计历史中。");
+      } else {
+        setWorkspace((current) => current ? { ...current, revision: next.revision } : next);
+        setMessage("保存期间又有新修改：较早版本已保存，当前草稿仍需再保存一次。");
+      }
+      setReview(await fetchGoldenReviewQueue(parentPin));
+    }
     catch (error) { const status = axios.isAxiosError(error) ? error.response?.status : 0; setMessage(status === 409 ? "Another save won. Reloaded data is required before retrying." : "Save failed. Nothing was marked confirmed. Check event bounds, profile fields, and label values."); }
     finally { setSaving(false); }
   };
   const upload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; if (!file || !parentPin || !workspace) return;
+    if (dirty) { setMessage("请先保存当前标注，再上传新视频。"); event.target.value = ""; return; }
     if (!sessionAlias.trim() || !groupAlias.trim()) { setMessage("Enter redacted recording-session and grouping aliases before import."); event.target.value = ""; return; }
     const form = new FormData(); form.set("file", file); form.set("recording_session_id", sessionAlias.trim()); form.set("grouping_id", groupAlias.trim()); form.set("redacted_alias", `source-${workspace.sources.length + 1}`); form.set("expected_revision", String(workspace.revision)); form.set("annotator_alias", annotator);
-    try { await importGoldenSource(parentPin, form); await load(); setMessage("Private source imported and source metadata recorded."); } catch { setMessage("Import failed; no private source was registered."); }
+    try { const imported = await importGoldenSource(parentPin, form); await load(imported.source_sha256); setSelectedEvent(null); setTime(0); setFrame(null); setMessage("视频已导入。下一步：点击“在当前时间新建动作”，然后标动作类型和区间。"); } catch { setMessage("导入失败，没有注册私有视频。请检查格式或网络后重试。"); }
+  };
+  const saveSourceMetadata = async () => {
+    if (dirty) { setMessage("请先保存当前动作标注，再修改视频信息。"); return; }
+    if (!workspace || !source || !parentPin || !sourceAlias.trim() || !sourceSession.trim() || !sourceGroup.trim()) { setMessage("视频别名、录制场次和分组都不能为空。"); return; }
+    try {
+      const next = await updateGoldenSource(parentPin, source.source_sha256, { expected_revision: workspace.revision, annotator_alias: annotator, redacted_alias: sourceAlias.trim(), recording_session_id: sourceSession.trim(), grouping_id: sourceGroup.trim() });
+      setWorkspace(next); setMessage("视频信息已保存。录制场次和分组将用于防止数据泄漏到不同 split。");
+    } catch { setMessage("视频信息保存失败；如 revision 已变化，请刷新后重试。"); }
+  };
+  const deleteSource = async () => {
+    if (!workspace || !source || !parentPin) return;
+    if (dirty) { setMessage("请先保存或刷新当前动作标注，再删除视频。"); return; }
+    const count = workspace.events.filter((event) => event.source_sha256 === source.source_sha256).length;
+    if (!window.confirm(`确定删除“${source.redacted_alias}”吗？将同时删除 ${count} 个事件及其 bbox/pose 标签。历史 revision 仍保留，但视频文件不可恢复。`)) return;
+    try {
+      const next = await deleteGoldenSource(parentPin, source.source_sha256, { expected_revision: workspace.revision, annotator_alias: annotator, confirmation: "delete_source_and_labels" });
+      const nextSource = next.sources[0]?.source_sha256 ?? null;
+      setWorkspace(next); setSourceHash(nextSource); setSelectedEvent(null); setFrame(null); setTime(0); setDirty(false); setMessage("视频及当前标签已删除；旧评估结果已失效。");
+    } catch { setMessage("删除失败，数据保持不变。请刷新 revision 后重试。"); }
   };
   const attestReview = async () => { if (!parentPin || !selected) return; try { await attestGoldenReview(parentPin, selected.event_id, { reviewer_alias: annotator, review_type: reviewType }); await load(); setMessage("Review attestation recorded separately from Ground Truth."); } catch { setMessage("Review attestation was not eligible or could not be recorded."); } };
 
-  const momentEditor = (label: string, key: "takeoff" | "apex" | "landing" | "representative_moment", value?: SourceMoment | null) => <div className="golden-annotation__capture"><span>{label}: {value ? `${value.pts.toFixed(6)}s / frame ${value.source_frame_index ?? "not supplied"}` : "not set"}</span><IslandButton variant="secondary" onClick={() => setMoment(key)}>Use current frame and PTS</IslandButton></div>;
-  const phaseEditor = (label: string, key: "entry" | "main" | "exit" | "phase", value?: PhaseInterval | null) => <fieldset className="golden-annotation__phase"><legend>{label}</legend><label>Start PTS <input aria-label={`${label} start PTS`} type="number" step="0.001" value={value?.start_pts ?? selected?.start_pts ?? 0} onChange={(event) => setPhase(key, "start_pts", numberValue(event.target.value))} /></label><label>End PTS <input aria-label={`${label} end PTS`} type="number" step="0.001" value={value?.end_pts ?? selected?.end_pts ?? 0} onChange={(event) => setPhase(key, "end_pts", numberValue(event.target.value))} /></label><IslandButton variant="secondary" onClick={() => capturePhaseStart(key)}>Start at current PTS</IslandButton></fieldset>;
-  const rotationEditor = (profile: "jump" | "spin", value?: RotationLabel | null) => { const rotation = value ?? blankRotation(); return <fieldset className="golden-annotation__rotation"><legend>Rotation (human observation only)</legend><label>Minimum turns <input aria-label={`${profile} minimum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_min} onChange={(event) => setRotation(profile, { observed_turns_min: numberValue(event.target.value) })} /></label><label>Maximum turns <input aria-label={`${profile} maximum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_max} onChange={(event) => setRotation(profile, { observed_turns_max: numberValue(event.target.value) })} /></label><label>Reported turns <input aria-label={`${profile} reported turns`} type="number" min="0" max="12" step="0.25" value={rotation.reported_turns ?? ""} onChange={(event) => setRotation(profile, { reported_turns: event.target.value === "" ? null : numberValue(event.target.value) })} /></label><label>Convention <select aria-label={`${profile} rotation convention`} value={rotation.convention} onChange={(event) => setRotation(profile, { convention: event.target.value as RotationLabel["convention"] })}><option value="unknown">unknown</option><option value="axel_includes_forward_takeoff">axel includes forward takeoff</option><option value="non_axel_airborne">non-axel airborne</option></select></label><label>Rotation observability <select aria-label={`${profile} rotation observability`} value={rotation.observability} onChange={(event) => setRotation(profile, { observability: event.target.value as GoldenObservability })}><option>observable</option><option>uncertain</option><option>unobservable</option></select></label></fieldset>; };
+  const momentEditor = (label: string, key: "takeoff" | "apex" | "landing" | "representative_moment", value?: SourceMoment | null) => <div className="golden-annotation__capture"><span>{label}：{value ? `${value.pts.toFixed(6)} 秒 / 帧 ${value.source_frame_index ?? "未提供"}` : "未设置"}</span><IslandButton variant="secondary" onClick={() => setMoment(key)}>使用当前精确帧</IslandButton></div>;
+  const phaseEditor = (label: string, key: "entry" | "main" | "exit" | "phase", value?: PhaseInterval | null) => <fieldset className="golden-annotation__phase"><legend>{label}</legend><label>开始（秒）<input aria-label={`${label} start PTS`} type="number" step="0.001" value={value?.start_pts ?? selected?.start_pts ?? 0} onChange={(event) => setPhase(key, "start_pts", numberValue(event.target.value))} /></label><label>结束（秒）<input aria-label={`${label} end PTS`} type="number" step="0.001" value={value?.end_pts ?? selected?.end_pts ?? 0} onChange={(event) => setPhase(key, "end_pts", numberValue(event.target.value))} /></label><IslandButton variant="secondary" onClick={() => capturePhaseStart(key)}>从当前时间开始</IslandButton></fieldset>;
+  const rotationEditor = (profile: "jump" | "spin", value?: RotationLabel | null) => { const rotation = value ?? blankRotation(); return <fieldset className="golden-annotation__rotation"><legend>旋转圈数（仅人工观察）</legend><label>最少圈数<input aria-label={`${profile} minimum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_min} onChange={(event) => setRotation(profile, { observed_turns_min: numberValue(event.target.value) })} /></label><label>最多圈数<input aria-label={`${profile} maximum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_max} onChange={(event) => setRotation(profile, { observed_turns_max: numberValue(event.target.value) })} /></label><label>明确圈数（可空）<input aria-label={`${profile} reported turns`} type="number" min="0" max="12" step="0.25" value={rotation.reported_turns ?? ""} onChange={(event) => setRotation(profile, { reported_turns: event.target.value === "" ? null : numberValue(event.target.value) })} /></label><label>计数约定<select aria-label={`${profile} rotation convention`} value={rotation.convention} onChange={(event) => setRotation(profile, { convention: event.target.value as RotationLabel["convention"] })}><option value="unknown">不确定</option><option value="axel_includes_forward_takeoff">Axel 含向前起跳约定</option><option value="non_axel_airborne">非 Axel 空中转体</option></select></label><label>可观察性<select aria-label={`${profile} rotation observability`} value={rotation.observability} onChange={(event) => setRotation(profile, { observability: event.target.value as GoldenObservability })}><option value="observable">看得清</option><option value="uncertain">不太确定</option><option value="unobservable">无法判断</option></select></label></fieldset>; };
 
   return <div className="golden-annotation" data-testid="golden-annotation-workspace">
-    <IslandCard className="modern-me-panel"><IslandTitle>Private source browser</IslandTitle><div className="golden-annotation__source-fields"><label>Annotator <input value={annotator} onChange={(event) => setAnnotator(event.target.value)} /></label><label>Recording-session alias <input aria-label="Recording-session alias" value={sessionAlias} onChange={(event) => setSessionAlias(event.target.value)} placeholder="session-01" /></label><label>Grouping alias <input aria-label="Grouping alias" value={groupAlias} onChange={(event) => setGroupAlias(event.target.value)} placeholder="group-01" /></label><label>Import a newly selected private video <input aria-label="Import private source video" type="file" accept="video/*" onChange={upload} /></label></div><select aria-label="Golden source" value={sourceHash ?? ""} onChange={(event) => { setSourceHash(event.target.value); setSelectedEvent(null); }}>{workspace?.sources.map((item) => <option key={item.source_sha256} value={item.source_sha256}>{item.redacted_alias} ({item.width}x{item.height})</option>)}</select>{source ? <p>Duration {source.duration_pts.toFixed(3)}s; display rotation {source.display_rotation_degrees} degrees. Source metadata stays private.</p> : <p>Import a newly selected video to begin. Historical debug media is unavailable here.</p>}</IslandCard>
-    {source ? <IslandCard className="modern-me-panel">{mediaUrl ? <IceMediaPlayer fallbackSrc={mediaUrl} onTimeChange={setTime} seekTime={frame?.pts ?? null} sourceFrame={frame} onStepSourceFrame={step} unavailableFrame={message?.startsWith("The requested source frame") ?? false} /> : <p>Authorizing private video…</p>}<p>Exact source time: {time.toFixed(6)} seconds; source frame: {frameIndex}. Every capture below records this pair from the private source.</p></IslandCard> : null}
-    <div className="golden-annotation__grid"><IslandCard className="modern-me-panel"><IslandTitle>Event intervals</IslandTitle><IslandButton onClick={createEvent} disabled={!source}>Add event at current source time</IslandButton><div className="golden-annotation__events">{events.map((event) => <button type="button" className={event.event_id === selectedEvent ? "is-active" : ""} key={event.event_id} onClick={() => setSelectedEvent(event.event_id)}>{event.profile} {event.start_pts.toFixed(2)}-{event.end_pts.toFixed(2)}</button>)}</div></IslandCard>
-    <IslandCard className="modern-me-panel"><IslandTitle>Human Ground Truth</IslandTitle>{selected ? <div className="golden-annotation__form"><label>Profile <select value={selected.profile} onChange={(event) => selectProfile(event.target.value as GoldenProfile)}>{profiles.map((profile) => <option key={profile}>{profile}</option>)}</select></label><label>Subtype <input value={selected.subtype ?? ""} onChange={(event) => updateEvent({ subtype: event.target.value || null })} /></label><label>Scene strata (comma-separated) <input aria-label="Scene strata" value={selected.strata.join(", ")} onChange={(event) => updateEvent({ strata: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></label><label>Split <select value={selected.split ?? ""} onChange={(event) => updateEvent({ split: (event.target.value || null) as GoldenEvent["split"] })}><option value="">Unassigned</option><option value="development">development</option><option value="validation">validation</option><option value="frozen_test">frozen_test</option></select></label><label>Start PTS <input type="number" step="0.001" value={selected.start_pts} onChange={(event) => updateEvent({ start_pts: numberValue(event.target.value) })} /></label><label>End PTS <input type="number" step="0.001" value={selected.end_pts} onChange={(event) => updateEvent({ end_pts: numberValue(event.target.value) })} /></label><label>Observability <select value={selected.observability} onChange={(event) => updateEvent({ observability: event.target.value as GoldenObservability, ...(event.target.value === "unobservable" ? { jump: null, spin: null, step: null, spiral: null } : {}) })}><option>observable</option><option>uncertain</option><option>unobservable</option></select></label><label><input type="checkbox" checked={selected.main_skater_confirmed} onChange={(event) => updateEvent({ main_skater_confirmed: event.target.checked })} /> Main skater confirmed</label><label>Confidence <input type="number" min="0" max="1" step="0.05" value={selected.annotator_confidence} onChange={(event) => updateEvent({ annotator_confidence: numberValue(event.target.value) })} /></label>
-      {selected.observability !== "unobservable" && selected.profile === "jump" ? <section className="golden-annotation__details"><h3>Jump details</h3>{momentEditor("Takeoff", "takeoff", selected.jump?.takeoff)}{momentEditor("Apex", "apex", selected.jump?.apex)}{momentEditor("Landing", "landing", selected.jump?.landing)}{rotationEditor("jump", selected.jump?.rotation)}</section> : null}
-      {selected.observability !== "unobservable" && selected.profile === "spin" ? <section className="golden-annotation__details"><h3>Spin details</h3>{phaseEditor("Entry", "entry", selected.spin?.entry)}{phaseEditor("Main", "main", selected.spin?.main)}{phaseEditor("Exit", "exit", selected.spin?.exit)}{rotationEditor("spin", selected.spin?.rotation)}</section> : null}
-      {selected.observability !== "unobservable" && intervalProfile ? <section className="golden-annotation__details"><h3>{intervalProfile} details</h3>{phaseEditor("Phase", "phase", intervalDetails?.phase)}{momentEditor("Representative moment", "representative_moment", intervalDetails?.representative_moment)}</section> : null}
-      <section className="golden-annotation__details"><h3>Challenge intervals</h3><IslandButton variant="secondary" onClick={addChallenge}>Add challenge interval</IslandButton>{selected.challenge_intervals.map((challenge, index) => <div className="golden-annotation__challenge" key={`${challenge.category}-${index}`}><label>Start <input type="number" step="0.001" value={challenge.start_pts} onChange={(event) => updateChallenge(index, { start_pts: numberValue(event.target.value) })} /></label><label>End <input type="number" step="0.001" value={challenge.end_pts} onChange={(event) => updateChallenge(index, { end_pts: numberValue(event.target.value) })} /></label><label>Category <select value={challenge.category} onChange={(event) => updateChallenge(index, { category: event.target.value as ChallengeInterval["category"] })}>{["crossing", "occlusion", "relock", "exit_reentry", "blur", "compression", "unknown"].map((item) => <option key={item}>{item}</option>)}</select></label><label>Observability <select value={challenge.observability} onChange={(event) => updateChallenge(index, { observability: event.target.value as GoldenObservability })}><option>observable</option><option>uncertain</option><option>unobservable</option></select></label><button type="button" onClick={() => removeChallenge(index)}>Remove</button></div>)}</section></div> : <p>Select or add an event. Suggestions are structurally separate and are never saved from this form.</p>}</IslandCard></div>
-    {selected ? <div className="golden-annotation__grid"><IslandCard className="modern-me-panel"><IslandTitle>Skater boxes</IslandTitle><p>Add boxes only when you observed the main skater. Coordinates are normalized: 0 is left/top and 1 is right/bottom.</p><div className="golden-annotation__label-draft"><label>Left <input aria-label="Box left" value={boxDraft.left} onChange={(event) => setBoxDraft({ ...boxDraft, left: event.target.value })} /></label><label>Top <input aria-label="Box top" value={boxDraft.top} onChange={(event) => setBoxDraft({ ...boxDraft, top: event.target.value })} /></label><label>Right <input aria-label="Box right" value={boxDraft.right} onChange={(event) => setBoxDraft({ ...boxDraft, right: event.target.value })} /></label><label>Bottom <input aria-label="Box bottom" value={boxDraft.bottom} onChange={(event) => setBoxDraft({ ...boxDraft, bottom: event.target.value })} /></label><label>State <select value={boxDraft.state} onChange={(event) => setBoxDraft({ ...boxDraft, state: event.target.value as GoldenTrack["state"] })}><option>confirmed</option><option>uncertain</option><option>lost</option></select></label><IslandButton variant="secondary" onClick={addBox}>Add box at current frame</IslandButton></div>{tracks.map((track) => <div className="golden-annotation__saved-label" key={track.label_id}><strong>Frame {track.source_frame_index ?? "legacy"}, {track.pts.toFixed(3)}s</strong><label>State <select value={track.state} onChange={(event) => updateTrack(track.label_id, { state: event.target.value as GoldenTrack["state"] })}><option>confirmed</option><option>uncertain</option><option>lost</option></select></label><label>Left <input value={track.bbox.left} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, left: numberValue(event.target.value) } })} /></label><label>Top <input value={track.bbox.top} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, top: numberValue(event.target.value) } })} /></label><label>Right <input value={track.bbox.right} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, right: numberValue(event.target.value) } })} /></label><label>Bottom <input value={track.bbox.bottom} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, bottom: numberValue(event.target.value) } })} /></label></div>)}</IslandCard>
-      <IslandCard className="modern-me-panel"><IslandTitle>Pose joints</IslandTitle><p>Only add joints you can actually observe. Do not add a pose at all when it is unobservable; omission is the correct label.</p><div className="golden-annotation__label-draft"><label>Joint <select value={poseDraft.joint} onChange={(event) => setPoseDraft({ ...poseDraft, joint: event.target.value as typeof joints[number] })}>{joints.map((joint) => <option key={joint}>{joint}</option>)}</select></label><label>X <input aria-label="Pose joint X" value={poseDraft.x} onChange={(event) => setPoseDraft({ ...poseDraft, x: event.target.value })} /></label><label>Y <input aria-label="Pose joint Y" value={poseDraft.y} onChange={(event) => setPoseDraft({ ...poseDraft, y: event.target.value })} /></label><label>Visibility <input aria-label="Pose joint visibility" value={poseDraft.visibility} onChange={(event) => setPoseDraft({ ...poseDraft, visibility: event.target.value })} /></label><label>Observability <select value={poseDraft.observability} onChange={(event) => setPoseDraft({ ...poseDraft, observability: event.target.value as GoldenPose["observability"] })}><option>observable</option><option>uncertain</option></select></label><IslandButton variant="secondary" onClick={addPoseJoint}>Add observed joint at current frame</IslandButton></div>{poses.map((pose) => <div className="golden-annotation__saved-label" key={pose.label_id}><strong>Frame {pose.source_frame_index ?? "legacy"}, {pose.pts.toFixed(3)}s</strong><label>Observability <select value={pose.observability} onChange={(event) => updatePose(pose.label_id, { observability: event.target.value as GoldenPose["observability"] })}><option>observable</option><option>uncertain</option></select></label>{pose.joints.map((joint, index) => <div className="golden-annotation__joint" key={joint.joint}><span>{joint.joint}</span><label>X <input value={joint.x} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, x: numberValue(event.target.value) } : item) })} /></label><label>Y <input value={joint.y} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, y: numberValue(event.target.value) } : item) })} /></label><label>Visibility <input value={joint.visibility} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, visibility: numberValue(event.target.value) } : item) })} /></label></div>)}</div>)}</IslandCard></div> : null}
-    <IslandCard className="modern-me-panel"><IslandTitle>Review queue and history</IslandTitle>{review.length ? <ul>{review.map((item) => <li key={`${item.event_id}-${item.status}`}>{item.event_id}: {item.message}</li>)}</ul> : <p>No incomplete, contradictory, or low-confidence labels need review.</p>}<p>Every human-confirmed field records annotator, timestamp, and revision in the private manifest history.</p>{selected ? <div><label>Review evidence <select value={reviewType} onChange={(event) => setReviewType(event.target.value as typeof reviewType)}><option value="delayed_relabel">Delayed re-label (24h+)</option><option value="ambiguous_rotation">Ambiguous rotation double review</option><option value="frozen_identity_crossing">Frozen crossing double review</option></select></label><IslandButton variant="secondary" onClick={() => void attestReview()}>Record eligible review</IslandButton></div> : null}</IslandCard>
-    {message ? <p role="alert">{message}</p> : null}<IslandButton onClick={save} disabled={!dirty || saving || offline}>{saving ? "Saving..." : offline ? "Offline - retry when connected" : dirty ? "Save confirmed Ground Truth" : "All changes saved"}</IslandButton>{dirty ? <p>Unsaved changes: leaving this page will ask for confirmation.</p> : null}
+    <IslandCard className="modern-me-panel golden-annotation__guide" tone="sky"><IslandTitle>上传以后做什么？</IslandTitle><ol><li className={source ? "is-done" : ""}><strong>选择视频</strong><span>从下拉框打开刚上传或以前上传的视频。</span></li><li className={selected ? "is-done" : ""}><strong>新建一个动作</strong><span>播放到动作附近，点击“在当前时间新建动作”。</span></li><li className={selected?.profile !== "unknown" ? "is-done" : ""}><strong>标类型和区间</strong><span>选择跳跃、旋转、步法或燕式，并填写开始/结束时间。</span></li><li className={selected?.main_skater_confirmed ? "is-done" : ""}><strong>确认主滑手</strong><span>勾选主滑手，在动作中选 3-8 个清晰帧添加人物框。</span></li><li className={!dirty && Boolean(selected) ? "is-done" : ""}><strong>保存</strong><span>补动作专属时刻后保存。Pose 只需少量抽样，可以暂不标。</span></li></ol><p><strong>普通事件最少要标：</strong>动作区间、类型、可观察性、主滑手、动作专属时刻，以及 3-8 个主滑手框。场景标签、困难区间和 Pose 按实际情况补充。</p><p><strong>当前目标是 36 个真实动作事件。</strong>不用为了凑 60-80 个而重复素材；后续缺哪类，再补拍新的场次或难例。</p></IslandCard>
+    <IslandCard className="modern-me-panel"><IslandTitle>1. 视频库</IslandTitle><div className="golden-annotation__source-fields"><label>标注人<input value={annotator} onChange={(event) => setAnnotator(event.target.value)} /></label><label>新视频录制场次<input aria-label="Recording-session alias" value={sessionAlias} onChange={(event) => setSessionAlias(event.target.value)} placeholder="例如 session-01" /></label><label>新视频分组<input aria-label="Grouping alias" value={groupAlias} onChange={(event) => setGroupAlias(event.target.value)} placeholder="同一次拍摄填相同分组" /></label><label>上传新视频<input aria-label="Import private source video" type="file" accept="video/*" onChange={upload} /></label></div><label>已上传视频<select aria-label="Golden source" value={sourceHash ?? ""} onChange={(event) => { setSourceHash(event.target.value); setSelectedEvent(null); setFrame(null); setTime(0); }}>{workspace?.sources.map((item) => <option key={item.source_sha256} value={item.source_sha256}>{item.redacted_alias} · {workspace.events.filter((entry) => entry.source_sha256 === item.source_sha256).length} 个动作</option>)}</select></label>{source ? <><div className="golden-annotation__source-edit"><label>显示名称<input value={sourceAlias} onChange={(event) => setSourceAlias(event.target.value)} /></label><label>录制场次<input value={sourceSession} onChange={(event) => setSourceSession(event.target.value)} /></label><label>分组<input value={sourceGroup} onChange={(event) => setSourceGroup(event.target.value)} /></label></div><div className="golden-annotation__actions"><IslandButton variant="secondary" onClick={() => void saveSourceMetadata()}>保存视频信息</IslandButton><IslandButton variant="quiet" className="golden-annotation__danger" onClick={() => void deleteSource()}>删除此视频和标签</IslandButton></div><p>时长 {source.duration_pts.toFixed(3)} 秒，{source.width}x{source.height}。私有路径不会显示或导出。</p></> : <p>请先上传一个新选择的视频。历史 debug 素材不能用于 V2 Golden。</p>}</IslandCard>
+    {source ? <IslandCard className="modern-me-panel"><IslandTitle>2. 播放并观察标注</IslandTitle>{mediaUrl ? <IceMediaPlayer fallbackSrc={mediaUrl} markers={markers} aspectRatio={displayWidth && displayHeight ? displayWidth / displayHeight : undefined} onTimeChange={(value) => { setTime(value); if (frame && Math.abs(frame.pts - value) > Math.max(frame.duration ?? .04, .04)) setFrame(null); }} seekTime={frame?.pts ?? null} sourceFrame={frame} onStepSourceFrame={step} unavailableFrame={message?.startsWith("The requested source frame") ?? false} overlay={annotationOverlay} /> : <p>正在授权私有视频…</p>}<p>当前时间 {time.toFixed(6)} 秒；源帧 {frameIndex}。用上一帧/下一帧锁定精确帧后，当前帧的主滑手框和 Pose 会叠加显示。</p><div className="golden-annotation__legend"><span className="is-confirmed">主滑手框</span><span className="is-pose">Pose 抽样</span><span>时间轴圆点：动作与关键时刻</span></div></IslandCard> : null}
+    <div className="golden-annotation__grid"><IslandCard className="modern-me-panel"><IslandTitle>3. 动作记录</IslandTitle><IslandButton onClick={createEvent} disabled={!source}>在当前时间新建动作</IslandButton><div className="golden-annotation__events">{events.map((event) => <button type="button" className={event.event_id === selectedEvent ? "is-active" : ""} key={event.event_id} onClick={() => setSelectedEvent(event.event_id)}>{profileNames[event.profile]} {event.start_pts.toFixed(2)}-{event.end_pts.toFixed(2)} 秒</button>)}</div>{selected ? <IslandButton variant="quiet" className="golden-annotation__danger" onClick={deleteEvent}>删除当前动作</IslandButton> : <p>选择已有动作即可继续编辑；同一视频可以新建多个动作。</p>}</IslandCard>
+    <IslandCard className="modern-me-panel"><IslandTitle>4. 人工真值</IslandTitle>{selected ? <div className="golden-annotation__form"><label>动作类型<select aria-label="Profile" value={selected.profile} onChange={(event) => selectProfile(event.target.value as GoldenProfile)}>{profiles.map((profile) => <option key={profile} value={profile}>{profileNames[profile]}</option>)}</select></label><label>动作细分（可选）<input value={selected.subtype ?? ""} onChange={(event) => updateEvent({ subtype: event.target.value || null })} placeholder="不确定可留空" /></label><label>场景标签（可选）<input aria-label="Scene strata" value={selected.strata.join(", ")} onChange={(event) => updateEvent({ strata: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} placeholder="normal, multi-skater, blur" /></label><label>数据分区<select value={selected.split ?? ""} onChange={(event) => updateEvent({ split: (event.target.value || null) as GoldenEvent["split"] })}><option value="">稍后分配</option><option value="development">开发集</option><option value="validation">验证集</option><option value="frozen_test">冻结测试集</option></select></label><label>动作开始（秒）<input type="number" step="0.001" value={selected.start_pts} onChange={(event) => updateEvent({ start_pts: numberValue(event.target.value) })} /></label><label>动作结束（秒）<input type="number" step="0.001" value={selected.end_pts} onChange={(event) => updateEvent({ end_pts: numberValue(event.target.value) })} /></label><label>可观察性<select value={selected.observability} onChange={(event) => updateEvent({ observability: event.target.value as GoldenObservability, ...(event.target.value === "unobservable" ? { jump: null, spin: null, step: null, spiral: null } : {}) })}><option value="observable">看得清</option><option value="uncertain">不太确定</option><option value="unobservable">画面不足，无法判断</option></select></label><label><input type="checkbox" checked={selected.main_skater_confirmed} onChange={(event) => updateEvent({ main_skater_confirmed: event.target.checked })} /> 已确认画面中的主滑手</label><label>我的把握（0-1）<input type="number" min="0" max="1" step="0.05" value={selected.annotator_confidence} onChange={(event) => updateEvent({ annotator_confidence: numberValue(event.target.value) })} /></label>
+      {selected.observability !== "unobservable" && selected.profile === "jump" ? <section className="golden-annotation__details"><h3>跳跃关键时刻</h3>{momentEditor("起跳", "takeoff", selected.jump?.takeoff)}{momentEditor("最高点", "apex", selected.jump?.apex)}{momentEditor("落冰", "landing", selected.jump?.landing)}{rotationEditor("jump", selected.jump?.rotation)}</section> : null}
+      {selected.observability !== "unobservable" && selected.profile === "spin" ? <section className="golden-annotation__details"><h3>旋转阶段</h3>{phaseEditor("进入", "entry", selected.spin?.entry)}{phaseEditor("主体", "main", selected.spin?.main)}{phaseEditor("退出", "exit", selected.spin?.exit)}{rotationEditor("spin", selected.spin?.rotation)}</section> : null}
+      {selected.observability !== "unobservable" && intervalProfile ? <section className="golden-annotation__details"><h3>{profileNames[intervalProfile]}阶段</h3>{phaseEditor("动作阶段", "phase", intervalDetails?.phase)}{momentEditor("代表时刻", "representative_moment", intervalDetails?.representative_moment)}</section> : null}
+      <section className="golden-annotation__details"><h3>困难区间（可选）</h3><IslandButton variant="secondary" onClick={addChallenge}>添加困难区间</IslandButton>{selected.challenge_intervals.map((challenge, index) => <div className="golden-annotation__challenge" key={`${challenge.category}-${index}`}><label>开始<input type="number" step="0.001" value={challenge.start_pts} onChange={(event) => updateChallenge(index, { start_pts: numberValue(event.target.value) })} /></label><label>结束<input type="number" step="0.001" value={challenge.end_pts} onChange={(event) => updateChallenge(index, { end_pts: numberValue(event.target.value) })} /></label><label>类型<select value={challenge.category} onChange={(event) => updateChallenge(index, { category: event.target.value as ChallengeInterval["category"] })}>{["crossing", "occlusion", "relock", "exit_reentry", "blur", "compression", "unknown"].map((item) => <option key={item}>{item}</option>)}</select></label><label>可观察性<select value={challenge.observability} onChange={(event) => updateChallenge(index, { observability: event.target.value as GoldenObservability })}><option>observable</option><option>uncertain</option><option>unobservable</option></select></label><button type="button" onClick={() => removeChallenge(index)}>移除</button></div>)}</section></div> : <p>请先选择或新建一个动作。这里保存的是人工真值，不会自动接受算法建议。</p>}</IslandCard></div>
+    {selected ? <div className="golden-annotation__grid"><IslandCard className="modern-me-panel"><IslandTitle>5. 主滑手框（每个动作 3-8 帧）</IslandTitle><p>先用上一帧/下一帧锁定清晰源帧，再点击下方按钮，直接在上方视频中用鼠标、触控笔或手指拖框。高级用户也可以手动微调 0-1 坐标。</p><IslandButton variant="secondary" onClick={() => { if (!requireSourceFrame()) return; setDrawingBox(true); setBoxPreview(null); setMessage("请在上方视频画面中，从主滑手左上角拖到右下角。"); }}>{drawingBox ? "正在等待画框…" : "在视频上画主滑手框"}</IslandButton><div className="golden-annotation__label-draft"><label>左<input aria-label="Box left" value={boxDraft.left} onChange={(event) => setBoxDraft({ ...boxDraft, left: event.target.value })} /></label><label>上<input aria-label="Box top" value={boxDraft.top} onChange={(event) => setBoxDraft({ ...boxDraft, top: event.target.value })} /></label><label>右<input aria-label="Box right" value={boxDraft.right} onChange={(event) => setBoxDraft({ ...boxDraft, right: event.target.value })} /></label><label>下<input aria-label="Box bottom" value={boxDraft.bottom} onChange={(event) => setBoxDraft({ ...boxDraft, bottom: event.target.value })} /></label><label>状态<select value={boxDraft.state} onChange={(event) => setBoxDraft({ ...boxDraft, state: event.target.value as GoldenTrack["state"] })}><option value="confirmed">确认是主滑手</option><option value="uncertain">不确定</option><option value="lost">丢失</option></select></label><IslandButton variant="secondary" onClick={addBox}>添加到当前帧</IslandButton></div>{tracks.map((track) => <div className="golden-annotation__saved-label" key={track.label_id}><strong>帧 {track.source_frame_index ?? "旧数据"}，{track.pts.toFixed(3)} 秒</strong><label>状态<select value={track.state} onChange={(event) => updateTrack(track.label_id, { state: event.target.value as GoldenTrack["state"] })}><option>confirmed</option><option>uncertain</option><option>lost</option></select></label><label>左<input value={track.bbox.left} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, left: numberValue(event.target.value) } })} /></label><label>上<input value={track.bbox.top} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, top: numberValue(event.target.value) } })} /></label><label>右<input value={track.bbox.right} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, right: numberValue(event.target.value) } })} /></label><label>下<input value={track.bbox.bottom} onChange={(event) => updateTrack(track.label_id, { bbox: { ...track.bbox, bottom: numberValue(event.target.value) } })} /></label><button type="button" className="golden-annotation__danger" onClick={() => deleteTrack(track.label_id)}>删除</button></div>)}</IslandCard>
+      <IslandCard className="modern-me-panel"><IslandTitle>6. Pose 抽样（可选）</IslandTitle><p>不需要每帧标，也不需要每个事件都标。只在少量清晰代表帧添加看得见的关节；看不清就留空。</p><div className="golden-annotation__label-draft"><label>关节<select value={poseDraft.joint} onChange={(event) => setPoseDraft({ ...poseDraft, joint: event.target.value as typeof joints[number] })}>{joints.map((joint) => <option key={joint}>{joint}</option>)}</select></label><label>X<input aria-label="Pose joint X" value={poseDraft.x} onChange={(event) => setPoseDraft({ ...poseDraft, x: event.target.value })} /></label><label>Y<input aria-label="Pose joint Y" value={poseDraft.y} onChange={(event) => setPoseDraft({ ...poseDraft, y: event.target.value })} /></label><label>可见度<input aria-label="Pose joint visibility" value={poseDraft.visibility} onChange={(event) => setPoseDraft({ ...poseDraft, visibility: event.target.value })} /></label><label>可观察性<select value={poseDraft.observability} onChange={(event) => setPoseDraft({ ...poseDraft, observability: event.target.value as GoldenPose["observability"] })}><option>observable</option><option>uncertain</option></select></label><IslandButton variant="secondary" onClick={addPoseJoint}>添加到当前帧</IslandButton></div>{poses.map((pose) => <div className="golden-annotation__saved-label" key={pose.label_id}><strong>帧 {pose.source_frame_index ?? "旧数据"}，{pose.pts.toFixed(3)} 秒</strong><label>可观察性<select value={pose.observability} onChange={(event) => updatePose(pose.label_id, { observability: event.target.value as GoldenPose["observability"] })}><option>observable</option><option>uncertain</option></select></label><button type="button" className="golden-annotation__danger" onClick={() => deletePose(pose.label_id)}>删除整帧 Pose</button>{pose.joints.map((joint, index) => <div className="golden-annotation__joint" key={joint.joint}><span>{joint.joint}</span><label>X<input value={joint.x} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, x: numberValue(event.target.value) } : item) })} /></label><label>Y<input value={joint.y} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, y: numberValue(event.target.value) } : item) })} /></label><label>可见度<input value={joint.visibility} onChange={(event) => updatePose(pose.label_id, { joints: pose.joints.map((item, itemIndex) => itemIndex === index ? { ...item, visibility: numberValue(event.target.value) } : item) })} /></label></div>)}</div>)}</IslandCard></div> : null}
+    <IslandCard className="modern-me-panel"><IslandTitle>复核与修订</IslandTitle>{review.length ? <ul>{review.map((item) => <li key={`${item.event_id}-${item.status}`}>{item.event_id}: {item.message}</li>)}</ul> : <p>当前没有待处理的低把握、矛盾或二次复核项目。</p>}<p>每次保存都会创建新的 revision；历史标注不会被静默覆盖。</p>{selected ? <div className="golden-annotation__review"><label>复核类型<select value={reviewType} onChange={(event) => setReviewType(event.target.value as typeof reviewType)}><option value="delayed_relabel">24 小时后延迟复标</option><option value="ambiguous_rotation">模糊旋转二次复核</option><option value="frozen_identity_crossing">冻结集交叉场景复核</option></select></label><IslandButton variant="secondary" onClick={() => void attestReview()}>记录合格复核</IslandButton></div> : null}</IslandCard>
+    <IslandCard className="modern-me-panel golden-annotation__save"><IslandTitle>保存当前 Golden</IslandTitle><label>修改说明（可选）<input value={changeNote} onChange={(event) => setChangeNote(event.target.value)} placeholder="例如：修正落冰帧" /></label>{message ? <p role="alert">{message}</p> : null}<IslandButton onClick={save} disabled={!dirty || saving || offline}>{saving ? "正在保存…" : offline ? "离线，联网后重试" : dirty ? "保存人工真值" : "当前修改已保存"}</IslandButton>{dirty ? <p>有未保存修改。离开页面前浏览器会提醒你。</p> : null}</IslandCard>
   </div>;
 }

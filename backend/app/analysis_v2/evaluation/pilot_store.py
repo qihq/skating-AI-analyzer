@@ -109,6 +109,25 @@ class PilotEvaluationStore:
             return {"status": "not_run", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": None}
         return self._read(self.status_path)
 
+    def invalidate(self, reason: str) -> None:
+        """Discard derived results when their Golden input revision changes."""
+        for path in (
+            self.private_report_path,
+            self.sanitized_report_path,
+            self.diff_path,
+            self.gate_path,
+        ):
+            path.unlink(missing_ok=True)
+        self._write(
+            self.status_path,
+            {
+                "status": "not_run",
+                "evaluator_version": EVALUATOR_VERSION,
+                "diagnostic_only": True,
+                "message": reason,
+            },
+        )
+
     def run(self, bundle: PilotPredictionBundle) -> dict[str, Any]:
         try:
             dataset = self.golden_store.ensure_initialized()

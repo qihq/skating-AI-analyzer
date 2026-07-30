@@ -108,6 +108,20 @@ class GoldenAnnotationSaveRequest(_StrictResponse):
     poses: list[dict[str, object]]
 
 
+class GoldenSourceUpdateRequest(_StrictResponse):
+    expected_revision: int = Field(ge=1)
+    annotator_alias: str = Field(min_length=1, max_length=160)
+    recording_session_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
+    grouping_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
+    redacted_alias: str = Field(min_length=1, max_length=160)
+
+
+class GoldenSourceDeleteRequest(_StrictResponse):
+    expected_revision: int = Field(ge=1)
+    annotator_alias: str = Field(min_length=1, max_length=160)
+    confirmation: Literal["delete_source_and_labels"]
+
+
 class GoldenReviewItem(_StrictResponse):
     event_id: str
     status: Literal["incomplete", "low-confidence", "ambiguous", "double-review-required"]
@@ -211,11 +225,11 @@ async def get_golden_frame_identity(
 @router.post("/sources/import", response_model=GoldenSourceView, status_code=status.HTTP_201_CREATED)
 async def import_golden_source(
     file: UploadFile = File(...),
-    recording_session_id: str = Form(...),
-    grouping_id: str = Form(...),
-    redacted_alias: str = Form(...),
-    expected_revision: int = Form(...),
-    annotator_alias: str = Form(...),
+    recording_session_id: str = Form(..., pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$"),
+    grouping_id: str = Form(..., pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$"),
+    redacted_alias: str = Form(..., min_length=1, max_length=160),
+    expected_revision: int = Form(..., ge=1),
+    annotator_alias: str = Form(..., min_length=1, max_length=160),
     _: None = Depends(require_golden_parent),
     store: GoldenCatalogStore = Depends(get_golden_store),
 ) -> GoldenSourceView:
@@ -246,8 +260,9 @@ async def import_golden_source(
             "source_frame_count": metadata.source_frame_count, "average_fps": metadata.average_fps,
             "nominal_fps": metadata.nominal_fps, "display_rotation_degrees": metadata.display_rotation_degrees,
         }
-        updated = _next_dataset(current, expected_revision, annotator_alias, "source imported", sources=[*current.sources, source])
+        updated = _next_dataset(current, expected_revision, annotator_alias, "source imported", touch_labels=False, sources=[*current.sources, source])
         store.save(updated, expected_revision=expected_revision)
+        get_pilot_store(store).invalidate("Golden sources changed. Run the pilot evaluator again after labeling is complete.")
         return _source_view(updated.sources[-1])
     except SourceMediaError as exc:
         raise HTTPException(status_code=400, detail="Unable to read private source metadata.") from exc
@@ -258,6 +273,77 @@ async def import_golden_source(
         raise
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@router.patch("/sources/{source_sha256}", response_model=GoldenWorkspaceResponse)
+async def update_golden_source(
+    source_sha256: str,
+    payload: GoldenSourceUpdateRequest,
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+) -> GoldenWorkspaceResponse:
+    current = store.ensure_initialized()
+    if current.revision.revision != payload.expected_revision:
+        raise HTTPException(status_code=409, detail={"code": "revision_conflict", "current_revision": current.revision.revision})
+    if not any(source.source_sha256 == source_sha256 for source in current.sources):
+        raise HTTPException(status_code=404, detail="Golden source is unavailable.")
+    sources = [
+        {
+            **source.model_dump(mode="json"),
+            "recording_session_id": payload.recording_session_id,
+            "grouping_id": payload.grouping_id,
+            "redacted_alias": payload.redacted_alias,
+        }
+        if source.source_sha256 == source_sha256
+        else source.model_dump(mode="json")
+        for source in current.sources
+    ]
+    updated = _next_dataset(
+        current,
+        payload.expected_revision,
+        payload.annotator_alias,
+        "source metadata updated",
+        touch_labels=False,
+        sources=sources,
+    )
+    store.save(updated, expected_revision=payload.expected_revision)
+    get_pilot_store(store).invalidate("Golden source grouping changed. Run the pilot evaluator again after labeling is complete.")
+    return _workspace_response(updated)
+
+
+@router.delete("/sources/{source_sha256}", response_model=GoldenWorkspaceResponse)
+async def delete_golden_source(
+    source_sha256: str,
+    payload: GoldenSourceDeleteRequest,
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+) -> GoldenWorkspaceResponse:
+    current = store.ensure_initialized()
+    if current.revision.revision != payload.expected_revision:
+        raise HTTPException(status_code=409, detail={"code": "revision_conflict", "current_revision": current.revision.revision})
+    source = next((item for item in current.sources if item.source_sha256 == source_sha256), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Golden source is unavailable.")
+    event_ids = {event.event_id for event in current.events if event.source_sha256 == source_sha256}
+    media_path = store.source_media_path(source_sha256)
+    updated = _next_dataset(
+        current,
+        payload.expected_revision,
+        payload.annotator_alias,
+        "source and labels deleted",
+        touch_labels=False,
+        sources=[item.model_dump(mode="json") for item in current.sources if item.source_sha256 != source_sha256],
+        events=[item.model_dump(mode="json") for item in current.events if item.event_id not in event_ids],
+        tracks=[item.model_dump(mode="json") for item in current.tracks if item.event_id not in event_ids],
+        poses=[item.model_dump(mode="json") for item in current.poses if item.event_id not in event_ids],
+    )
+    store.save(updated, expected_revision=payload.expected_revision)
+    media_path.unlink(missing_ok=True)
+    for event_id in event_ids:
+        (store.suggestions_dir / f"{event_id}.json").unlink(missing_ok=True)
+        (store.reviews_dir / f"{event_id}.json").unlink(missing_ok=True)
+    get_pilot_store(store).invalidate("Golden sources changed. Run the pilot evaluator again after labeling is complete.")
+    return _workspace_response(updated)
 
 
 @router.put("/annotations", response_model=GoldenWorkspaceResponse)
@@ -273,6 +359,7 @@ async def save_golden_annotations(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail="Annotation is incomplete or contradictory; nothing was saved.") from exc
     store.save(updated, expected_revision=payload.expected_revision)
+    get_pilot_store(store).invalidate("Golden labels changed. Run the pilot evaluator again after labeling is complete.")
     return _workspace_response(updated)
 
 
@@ -438,21 +525,22 @@ def _workspace_response(dataset: GoldenDatasetV2) -> GoldenWorkspaceResponse:
     )
 
 
-def _next_dataset(current: GoldenDatasetV2, expected_revision: int, annotator_alias: str, change_note: str | None, **changes: Any) -> GoldenDatasetV2:
+def _next_dataset(current: GoldenDatasetV2, expected_revision: int, annotator_alias: str, change_note: str | None, *, touch_labels: bool = True, **changes: Any) -> GoldenDatasetV2:
     revision = {"revision": expected_revision + 1, "parent_revision": expected_revision, "annotator_alias": annotator_alias, "provenance": "human_annotation", "change_note": change_note}
     payload = current.model_dump(mode="json")
     payload.update(changes)
     payload["revision"] = revision
-    for event in payload.get("events", []):
-        if isinstance(event, dict):
-            event["revision"] = revision
-            event["field_revisions"] = {key: revision for key in ("profile", "interval", "observability", "main_skater", "moments", "rotation", "boxes", "pose")}
-    for track in payload.get("tracks", []):
-        if isinstance(track, dict):
-            track["revision"] = revision
-    for pose in payload.get("poses", []):
-        if isinstance(pose, dict):
-            pose["revision"] = revision
+    if touch_labels:
+        for event in payload.get("events", []):
+            if isinstance(event, dict):
+                event["revision"] = revision
+                event["field_revisions"] = {key: revision for key in ("profile", "interval", "observability", "main_skater", "moments", "rotation", "boxes", "pose")}
+        for track in payload.get("tracks", []):
+            if isinstance(track, dict):
+                track["revision"] = revision
+        for pose in payload.get("poses", []):
+            if isinstance(pose, dict):
+                pose["revision"] = revision
     return GoldenDatasetV2.model_validate(payload)
 
 

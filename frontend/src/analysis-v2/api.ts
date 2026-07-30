@@ -63,6 +63,16 @@ export async function importGoldenSource(parentPin: string, form: FormData): Pro
   return response.data;
 }
 
+export async function updateGoldenSource(parentPin: string, sourceHash: string, payload: { expected_revision: number; annotator_alias: string; recording_session_id: string; grouping_id: string; redacted_alias: string }): Promise<GoldenWorkspace> {
+  const response = await apiClient.patch<GoldenWorkspace>(`/golden/v2/sources/${encodeURIComponent(sourceHash)}`, payload, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function deleteGoldenSource(parentPin: string, sourceHash: string, payload: { expected_revision: number; annotator_alias: string; confirmation: "delete_source_and_labels" }): Promise<GoldenWorkspace> {
+  const response = await apiClient.delete<GoldenWorkspace>(`/golden/v2/sources/${encodeURIComponent(sourceHash)}`, { headers: { "X-Parent-Pin": parentPin }, data: payload, timeout: 10_000 });
+  return response.data;
+}
+
 export async function fetchPilotProgress(parentPin: string): Promise<PilotProgress> {
   const response = await apiClient.get<PilotProgress>("/golden/v2/evaluator/progress", { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
   return response.data;
