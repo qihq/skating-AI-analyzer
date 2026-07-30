@@ -31,12 +31,14 @@ class GoldenCatalogStore:
         self.labels_dir = self.root / "labels"
         self.history_dir = self.root / "history"
         self.suggestions_dir = self.root / "suggestions"
+        self.reviews_dir = self.root / "reviews"
 
     def ensure_initialized(self) -> GoldenDatasetV2:
         self.videos_dir.mkdir(parents=True, exist_ok=True)
         self.labels_dir.mkdir(parents=True, exist_ok=True)
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self.suggestions_dir.mkdir(parents=True, exist_ok=True)
+        self.reviews_dir.mkdir(parents=True, exist_ok=True)
         if self.manifest_path.exists():
             return self.read()
         dataset = GoldenDatasetV2(
@@ -96,6 +98,7 @@ class GoldenCatalogStore:
         self.labels_dir.mkdir(exist_ok=True)
         self.history_dir.mkdir(exist_ok=True)
         self.suggestions_dir.mkdir(exist_ok=True)
+        self.reviews_dir.mkdir(exist_ok=True)
         # Persist an immutable private snapshot before publishing the new manifest.
         self._atomic_write_json(self.history_dir / f"catalog-r{dataset.revision.revision}.json", self._manifest_payload(dataset))
         self._atomic_write_json(self.manifest_path, self._manifest_payload(dataset))
@@ -182,6 +185,26 @@ class GoldenCatalogStore:
         payload = self._read_json(path)
         suggestions = payload.get("suggestions", [])
         return suggestions if isinstance(suggestions, list) else []
+
+    def review_attestations(self, event_id: str | None = None) -> list[dict[str, Any]]:
+        paths = [self.reviews_dir / f"{event_id}.json"] if event_id else sorted(self.reviews_dir.glob("*.json"))
+        output: list[dict[str, Any]] = []
+        for path in paths:
+            if not path.exists():
+                continue
+            payload = self._read_json(path)
+            items = payload.get("reviews", [])
+            if isinstance(items, list):
+                output.extend(item for item in items if isinstance(item, dict))
+        return output
+
+    def add_review_attestation(self, event_id: str, attestation: dict[str, Any]) -> None:
+        if not any(event.event_id == event_id for event in self.read().events):
+            raise GoldenContractError("Golden event is unavailable")
+        path = self.reviews_dir / f"{event_id}.json"
+        existing = self._read_json(path).get("reviews", []) if path.exists() else []
+        reviews = existing if isinstance(existing, list) else []
+        self._atomic_write_json(path, {"event_id": event_id, "reviews": [*reviews, attestation]})
 
     @staticmethod
     def _manifest_payload(dataset: GoldenDatasetV2) -> dict[str, Any]:

@@ -13,7 +13,9 @@
   "redacted_aliases": [],
   "gate_template": {
     "gate": "G1",
-    "status": "not-run",
-    "required_new_events": 36
+    "status": "waiting_for_owner_labels",
+    "required_new_events": 36,
+    "diagnostic_only": true,
+    "release_claim": false
   }
 }

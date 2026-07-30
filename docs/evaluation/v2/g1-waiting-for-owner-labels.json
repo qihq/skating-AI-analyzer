@@ -1,0 +1,55 @@
+{
+  "schema_version": "golden-pilot-gate-evidence.v1",
+  "gate": "G1",
+  "status": "waiting_for_owner_labels",
+  "diagnostic_only": true,
+  "release_claim": false,
+  "dataset": {
+    "source_count": 0,
+    "event_count": 0,
+    "session_count": 0,
+    "required_session_count": 5,
+    "profile_counts": {
+      "jump": 0,
+      "spin": 0,
+      "step": 0,
+      "spiral": 0
+    },
+    "profile_missing": {
+      "jump": 14,
+      "spin": 10,
+      "step": 6,
+      "spiral": 6
+    },
+    "scene_missing": [
+      "normal",
+      "multi-skater",
+      "crossing/occlusion",
+      "small/distant target",
+      "pan/zoom",
+      "blur/compression"
+    ],
+    "duplicate_check": "no events to evaluate",
+    "delayed_review": {
+      "count": 0,
+      "required": 4
+    }
+  },
+  "evaluator": {
+    "version": "golden-pilot-evaluator.v1",
+    "fixture_status": "implemented",
+    "real_pilot_status": "not_run_without_owner_labels"
+  },
+  "privacy": {
+    "private_diagnostics": "V2 runtime only",
+    "sanitized_boundary": "passed"
+  },
+  "unmet": [
+    "36 schema-valid newly selected real events",
+    "profile and scene targets",
+    "split/group/duplicate checks on real events",
+    "at least four delayed re-label reviews",
+    "required ambiguous-rotation and frozen-crossing double reviews",
+    "real pilot evaluator run"
+  ]
+}

@@ -39,6 +39,15 @@ export interface GoldenSanitizedExport {
 export interface GoldenCount { key: string; count: number; }
 
 export type GoldenProfile = "jump" | "spin" | "step" | "spiral" | "unknown";
+export type GoldenObservability = "observable" | "uncertain" | "unobservable";
+export type SourceMoment = { pts: number; source_frame_index?: number };
+export type PhaseInterval = { start_pts: number; end_pts: number };
+export type RotationLabel = { observed_turns_min: number; observed_turns_max: number; reported_turns: number | null; convention: "axel_includes_forward_takeoff" | "non_axel_airborne" | "unknown"; observability: GoldenObservability };
+export type ChallengeInterval = { start_pts: number; end_pts: number; category: "crossing" | "occlusion" | "relock" | "exit_reentry" | "blur" | "compression" | "unknown"; observability: GoldenObservability };
+export type JumpDetails = { takeoff?: SourceMoment | null; apex?: SourceMoment | null; landing?: SourceMoment | null; rotation?: RotationLabel | null };
+export type SpinDetails = { entry?: PhaseInterval | null; main?: PhaseInterval | null; exit?: PhaseInterval | null; rotation?: RotationLabel | null };
+export type IntervalDetails = { phase?: PhaseInterval | null; representative_moment?: SourceMoment | null };
+export type PoseJoint = { joint: "nose" | "left_shoulder" | "right_shoulder" | "left_elbow" | "right_elbow" | "left_wrist" | "right_wrist" | "left_hip" | "right_hip" | "left_knee" | "right_knee" | "left_ankle" | "right_ankle"; x: number; y: number; visibility: number };
 export type GoldenWorkspace = {
   dataset_id: string;
   revision: number;
@@ -47,10 +56,47 @@ export type GoldenWorkspace = {
   tracks: GoldenTrack[];
   poses: GoldenPose[];
 };
-export type GoldenEvent = { event_id: string; source_sha256: string; start_pts: number; end_pts: number; profile: GoldenProfile; subtype?: string | null; observability: "observable" | "uncertain" | "unobservable"; strata: string[]; ambiguity_tags: string[]; failure_tags: string[]; annotator_confidence: number; main_skater_confirmed: boolean; split?: "development" | "validation" | "frozen_test" | null; challenge_intervals: Array<{ start_pts: number; end_pts: number; category: string; observability: string }>; jump?: unknown; spin?: unknown; step?: unknown; spiral?: unknown; revision?: unknown; field_revisions?: Record<string, unknown> };
-export type GoldenTrack = { label_id: string; event_id: string; source_sha256: string; pts: number; bbox: { left: number; top: number; right: number; bottom: number }; state: "confirmed" | "uncertain" | "lost"; revision?: unknown };
-export type GoldenPose = { label_id: string; event_id: string; source_sha256: string; pts: number; joints: unknown[]; observability: "observable" | "uncertain" | "unobservable"; revision?: unknown };
+export type GoldenEvent = { event_id: string; source_sha256: string; start_pts: number; end_pts: number; profile: GoldenProfile; subtype?: string | null; observability: GoldenObservability; strata: string[]; ambiguity_tags: string[]; failure_tags: string[]; annotator_confidence: number; main_skater_confirmed: boolean; split?: "development" | "validation" | "frozen_test" | null; challenge_intervals: ChallengeInterval[]; jump?: JumpDetails | null; spin?: SpinDetails | null; step?: IntervalDetails | null; spiral?: IntervalDetails | null; revision?: unknown; field_revisions?: Record<string, unknown> };
+export type GoldenTrack = { label_id: string; event_id: string; source_sha256: string; source_frame_index?: number; pts: number; bbox: { left: number; top: number; right: number; bottom: number }; state: "confirmed" | "uncertain" | "lost"; revision?: unknown };
+export type GoldenPose = { label_id: string; event_id: string; source_sha256: string; source_frame_index?: number; pts: number; joints: PoseJoint[]; observability: Exclude<GoldenObservability, "unobservable">; revision?: unknown };
 export type GoldenReviewItem = { event_id: string; status: "incomplete" | "low-confidence" | "ambiguous" | "double-review-required"; message: string };
+
+export type PilotEvaluatorState = "not_run" | "running" | "waiting_for_owner_labels" | "invalid_labels" | "failed" | "passed_for_pilot_only";
+export type PilotGap = { key: string; count: number; target: number; missing: number };
+export type PilotProgress = {
+  gate: "G1";
+  status: "waiting_for_owner_labels" | "ready_for_evaluator";
+  diagnostic_only: true;
+  release_claim: false;
+  profiles: PilotGap[];
+  scenes: PilotGap[];
+  requirements: Record<string, { count?: number; target?: number; issues?: string[]; passed: boolean }>;
+  next_best_videos: string[];
+};
+export type PilotEvaluatorStatus = { status: PilotEvaluatorState; evaluator_version: string; diagnostic_only: true; message: string | null; result_fingerprint?: string | null; leakage_fields?: string[]; progress?: PilotProgress | null };
+export type MetricRate = { numerator: number; denominator: number; rate: number | null; confidence_interval_95: [number, number] | null };
+export type PilotSanitizedResult = {
+  schema_version: "golden-pilot-sanitized-report.v1";
+  evaluator_version: string;
+  dataset_id: string;
+  dataset_fingerprint: string;
+  pipeline_fingerprint: string;
+  evaluation_masks: string[];
+  diagnostic_only: true;
+  release_claim: false;
+  deterministic_fingerprint: string;
+  repeatability: { deterministic: true; fingerprint: string };
+  aggregate: Record<string, unknown>;
+  failed_events: Array<{ alias: string; profile: GoldenProfile; strata: string[]; failure_codes: string[] }>;
+};
+
+export function isPilotSanitizedResult(value: unknown): value is PilotSanitizedResult {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.schema_version === "golden-pilot-sanitized-report.v1" && record.diagnostic_only === true && record.release_claim === false &&
+    typeof record.dataset_fingerprint === "string" && typeof record.pipeline_fingerprint === "string" && Array.isArray(record.evaluation_masks) &&
+    typeof record.aggregate === "object" && record.aggregate !== null && Array.isArray(record.failed_events);
+}
 
 export function isGoldenCatalogSummary(value: unknown): value is GoldenCatalogSummary {
   if (!value || typeof value !== "object") return false;

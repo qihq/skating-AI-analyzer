@@ -17,6 +17,13 @@ def test_committed_sanitized_template_contains_no_private_source_material() -> N
         assert forbidden not in encoded.lower()
 
 
+def test_committed_g1_waiting_evidence_contains_only_aggregate_state() -> None:
+    evidence = ROOT / "docs" / "evaluation" / "v2" / "g1-waiting-for-owner-labels.json"
+    encoded = evidence.read_text(encoding="utf-8").lower()
+    for forbidden in ("c:\\users", "source_sha256", "event_id", "annotator_alias", "reviewer_alias", "filename", "embedding"):
+        assert forbidden not in encoded
+
+
 def test_private_golden_layout_is_ignored_and_never_committed() -> None:
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "golden/" in ignore

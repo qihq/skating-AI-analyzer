@@ -238,6 +238,7 @@ class GoldenTrackLabel(_StrictModel):
     label_id: Identifier
     event_id: Identifier
     source_sha256: Sha256
+    source_frame_index: int | None = Field(default=None, ge=0)
     pts: float = Field(ge=0)
     bbox: NormalizedBBox
     state: Literal["confirmed", "uncertain", "lost"]
@@ -258,6 +259,7 @@ class GoldenPoseLabel(_StrictModel):
     label_id: Identifier
     event_id: Identifier
     source_sha256: Sha256
+    source_frame_index: int | None = Field(default=None, ge=0)
     pts: float = Field(ge=0)
     joints: list[PoseJointLabel] = Field(min_length=1, max_length=13)
     observability: Literal["observable", "uncertain", "unobservable"]

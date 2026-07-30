@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -13,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis_v2.config import RuntimeConfig
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
+from app.analysis_v2.evaluation.pilot_evaluator import PilotPredictionBundle
+from app.analysis_v2.evaluation.pilot_store import PilotEvaluationStore, collection_progress
 from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_at
 from app.database import get_session
 from app.routers.capabilities import get_runtime_config
@@ -117,11 +120,31 @@ class GoldenFrameIdentity(_StrictResponse):
     duration: float | None
 
 
+class PilotEvaluationStatus(_StrictResponse):
+    status: Literal["not_run", "running", "waiting_for_owner_labels", "invalid_labels", "failed", "passed_for_pilot_only"]
+    evaluator_version: str
+    diagnostic_only: Literal[True]
+    message: str | None = None
+    result_fingerprint: str | None = None
+    leakage_fields: list[str] = Field(default_factory=list)
+    progress: dict[str, Any] | None = None
+
+
+class GoldenReviewAttestationRequest(_StrictResponse):
+    reviewer_alias: str = Field(min_length=1, max_length=160)
+    review_type: Literal["delayed_relabel", "ambiguous_rotation", "frozen_identity_crossing"]
+    note: str | None = Field(default=None, max_length=500)
+
+
 router = APIRouter(prefix="/api/golden/v2", tags=["golden-v2"])
 
 
 def get_golden_store(config: RuntimeConfig = Depends(get_runtime_config)) -> GoldenCatalogStore:
     return GoldenCatalogStore(config.runtime_paths["golden"])
+
+
+def get_pilot_store(store: GoldenCatalogStore = Depends(get_golden_store)) -> PilotEvaluationStore:
+    return PilotEvaluationStore(store)
 
 
 async def require_golden_parent(
@@ -260,6 +283,35 @@ async def get_golden_event_history(
     return store.event_history(event_id)
 
 
+@router.post("/events/{event_id}/review-attestations", status_code=status.HTTP_201_CREATED)
+async def add_golden_review_attestation(
+    event_id: str,
+    payload: GoldenReviewAttestationRequest,
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+) -> dict[str, object]:
+    event = next((item for item in store.read().events if item.event_id == event_id), None)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Golden event is unavailable.")
+    history_times = [event.revision.created_at]
+    for snapshot in store.event_history(event_id):
+        created_at = snapshot.get("event", {}).get("revision", {}).get("created_at")
+        if created_at:
+            history_times.append(datetime.fromisoformat(str(created_at).replace("Z", "+00:00")))
+    if payload.review_type == "delayed_relabel" and datetime.now(timezone.utc) - min(history_times) < timedelta(hours=24):
+        raise HTTPException(status_code=422, detail="Delayed re-label review requires at least 24 hours after the original label.")
+    if payload.review_type != "delayed_relabel" and payload.reviewer_alias == event.revision.annotator_alias:
+        raise HTTPException(status_code=422, detail="Double review requires a different reviewer alias.")
+    if payload.review_type == "ambiguous_rotation":
+        rotation = event.jump.rotation if event.jump else event.spin.rotation if event.spin else None
+        if not rotation or (rotation.observability == "observable" and rotation.observed_turns_min == rotation.observed_turns_max):
+            raise HTTPException(status_code=422, detail="This event does not require ambiguous-rotation review.")
+    if payload.review_type == "frozen_identity_crossing" and not (event.split == "frozen_test" and any(item.category == "crossing" for item in event.challenge_intervals)):
+        raise HTTPException(status_code=422, detail="This event does not require frozen crossing review.")
+    store.add_review_attestation(event_id, {"review_type": payload.review_type, "reviewer_alias": payload.reviewer_alias, "reviewed_at": datetime.now(timezone.utc).isoformat(), "note": payload.note})
+    return {"event_id": event_id, "review_type": payload.review_type, "recorded": True}
+
+
 @router.get("/events/{event_id}/suggestions")
 async def get_golden_event_suggestions(
     event_id: str, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
@@ -278,6 +330,51 @@ async def get_golden_review_queue(
     _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
 ) -> list[GoldenReviewItem]:
     return _review_queue(store.ensure_initialized())
+
+
+@router.get("/evaluator/progress")
+async def get_pilot_progress(
+    _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> dict[str, Any]:
+    return collection_progress(store.ensure_initialized(), store)
+
+
+@router.get("/evaluator/status", response_model=PilotEvaluationStatus)
+async def get_pilot_evaluator_status(
+    _: None = Depends(require_golden_parent), evaluator: PilotEvaluationStore = Depends(get_pilot_store)
+) -> PilotEvaluationStatus:
+    return PilotEvaluationStatus.model_validate(evaluator.status())
+
+
+@router.post("/evaluator/runs", response_model=PilotEvaluationStatus)
+async def run_pilot_evaluator(
+    payload: PilotPredictionBundle,
+    _: None = Depends(require_golden_parent),
+    evaluator: PilotEvaluationStore = Depends(get_pilot_store),
+) -> PilotEvaluationStatus:
+    return PilotEvaluationStatus.model_validate(evaluator.run(payload))
+
+
+@router.get("/evaluator/result")
+async def get_pilot_evaluator_result(
+    _: None = Depends(require_golden_parent), evaluator: PilotEvaluationStore = Depends(get_pilot_store)
+) -> dict[str, Any]:
+    result = evaluator.sanitized_result()
+    if result is None:
+        raise HTTPException(status_code=404, detail="No pilot diagnostic result is available.")
+    return result
+
+
+@router.get("/evaluator/events/{alias}")
+async def get_pilot_event_diagnostic(
+    alias: str,
+    _: None = Depends(require_golden_parent),
+    evaluator: PilotEvaluationStore = Depends(get_pilot_store),
+) -> dict[str, Any]:
+    result = evaluator.private_event(alias)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Private pilot event diagnostic is unavailable.")
+    return result
 
 
 @router.get("/sanitized-export", response_model=GoldenSanitizedExport)

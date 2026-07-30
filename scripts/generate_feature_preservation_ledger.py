@@ -20,6 +20,8 @@ def _source(path: Path, line: int = 1) -> str:
 
 def _owner(kind: str, name: str) -> int:
     lowered = name.lower()
+    if "evaluator" in lowered or "pilot" in lowered or "review-attestations" in lowered:
+        return 3
     if kind in {"environment_setting", "package_entrypoint", "startup_or_scheduled_job"}:
         return 0 if not any(term in lowered for term in ("v2", "shadow", "golden")) else 15
     if kind == "database_model":
@@ -122,21 +124,21 @@ def _frontend_routes(tests: list[str]) -> list[dict[str, Any]]:
 
 
 def _frontend_api(tests: list[str]) -> list[dict[str, Any]]:
-    path = ROOT / "frontend" / "src" / "api" / "client.ts"
-    text = path.read_text(encoding="utf-8")
     pattern = re.compile(r"export\s+(?:async\s+)?(?:function|const)\s+([A-Za-z0-9_]+)")
     entries = []
-    for match in pattern.finditer(text):
-        name = match.group(1)
-        line = text.count("\n", 0, match.start()) + 1
-        body = text[match.start():match.start() + 900]
-        method_match = re.search(r"apiClient\.(get|post|put|patch|delete)", body)
-        method = method_match.group(1).upper() if method_match else "TRANSPORT"
-        entries.append(_entry(
-            kind="frontend_api_operation", name=name, source=_source(path, line),
-            read=f"typed {method} API response", write="none" if method in {"GET", "TRANSPORT"} else f"{method} request mutation",
-            permissions=_permissions(body), artifact="frontend API contract and cache-visible response", tests=tests, detail=method,
-        ))
+    for path in [ROOT / "frontend" / "src" / "api" / "client.ts", ROOT / "frontend" / "src" / "analysis-v2" / "api.ts"]:
+        text = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            name = match.group(1)
+            line = text.count("\n", 0, match.start()) + 1
+            body = text[match.start():match.start() + 900]
+            method_match = re.search(r"apiClient\.(get|post|put|patch|delete)", body)
+            method = method_match.group(1).upper() if method_match else "TRANSPORT"
+            entries.append(_entry(
+                kind="frontend_api_operation", name=name, source=_source(path, line),
+                read=f"typed {method} API response", write="none" if method in {"GET", "TRANSPORT"} else f"{method} request mutation",
+                permissions=_permissions(body), artifact="frontend API contract and cache-visible response", tests=tests, detail=method,
+            ))
     return entries
 
 
@@ -217,7 +219,7 @@ def _manual_entries(tests: list[str]) -> list[dict[str, Any]]:
 
 
 def generate_ledger() -> dict[str, Any]:
-    tests = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "backend" / "tests").glob("test_*.py"))
+    tests = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "backend" / "tests").rglob("test_*.py"))
     tests += sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "frontend" / "src").rglob("*.test.ts*"))
     entries: list[dict[str, Any]] = []
     entries.extend(_python_routes(tests))
