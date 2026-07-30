@@ -29,10 +29,14 @@ class GoldenCatalogStore:
         self.manifest_path = self.root / "manifest.json"
         self.videos_dir = self.root / "videos"
         self.labels_dir = self.root / "labels"
+        self.history_dir = self.root / "history"
+        self.suggestions_dir = self.root / "suggestions"
 
     def ensure_initialized(self) -> GoldenDatasetV2:
         self.videos_dir.mkdir(parents=True, exist_ok=True)
         self.labels_dir.mkdir(parents=True, exist_ok=True)
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        self.suggestions_dir.mkdir(parents=True, exist_ok=True)
         if self.manifest_path.exists():
             return self.read()
         dataset = GoldenDatasetV2(
@@ -49,6 +53,13 @@ class GoldenCatalogStore:
         version = raw.get("schema_version")
         if version not in GOLDEN_SUPPORTED_SCHEMA_VERSIONS:
             raise GoldenContractError(f"Unsupported Golden V2 schema version: {version!r}")
+        # Iteration 2 stores the committed annotation atomically in the manifest.
+        # The event-file layout is retained solely to read an Iteration 1 empty manifest.
+        if "events" in raw:
+            try:
+                return GoldenDatasetV2.model_validate(raw)
+            except ValidationError as exc:
+                raise GoldenContractError(f"Invalid Golden V2 catalog: {exc}") from exc
         event_ids = raw.pop("event_ids", [])
         if not isinstance(event_ids, list) or not all(isinstance(item, str) for item in event_ids):
             raise GoldenContractError("Golden manifest has an invalid event index")
@@ -83,14 +94,10 @@ class GoldenCatalogStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.videos_dir.mkdir(exist_ok=True)
         self.labels_dir.mkdir(exist_ok=True)
-        for event in dataset.events:
-            payload = {
-                "schema_version": dataset.schema_version,
-                "event": event.model_dump(mode="json"),
-                "tracks": [item.model_dump(mode="json") for item in dataset.tracks if item.event_id == event.event_id],
-                "poses": [item.model_dump(mode="json") for item in dataset.poses if item.event_id == event.event_id],
-            }
-            self._atomic_write_json(self.labels_dir / f"{event.event_id}.json", payload)
+        self.history_dir.mkdir(exist_ok=True)
+        self.suggestions_dir.mkdir(exist_ok=True)
+        # Persist an immutable private snapshot before publishing the new manifest.
+        self._atomic_write_json(self.history_dir / f"catalog-r{dataset.revision.revision}.json", self._manifest_payload(dataset))
         self._atomic_write_json(self.manifest_path, self._manifest_payload(dataset))
         return dataset
 
@@ -147,6 +154,35 @@ class GoldenCatalogStore:
             "gate_template": {"gate": "G1", "status": "not-run", "required_new_events": 36},
         }
 
+    def source_media_path(self, source_sha256: str) -> Path:
+        source = next((item for item in self.read().sources if item.source_sha256 == source_sha256), None)
+        if source is None:
+            raise GoldenContractError("Golden source is not registered")
+        candidate = (self.root / source.private_source_reference).resolve()
+        if self.videos_dir.resolve() not in candidate.parents or not candidate.is_file():
+            raise GoldenContractError("Golden source media is unavailable")
+        return candidate
+
+    def event_history(self, event_id: str) -> list[dict[str, Any]]:
+        history: list[dict[str, Any]] = []
+        for path in sorted(self.history_dir.glob("catalog-r*.json"), reverse=True):
+            try:
+                payload = self._read_json(path)
+                event = next((item for item in payload.get("events", []) if item.get("event_id") == event_id), None)
+                if isinstance(event, dict):
+                    history.append({"catalog_revision": payload["revision"]["revision"], "event": event})
+            except (GoldenContractError, KeyError, TypeError):
+                continue
+        return history
+
+    def read_suggestions(self, event_id: str) -> list[dict[str, Any]]:
+        path = self.suggestions_dir / f"{event_id}.json"
+        if not path.exists():
+            return []
+        payload = self._read_json(path)
+        suggestions = payload.get("suggestions", [])
+        return suggestions if isinstance(suggestions, list) else []
+
     @staticmethod
     def _manifest_payload(dataset: GoldenDatasetV2) -> dict[str, Any]:
         return {
@@ -154,7 +190,9 @@ class GoldenCatalogStore:
             "schema_version": dataset.schema_version,
             "revision": dataset.revision.model_dump(mode="json"),
             "sources": [source.model_dump(mode="json") for source in dataset.sources],
-            "event_ids": [event.event_id for event in dataset.events],
+            "events": [event.model_dump(mode="json") for event in dataset.events],
+            "tracks": [track.model_dump(mode="json") for track in dataset.tracks],
+            "poses": [pose.model_dump(mode="json") for pose in dataset.poses],
         }
 
     @staticmethod

@@ -38,6 +38,20 @@ export interface GoldenSanitizedExport {
 
 export interface GoldenCount { key: string; count: number; }
 
+export type GoldenProfile = "jump" | "spin" | "step" | "spiral" | "unknown";
+export type GoldenWorkspace = {
+  dataset_id: string;
+  revision: number;
+  sources: Array<{ source_sha256: string; duration_pts: number; width: number; height: number; source_frame_count: number | null; display_rotation_degrees: 0 | 90 | 180 | 270; redacted_alias: string }>;
+  events: GoldenEvent[];
+  tracks: GoldenTrack[];
+  poses: GoldenPose[];
+};
+export type GoldenEvent = { event_id: string; source_sha256: string; start_pts: number; end_pts: number; profile: GoldenProfile; subtype?: string | null; observability: "observable" | "uncertain" | "unobservable"; strata: string[]; ambiguity_tags: string[]; failure_tags: string[]; annotator_confidence: number; main_skater_confirmed: boolean; split?: "development" | "validation" | "frozen_test" | null; challenge_intervals: Array<{ start_pts: number; end_pts: number; category: string; observability: string }>; jump?: unknown; spin?: unknown; step?: unknown; spiral?: unknown; revision?: unknown; field_revisions?: Record<string, unknown> };
+export type GoldenTrack = { label_id: string; event_id: string; source_sha256: string; pts: number; bbox: { left: number; top: number; right: number; bottom: number }; state: "confirmed" | "uncertain" | "lost"; revision?: unknown };
+export type GoldenPose = { label_id: string; event_id: string; source_sha256: string; pts: number; joints: unknown[]; observability: "observable" | "uncertain" | "unobservable"; revision?: unknown };
+export type GoldenReviewItem = { event_id: string; status: "incomplete" | "low-confidence" | "ambiguous" | "double-review-required"; message: string };
+
 export function isGoldenCatalogSummary(value: unknown): value is GoldenCatalogSummary {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;

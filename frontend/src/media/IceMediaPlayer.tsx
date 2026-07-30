@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { PoseResponse } from "../api/client";
 import { MediaControls } from "./MediaControls";
-import type { MediaManifest, MediaMarker } from "./types";
+import type { MediaManifest, MediaMarker, SourceFrameIdentity } from "./types";
 import { useMediaController } from "./useMediaController";
 import { VideoSurface } from "./VideoSurface";
 import { PoseSurface } from "./PoseSurface";
@@ -12,9 +12,9 @@ export type IceMediaPlayerHandle = {
   video: () => HTMLVideoElement | null;
 };
 
-type Props = { manifest?: MediaManifest | null; fallbackSrc?: string; pose?: PoseResponse | null; markers?: MediaMarker[]; mode?: "video" | "pose" | "overlay"; className?: string; onTimeChange?: (timestamp: number) => void; seekTime?: number | null };
+type Props = { manifest?: MediaManifest | null; fallbackSrc?: string; pose?: PoseResponse | null; markers?: MediaMarker[]; mode?: "video" | "pose" | "overlay"; className?: string; onTimeChange?: (timestamp: number) => void; seekTime?: number | null; sourceFrame?: SourceFrameIdentity | null; onStepSourceFrame?: (direction: -1 | 1) => void; unavailableFrame?: boolean };
 
-export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(function IceMediaPlayer({ manifest, fallbackSrc, pose, markers = [], mode = "video", className = "", onTimeChange, seekTime }, forwardedRef) {
+export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(function IceMediaPlayer({ manifest, fallbackSrc, pose, markers = [], mode = "video", className = "", onTimeChange, seekTime, sourceFrame, onStepSourceFrame, unavailableFrame = false }, forwardedRef) {
   const fallbackManifest: MediaManifest | null = manifest ?? (fallbackSrc ? { schema_version: "fallback", status: "ready", sources: [{ quality: "original", status: "ready", width: null, height: null, url: fallbackSrc, filename: null, error: null }] } : null);
   const controller = useMediaController(fallbackManifest);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -34,6 +34,6 @@ export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(fun
       {mode !== "pose" ? <VideoSurface ref={videoRef} controller={controller} manifest={fallbackManifest}>{mode === "overlay" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} className="ice-media-player__overlay" /> : null}</VideoSurface> : null}
       {mode === "pose" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} /> : null}
     </div>
-    <MediaControls controller={controller} markers={markers} />
+    <MediaControls controller={controller} markers={markers} sourceFrame={sourceFrame} onStepSourceFrame={onStepSourceFrame} unavailableFrame={unavailableFrame} />
   </section>;
 });

@@ -9,6 +9,12 @@ export type MediaMarker = {
   phase?: string;
 };
 
+export type SourceFrameIdentity = {
+  sourceFrameIndex: number;
+  pts: number;
+  duration: number | null;
+};
+
 export type BufferedRange = { start: number; end: number };
 
 export type MediaControllerState = {

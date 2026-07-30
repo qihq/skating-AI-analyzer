@@ -60,6 +60,10 @@ class GoldenSourceVideo(_StrictModel):
     grouping_id: Identifier
     redacted_alias: ShortText
     perceptual_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,128}$")
+    source_frame_count: int | None = Field(default=None, ge=1)
+    average_fps: float | None = Field(default=None, gt=0, le=1_000)
+    nominal_fps: float | None = Field(default=None, gt=0, le=1_000)
+    display_rotation_degrees: Literal[0, 90, 180, 270] = 0
 
 
 class SourceMoment(_StrictModel):
@@ -175,6 +179,8 @@ class GoldenEventLabel(_StrictModel):
     step: IntervalEventDetails | None = None
     spiral: IntervalEventDetails | None = None
     revision: GoldenRevisionMetadata
+    # Each confirmed field is independently auditable even when one save updates several fields.
+    field_revisions: dict[str, GoldenRevisionMetadata] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def event_is_self_consistent(self) -> "GoldenEventLabel":

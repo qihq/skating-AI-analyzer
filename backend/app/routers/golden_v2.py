@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import Literal
+import shutil
+from pathlib import Path
+from typing import Any, Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis_v2.config import RuntimeConfig
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
+from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
+from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_at
 from app.database import get_session
 from app.routers.capabilities import get_runtime_config
 from app.services.parent_access import require_parent_pin
@@ -66,6 +72,51 @@ class GoldenSanitizedExport(_StrictResponse):
     gate_template: GoldenGateTemplate
 
 
+class GoldenSourceView(_StrictResponse):
+    source_sha256: str
+    duration_pts: float
+    width: int
+    height: int
+    timebase: dict[str, object]
+    recording_session_id: str
+    grouping_id: str
+    redacted_alias: str
+    source_frame_count: int | None
+    average_fps: float | None
+    nominal_fps: float | None
+    display_rotation_degrees: Literal[0, 90, 180, 270]
+
+
+class GoldenWorkspaceResponse(_StrictResponse):
+    dataset_id: str
+    revision: int
+    sources: list[GoldenSourceView]
+    events: list[dict[str, object]]
+    tracks: list[dict[str, object]]
+    poses: list[dict[str, object]]
+
+
+class GoldenAnnotationSaveRequest(_StrictResponse):
+    expected_revision: int = Field(ge=1)
+    annotator_alias: str = Field(min_length=1, max_length=160)
+    change_note: str | None = Field(default=None, max_length=500)
+    events: list[dict[str, object]]
+    tracks: list[dict[str, object]]
+    poses: list[dict[str, object]]
+
+
+class GoldenReviewItem(_StrictResponse):
+    event_id: str
+    status: Literal["incomplete", "low-confidence", "ambiguous", "double-review-required"]
+    message: str
+
+
+class GoldenFrameIdentity(_StrictResponse):
+    source_frame_index: int
+    pts: float
+    duration: float | None
+
+
 router = APIRouter(prefix="/api/golden/v2", tags=["golden-v2"])
 
 
@@ -102,6 +153,131 @@ async def get_golden_revision(
     _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
 ) -> GoldenCatalogSummary:
     return _catalog_response(store.catalog_summary())
+
+
+@router.get("/workspace", response_model=GoldenWorkspaceResponse)
+async def get_golden_workspace(
+    _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> GoldenWorkspaceResponse:
+    dataset = store.ensure_initialized()
+    return _workspace_response(dataset)
+
+
+@router.get("/sources/{source_sha256}/media")
+async def get_golden_source_media(
+    source_sha256: str, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> FileResponse:
+    try:
+        path = store.source_media_path(source_sha256)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Private Golden source media is unavailable.") from exc
+    return FileResponse(path, media_type="video/mp4", filename="private-golden-source.mp4")
+
+
+@router.get("/sources/{source_sha256}/frames/{frame_index}", response_model=GoldenFrameIdentity)
+async def get_golden_frame_identity(
+    source_sha256: str, frame_index: int, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> GoldenFrameIdentity:
+    try:
+        frame = source_frame_at(store.source_media_path(source_sha256), frame_index)
+    except SourceMediaError as exc:
+        raise HTTPException(status_code=404, detail="Requested source frame is unavailable.") from exc
+    return GoldenFrameIdentity(source_frame_index=frame.index, pts=frame.pts, duration=frame.duration)
+
+
+@router.post("/sources/import", response_model=GoldenSourceView, status_code=status.HTTP_201_CREATED)
+async def import_golden_source(
+    file: UploadFile = File(...),
+    recording_session_id: str = Form(...),
+    grouping_id: str = Form(...),
+    redacted_alias: str = Form(...),
+    expected_revision: int = Form(...),
+    annotator_alias: str = Form(...),
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+) -> GoldenSourceView:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".mp4", ".mov", ".mkv", ".avi"}:
+        raise HTTPException(status_code=400, detail="Unsupported private video format.")
+    temporary = store.videos_dir / f".import-{uuid4().hex}{suffix}"
+    final: Path | None = None
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with temporary.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        metadata = probe_source(temporary)
+        current = store.ensure_initialized()
+        if current.revision.revision != expected_revision:
+            raise HTTPException(status_code=409, detail={"code": "revision_conflict", "current_revision": current.revision.revision})
+        if any(source.source_sha256 == metadata.source_sha256 for source in current.sources):
+            raise HTTPException(status_code=409, detail={"code": "duplicate_source", "source_sha256": metadata.source_sha256})
+        final_name = f"{metadata.source_sha256}{suffix}"
+        final = store.videos_dir / final_name
+        temporary.replace(final)
+        source = {
+            "source_sha256": metadata.source_sha256, "duration_pts": metadata.duration_pts,
+            "width": metadata.width, "height": metadata.height,
+            "timebase": {"numerator": metadata.timebase_numerator, "denominator": metadata.timebase_denominator, "source_fps": metadata.nominal_fps, "is_vfr": metadata.is_vfr},
+            "private_source_reference": f"videos/{final_name}", "recording_session_id": recording_session_id,
+            "grouping_id": grouping_id, "redacted_alias": redacted_alias,
+            "source_frame_count": metadata.source_frame_count, "average_fps": metadata.average_fps,
+            "nominal_fps": metadata.nominal_fps, "display_rotation_degrees": metadata.display_rotation_degrees,
+        }
+        updated = _next_dataset(current, expected_revision, annotator_alias, "source imported", sources=[*current.sources, source])
+        store.save(updated, expected_revision=expected_revision)
+        return _source_view(updated.sources[-1])
+    except SourceMediaError as exc:
+        raise HTTPException(status_code=400, detail="Unable to read private source metadata.") from exc
+    except Exception:
+        # Never leave an unregistered private copy after an interrupted catalog write.
+        if final is not None:
+            final.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@router.put("/annotations", response_model=GoldenWorkspaceResponse)
+async def save_golden_annotations(
+    payload: GoldenAnnotationSaveRequest,
+    _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> GoldenWorkspaceResponse:
+    current = store.ensure_initialized()
+    if current.revision.revision != payload.expected_revision:
+        raise HTTPException(status_code=409, detail={"code": "revision_conflict", "current_revision": current.revision.revision})
+    try:
+        updated = _next_dataset(current, payload.expected_revision, payload.annotator_alias, payload.change_note, events=payload.events, tracks=payload.tracks, poses=payload.poses)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="Annotation is incomplete or contradictory; nothing was saved.") from exc
+    store.save(updated, expected_revision=payload.expected_revision)
+    return _workspace_response(updated)
+
+
+@router.get("/events/{event_id}/history")
+async def get_golden_event_history(
+    event_id: str, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> list[dict[str, Any]]:
+    return store.event_history(event_id)
+
+
+@router.get("/events/{event_id}/suggestions")
+async def get_golden_event_suggestions(
+    event_id: str, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> list[dict[str, Any]]:
+    event = next((item for item in store.read().events if item.event_id == event_id), None)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Golden event is unavailable.")
+    # Frozen first pass is a server-side authorization boundary, never a CSS choice.
+    if event.split == "frozen_test" and event.revision.revision <= 2:
+        raise HTTPException(status_code=403, detail="Suggestions are unavailable during frozen-test first pass.")
+    return store.read_suggestions(event_id)
+
+
+@router.get("/review-queue", response_model=list[GoldenReviewItem])
+async def get_golden_review_queue(
+    _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> list[GoldenReviewItem]:
+    return _review_queue(store.ensure_initialized())
 
 
 @router.get("/sanitized-export", response_model=GoldenSanitizedExport)
@@ -146,3 +322,55 @@ def _counts(value: object) -> list[GoldenCount]:
     if not isinstance(value, dict):
         return []
     return [GoldenCount(key=str(key), count=int(count)) for key, count in value.items()]
+
+
+def _source_view(source: Any) -> GoldenSourceView:
+    return GoldenSourceView(
+        source_sha256=source.source_sha256, duration_pts=source.duration_pts, width=source.width, height=source.height,
+        timebase=source.timebase.model_dump(), recording_session_id=source.recording_session_id, grouping_id=source.grouping_id,
+        redacted_alias=source.redacted_alias, source_frame_count=source.source_frame_count, average_fps=source.average_fps,
+        nominal_fps=source.nominal_fps, display_rotation_degrees=source.display_rotation_degrees,
+    )
+
+
+def _workspace_response(dataset: GoldenDatasetV2) -> GoldenWorkspaceResponse:
+    return GoldenWorkspaceResponse(
+        dataset_id=dataset.dataset_id, revision=dataset.revision.revision, sources=[_source_view(item) for item in dataset.sources],
+        events=[item.model_dump(mode="json") for item in dataset.events], tracks=[item.model_dump(mode="json") for item in dataset.tracks],
+        poses=[item.model_dump(mode="json") for item in dataset.poses],
+    )
+
+
+def _next_dataset(current: GoldenDatasetV2, expected_revision: int, annotator_alias: str, change_note: str | None, **changes: Any) -> GoldenDatasetV2:
+    revision = {"revision": expected_revision + 1, "parent_revision": expected_revision, "annotator_alias": annotator_alias, "provenance": "human_annotation", "change_note": change_note}
+    payload = current.model_dump(mode="json")
+    payload.update(changes)
+    payload["revision"] = revision
+    for event in payload.get("events", []):
+        if isinstance(event, dict):
+            event["revision"] = revision
+            event["field_revisions"] = {key: revision for key in ("profile", "interval", "observability", "main_skater", "moments", "rotation", "boxes", "pose")}
+    for track in payload.get("tracks", []):
+        if isinstance(track, dict):
+            track["revision"] = revision
+    for pose in payload.get("poses", []):
+        if isinstance(pose, dict):
+            pose["revision"] = revision
+    return GoldenDatasetV2.model_validate(payload)
+
+
+def _review_queue(dataset: GoldenDatasetV2) -> list[GoldenReviewItem]:
+    items: list[GoldenReviewItem] = []
+    for event in dataset.events:
+        if not event.main_skater_confirmed:
+            items.append(GoldenReviewItem(event_id=event.event_id, status="incomplete", message="Confirm the main skater before this event can be reviewed."))
+        if event.annotator_confidence < 0.7:
+            items.append(GoldenReviewItem(event_id=event.event_id, status="low-confidence", message="Low annotator confidence needs a follow-up review."))
+        if event.ambiguity_tags:
+            items.append(GoldenReviewItem(event_id=event.event_id, status="ambiguous", message="Ambiguity tags require an explicit reviewer decision."))
+        rotation = event.jump.rotation if event.jump else event.spin.rotation if event.spin else None
+        if rotation and (rotation.observability != "observable" or rotation.observed_turns_min != rotation.observed_turns_max):
+            items.append(GoldenReviewItem(event_id=event.event_id, status="double-review-required", message="Ambiguous rotation requires a second reviewer."))
+        if event.split == "frozen_test" and any(challenge.category == "crossing" for challenge in event.challenge_intervals):
+            items.append(GoldenReviewItem(event_id=event.event_id, status="double-review-required", message="Frozen-test identity crossings require a second reviewer."))
+    return items

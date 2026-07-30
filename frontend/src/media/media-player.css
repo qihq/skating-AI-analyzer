@@ -1,6 +1,7 @@
 .ice-media-controls { display: grid; gap: .65rem; padding: .7rem; color: var(--island-text, #6f5a3d); }
 .ice-media-controls__row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
 .ice-media-controls__time { min-width: 7.5rem; font-variant-numeric: tabular-nums; }
+.ice-media-controls__source-frame { font-variant-numeric: tabular-nums; font-size: .82rem; color: var(--island-teal-dark, #0b7e77); }
 .ice-media-controls__loading { color: var(--island-teal-dark, #0b7e77); }
 .ice-media-controls__error { color: #b44d42; }
 .ice-media-timeline { position: relative; height: 2rem; display: grid; align-items: center; }
