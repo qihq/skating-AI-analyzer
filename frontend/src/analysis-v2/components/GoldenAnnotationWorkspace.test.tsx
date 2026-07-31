@@ -35,6 +35,29 @@ describe("GoldenAnnotationWorkspace", () => {
     await waitFor(() => expect(frame).toHaveBeenCalled());
   });
 
+  it("creates an event when randomUUID is unavailable on an HTTP origin", async () => {
+    mockData();
+    const originalCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: { getRandomValues: (bytes: Uint8Array) => bytes.fill(7) } });
+    try {
+      render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+      fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+      expect(screen.getByLabelText("Profile")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(/动作草稿已创建/);
+    } finally {
+      Object.defineProperty(globalThis, "crypto", { configurable: true, value: originalCrypto });
+    }
+  });
+
+  it("locks the nearest source frame before enabling box drawing", async () => {
+    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+    fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
+    await waitFor(() => expect(frame).toHaveBeenCalledWith("1234", "d".repeat(64), 0));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/已锁定第 1 帧/);
+    expect(screen.getByRole("button", { name: /正在等待画框/ })).toBeInTheDocument();
+  });
+
   it("does not claim confirmation after a failed save", async () => {
     mockData(); save.mockRejectedValue(new Error("offline")); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
     await waitFor(() => expect(screen.getByRole("button", { name: /新建动作/i })).toBeInTheDocument());
@@ -77,7 +100,7 @@ describe("GoldenAnnotationWorkspace", () => {
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: "Next source frame" }));
     await waitFor(() => expect(frame).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /在视频上画主滑手框/ }));
+    fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
     const overlay = await screen.findByRole("img", { name: /Golden 标注叠加结果/ });
     vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 450, width: 800, height: 450, toJSON: () => ({}) });
     Object.defineProperty(overlay, "setPointerCapture", { value: vi.fn() });
@@ -96,7 +119,7 @@ describe("GoldenAnnotationWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next source frame" }));
     await waitFor(() => expect(frame).toHaveBeenCalled());
     expect(Number(screen.getByTestId("media-aspect-ratio").textContent)).toBeCloseTo(720 / 1280);
-    fireEvent.click(screen.getByRole("button", { name: /在视频上画主滑手框/ }));
+    fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
     const overlay = await screen.findByRole("img", { name: /Golden 标注叠加结果/ });
     vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 360, bottom: 640, width: 360, height: 640, toJSON: () => ({}) });
     Object.defineProperty(overlay, "setPointerCapture", { value: vi.fn() });
