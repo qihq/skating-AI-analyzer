@@ -1,4 +1,4 @@
-import { Button, Select } from "../modern/AnimalUi";
+import { Button } from "../modern/AnimalUi";
 import { formatTime } from "./formatTime";
 import { MediaTimeline } from "./MediaTimeline";
 import type { MediaMarker, MediaQuality, SourceFrameIdentity } from "./types";
@@ -26,8 +26,18 @@ export function MediaControls({ controller, markers = [], sourceFrame, onStepSou
       <span className="ice-media-controls__time">{formatTime(state.previewTime ?? state.currentTime)} / {formatTime(state.duration)}</span>
       {sourceFrame ? <output className="ice-media-controls__source-frame" aria-live="polite">PTS {sourceFrame.pts.toFixed(6)} / frame {sourceFrame.sourceFrameIndex}</output> : null}
       <Button aria-label={state.muted ? "\u53d6\u6d88\u9759\u97f3" : "\u9759\u97f3"} onClick={() => setMuted(!state.muted)}>{state.muted ? "\u53d6\u6d88\u9759\u97f3" : "\u9759\u97f3"}</Button>
-      <Select value={String(state.playbackRate)} onChange={(value) => setPlaybackRate(Number(value))} options={[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => ({ key: String(value), label: `${value}x`, value: String(value) }))} />
-      <Select value={state.quality} onChange={(value) => void setQuality(value as MediaQuality)} options={qualities.filter((quality) => quality === "auto" || quality === "original" || source?.quality === quality).map((quality) => ({ key: quality, label: quality === "auto" ? "Auto" : quality, value: quality }))} />
+      <label className="ice-media-controls__select">
+        <span className="sr-only">Playback speed</span>
+        <select aria-label="Playback speed" value={String(state.playbackRate)} onChange={(event) => setPlaybackRate(Number(event.target.value))}>
+          {[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}x</option>)}
+        </select>
+      </label>
+      <label className="ice-media-controls__select">
+        <span className="sr-only">Video quality</span>
+        <select aria-label="Video quality" value={state.quality} onChange={(event) => void setQuality(event.target.value as MediaQuality)}>
+          {qualities.filter((quality) => quality === "auto" || quality === "original" || source?.quality === quality).map((quality) => <option key={quality} value={quality}>{quality === "auto" ? "Auto" : quality}</option>)}
+        </select>
+      </label>
       {markers.map((marker) => <Button key={marker.id} aria-label={`\u8df3\u5230${marker.label}`} onClick={() => commitSeek(marker.timestamp)}>{marker.label}</Button>)}
     </div>
     {state.buffering ? <span className="ice-media-controls__loading">Buffering...</span> : null}
