@@ -10,7 +10,7 @@ import GoldenAnnotationWorkspace from "./GoldenAnnotationWorkspace";
 
 vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
 vi.mock("../api", () => ({ fetchGoldenWorkspace: vi.fn(), fetchGoldenReviewQueue: vi.fn(), fetchGoldenSourceFrame: vi.fn(), fetchGoldenSourceMediaUrl: vi.fn(), saveGoldenAnnotations: vi.fn(), importGoldenSource: vi.fn(), attestGoldenReview: vi.fn(), updateGoldenSource: vi.fn(), deleteGoldenSource: vi.fn() }));
-vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { className?: string; onStepSourceFrame: (direction: -1 | 1) => void; overlay?: unknown; aspectRatio?: number }) => <div data-testid="golden-player" className={props.className}><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</div> }));
+vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { className?: string; onStepSourceFrame: (direction: -1 | 1) => void; onTimeChange?: (value: number) => void; overlay?: unknown; aspectRatio?: number }) => <div data-testid="golden-player" className={props.className}><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><button onClick={() => props.onTimeChange?.(0)}>Report stale player time</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</div> }));
 
 const workspace = vi.mocked(fetchGoldenWorkspace);
 const review = vi.mocked(fetchGoldenReviewQueue);
@@ -56,6 +56,16 @@ describe("GoldenAnnotationWorkspace", () => {
     await waitFor(() => expect(frame).toHaveBeenCalledWith("1234", "d".repeat(64), 0));
     expect(await screen.findByRole("alert")).toHaveTextContent(/已锁定第 1 帧/);
     expect(screen.getByRole("button", { name: /正在等待画框/ })).toBeInTheDocument();
+  });
+
+  it("keeps a returned exact frame when the player reports its stale pre-seek time", async () => {
+    mockData(); frame.mockResolvedValue({ sourceFrameIndex: 48, pts: 1.6, duration: .033 });
+    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Next source frame" }));
+    await waitFor(() => expect(screen.getByText(/当前时间 1\.600000 秒；源帧 48/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Report stale player time" }));
+    expect(screen.getByText(/当前时间 1\.600000 秒；源帧 48/)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/已定位到第 48 帧/);
   });
 
   it("does not claim confirmation after a failed save", async () => {
