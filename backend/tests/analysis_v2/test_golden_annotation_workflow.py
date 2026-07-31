@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
+from app.analysis_v2.evaluation import source_media
 from app.routers import golden_v2
 
 
@@ -94,6 +95,22 @@ def test_private_media_prefers_a_browser_playback_copy_without_changing_evidence
 
     assert store.source_media_path(HASH) == original
     assert store.source_playback_path(HASH) == playback
+
+
+def test_source_frame_uses_cached_packet_pts_without_decoding_frames(tmp_path: Path) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    payload = {"packets": [
+        {"pts_time": "0.066667", "duration_time": "0.033333"},
+        {"pts_time": "0.000000", "duration_time": "0.033333"},
+        {"pts_time": "0.033333", "duration_time": "0.033333"},
+    ]}
+    source_media._source_packet_index.cache_clear()
+    with patch.object(source_media, "_ffprobe", return_value=payload) as probe:
+        assert source_media.source_frame_at(video, 1).pts == pytest.approx(0.033333)
+        assert source_media.source_frame_at(video, 2).pts == pytest.approx(0.066667)
+    probe.assert_called_once()
+    assert "-show_packets" in probe.call_args.args
 
 
 def test_import_rejects_invalid_session_identifier_before_reading_media(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import os
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -76,20 +77,32 @@ def probe_source(path: Path) -> SourceMetadata:
 def source_frame_at(path: Path, index: int) -> SourceFrame:
     if index < 0:
         raise SourceMediaError("Source frame index must be non-negative")
-    payload = _ffprobe(
-        path,
-        "-show_frames",
-        "-show_entries",
-        "frame=media_type,best_effort_timestamp_time,pkt_duration_time",
-    )
-    frames = [item for item in payload.get("frames", []) if item.get("media_type") == "video"]
+    frames = _source_packet_index(str(path.resolve()), path.stat().st_mtime_ns, path.stat().st_size)
     if index >= len(frames):
         raise SourceMediaError("Requested source frame is unavailable")
-    frame = frames[index]
-    pts = _number(frame.get("best_effort_timestamp_time"))
-    if pts is None:
-        raise SourceMediaError("Requested source frame has no PTS")
-    return SourceFrame(index=index, pts=pts, duration=_number(frame.get("pkt_duration_time")))
+    pts, duration = frames[index]
+    return SourceFrame(index=index, pts=pts, duration=duration)
+
+
+@lru_cache(maxsize=64)
+def _source_packet_index(path: str, _mtime_ns: int, _size: int) -> tuple[tuple[float, float | None], ...]:
+    payload = _ffprobe(
+        Path(path),
+        "-select_streams", "v:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time,duration_time",
+    )
+    packets: list[tuple[float, float | None]] = []
+    for packet in payload.get("packets", []):
+        if not isinstance(packet, dict):
+            continue
+        pts = _number(packet.get("pts_time"))
+        if pts is not None:
+            packets.append((pts, _number(packet.get("duration_time"))))
+    packets.sort(key=lambda item: item[0])
+    if not packets:
+        raise SourceMediaError("Video frame PTS index is unavailable")
+    return tuple(packets)
 
 
 def create_browser_playback(source: Path, target: Path) -> None:
