@@ -166,6 +166,12 @@ class GoldenCatalogStore:
             raise GoldenContractError("Golden source media is unavailable")
         return candidate
 
+    def source_playback_path(self, source_sha256: str) -> Path:
+        """Return an optional browser-compatible copy without replacing evidence media."""
+        source = self.source_media_path(source_sha256)
+        candidate = self.videos_dir / f"{source_sha256}.playback.mp4"
+        return candidate if candidate.is_file() else source
+
     def event_history(self, event_id: str) -> list[dict[str, Any]]:
         history: list[dict[str, Any]] = []
         for path in sorted(self.history_dir.glob("catalog-r*.json"), reverse=True):

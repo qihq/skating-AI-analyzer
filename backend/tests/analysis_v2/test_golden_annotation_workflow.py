@@ -82,6 +82,20 @@ def test_private_media_and_frame_identity_require_parent_and_never_return_paths(
     assert str(tmp_path) not in response.model_dump_json()
 
 
+def test_private_media_prefers_a_browser_playback_copy_without_changing_evidence_path(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    initial = store.ensure_initialized()
+    seeded = golden_v2._next_dataset(initial, 1, "owner", "seed", sources=[_source()], events=[], tracks=[], poses=[])
+    store.save(seeded, expected_revision=1)
+    original = store.videos_dir / "private.mp4"
+    original.write_bytes(b"original")
+    playback = store.videos_dir / f"{HASH}.playback.mp4"
+    playback.write_bytes(b"h264")
+
+    assert store.source_media_path(HASH) == original
+    assert store.source_playback_path(HASH) == playback
+
+
 def test_import_rejects_invalid_session_identifier_before_reading_media(tmp_path: Path) -> None:
     app = FastAPI()
     app.include_router(golden_v2.router)

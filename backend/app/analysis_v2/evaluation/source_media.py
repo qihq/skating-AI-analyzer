@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,27 @@ def source_frame_at(path: Path, index: int) -> SourceFrame:
     if pts is None:
         raise SourceMediaError("Requested source frame has no PTS")
     return SourceFrame(index=index, pts=pts, duration=_number(frame.get("pkt_duration_time")))
+
+
+def create_browser_playback(source: Path, target: Path) -> None:
+    """Create a seek-friendly H.264 copy while retaining the original evidence file."""
+    temporary = target.with_suffix(".tmp.mp4")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-movflags", "+faststart", str(temporary),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SourceMediaError(result.stderr.strip() or "ffmpeg browser playback conversion failed")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _ffprobe(path: Path, *arguments: str) -> dict[str, Any]:

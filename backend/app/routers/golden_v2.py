@@ -16,7 +16,7 @@ from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
 from app.analysis_v2.evaluation.pilot_evaluator import PilotPredictionBundle
 from app.analysis_v2.evaluation.pilot_store import PilotEvaluationStore, collection_progress
-from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_at
+from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, probe_source, source_frame_at
 from app.database import get_session
 from app.routers.capabilities import get_runtime_config
 from app.services.parent_access import require_parent_pin
@@ -205,7 +205,7 @@ async def get_golden_source_media(
     source_sha256: str, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
 ) -> FileResponse:
     try:
-        path = store.source_media_path(source_sha256)
+        path = store.source_playback_path(source_sha256)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=404, detail="Private Golden source media is unavailable.") from exc
     return FileResponse(path, media_type="video/mp4", filename="private-golden-source.mp4")
@@ -251,6 +251,7 @@ async def import_golden_source(
         final_name = f"{metadata.source_sha256}{suffix}"
         final = store.videos_dir / final_name
         temporary.replace(final)
+        create_browser_playback(final, store.videos_dir / f"{metadata.source_sha256}.playback.mp4")
         source = {
             "source_sha256": metadata.source_sha256, "duration_pts": metadata.duration_pts,
             "width": metadata.width, "height": metadata.height,
