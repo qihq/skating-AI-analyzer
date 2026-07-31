@@ -10,7 +10,7 @@ import GoldenAnnotationWorkspace from "./GoldenAnnotationWorkspace";
 
 vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
 vi.mock("../api", () => ({ fetchGoldenWorkspace: vi.fn(), fetchGoldenReviewQueue: vi.fn(), fetchGoldenSourceFrame: vi.fn(), fetchGoldenSourceMediaUrl: vi.fn(), saveGoldenAnnotations: vi.fn(), importGoldenSource: vi.fn(), attestGoldenReview: vi.fn(), updateGoldenSource: vi.fn(), deleteGoldenSource: vi.fn() }));
-vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { onStepSourceFrame: (direction: -1 | 1) => void; overlay?: unknown; aspectRatio?: number }) => <><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</> }));
+vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { className?: string; onStepSourceFrame: (direction: -1 | 1) => void; overlay?: unknown; aspectRatio?: number }) => <div data-testid="golden-player" className={props.className}><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</div> }));
 
 const workspace = vi.mocked(fetchGoldenWorkspace);
 const review = vi.mocked(fetchGoldenReviewQueue);
@@ -107,6 +107,14 @@ describe("GoldenAnnotationWorkspace", () => {
     expect(screen.getByLabelText("Box top")).toHaveValue("0.5000");
     expect(screen.getByLabelText("Box right")).toHaveValue("0.8000");
     expect(screen.getByLabelText("Box bottom")).toHaveValue("0.9000");
+  });
+
+  it("uses a compact portrait player while preserving the source aspect ratio", async () => {
+    mockData();
+    workspace.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 2, sources: [{ source_sha256: "d".repeat(64), duration_pts: 8, width: 720, height: 1280, source_frame_count: 240, display_rotation_degrees: 0, redacted_alias: "source-001", recording_session_id: "session-01", grouping_id: "group-01" }], events: [], tracks: [], poses: [] });
+    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("golden-player")).toHaveClass("is-portrait"));
+    expect(Number(screen.getByTestId("media-aspect-ratio").textContent)).toBeCloseTo(720 / 1280);
   });
 
   it("does not let a delayed duplicate load overwrite an unsaved event", async () => {
