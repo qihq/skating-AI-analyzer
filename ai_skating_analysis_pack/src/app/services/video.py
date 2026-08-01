@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import hashlib
 import json
 import logging
@@ -53,7 +54,12 @@ MIN_VIDEO_WIDTH = 320
 MIN_VIDEO_HEIGHT = 180
 BLANK_FRAME_VARIANCE_THRESHOLD = 5.0
 MIN_FILTERED_FRAMES = 3
-PROCESSING_ROOT = Path("/tmp/skating-analyzer") if Path("/tmp").exists() else UPLOADS_DIR / "_processing"
+PROCESSING_ROOT = Path(
+    os.getenv(
+        "VIDEO_PROCESSING_ROOT",
+        str(Path("/tmp/skating-analyzer") if Path("/tmp").exists() else UPLOADS_DIR / "_processing"),
+    )
+)
 
 ACTION_WINDOW_SIZES: dict[str, float | None] = {
     "跳跃": 3.0,
@@ -75,10 +81,10 @@ DEFAULT_PROFILE_FRAME_RATES: dict[str, int] = {
     "step": 6,
 }
 DEFAULT_PROFILE_MAX_FRAMES: dict[str, int] = {
-    "jump": 32,
-    "spin": 24,
-    "spiral": 16,
-    "step": 20,
+    "jump": 48,
+    "spin": 36,
+    "spiral": 28,
+    "step": 32,
 }
 MANUAL_WINDOW_PROFILE_FRAME_RATES: dict[str, int] = {
     "jump": 24,
@@ -87,10 +93,10 @@ MANUAL_WINDOW_PROFILE_FRAME_RATES: dict[str, int] = {
     "step": 10,
 }
 MANUAL_WINDOW_PROFILE_MAX_FRAMES: dict[str, int] = {
-    "jump": 48,
-    "spin": 36,
-    "spiral": 28,
-    "step": 36,
+    "jump": 64,
+    "spin": 64,
+    "spiral": 48,
+    "step": 56,
 }
 FFMPEG_RETRYABLE_ERRORS = (
     "partial file",
@@ -162,6 +168,40 @@ def get_max_frames_for_profile(profile: str | None) -> int:
     return int(config.get("frame_sample_count") or DEFAULT_PROFILE_MAX_FRAMES.get(profile or "", MAX_SAMPLED_FRAMES))
 
 
+def get_sampling_density(
+    profile: str | None,
+    effective_duration_seconds: float,
+    *,
+    manual_window: bool = False,
+    action_type: str | None = None,
+) -> tuple[int, int, str]:
+    """Return requested count, cap, and stable policy label for the action window."""
+    normalized = _normalized_profile(profile)
+    config = _profile_sampling_config(normalized)
+    base_count = get_max_frames_for_profile(normalized)
+    manual_cap = int(config.get("manual_frame_sample_count") or MANUAL_WINDOW_PROFILE_MAX_FRAMES.get(normalized, base_count))
+    if manual_window:
+        return manual_cap, manual_cap, "manual_window_dense"
+
+    if normalized == "jump":
+        return base_count, base_count, "jump_fixed_dense"
+
+    if not normalized and action_type in {"自由滑", "free skate", "freeskate"}:
+        cap = 64
+        requested = min(cap, max(32, math.ceil(max(effective_duration_seconds, 0.0) * 4)))
+        return requested, cap, "free_skate_duration_dense"
+
+    base_seconds = config.get("density_base_seconds")
+    extra_per_second = config.get("density_extra_frames_per_second")
+    cap = int(config.get("density_cap") or base_count)
+    if isinstance(base_seconds, (int, float)) and isinstance(extra_per_second, (int, float)):
+        extra_seconds = max(0.0, float(effective_duration_seconds) - float(base_seconds))
+        requested = base_count + math.ceil(extra_seconds * float(extra_per_second))
+        return min(requested, cap), cap, "duration_aware_dense"
+
+    return base_count, base_count, "profile_fixed"
+
+
 def get_window_seconds_for_profile(profile: str | None, action_type: str) -> float | None:
     """Return configured action-window duration on the normal-speed timeline."""
     config = _profile_sampling_config(profile)
@@ -210,16 +250,15 @@ def _manual_window_dense_sampling(input_window: VideoInputWindow | None) -> bool
 def _sampling_config_for_window(
     profile: str | None,
     input_window: VideoInputWindow | None,
-) -> tuple[int, int, str]:
+) -> tuple[int, bool, str]:
     base_frame_rate = get_frame_rate_for_profile(profile)
-    base_sample_count = get_max_frames_for_profile(profile)
     if not _manual_window_dense_sampling(input_window):
-        return base_frame_rate, base_sample_count, "profile_default"
+        return base_frame_rate, False, "profile_default"
 
     normalized = _normalized_profile(profile)
     return (
         MANUAL_WINDOW_PROFILE_FRAME_RATES.get(normalized, base_frame_rate),
-        MANUAL_WINDOW_PROFILE_MAX_FRAMES.get(normalized, base_sample_count),
+        True,
         "manual_window_dense",
     )
 
@@ -1960,7 +1999,7 @@ async def extract_motion_sampled_frames(
     source_fps = detect_video_fps(video_path)
     is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
     slow_motion_scale = get_slow_motion_scale(source_fps) if is_slow_motion else 1.0
-    frame_rate, sample_count, sampling_profile_source = _sampling_config_for_window(analysis_profile, input_window)
+    frame_rate, manual_window_dense, sampling_profile_source = _sampling_config_for_window(analysis_profile, input_window)
     if input_window is not None:
         start_sec = input_window.input_window_start_sec
         end_sec = input_window.input_window_end_sec
@@ -1995,12 +2034,14 @@ async def extract_motion_sampled_frames(
                 "selected_start_sec": round(start_sec, 3),
                 "selected_end_sec": round(end_sec, 3),
             }
-    window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
-        start_sec,
-        end_sec,
-        sample_count,
-        slow_motion_scale,
+    effective_duration = max((end_sec - start_sec) / max(slow_motion_scale, 1e-6), 1e-6)
+    requested_sample_count, profile_cap, sampling_density_policy = get_sampling_density(
+        analysis_profile,
+        effective_duration,
+        manual_window=manual_window_dense,
+        action_type=action_type,
     )
+    window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(start_sec, end_sec, requested_sample_count, slow_motion_scale)
     sampling_metadata = VideoSamplingMetadata(
         action_window_start=round(start_sec, 3),
         action_window_end=round(end_sec, 3),
@@ -2022,10 +2063,17 @@ async def extract_motion_sampled_frames(
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
         start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        effective_duration = max((end_sec - start_sec) / max(slow_motion_scale, 1e-6), 1e-6)
+        requested_sample_count, profile_cap, sampling_density_policy = get_sampling_density(
+            analysis_profile,
+            effective_duration,
+            manual_window=manual_window_dense,
+            action_type=action_type,
+        )
         window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
             start_sec,
             end_sec,
-            sample_count,
+            requested_sample_count,
             slow_motion_scale,
         )
         sampling_metadata = VideoSamplingMetadata(
@@ -2042,7 +2090,7 @@ async def extract_motion_sampled_frames(
         raise RuntimeError("视频缩略图抽取结果为空，请检查上传文件是否损坏。")
 
     scores = _motion_scores_from_thumbs(thumbs)
-    selected_indices = _select_motion_weighted_indices(scores, sample_count, dense_peak_bursts=dense_peak_bursts)
+    selected_indices = _select_motion_weighted_indices(scores, requested_sample_count, dense_peak_bursts=dense_peak_bursts)
 
     output_paths: list[Path] = []
     selected_records: list[dict[str, object]] = []
@@ -2068,7 +2116,7 @@ async def extract_motion_sampled_frames(
         )
         for existing_frame in frames_dir.glob("frame_*.jpg"):
             existing_frame.unlink(missing_ok=True)
-        output_paths = sample_frame_paths(await extract_frames(video_path, frames_dir, frame_rate=frame_rate), sample_count)
+        output_paths = sample_frame_paths(await extract_frames(video_path, frames_dir, frame_rate=frame_rate), requested_sample_count)
         selected_records = [
             {
                 "frame_id": frame_path.stem,
@@ -2095,7 +2143,11 @@ async def extract_motion_sampled_frames(
         "effective_window_duration": round((end_sec - start_sec) / slow_motion_scale, 3),
         "total_thumb_frames": len(thumbs),
         "sample_count": len(output_paths),
-        "max_frames_for_profile": sample_count,
+        "requested_sample_count": requested_sample_count,
+        "resolved_sample_count": len(output_paths),
+        "max_frames_for_profile": requested_sample_count,
+        "profile_frame_cap": profile_cap,
+        "sampling_density_policy": sampling_density_policy,
         "selection_strategy": "dense_peak_bursts" if dense_peak_bursts else "motion_weighted",
         "window_strategy": input_window.input_window_mode if input_window is not None else ("full_video_debug" if full_video_window else "detected_action_window"),
         "sampling_profile_source": sampling_profile_source,

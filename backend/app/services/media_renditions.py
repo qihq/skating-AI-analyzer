@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_index
+
 
 MEDIA_SCHEMA_VERSION = "analysis_media.v1"
 MEDIA_QUALITIES = ("original", "1080p", "720p", "480p")
@@ -67,7 +69,25 @@ def create_manifest(video_path: Path, analysis_id: str) -> dict[str, Any]:
     for quality, height in (("1080p", 1080), ("720p", 720), ("480p", 480)):
         if metadata["height"] > height:
             sources.append(_source(quality, "pending", metadata={**metadata, "height": height}, url=None, filename=f"renditions/{quality}.mp4"))
-    return {"schema_version": MEDIA_SCHEMA_VERSION, "status": "ready", "sources": sources}
+    source_timeline: dict[str, Any] | None = None
+    try:
+        source_timeline = source_frame_index(video_path, metadata=probe_source(video_path)).to_timeline()
+    except (AttributeError, OSError, SourceMediaError, RuntimeError, ValueError):
+        source_timeline = {
+            "schema_version": "source-timeline.v1",
+            "source_video_hash": "",
+            "duration_sec": metadata["duration_sec"],
+            "width": metadata["width"],
+            "height": metadata["height"],
+            "rotation_degrees": 0,
+            "timebase": {"numerator": 0, "denominator": 0, "is_vfr": False},
+            "timestamp_status": "unavailable",
+            "frames": [],
+            "decode_gaps": [],
+            "pts_discontinuities": [],
+            "fingerprint": "unavailable",
+        }
+    return {"schema_version": MEDIA_SCHEMA_VERSION, "status": "ready", "sources": sources, "source_timeline": source_timeline}
 
 
 def read_or_create_manifest(video_path: Path, analysis_id: str) -> dict[str, Any]:

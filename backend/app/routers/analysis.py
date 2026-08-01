@@ -6128,6 +6128,7 @@ def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) 
         frames=safe_pose_data.get("frames", []),
         frame_urls=frame_urls,
         pose_diagnostics=safe_pose_data.get("pose_diagnostics") if isinstance(safe_pose_data.get("pose_diagnostics"), dict) else None,
+        source_timeline=safe_pose_data.get("source_timeline") if isinstance(safe_pose_data.get("source_timeline"), dict) else None,
     )
 
 
@@ -7753,6 +7754,23 @@ def _frame_exists_and_url(analysis: Analysis, frame_id: str) -> tuple[bool, str 
 
 
 def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
+    source_index = None
+    source_pts = None
+    timing_status = "unavailable"
+    try:
+        from app.analysis_v2.evaluation.source_media import probe_source, source_frame_index
+        source_path = _video_path_if_available(analysis)
+        if source_path is not None:
+            timeline = source_frame_index(source_path, metadata=probe_source(source_path))
+            timing_status = timeline.timestamp_status
+            candidate_pts = _to_number(_legacy_keyframe_timestamps(analysis).get(key))
+            if candidate_pts is not None and timeline.exact:
+                resolved = timeline.frame_at_pts(candidate_pts)
+                source_index = resolved.source_frame_index
+                source_pts = resolved.pts_sec
+    except Exception:
+        # Historical comparisons remain readable when the source was cleaned up.
+        pass
     candidates = _keyframe_candidate_map(analysis)
     candidate = candidates.get(key) if isinstance(candidates.get(key), dict) else None
     legacy = _legacy_keyframes(analysis)
@@ -7802,6 +7820,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
             quality_flags=quality_flags,
             available=frame_exists,
             missing_reason=None if frame_exists else "keyframe image unavailable",
+            source_frame_index=source_index, source_pts=source_pts, timing_status=timing_status,
         )
 
     semantic = _semantic_keyframe_record(analysis, key)
@@ -7827,6 +7846,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
                 quality_flags=quality_flags,
                 available=frame_exists,
                 missing_reason=None if frame_exists else "语义关键帧图片不可用",
+                source_frame_index=source_index, source_pts=source_pts, timing_status=timing_status,
             )
 
     candidate = candidates.get(key) if isinstance(candidates.get(key), dict) else None
@@ -7853,6 +7873,7 @@ def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
         quality_flags=[],
         available=frame_exists,
         missing_reason=None if frame_exists else "关键帧图片不可用",
+        source_frame_index=source_index, source_pts=source_pts, timing_status=timing_status,
     )
 
 
@@ -7976,6 +7997,13 @@ def _build_video_side(analysis: Analysis) -> CompareVideoSide:
     start = _to_number(analysis.action_window_start)
     end = _to_number(analysis.action_window_end)
     duration = round(end - start, 3) if start is not None and end is not None and end > start else None
+    source_timeline = None
+    try:
+        from app.analysis_v2.evaluation.source_media import probe_source, source_frame_index
+        if path is not None:
+            source_timeline = source_frame_index(path, metadata=probe_source(path)).to_timeline()
+    except Exception:
+        source_timeline = None
     return CompareVideoSide(
         analysis_id=analysis.id,
         video_url=f"/api/analysis/{analysis.id}/video" if path is not None else None,
@@ -7988,6 +8016,7 @@ def _build_video_side(analysis: Analysis) -> CompareVideoSide:
         sync_duration=_round_delta_value(duration, 3),
         is_slow_motion=bool(analysis.is_slow_motion),
         source_fps=_round_delta_value(_to_number(analysis.source_fps), 3),
+        source_timeline=source_timeline,
     )
 
 

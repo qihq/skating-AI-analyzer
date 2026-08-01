@@ -12,6 +12,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "backend" / "app" / "services"
 DST = REPO_ROOT / "ai_skating_analysis_pack" / "src" / "app" / "services"
+V2_SRC = REPO_ROOT / "backend" / "app" / "analysis_v2"
+V2_DST = REPO_ROOT / "ai_skating_analysis_pack" / "src" / "app" / "analysis_v2"
 
 FILES = [
     "__init__.py",
@@ -41,6 +43,7 @@ FILES = [
     "plan.py",
     "vision_prompt_templates.py",
 ]
+V2_FILES = ["__init__.py", "timebase.py", "contracts.py"]
 
 def main():
     DST.mkdir(parents=True, exist_ok=True)
@@ -54,6 +57,16 @@ def main():
         else:
             miss += 1
             print(f"  MISS {f}")
+    V2_DST.mkdir(parents=True, exist_ok=True)
+    for f in V2_FILES:
+        s, d = V2_SRC / f, V2_DST / f
+        if s.exists():
+            shutil.copy2(s, d)
+            ok += 1
+            print(f"  OK  analysis_v2/{f}")
+        else:
+            miss += 1
+            print(f"  MISS analysis_v2/{f}")
     print(f"\nCopied {ok} files, {miss} missing.")
 
 if __name__ == "__main__":

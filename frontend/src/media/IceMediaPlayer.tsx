@@ -35,6 +35,7 @@ export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(fun
       {mode !== "pose" ? <VideoSurface ref={videoRef} controller={controller} manifest={fallbackManifest}>{mode === "overlay" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} className="ice-media-player__overlay" /> : null}{overlay}</VideoSurface> : null}
       {mode === "pose" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} /> : null}
     </div>
-    <MediaControls controller={controller} markers={markers} sourceFrame={sourceFrame} onStepSourceFrame={onStepSourceFrame} unavailableFrame={unavailableFrame} />
+    <MediaControls controller={controller} markers={markers} sourceFrame={sourceFrame ?? controller.state.sourceFrame} onStepSourceFrame={onStepSourceFrame ?? controller.stepSourceFrame} unavailableFrame={unavailableFrame} />
+    {controller.state.timingWarning ? <p role="status" className="ice-media-controls__error">{controller.state.timingWarning}</p> : null}
   </section>;
 });

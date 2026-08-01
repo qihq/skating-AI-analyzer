@@ -27,7 +27,7 @@ from app.services.providers import ActiveProviderConfig
 from app.services.pose import extract_pose
 from app.services.video import FramePayload, encode_frames
 from app.services.vision_path_a import analyze_path_a
-from app.services.vision_path_b import PATH_B_MAX_FRAMES, analyze_path_b, sample_frames_path_b
+from app.services.vision_path_b import PATH_B_MAX_FRAMES, PathBFrameSelection, analyze_path_b, select_stage_balanced_frames
 from app.services.video_temporal import semantic_keyframes_are_reliable
 from app.services.vision_video_context import build_video_context_by_frame
 
@@ -288,11 +288,24 @@ async def analyze_frames_dual(
 
     frame_stems = [payload.frame_id for payload in raw_frame_payloads]
     key_stems = extract_key_frame_stems(bio_data)
-    path_b_payloads = (
-        compressed_annotated_payloads
-        if uses_semantic_keyframes
-        else sample_frames_path_b(compressed_annotated_payloads, key_stems, max_frames=PATH_B_MAX_FRAMES)
-    )
+    evidence_frames = frame_motion_scores.get("evidence_frames_v1") if isinstance(frame_motion_scores, dict) else None
+    if uses_semantic_keyframes:
+        path_b_selection = PathBFrameSelection(
+            compressed_annotated_payloads,
+            {},
+            ["resolved_semantic"],
+            0,
+            "semantic_frames_preserved",
+            {},
+        )
+    else:
+        path_b_selection = select_stage_balanced_frames(
+            compressed_annotated_payloads,
+            evidence_frames if isinstance(evidence_frames, dict) else None,
+            analysis_profile=analysis_profile,
+            max_frames=PATH_B_MAX_FRAMES,
+        )
+    path_b_payloads = path_b_selection.frames
     bio_ctx = build_frame_bio_context(bio_data, frame_stems)
     jump_metrics_text = summarize_jump_metrics(bio_data)
     motion_features = _motion_features_for_prompt(frame_motion_scores)
@@ -350,6 +363,7 @@ async def analyze_frames_dual(
             memory_context=path_b_context,
             skill_category=skill_category,
             video_context_by_frame=video_context_by_frame,
+            evidence_context_by_frame=path_b_selection.evidence_context_by_frame,
             preserve_all_frames=uses_semantic_keyframes,
         )
 
@@ -400,6 +414,10 @@ async def analyze_frames_dual(
         "raw_frame_count": len(raw_frame_payloads),
         "annotated_frame_count": len(path_b_payloads),
         "annotated_frame_count_raw": len(annotated_payloads),
+        "path_b_stage_counts": path_b_selection.per_stage_count,
+        "path_b_evidence_sources": path_b_selection.sources,
+        "path_b_omitted_context_count": path_b_selection.omitted_context_count,
+        "path_b_cap_reason": path_b_selection.cap_reason,
         "fusion_diagnostics": fusion_diagnostics,
         "conflict_level": fusion_diagnostics.get("conflict_level", "none"),
         "downgraded_reasons": fusion_diagnostics.get("downgraded_reasons", []),

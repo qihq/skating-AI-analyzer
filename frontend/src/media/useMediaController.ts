@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { qualitySource } from "./qualitySelection";
-import type { BufferedRange, MediaControllerState, MediaManifest, MediaQuality } from "./types";
+import type { BufferedRange, MediaControllerState, MediaManifest, MediaQuality, SourceFrameIdentity } from "./types";
 
 const initialState: MediaControllerState = {
   duration: 0, currentTime: 0, previewTime: null, paused: true, buffering: false, buffered: [],
   volume: 1, muted: false, playbackRate: 1, quality: "auto", isFullscreen: false, isPictureInPicture: false, error: null,
+  sourceFrame: null, timingStatus: "unavailable", timingWarning: null,
 };
 
 function ranges(video: HTMLVideoElement): BufferedRange[] {
@@ -17,6 +18,17 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
   const pendingSeek = useRef<number | null>(null);
   const [state, setState] = useState<MediaControllerState>(initialState);
   const source = useMemo(() => qualitySource(manifest, state.quality), [manifest, state.quality]);
+  const timeline = manifest?.source_timeline ?? null;
+  const frameAtPts = useCallback((timestamp: number): SourceFrameIdentity | null => {
+    if (!timeline || timeline.timestamp_status !== "exact") return null;
+    const candidates = timeline.frames.filter((frame) => frame.pts_sec != null);
+    const selected = candidates.reduce<typeof candidates[number] | null>((best, frame) => !best || Math.abs((frame.pts_sec as number) - timestamp) < Math.abs((best.pts_sec as number) - timestamp) ? frame : best, null);
+    return selected && selected.pts_sec != null ? { sourceFrameIndex: selected.source_frame_index, pts: selected.pts_sec, duration: selected.duration_sec, status: selected.status } : null;
+  }, [timeline]);
+  const frameByIndex = useCallback((index: number): SourceFrameIdentity | null => {
+    const selected = timeline?.frames.find((frame) => frame.source_frame_index === index);
+    return selected && selected.pts_sec != null ? { sourceFrameIndex: selected.source_frame_index, pts: selected.pts_sec, duration: selected.duration_sec, status: selected.status } : null;
+  }, [timeline]);
 
   const bindVideo = useCallback((video: HTMLVideoElement | null) => { videoRef.current = video; }, []);
   const commitSeek = useCallback((time: number) => {
@@ -24,8 +36,18 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
     const next = Math.max(0, Math.min(time, Number.isFinite(video?.duration) ? video!.duration : time));
     pendingSeek.current = next;
     if (video) video.currentTime = next;
-    setState((current) => ({ ...current, currentTime: next, previewTime: null }));
-  }, []);
+    setState((current) => ({ ...current, currentTime: next, previewTime: null, sourceFrame: frameAtPts(next) }));
+  }, [frameAtPts]);
+  const commitSourceFrame = useCallback((index: number) => {
+    const frame = frameByIndex(index);
+    if (!frame) { setState((current) => ({ ...current, error: "Requested source frame is unavailable." })); return false; }
+    commitSeek(frame.pts);
+    return true;
+  }, [commitSeek, frameByIndex]);
+  const stepSourceFrame = useCallback((direction: -1 | 1) => {
+    const current = state.sourceFrame?.sourceFrameIndex ?? frameAtPts(state.currentTime)?.sourceFrameIndex;
+    return current == null ? false : commitSourceFrame(current + direction);
+  }, [commitSourceFrame, frameAtPts, state.currentTime, state.sourceFrame]);
   const previewSeek = useCallback((time: number) => setState((current) => ({ ...current, previewTime: Math.max(0, time) })), []);
   const togglePlay = useCallback(async () => {
     const video = videoRef.current;
@@ -75,14 +97,15 @@ export function useMediaController(manifest: MediaManifest | null | undefined) {
       video.currentTime = Math.min(pendingSeek.current, Number.isFinite(video.duration) ? video.duration : pendingSeek.current);
       pendingSeek.current = null;
     }
-    setState((current) => ({ ...current, duration: video.duration || 0, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate }));
-  }, []);
-  const onTimeUpdate = useCallback(() => { const video = videoRef.current; if (video) setState((current) => current.previewTime == null ? { ...current, currentTime: video.currentTime, buffered: ranges(video) } : current); }, []);
+    const timingStatus = timeline?.timestamp_status ?? "unavailable";
+    setState((current) => ({ ...current, duration: video.duration || timeline?.duration_sec || 0, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate, timingStatus, timingWarning: timingStatus === "exact" ? null : timingStatus === "approximate_legacy" ? "Legacy timing is approximate; it is not V2 exact evidence." : "Source timestamps are unavailable." }));
+  }, [timeline]);
+  const onTimeUpdate = useCallback(() => { const video = videoRef.current; if (video) setState((current) => current.previewTime == null ? { ...current, currentTime: video.currentTime, buffered: ranges(video), sourceFrame: frameAtPts(video.currentTime) } : current); }, [frameAtPts]);
   const onPlay = useCallback(() => setState((current) => ({ ...current, paused: false })), []);
   const onPause = useCallback(() => setState((current) => ({ ...current, paused: true })), []);
   const onWaiting = useCallback(() => setState((current) => ({ ...current, buffering: true })), []);
   const onPlaying = useCallback(() => setState((current) => ({ ...current, buffering: false })), []);
   const onError = useCallback(() => setState((current) => ({ ...current, buffering: false, error: "视频无法播放" })), []);
   useEffect(() => () => { switchToken.current += 1; }, []);
-  return { state, source, bindVideo, commitSeek, previewSeek, togglePlay, play, pause, setPlaybackRate, setVolume, setMuted, setQuality, mediaProps: { onLoadedMetadata, onTimeUpdate, onPlay, onPause, onWaiting, onPlaying, onError } };
+  return { state, source, bindVideo, commitSeek, commitSourceFrame, stepSourceFrame, previewSeek, togglePlay, play, pause, setPlaybackRate, setVolume, setMuted, setQuality, mediaProps: { onLoadedMetadata, onTimeUpdate, onPlay, onPause, onWaiting, onPlaying, onError } };
 }

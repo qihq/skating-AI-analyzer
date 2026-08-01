@@ -13,6 +13,7 @@ export type SourceFrameIdentity = {
   sourceFrameIndex: number;
   pts: number;
   duration: number | null;
+  status?: string;
 };
 
 export type BufferedRange = { start: number; end: number };
@@ -31,4 +32,7 @@ export type MediaControllerState = {
   isFullscreen: boolean;
   isPictureInPicture: boolean;
   error: string | null;
+  sourceFrame: SourceFrameIdentity | null;
+  timingStatus: "exact" | "approximate_legacy" | "unavailable";
+  timingWarning: string | null;
 };

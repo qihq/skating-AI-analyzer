@@ -61,6 +61,16 @@ export async function fetchGoldenSourceFrame(parentPin: string, sourceHash: stri
   return { sourceFrameIndex: response.data.source_frame_index, pts: response.data.pts, duration: response.data.duration };
 }
 
+export async function fetchGoldenSourceFrameByPts(parentPin: string, sourceHash: string, pts: number) {
+  const response = await apiClient.get<{ source_frame_index: number; pts: number; duration: number | null }>(`/golden/v2/sources/${encodeURIComponent(sourceHash)}/frames/by-pts`, { params: { pts }, headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return { sourceFrameIndex: response.data.source_frame_index, pts: response.data.pts, duration: response.data.duration };
+}
+
+export async function fetchGoldenSourceFrameImageUrl(parentPin: string, sourceHash: string, frameIndex: number): Promise<string> {
+  const response = await apiClient.get<Blob>(`/golden/v2/sources/${encodeURIComponent(sourceHash)}/frames/${frameIndex}/image`, { headers: { "X-Parent-Pin": parentPin }, responseType: "blob", timeout: 60_000 });
+  return URL.createObjectURL(response.data);
+}
+
 export async function fetchGoldenSourceMediaUrl(parentPin: string, sourceHash: string): Promise<string> {
   const response = await apiClient.get<Blob>(`/golden/v2/sources/${sourceHash}/media`, {
     headers: { "X-Parent-Pin": parentPin }, responseType: "blob", timeout: 600_000,

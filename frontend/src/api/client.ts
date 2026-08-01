@@ -125,6 +125,7 @@ export interface PoseKeypoint {
 
 export interface PoseFrame {
   frame: string;
+  source_frame_index?: number;
   keypoints: PoseKeypoint[];
   target_bbox?: {
     x: number;
@@ -143,7 +144,31 @@ export interface PoseResponse {
   frame_urls: Record<string, string>;
   frame_timestamps?: Record<string, number>;
   effective_fps?: number | null;
+  source_timeline?: SourceTimeline | null;
   pose_diagnostics?: Record<string, unknown> | null;
+}
+
+export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
+export interface SourceTimelineFrame {
+  source_frame_index: number;
+  pts_sec: number | null;
+  duration_sec: number | null;
+  status: "available" | "duplicate_pts" | "gap_after_previous" | "discontinuity" | "timestamp_unavailable";
+  gap_before_sec: number;
+}
+export interface SourceTimeline {
+  schema_version: "source-timeline.v1";
+  source_video_hash: string;
+  duration_sec: number | null;
+  width: number;
+  height: number;
+  rotation_degrees: 0 | 90 | 180 | 270;
+  timebase: { numerator: number; denominator: number; average_fps?: number | null; nominal_fps?: number | null; is_vfr: boolean };
+  timestamp_status: SourceTimelineStatus;
+  frames: SourceTimelineFrame[];
+  decode_gaps: Array<{ previous_frame_index: number; next_frame_index: number; previous_pts_sec: number; next_pts_sec: number; missing_duration_sec: number; reason: "dropped_frames" | "timestamp_discontinuity" }>;
+  pts_discontinuities: number[];
+  fingerprint: string;
 }
 
 export interface AnalysisListItem {
@@ -183,6 +208,7 @@ export interface MediaManifest {
   schema_version: string;
   status: "processing" | "ready" | string;
   sources: MediaSource[];
+  source_timeline?: SourceTimeline | null;
 }
 
 export interface AnalysisDetail extends AnalysisListItem {
@@ -673,6 +699,9 @@ export interface CompareKeyframeSide {
   quality_flags?: string[];
   available: boolean;
   missing_reason: string | null;
+  source_frame_index?: number | null;
+  source_pts?: number | null;
+  timing_status?: "exact" | "approximate_legacy" | "unavailable" | string;
 }
 
 export interface CompareKeyframePair {
@@ -698,6 +727,7 @@ export interface CompareVideoSide {
   sync_duration?: number | null;
   is_slow_motion: boolean;
   source_fps: number | null;
+  source_timeline?: SourceTimeline | null;
 }
 
 export interface CompareVideoPayload {

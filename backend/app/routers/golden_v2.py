@@ -7,7 +7,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +17,7 @@ from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
 from app.analysis_v2.evaluation.g2_baseline import G2BaselineStore, G2FreezeError
 from app.analysis_v2.evaluation.pilot_evaluator import PilotPredictionBundle
 from app.analysis_v2.evaluation.pilot_store import PilotEvaluationStore, collection_progress
-from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, probe_source, source_frame_at
+from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, extract_source_frame_bytes, probe_source, source_frame_at, source_frame_index, source_frame_reference_at, source_frame_reference_at_pts
 from app.database import get_session
 from app.routers.capabilities import get_runtime_config
 from app.services.parent_access import require_parent_pin
@@ -89,6 +89,7 @@ class GoldenSourceView(_StrictResponse):
     average_fps: float | None
     nominal_fps: float | None
     display_rotation_degrees: Literal[0, 90, 180, 270]
+    source_timeline: dict[str, object] | None = None
 
 
 class GoldenWorkspaceResponse(_StrictResponse):
@@ -221,7 +222,7 @@ async def get_golden_workspace(
     _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
 ) -> GoldenWorkspaceResponse:
     dataset = store.ensure_initialized()
-    return _workspace_response(dataset)
+    return _workspace_response(dataset, store)
 
 
 @router.get("/sources/{source_sha256}/media")
@@ -244,6 +245,30 @@ async def get_golden_frame_identity(
     except SourceMediaError as exc:
         raise HTTPException(status_code=404, detail="Requested source frame is unavailable.") from exc
     return GoldenFrameIdentity(source_frame_index=frame.index, pts=frame.pts, duration=frame.duration)
+
+
+@router.get("/sources/{source_sha256}/frames/by-pts", response_model=GoldenFrameIdentity)
+async def get_golden_frame_identity_by_pts(
+    source_sha256: str, pts: float = Query(..., ge=0), _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> GoldenFrameIdentity:
+    try:
+        reference = source_frame_reference_at_pts(store.source_media_path(source_sha256), pts)
+        if reference.pts_sec is None:
+            raise SourceMediaError("Requested source PTS has no timestamp")
+    except SourceMediaError as exc:
+        raise HTTPException(status_code=404, detail="Requested source PTS is unavailable.") from exc
+    return GoldenFrameIdentity(source_frame_index=reference.source_frame_index, pts=reference.pts_sec, duration=reference.duration_sec)
+
+
+@router.get("/sources/{source_sha256}/frames/{frame_index}/image")
+async def get_golden_source_frame_image(
+    source_sha256: str, frame_index: int, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> Response:
+    try:
+        payload = extract_source_frame_bytes(store.source_media_path(source_sha256), frame_index)
+    except SourceMediaError as exc:
+        raise HTTPException(status_code=404, detail="Requested source frame image is unavailable.") from exc
+    return Response(content=payload, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/sources/import", response_model=GoldenSourceView, status_code=status.HTTP_201_CREATED)
@@ -288,7 +313,7 @@ async def import_golden_source(
         updated = _next_dataset(current, expected_revision, annotator_alias, "source imported", touch_labels=False, sources=[*current.sources, source])
         store.save(updated, expected_revision=expected_revision)
         get_pilot_store(store).invalidate("Golden sources changed. Run the pilot evaluator again after labeling is complete.")
-        return _source_view(updated.sources[-1])
+        return _source_view(updated.sources[-1], store)
     except SourceMediaError as exc:
         raise HTTPException(status_code=400, detail="Unable to read private source metadata.") from exc
     except Exception:
@@ -333,7 +358,7 @@ async def update_golden_source(
     )
     store.save(updated, expected_revision=payload.expected_revision)
     get_pilot_store(store).invalidate("Golden source grouping changed. Run the pilot evaluator again after labeling is complete.")
-    return _workspace_response(updated)
+    return _workspace_response(updated, store)
 
 
 @router.delete("/sources/{source_sha256}", response_model=GoldenWorkspaceResponse)
@@ -368,7 +393,7 @@ async def delete_golden_source(
         (store.suggestions_dir / f"{event_id}.json").unlink(missing_ok=True)
         (store.reviews_dir / f"{event_id}.json").unlink(missing_ok=True)
     get_pilot_store(store).invalidate("Golden sources changed. Run the pilot evaluator again after labeling is complete.")
-    return _workspace_response(updated)
+    return _workspace_response(updated, store)
 
 
 @router.put("/annotations", response_model=GoldenWorkspaceResponse)
@@ -385,7 +410,7 @@ async def save_golden_annotations(
         raise HTTPException(status_code=422, detail="Annotation is incomplete or contradictory; nothing was saved.") from exc
     store.save(updated, expected_revision=payload.expected_revision)
     get_pilot_store(store).invalidate("Golden labels changed. Run the pilot evaluator again after labeling is complete.")
-    return _workspace_response(updated)
+    return _workspace_response(updated, store)
 
 
 @router.get("/events/{event_id}/history")
@@ -560,18 +585,33 @@ def _counts(value: object) -> list[GoldenCount]:
     return [GoldenCount(key=str(key), count=int(count)) for key, count in value.items()]
 
 
-def _source_view(source: Any) -> GoldenSourceView:
+def _source_view(source: Any, store: GoldenCatalogStore | None = None) -> GoldenSourceView:
+    timeline = None
+    try:
+        source_path = store.source_media_path(source.source_sha256) if store is not None else None
+        if source_path is None:
+            raise FileNotFoundError(source.source_sha256)
+        timeline = source_frame_index(source_path).to_timeline()
+    except Exception:  # source metadata remains readable if a rebuildable index cannot be created
+        timeline = {
+            "schema_version": "source-timeline.v1", "source_video_hash": source.source_sha256,
+            "duration_sec": source.duration_pts, "width": source.width, "height": source.height,
+            "rotation_degrees": source.display_rotation_degrees,
+            "timebase": source.timebase.model_dump(mode="json"), "timestamp_status": "unavailable",
+            "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "unavailable",
+        }
     return GoldenSourceView(
         source_sha256=source.source_sha256, duration_pts=source.duration_pts, width=source.width, height=source.height,
         timebase=source.timebase.model_dump(), recording_session_id=source.recording_session_id, grouping_id=source.grouping_id,
         redacted_alias=source.redacted_alias, source_frame_count=source.source_frame_count, average_fps=source.average_fps,
         nominal_fps=source.nominal_fps, display_rotation_degrees=source.display_rotation_degrees,
+        source_timeline=timeline,
     )
 
 
-def _workspace_response(dataset: GoldenDatasetV2) -> GoldenWorkspaceResponse:
+def _workspace_response(dataset: GoldenDatasetV2, store: GoldenCatalogStore | None = None) -> GoldenWorkspaceResponse:
     return GoldenWorkspaceResponse(
-        dataset_id=dataset.dataset_id, revision=dataset.revision.revision, sources=[_source_view(item) for item in dataset.sources],
+        dataset_id=dataset.dataset_id, revision=dataset.revision.revision, sources=[_source_view(item, store) for item in dataset.sources],
         events=[item.model_dump(mode="json") for item in dataset.events], tracks=[item.model_dump(mode="json") for item in dataset.tracks],
         poses=[item.model_dump(mode="json") for item in dataset.poses],
     )

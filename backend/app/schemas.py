@@ -164,6 +164,7 @@ class MediaManifest(BaseModel):
     schema_version: str
     status: str
     sources: list[MediaSource] = Field(default_factory=list)
+    source_timeline: dict[str, Any] | None = None
 
 
 class AnalysisDetail(BaseModel):
@@ -349,6 +350,9 @@ class CompareKeyframeSide(BaseModel):
     quality_flags: list[str] = Field(default_factory=list)
     available: bool = False
     missing_reason: str | None = None
+    source_frame_index: int | None = None
+    source_pts: float | None = None
+    timing_status: str = "unavailable"
 
 
 class CompareKeyframePair(BaseModel):
@@ -374,6 +378,7 @@ class CompareVideoSide(BaseModel):
     sync_duration: float | None = None
     is_slow_motion: bool = False
     source_fps: float | None = None
+    source_timeline: dict[str, Any] | None = None
 
 
 class CompareVideoPayload(BaseModel):
@@ -762,6 +767,7 @@ class PoseResponse(BaseModel):
     frame_timestamps: dict[str, float] = Field(default_factory=dict)
     effective_fps: float | None = None
     pose_diagnostics: dict[str, Any] | None = None
+    source_timeline: dict[str, Any] | None = None
 
 
 class ProviderBase(BaseModel):

@@ -9,12 +9,23 @@ from app.analysis_v2.presentation import AnalysisExperienceV2, present_analysis_
 from app.database import get_session
 from app.models import Analysis
 from app.services.parent_access import require_parent_pin
+from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_index
+from pathlib import Path
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis-v2"])
 
 
 def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> dict[str, Any]:
-    rendered = build_analysis_experience(analysis, pipeline_mode="shadow" if diagnostic else "legacy")
+    timeline = None
+    video_path = getattr(analysis, "video_path", None)
+    if video_path:
+        try:
+            path = Path(str(video_path))
+            if path.exists():
+                timeline = source_frame_index(path, metadata=probe_source(path)).to_timeline()
+        except (OSError, SourceMediaError, RuntimeError, ValueError):
+            timeline = {"schema_version": "source-timeline.v1", "source_video_hash": "", "duration_sec": None, "width": 1, "height": 1, "rotation_degrees": 0, "timebase": {"numerator": 1, "denominator": 1, "is_vfr": False}, "timestamp_status": "unavailable", "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "unavailable"}
+    rendered = build_analysis_experience(analysis, pipeline_mode="shadow" if diagnostic else "legacy", source_timeline=timeline)
     return rendered.model_dump(mode="json")
 
 

@@ -32,6 +32,9 @@ def _chapter_snapshot(chapter: MonthlyChapter) -> dict[str, Any]:
             "analysis_id": str(frame.get("analysis_id") or ""),
             "frame_id": str(frame.get("frame_id") or ""),
             "timestamp": frame.get("timestamp"),
+            "source_frame_index": frame.get("source_frame_index"),
+            "source_pts": frame.get("source_pts"),
+            "timing_status": str(frame.get("timing_status") or "approximate_legacy"),
             "phase": str(frame.get("phase") or ""),
             "evidence_source": str(frame.get("evidence_source") or ""),
         }

@@ -42,6 +42,9 @@ export interface ExperienceClaim {
 }
 export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; }
 export interface ExperienceReviewTask { taskId: string; authority: ExperienceAuthority; kind: string; eventId: string | null; }
+export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
+export interface SourceTimelineFrame { sourceFrameIndex: number; ptsSec: number | null; durationSec: number | null; status: "available" | "duplicate_pts" | "gap_after_previous" | "discontinuity" | "timestamp_unavailable"; gapBeforeSec: number; }
+export interface SourceTimeline { schemaVersion: "source-timeline.v1"; sourceVideoHash: string; durationSec: number | null; width: number; height: number; rotationDegrees: 0 | 90 | 180 | 270; timestampStatus: SourceTimelineStatus; frames: SourceTimelineFrame[]; decodeGaps: Array<{ previousFrameIndex: number; nextFrameIndex: number; previousPtsSec: number; nextPtsSec: number; missingDurationSec: number; reason: "dropped_frames" | "timestamp_discontinuity" }>; ptsDiscontinuities: number[]; fingerprint: string; }
 export interface AnalysisExperienceV2 {
   schemaVersion: "analysis-experience.v2";
   analysisId: string;
@@ -53,6 +56,7 @@ export interface AnalysisExperienceV2 {
   events: ExperienceEvent[];
   claims: ExperienceClaim[];
   reviewTasks: ExperienceReviewTask[];
+  sourceTimeline?: SourceTimeline | null;
 }
 
 export type ExperienceStatusLanguage = {
@@ -66,6 +70,16 @@ export type ExperienceStatusLanguage = {
 export function buildExperienceCacheKey(analysisId: string, authority: ExperienceAuthority, sourcePipelineFingerprint: string): string {
   if (!analysisId || !sourcePipelineFingerprint) throw new Error("cache identity is incomplete");
   return `analysis-experience.v2:${authority}:${sourcePipelineFingerprint}:${analysisId}`;
+}
+
+export function sourceTimelineFrameAt(timeline: SourceTimeline | null | undefined, timestamp: number): SourceTimelineFrame | null {
+  if (!timeline || timeline.timestampStatus !== "exact" || !timeline.frames.length || !Number.isFinite(timestamp)) return null;
+  return timeline.frames.filter((frame) => frame.ptsSec != null).reduce<SourceTimelineFrame | null>((best, frame) => !best || Math.abs((frame.ptsSec as number) - timestamp) < Math.abs((best.ptsSec as number) - timestamp) ? frame : best, null);
+}
+
+export function sourceTimelineFrameByIndex(timeline: SourceTimeline | null | undefined, sourceFrameIndex: number): SourceTimelineFrame | null {
+  if (!timeline || !Number.isInteger(sourceFrameIndex) || sourceFrameIndex < 0) return null;
+  return timeline.frames.find((frame) => frame.sourceFrameIndex === sourceFrameIndex) ?? null;
 }
 
 export function statusLanguageForPayload(value: unknown): ExperienceStatusLanguage {
@@ -91,6 +105,15 @@ function isExperienceStatus(value: unknown): value is ExperienceStatus {
 function isExperienceObservability(value: unknown): value is ExperienceClaim["observability"] {
   return value === "observable" || value === "partially_observable" || value === "unobservable";
 }
+function decodeSourceTimeline(value: unknown): SourceTimeline | null {
+  if (value == null) return null;
+  if (!value || typeof value !== "object") throw new Error("invalid source timeline");
+  const raw = value as Record<string, unknown>;
+  if (raw.schema_version !== "source-timeline.v1" || typeof raw.source_video_hash !== "string" || typeof raw.width !== "number" || typeof raw.height !== "number" || !Array.isArray(raw.frames) || !Array.isArray(raw.decode_gaps) || !Array.isArray(raw.pts_discontinuities) || typeof raw.fingerprint !== "string") throw new Error("invalid source timeline");
+  const status = raw.timestamp_status;
+  if (status !== "exact" && status !== "approximate_legacy" && status !== "unavailable") throw new Error("invalid source timeline status");
+  return { schemaVersion: "source-timeline.v1", sourceVideoHash: raw.source_video_hash, durationSec: (raw.duration_sec as number | null) ?? null, width: raw.width, height: raw.height, rotationDegrees: raw.rotation_degrees as SourceTimeline["rotationDegrees"], timestampStatus: status, frames: raw.frames.map((item) => { const frame = record(item); return { sourceFrameIndex: Number(frame.source_frame_index), ptsSec: (frame.pts_sec as number | null) ?? null, durationSec: (frame.duration_sec as number | null) ?? null, status: frame.status as SourceTimelineFrame["status"], gapBeforeSec: Number(frame.gap_before_sec ?? 0) }; }), decodeGaps: raw.decode_gaps.map((item) => { const gap = record(item); return { previousFrameIndex: Number(gap.previous_frame_index), nextFrameIndex: Number(gap.next_frame_index), previousPtsSec: Number(gap.previous_pts_sec), nextPtsSec: Number(gap.next_pts_sec), missingDurationSec: Number(gap.missing_duration_sec), reason: gap.reason as "dropped_frames" | "timestamp_discontinuity" }; }), ptsDiscontinuities: raw.pts_discontinuities.map(Number), fingerprint: raw.fingerprint };
+}
 export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2 {
   const raw = record(value);
   if (raw.schema_version !== "analysis-experience.v2" || (raw.authority !== "legacy" && raw.authority !== "v2") || !isPipelineMode(raw.pipeline_mode) || typeof raw.analysis_id !== "string" || typeof raw.source_pipeline_fingerprint !== "string") throw new Error("unsupported analysis experience schema");
@@ -103,7 +126,7 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
   });
   const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });
   const reviewTasks = (Array.isArray(raw.review_tasks) ? raw.review_tasks : []).map((item) => { const t = record(item); if (t.authority !== raw.authority || typeof t.task_id !== "string" || typeof t.kind !== "string") throw new Error("cross-authority or invalid review task"); return { taskId: t.task_id, authority: t.authority as ExperienceAuthority, kind: t.kind, eventId: (t.event_id as string | null) ?? null }; });
-  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks };
+  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks, sourceTimeline: decodeSourceTimeline(raw.source_timeline) };
 }
 export function selectClaim(experience: AnalysisExperienceV2, claimType: string, identity?: { authority: ExperienceAuthority; sourcePipelineFingerprint: string }): ExperienceClaim | { status: "unobservable"; observability: "unobservable" } {
   if (identity && (identity.authority !== experience.authority || identity.sourcePipelineFingerprint !== experience.sourcePipelineFingerprint)) throw new Error("selector identity does not match experience");

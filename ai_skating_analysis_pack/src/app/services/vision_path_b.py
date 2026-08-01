@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.providers import ActiveProviderConfig, request_text_completion
@@ -14,8 +16,9 @@ from app.services.vision_video_context import format_video_context_prompt_block,
 logger = logging.getLogger(__name__)
 
 PATH_B_TEMPERATURE = 0.25
-PATH_B_MAX_FRAMES = 10
+PATH_B_MAX_FRAMES = int(os.getenv("PATH_B_MAX_FRAMES", "16"))
 PATH_B_CONTEXT_WIN = 2
+PATH_B_CORE_PHASE_QUOTA = int(os.getenv("PATH_B_CORE_PHASE_QUOTA", "3"))
 PATH_B_MAX_TOKENS_BASE = 1000
 PATH_B_MAX_TOKENS_FRAME = 380
 PATH_B_MAX_TOKENS_CAP = 8000
@@ -32,6 +35,102 @@ PATH_B_SYSTEM = (
     "- top_positives 应肯定学员做得好的地方，即使是很小的进步。\n"
     "- 用鼓励性语言替代批评性语言，例如用'建议加强'代替'严重不足'。"
 )
+
+
+@dataclass(slots=True)
+class PathBFrameSelection:
+    frames: list[FramePayload]
+    per_stage_count: dict[str, int]
+    sources: list[str]
+    omitted_context_count: int
+    cap_reason: str
+    evidence_context_by_frame: dict[str, str]
+
+
+def _nearest_payload_index(frame_payloads: list[FramePayload], timestamp: float, *, tolerance: float = 0.18) -> int | None:
+    if not frame_payloads:
+        return None
+    index, frame = min(enumerate(frame_payloads), key=lambda item: abs(item[1].timestamp_sec - timestamp))
+    return index if abs(frame.timestamp_sec - timestamp) <= tolerance else None
+
+
+def select_stage_balanced_frames(
+    frame_payloads: list[FramePayload],
+    evidence_frames: dict[str, Any] | None,
+    *,
+    analysis_profile: str | None,
+    max_frames: int = PATH_B_MAX_FRAMES,
+) -> PathBFrameSelection:
+    """Reserve stage quotas before adding chronological context frames."""
+    cap = min(max(max_frames, 1), len(frame_payloads))
+    evidence = evidence_frames.get("records") if isinstance(evidence_frames, dict) else None
+    if not isinstance(evidence, list):
+        frames = sample_frames_path_b(frame_payloads, None, max_frames=cap)
+        return PathBFrameSelection(frames, {}, [], max(0, len(frame_payloads) - len(frames)), "legacy_uniform_fallback", {})
+
+    required_by_profile = {
+        "jump": ("takeoff", "air", "landing"),
+        "spin": ("spin_entry", "spin_main", "spin_exit"),
+        "spiral": ("spiral_entry", "spiral_hold", "spiral_exit"),
+        "step": ("step_sequence",),
+    }
+    required = required_by_profile.get(str(analysis_profile or "").lower(), ())
+    source_order = {"resolved_semantic": 0, "mimo_key_moment": 1, "pose_candidate": 2, "mimo_phase": 3, "mimo_retry": 4, "partial_semantic": 5}
+    by_phase: dict[str, list[tuple[int, dict[str, Any]]]] = {phase: [] for phase in required}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        phase = str(item.get("phase") or "")
+        if phase not in by_phase:
+            continue
+        try:
+            timestamp = float(item.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        index = _nearest_payload_index(frame_payloads, timestamp)
+        if index is not None:
+            by_phase[phase].append((index, item))
+
+    selected: list[int] = []
+    evidence_context: dict[str, list[str]] = {}
+    sources: set[str] = set()
+    per_stage_count: dict[str, int] = {}
+    for phase in required:
+        candidates = sorted(by_phase[phase], key=lambda item: (source_order.get(str(item[1].get("source")), 9), item[0]))
+        phase_count = 0
+        for index, item in candidates:
+            if index in selected or phase_count >= PATH_B_CORE_PHASE_QUOTA or len(selected) >= cap:
+                continue
+            selected.append(index)
+            phase_count += 1
+            source = str(item.get("source") or "unknown")
+            sources.add(source)
+            evidence_context.setdefault(frame_payloads[index].frame_id, []).append(
+                f"evidence={source}; phase={phase}; reason={item.get('selection_reason') or 'stage_quota'}"
+            )
+        if phase_count:
+            per_stage_count[phase] = phase_count
+
+    if not selected:
+        frames = sample_frames_path_b(frame_payloads, None, max_frames=cap)
+        return PathBFrameSelection(frames, {}, [], max(0, len(frame_payloads) - len(frames)), "no_phase_evidence_uniform_fallback", {})
+
+    for position in range(cap):
+        if len(selected) >= cap:
+            break
+        index = round(position * (len(frame_payloads) - 1) / max(cap - 1, 1))
+        if index not in selected:
+            selected.append(index)
+    selected = sorted(selected)
+    frames = [frame_payloads[index] for index in selected]
+    return PathBFrameSelection(
+        frames,
+        per_stage_count,
+        sorted(sources),
+        max(0, len(frame_payloads) - len(frames)),
+        "stage_quota_cap" if len(frames) >= cap else "stage_quota_under_cap",
+        {frame_id: " | ".join(labels) for frame_id, labels in evidence_context.items()},
+    )
 
 
 def sample_frames_path_b(
@@ -94,6 +193,7 @@ def _build_user_prompt(
     n_frames: int,
     skill_category: str | None = None,
     video_context_by_frame: dict[str, dict[str, Any]] | None = None,
+    evidence_context_by_frame: dict[str, str] | None = None,
 ) -> str:
     blocks: list[str] = []
     if analysis_profile or profile_evidence:
@@ -132,7 +232,9 @@ def _build_user_prompt(
         '"top_positives":["最多2条，结合量化数据"]}\n\n'
         "必须只输出 JSON。"
     )
-    return grounding + body + format_video_context_prompt_block(video_context_by_frame)
+    evidence_lines = [f"- {frame_id}: {label}" for frame_id, label in (evidence_context_by_frame or {}).items()]
+    evidence_block = "\n【阶段取帧证据】\n" + "\n".join(evidence_lines) if evidence_lines else ""
+    return grounding + body + evidence_block + format_video_context_prompt_block(video_context_by_frame)
 
 
 def _fallback(error: str) -> dict[str, Any]:
@@ -204,6 +306,7 @@ async def analyze_path_b(
     memory_context: str = "",
     skill_category: str | None = None,
     video_context_by_frame: dict[str, dict[str, Any]] | None = None,
+    evidence_context_by_frame: dict[str, str] | None = None,
     preserve_all_frames: bool = False,
 ) -> dict[str, Any]:
     """
@@ -235,6 +338,7 @@ async def analyze_path_b(
             n_frames,
             skill_category,
             video_context_by_frame,
+            evidence_context_by_frame,
         )
 
         bio_context = frame_bio_context or {}

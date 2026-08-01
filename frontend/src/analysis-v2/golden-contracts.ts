@@ -51,7 +51,7 @@ export type PoseJoint = { joint: "nose" | "left_shoulder" | "right_shoulder" | "
 export type GoldenWorkspace = {
   dataset_id: string;
   revision: number;
-  sources: Array<{ source_sha256: string; duration_pts: number; width: number; height: number; source_frame_count: number | null; display_rotation_degrees: 0 | 90 | 180 | 270; redacted_alias: string; recording_session_id: string; grouping_id: string }>;
+  sources: Array<{ source_sha256: string; duration_pts: number; width: number; height: number; source_frame_count: number | null; display_rotation_degrees: 0 | 90 | 180 | 270; redacted_alias: string; recording_session_id: string; grouping_id: string; source_timeline?: { timestamp_status: "exact" | "approximate_legacy" | "unavailable"; frames: Array<{ source_frame_index: number; pts_sec: number | null; duration_sec: number | null; status: string; gap_before_sec: number }>; [key: string]: unknown } | null }>;
   events: GoldenEvent[];
   tracks: GoldenTrack[];
   poses: GoldenPose[];

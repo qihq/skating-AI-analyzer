@@ -21,13 +21,13 @@ function frameStem(frameName: string) {
   return frameName.replace(/\.jpg$/i, "");
 }
 
-function timestampForFrame(pose: PoseResponse, frame: PoseFrame, index: number) {
+function timestampForFrame(pose: PoseResponse, frame: PoseFrame) {
   const direct = pose.frame_timestamps?.[frame.frame] ?? pose.frame_timestamps?.[frameStem(frame.frame)];
   if (typeof direct === "number" && Number.isFinite(direct)) {
     return direct;
   }
-  const fps = typeof pose.effective_fps === "number" && pose.effective_fps > 0 ? pose.effective_fps : 5;
-  return index / fps;
+  const sourceFrameIndex = (frame as PoseFrame & { source_frame_index?: number }).source_frame_index;
+  return Number.isInteger(sourceFrameIndex) ? pose.source_timeline?.frames.find((item) => item.source_frame_index === sourceFrameIndex)?.pts_sec ?? null : null;
 }
 
 function formatMetric(value: number | null | undefined, unit: string, digits = 1) {
@@ -90,7 +90,8 @@ export default function ModernAnalysisWorkspace({ analysis, pose, selectedFrameI
   useEffect(() => {
     if (!pose || !selectedFrameId) return;
     const index = pose.frames.findIndex((frame) => frameStem(frame.frame) === selectedFrameId || frame.frame === selectedFrameId);
-    if (index >= 0) playerRef.current?.seek(timestampForFrame(pose, pose.frames[index], index));
+    const timestamp = index >= 0 ? timestampForFrame(pose, pose.frames[index]) : null;
+    if (timestamp != null) playerRef.current?.seek(timestamp);
   }, [pose, selectedFrameId]);
 
   return (
@@ -119,7 +120,9 @@ export default function ModernAnalysisWorkspace({ analysis, pose, selectedFrameI
             onTimeChange={(time) => {
               if (!pose?.frames?.length) return;
               const closest = pose.frames.reduce<{ frame: PoseFrame; index: number; delta: number } | null>((best, frame, index) => {
-                const delta = Math.abs(timestampForFrame(pose, frame, index) - time);
+                const timestamp = timestampForFrame(pose, frame);
+                if (timestamp == null) return best;
+                const delta = Math.abs(timestamp - time);
                 return !best || delta < best.delta ? { frame, index, delta } : best;
               }, null);
               if (closest) onFrameChange(frameStem(closest.frame.frame));
@@ -142,7 +145,7 @@ export default function ModernAnalysisWorkspace({ analysis, pose, selectedFrameI
           <div className="mt-4 rounded-md border border-white/10 bg-white/5 p-4">
             <p className="text-xs uppercase tracking-[0.18em] text-slate-400">å¸§é€Ÿä¿¡æ¯</p>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              {typeof pose?.effective_fps === "number" && pose.effective_fps > 0 ? `æœ‰æ•ˆ FPSï¼š${pose.effective_fps.toFixed(1)}` : "æœ‰æ•ˆ FPS æœªæä¾›ï¼ŒæŒ‰å¸§åºå·ä¼°ç®—æ—¶é—´ã€‚"}
+              {pose?.source_timeline?.timestamp_status === "exact" ? "Exact source PTS timeline" : pose?.frame_timestamps && Object.keys(pose.frame_timestamps).length ? "Legacy timestamps (approximate, not V2 evidence)" : "Source timestamps unavailable"}
             </p>
           </div>
           <div className="mt-4 rounded-md border border-white/10 bg-white/5 p-4">

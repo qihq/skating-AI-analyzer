@@ -4,7 +4,8 @@ import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, use
 import { useAppMode } from "../../components/AppModeContext";
 import { IceMediaPlayer } from "../../media/IceMediaPlayer";
 import { IslandButton, IslandCard, IslandTitle } from "../../modern/IslandSurface";
-import { attestGoldenReview, deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations, updateGoldenSource } from "../api";
+import { attestGoldenReview, deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceFrameImageUrl, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations, updateGoldenSource } from "../api";
+import { displayToSource, sourceBoxToDisplay, sourceToDisplay } from "../timebase";
 import type { ChallengeInterval, GoldenEvent, GoldenObservability, GoldenPose, GoldenProfile, GoldenReviewItem, GoldenTrack, GoldenWorkspace, IntervalDetails, JumpDetails, PhaseInterval, RotationLabel, SourceMoment, SpinDetails } from "../golden-contracts";
 
 const profiles: GoldenProfile[] = ["jump", "spin", "step", "spiral", "unknown"];
@@ -28,35 +29,6 @@ const jointConnections: Array<[typeof joints[number], typeof joints[number]]> = 
 type Point = { x: number; y: number };
 type BBox = { left: number; top: number; right: number; bottom: number };
 
-function sourceToDisplay(point: Point, rotation: 0 | 90 | 180 | 270): Point {
-  if (rotation === 90) return { x: 1 - point.y, y: point.x };
-  if (rotation === 180) return { x: 1 - point.x, y: 1 - point.y };
-  if (rotation === 270) return { x: point.y, y: 1 - point.x };
-  return point;
-}
-
-function displayToSource(point: Point, rotation: 0 | 90 | 180 | 270): Point {
-  if (rotation === 90) return { x: point.y, y: 1 - point.x };
-  if (rotation === 180) return { x: 1 - point.x, y: 1 - point.y };
-  if (rotation === 270) return { x: 1 - point.y, y: point.x };
-  return point;
-}
-
-function sourceBoxToDisplay(box: BBox, rotation: 0 | 90 | 180 | 270): BBox {
-  const corners = [
-    sourceToDisplay({ x: box.left, y: box.top }, rotation),
-    sourceToDisplay({ x: box.right, y: box.top }, rotation),
-    sourceToDisplay({ x: box.left, y: box.bottom }, rotation),
-    sourceToDisplay({ x: box.right, y: box.bottom }, rotation),
-  ];
-  return {
-    left: Math.min(...corners.map((point) => point.x)),
-    top: Math.min(...corners.map((point) => point.y)),
-    right: Math.max(...corners.map((point) => point.x)),
-    bottom: Math.max(...corners.map((point) => point.y)),
-  };
-}
-
 function blankEvent(sourceHash: string, now: number): GoldenEvent {
   return { event_id: uid("event"), source_sha256: sourceHash, start_pts: Math.max(0, now), end_pts: Math.max(0.1, now + 1), profile: "unknown", subtype: null, observability: "uncertain", strata: [], ambiguity_tags: [], failure_tags: [], annotator_confidence: 0.5, main_skater_confirmed: false, split: null, challenge_intervals: [] };
 }
@@ -75,6 +47,7 @@ export default function GoldenAnnotationWorkspace() {
   const [time, setTime] = useState(0);
   const [frame, setFrame] = useState<{ sourceFrameIndex: number; pts: number; duration: number | null } | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [sourceFrameImageUrl, setSourceFrameImageUrl] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [offline, setOffline] = useState(!navigator.onLine);
@@ -122,13 +95,15 @@ export default function GoldenAnnotationWorkspace() {
     return () => { active = false; };
   }, [parentPin, sourceHash]);
   useEffect(() => () => { if (mediaUrl) URL.revokeObjectURL(mediaUrl); }, [mediaUrl]);
+  useEffect(() => () => { if (sourceFrameImageUrl) URL.revokeObjectURL(sourceFrameImageUrl); }, [sourceFrameImageUrl]);
 
   const source = workspace?.sources.find((item) => item.source_sha256 === sourceHash) ?? null;
   const events = useMemo(() => workspace?.events.filter((item) => item.source_sha256 === sourceHash) ?? [], [workspace, sourceHash]);
   const selected = events.find((item) => item.event_id === selectedEvent) ?? null;
   const tracks = useMemo(() => workspace?.tracks.filter((item) => item.event_id === selectedEvent) ?? [], [workspace, selectedEvent]);
   const poses = useMemo(() => workspace?.poses.filter((item) => item.event_id === selectedEvent) ?? [], [workspace, selectedEvent]);
-  const frameIndex = frame?.sourceFrameIndex ?? Math.max(0, Math.round(time * (source?.source_frame_count && source.duration_pts ? source.source_frame_count / source.duration_pts : 30)));
+  const exactTimeline = source?.source_timeline?.timestamp_status === "exact" ? source.source_timeline : null;
+  const frameIndex = frame?.sourceFrameIndex ?? (exactTimeline?.frames.find((item) => item.pts_sec != null)?.source_frame_index ?? 0);
   const currentMoment = (): SourceMoment | null => frame ? { pts: frame.pts, source_frame_index: frame.sourceFrameIndex } : null;
   useEffect(() => {
     setSourceAlias(source?.redacted_alias ?? "");
@@ -199,7 +174,7 @@ export default function GoldenAnnotationWorkspace() {
     {boxPreview ? (() => { const box = sourceBoxToDisplay(boxPreview, source.display_rotation_degrees); return <rect className="golden-annotation__box-preview" x={box.left * displayWidth} y={box.top * displayHeight} width={(box.right - box.left) * displayWidth} height={(box.bottom - box.top) * displayHeight} />; })() : null}
   </svg> : null;
   const requireSourceFrame = () => {
-    if (frame) return true;
+    if (frame && frame.pts != null) return true;
     setMessage("Step to the exact private source frame before capturing a moment, box, or pose joint.");
     return false;
   };
@@ -209,6 +184,8 @@ export default function GoldenAnnotationWorkspace() {
     try {
       const next = await fetchGoldenSourceFrame(parentPin, source.source_sha256, Math.max(0, frameIndex + direction));
       pendingFrameSeek.current = next.pts; setFrame(next); setTime(next.pts);
+      const imageUrl = await fetchGoldenSourceFrameImageUrl(parentPin, source.source_sha256, next.sourceFrameIndex);
+      setSourceFrameImageUrl((previous) => { if (previous) URL.revokeObjectURL(previous); return imageUrl; });
       setMessage(`已定位到第 ${next.sourceFrameIndex} 帧（${next.pts.toFixed(6)} 秒）。`);
     } catch { setFrame(null); pendingFrameSeek.current = null; setMessage("源帧不可用，没有保存任何修改。"); }
   };
@@ -356,7 +333,7 @@ export default function GoldenAnnotationWorkspace() {
   return <div className="golden-annotation" data-testid="golden-annotation-workspace">
     <IslandCard className="modern-me-panel golden-annotation__guide" tone="sky"><IslandTitle>上传以后做什么？</IslandTitle><ol><li className={source ? "is-done" : ""}><strong>选择视频</strong><span>从下拉框打开刚上传或以前上传的视频。</span></li><li className={selected ? "is-done" : ""}><strong>新建一个动作</strong><span>播放到动作附近，点击“在当前时间新建动作”。</span></li><li className={selected?.profile !== "unknown" ? "is-done" : ""}><strong>标类型和区间</strong><span>选择跳跃、旋转、步法或燕式，并填写开始/结束时间。</span></li><li className={selected?.main_skater_confirmed ? "is-done" : ""}><strong>确认主滑手</strong><span>勾选主滑手，在动作中选 3-8 个清晰帧添加人物框。</span></li><li className={!dirty && Boolean(selected) ? "is-done" : ""}><strong>保存</strong><span>补动作专属时刻后保存。Pose 只需少量抽样，可以暂不标。</span></li></ol><p><strong>普通事件最少要标：</strong>动作区间、类型、可观察性、主滑手、动作专属时刻，以及 3-8 个主滑手框。场景标签、困难区间和 Pose 按实际情况补充。</p><p><strong>当前目标是 36 个真实动作事件。</strong>不用为了凑 60-80 个而重复素材；后续缺哪类，再补拍新的场次或难例。</p></IslandCard>
     <IslandCard className="modern-me-panel"><IslandTitle>1. 视频库</IslandTitle><div className="golden-annotation__source-fields"><label>标注人<input value={annotator} onChange={(event) => setAnnotator(event.target.value)} /></label><label>新视频录制场次<input aria-label="Recording-session alias" value={sessionAlias} onChange={(event) => setSessionAlias(event.target.value)} placeholder="例如 session-01" /></label><label>新视频分组<input aria-label="Grouping alias" value={groupAlias} onChange={(event) => setGroupAlias(event.target.value)} placeholder="同一次拍摄填相同分组" /></label><label>上传新视频<input aria-label="Import private source video" type="file" accept="video/*" onChange={upload} /></label></div><label>已上传视频<select aria-label="Golden source" value={sourceHash ?? ""} onChange={(event) => { setSourceHash(event.target.value); setSelectedEvent(null); setFrame(null); setTime(0); }}>{workspace?.sources.map((item) => <option key={item.source_sha256} value={item.source_sha256}>{item.redacted_alias} · {workspace.events.filter((entry) => entry.source_sha256 === item.source_sha256).length} 个动作</option>)}</select></label>{source ? <><div className="golden-annotation__source-edit"><label>显示名称<input value={sourceAlias} onChange={(event) => setSourceAlias(event.target.value)} /></label><label>录制场次<input value={sourceSession} onChange={(event) => setSourceSession(event.target.value)} /></label><label>分组<input value={sourceGroup} onChange={(event) => setSourceGroup(event.target.value)} /></label></div><div className="golden-annotation__actions"><IslandButton variant="secondary" onClick={() => void saveSourceMetadata()}>保存视频信息</IslandButton><IslandButton variant="quiet" className="golden-annotation__danger" onClick={() => void deleteSource()}>删除此视频和标签</IslandButton></div><p>时长 {source.duration_pts.toFixed(3)} 秒，{source.width}x{source.height}。私有路径不会显示或导出。</p></> : <p>请先上传一个新选择的视频。历史 debug 素材不能用于 V2 Golden。</p>}</IslandCard>
-    {source ? <IslandCard className="modern-me-panel"><IslandTitle>2. 播放并观察标注</IslandTitle>{mediaUrl ? <IceMediaPlayer className={`golden-annotation__player${displayWidth && displayHeight && displayHeight > displayWidth ? " is-portrait" : " is-landscape"}`} fallbackSrc={mediaUrl} markers={markers} aspectRatio={displayWidth && displayHeight ? displayWidth / displayHeight : undefined} onTimeChange={(value) => { const pending = pendingFrameSeek.current; if (pending != null && Math.abs(value - pending) > .04) return; pendingFrameSeek.current = null; setTime(value); if (frame && Math.abs(frame.pts - value) > Math.max(frame.duration ?? .04, .04)) setFrame(null); }} seekTime={frame?.pts ?? null} sourceFrame={frame} onStepSourceFrame={step} unavailableFrame={message?.startsWith("源帧不可用") ?? false} overlay={annotationOverlay} /> : <p>正在授权私有视频…</p>}<p>当前时间 {time.toFixed(6)} 秒；源帧 {frameIndex}。用上一帧/下一帧锁定精确帧后，当前帧的主滑手框和 Pose 会叠加显示。</p><div className="golden-annotation__legend"><span className="is-confirmed">主滑手框</span><span className="is-pose">Pose 抽样</span><span>时间轴圆点：动作与关键时刻</span></div></IslandCard> : null}
+    {source ? <IslandCard className="modern-me-panel"><IslandTitle>2. 播放并观察标注</IslandTitle>{mediaUrl ? <IceMediaPlayer className={`golden-annotation__player${displayWidth && displayHeight && displayHeight > displayWidth ? " is-portrait" : " is-landscape"}`} fallbackSrc={mediaUrl} markers={markers} aspectRatio={displayWidth && displayHeight ? displayWidth / displayHeight : undefined} onTimeChange={(value) => { const pending = pendingFrameSeek.current; if (pending != null && Math.abs(value - pending) > .04) return; pendingFrameSeek.current = null; setTime(value); if (frame && Math.abs(frame.pts - value) > Math.max(frame.duration ?? .04, .04)) setFrame(null); }} seekTime={frame?.pts ?? null} sourceFrame={frame} onStepSourceFrame={step} unavailableFrame={message?.startsWith("源帧不可用") ?? false} overlay={annotationOverlay} /> : <p>正在授权私有视频…</p>}{sourceFrameImageUrl ? <img src={sourceFrameImageUrl} alt="Exact source frame refinement" className="mt-3 max-h-64 w-auto rounded" /> : null}<p>当前时间 {time.toFixed(6)} 秒；源帧 {frameIndex}。用上一帧/下一帧锁定精确帧后，当前帧的主滑手框和 Pose 会叠加显示。</p><div className="golden-annotation__legend"><span className="is-confirmed">主滑手框</span><span className="is-pose">Pose 抽样</span><span>时间轴圆点：动作与关键时刻</span></div></IslandCard> : null}
     <div className="golden-annotation__grid"><IslandCard className="modern-me-panel"><IslandTitle>3. 动作记录</IslandTitle><IslandButton onClick={createEvent} disabled={!source}>在当前时间新建动作</IslandButton><div className="golden-annotation__events">{events.map((event) => <button type="button" className={event.event_id === selectedEvent ? "is-active" : ""} key={event.event_id} onClick={() => setSelectedEvent(event.event_id)}>{profileNames[event.profile]} {event.start_pts.toFixed(2)}-{event.end_pts.toFixed(2)} 秒</button>)}</div>{selected ? <IslandButton variant="quiet" className="golden-annotation__danger" onClick={deleteEvent}>删除当前动作</IslandButton> : <p>{events.length ? "请选择上方已有动作继续编辑。" : "还没有动作。播放到动作附近后，点击上方按钮创建第一个动作。"}</p>}</IslandCard>
     <IslandCard className="modern-me-panel"><IslandTitle>4. 人工真值</IslandTitle>{selected ? <div className="golden-annotation__form"><label>动作类型<select aria-label="Profile" value={selected.profile} onChange={(event) => selectProfile(event.target.value as GoldenProfile)}>{profiles.map((profile) => <option key={profile} value={profile}>{profileNames[profile]}</option>)}</select></label><label>动作细分（可选）<input value={selected.subtype ?? ""} onChange={(event) => updateEvent({ subtype: event.target.value || null })} placeholder="不确定可留空" /></label><label>场景标签（可选）<input aria-label="Scene strata" value={selected.strata.join(", ")} onChange={(event) => updateEvent({ strata: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} placeholder="normal, multi-skater, blur" /></label><label>数据分区<select value={selected.split ?? ""} onChange={(event) => updateEvent({ split: (event.target.value || null) as GoldenEvent["split"] })}><option value="">稍后分配</option><option value="development">开发集</option><option value="validation">验证集</option><option value="frozen_test">冻结测试集</option></select></label><label>动作开始（秒）<input type="number" step="0.001" value={selected.start_pts} onChange={(event) => updateEvent({ start_pts: numberValue(event.target.value) })} /></label><label>动作结束（秒）<input type="number" step="0.001" value={selected.end_pts} onChange={(event) => updateEvent({ end_pts: numberValue(event.target.value) })} /></label><label>可观察性<select value={selected.observability} onChange={(event) => updateEvent({ observability: event.target.value as GoldenObservability, ...(event.target.value === "unobservable" ? { jump: null, spin: null, step: null, spiral: null } : {}) })}><option value="observable">看得清</option><option value="uncertain">不太确定</option><option value="unobservable">画面不足，无法判断</option></select></label><label><input type="checkbox" checked={selected.main_skater_confirmed} onChange={(event) => updateEvent({ main_skater_confirmed: event.target.checked })} /> 已确认画面中的主滑手</label><label>我的把握（0-1）<input type="number" min="0" max="1" step="0.05" value={selected.annotator_confidence} onChange={(event) => updateEvent({ annotator_confidence: numberValue(event.target.value) })} /></label>
       {selected.observability !== "unobservable" && selected.profile === "jump" ? <section className="golden-annotation__details"><h3>跳跃关键时刻</h3>{momentEditor("起跳", "takeoff", selected.jump?.takeoff)}{momentEditor("最高点", "apex", selected.jump?.apex)}{momentEditor("落冰", "landing", selected.jump?.landing)}{rotationEditor("jump", selected.jump?.rotation)}</section> : null}

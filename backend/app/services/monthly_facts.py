@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import re
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
@@ -292,6 +293,21 @@ def _representative_frames(
                 continue
             ts = timestamps.get(phase_code) if isinstance(timestamps, dict) else None
             ts_value = float(ts) if isinstance(ts, (int, float)) else 0.0
+            source_frame_index = None
+            source_pts = ts_value if isinstance(ts, (int, float)) else None
+            timing_status = "approximate_legacy"
+            try:
+                from app.analysis_v2.evaluation.source_media import probe_source, source_frame_index as build_source_index
+                video_path = Path(str(analysis.video_path))
+                if video_path.exists():
+                    timeline = build_source_index(video_path, metadata=probe_source(video_path))
+                    timing_status = timeline.timestamp_status
+                    if source_pts is not None and timeline.exact:
+                        resolved = timeline.frame_at_pts(source_pts)
+                        source_frame_index = resolved.source_frame_index
+                        source_pts = resolved.pts_sec
+            except Exception:
+                pass
             label = {"L": "落冰", "A": "腾空", "T": "起跳"}.get(phase_code, phase_code)
             evidence = "milestone" if priority == 0 else quality
             candidates.append((priority, analysis, frame_id, label, ts_value))
@@ -309,6 +325,9 @@ def _representative_frames(
                 "analysis_id": analysis.id,
                 "frame_id": frame_id,
                 "timestamp": ts,
+                "source_frame_index": source_frame_index,
+                "source_pts": source_pts,
+                "timing_status": timing_status,
                 "phase": label,
                 "evidence_source": "milestone" if analysis.id in milestone_set else "quality",
             }

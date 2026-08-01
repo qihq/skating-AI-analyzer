@@ -9,6 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PACK_DIR = REPO_ROOT / "ai_skating_analysis_pack"
 SERVICES_DIR = REPO_ROOT / "backend" / "app" / "services"
 PACK_SERVICES_DIR = PACK_DIR / "src" / "app" / "services"
+V2_DIR = REPO_ROOT / "backend" / "app" / "analysis_v2"
+PACK_V2_DIR = PACK_DIR / "src" / "app" / "analysis_v2"
 def _load_script(name: str):
     path = PACK_DIR / name
     spec = importlib.util.spec_from_file_location(f"test_{name[:-3]}", path)
@@ -40,6 +42,8 @@ class AiPackGenerationTests(unittest.TestCase):
                 (SERVICES_DIR / name).read_bytes(),
                 (PACK_SERVICES_DIR / name).read_bytes(),
             )
+        for name in rebuild.V2_FILES:
+            self.assertEqual((V2_DIR / name).read_bytes(), (PACK_V2_DIR / name).read_bytes())
 
 
 if __name__ == "__main__":

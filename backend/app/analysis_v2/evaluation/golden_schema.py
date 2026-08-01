@@ -64,6 +64,7 @@ class GoldenSourceVideo(_StrictModel):
     average_fps: float | None = Field(default=None, gt=0, le=1_000)
     nominal_fps: float | None = Field(default=None, gt=0, le=1_000)
     display_rotation_degrees: Literal[0, 90, 180, 270] = 0
+    source_timeline: dict[str, object] | None = None
 
 
 class SourceMoment(_StrictModel):

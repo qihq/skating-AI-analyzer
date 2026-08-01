@@ -46,6 +46,7 @@ describe("analysis experience v2 contract", () => {
     events: [],
     claims: [],
     review_tasks: [],
+    source_timeline: null,
   };
 
   it("decodes historical whole-record experience", () => {
@@ -77,5 +78,11 @@ describe("analysis experience v2 contract", () => {
   it("rejects selector authority or fingerprint mismatch", () => {
     const decoded = decodeAnalysisExperienceV2(base);
     expect(() => selectClaim(decoded, "action", { authority: "v2", sourcePipelineFingerprint: "v2:1" })).toThrow();
+  });
+
+  it("decodes exact source timeline identity and explicit gaps", () => {
+    const decoded = decodeAnalysisExperienceV2({ ...base, source_timeline: { schema_version: "source-timeline.v1", source_video_hash: "sha256:video", duration_sec: 2, width: 1920, height: 1080, rotation_degrees: 90, timestamp_status: "exact", frames: [{ source_frame_index: 0, pts_sec: 0, duration_sec: .033, status: "available", gap_before_sec: 0 }], decode_gaps: [], pts_discontinuities: [], fingerprint: "fp" } });
+    expect(decoded.sourceTimeline?.timestampStatus).toBe("exact");
+    expect(decoded.sourceTimeline?.frames[0].sourceFrameIndex).toBe(0);
   });
 });

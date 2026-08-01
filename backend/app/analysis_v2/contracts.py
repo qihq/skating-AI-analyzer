@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -28,12 +28,87 @@ class FrameObservation(ContractModel):
     occlusion_context: str | None = None
     pipeline_version: str = Field(min_length=1)
     timing_provenance: Literal["source_pts", "legacy_approximate"] = "source_pts"
+    frame_status: Literal["available", "duplicate_pts", "gap_after_previous", "discontinuity", "timestamp_unavailable"] = "available"
+    gap_before_sec: float = Field(default=0, ge=0)
+    source_image_size: tuple[int, int] | None = None
+    tracking_proxy_size: tuple[int, int] | None = None
 
     @model_validator(mode="after")
     def valid_size(self) -> "FrameObservation":
         if self.image_size[0] <= 0 or self.image_size[1] <= 0:
             raise ValueError("image_size must be positive")
+        if self.source_image_size is not None and (self.source_image_size[0] <= 0 or self.source_image_size[1] <= 0):
+            raise ValueError("source_image_size must be positive")
+        if self.tracking_proxy_size is not None and (self.tracking_proxy_size[0] <= 0 or self.tracking_proxy_size[1] <= 0):
+            raise ValueError("tracking_proxy_size must be positive")
+        if self.timing_provenance == "source_pts" and self.frame_status == "timestamp_unavailable":
+            raise ValueError("timestamp-unavailable observations must be marked approximate")
         return self
+
+
+class ObservationStream(ContractModel):
+    schema_version: Literal["observation-stream.v1"] = "observation-stream.v1"
+    source_video_hash: str = Field(min_length=1)
+    source_index_fingerprint: str = Field(min_length=1)
+    sampling_strategy: Literal["dense_source_order_low_resolution"] = "dense_source_order_low_resolution"
+    observations: tuple[FrameObservation, ...] = ()
+    exact_timestamps: bool = True
+
+    @model_validator(mode="after")
+    def observations_are_ordered(self) -> "ObservationStream":
+        indexes = [item.source_frame_index for item in self.observations]
+        if indexes != sorted(indexes):
+            raise ValueError("observation stream must preserve source order")
+        if any(item.source_video_hash != self.source_video_hash for item in self.observations):
+            raise ValueError("observation source hashes must match stream")
+        if self.exact_timestamps and any(item.timing_provenance != "source_pts" for item in self.observations):
+            raise ValueError("exact observation streams cannot contain approximate timestamps")
+        return self
+
+
+class PhysicalMetricInput(ContractModel):
+    """Timestamp-only input for V2 physical calculations."""
+
+    observations: tuple[FrameObservation, ...] = Field(min_length=1)
+    required_timestamp_status: Literal["exact"] = "exact"
+
+    @model_validator(mode="after")
+    def requires_exact_timestamps(self) -> "PhysicalMetricInput":
+        if any(item.timing_provenance != "source_pts" or item.frame_status == "timestamp_unavailable" for item in self.observations):
+            raise ValueError("physical metrics require exact source PTS observations")
+        return self
+
+
+def reject_legacy_physical_payload(payload: Mapping[str, Any]) -> None:
+    forbidden = {"effective_fps", "sampled_frame_count", "average_fps", "frame_count"} & set(payload)
+    if forbidden:
+        raise ValueError("V2 physical metrics cannot accept sampled-frame or FPS-only timing: " + ", ".join(sorted(forbidden)))
+
+
+def observation_stream_from_source_index(index: Any, *, pipeline_version: str, proxy_size: tuple[int, int]) -> ObservationStream:
+    """Create the dense tracking stream from the canonical source index."""
+    observations = tuple(
+        FrameObservation(
+            source_video_hash=index.source_video_hash,
+            source_frame_index=frame.source_frame_index,
+            pts_sec=frame.pts_sec if frame.pts_sec is not None else 0.0,
+            duration_sec=frame.duration_sec or 0.000001,
+            image_size=proxy_size,
+            source_image_size=frame.image_size or (index.width, index.height),
+            tracking_proxy_size=proxy_size,
+            pipeline_version=pipeline_version,
+            timing_provenance="source_pts" if frame.pts_sec is not None and index.timestamp_status == "exact" else "legacy_approximate",
+            frame_status=frame.status,
+            gap_before_sec=frame.gap_before_sec,
+        )
+        for frame in index.frames
+    )
+    return ObservationStream(
+        source_video_hash=index.source_video_hash,
+        source_index_fingerprint=index.fingerprint(),
+        observations=observations,
+        exact_timestamps=index.exact,
+    )
 
 
 class TrackCandidate(ContractModel):
