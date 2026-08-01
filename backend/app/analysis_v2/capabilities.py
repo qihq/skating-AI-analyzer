@@ -22,7 +22,7 @@ class RuntimeCapabilities(BaseModel):
     supported_analysis_experience_schema_versions: list[str]
     runtime_mode: PipelineMode
     public_authority: Literal["legacy"]
-    analysis_experience_v2_enabled: Literal[False] = False
+    analysis_experience_v2_enabled: Literal[True] = True
     parent_tools: ParentToolCapabilities
 
 
@@ -41,7 +41,7 @@ class AdvancedRuntimeCapabilities(BaseModel):
 
 def build_public_capabilities(config: RuntimeConfig) -> RuntimeCapabilities:
     return RuntimeCapabilities(
-        supported_analysis_experience_schema_versions=[],
+        supported_analysis_experience_schema_versions=["analysis-experience.v2"],
         runtime_mode=config.pipeline_mode,
         public_authority="legacy",
         parent_tools=ParentToolCapabilities(shadow=True, golden=True, diagnostics=True),

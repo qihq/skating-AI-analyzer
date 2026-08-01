@@ -21,7 +21,8 @@ def test_public_capability_is_legacy_authoritative_in_shadow_mode(tmp_path: Path
 
     assert payload["runtime_mode"] == "shadow"
     assert payload["public_authority"] == "legacy"
-    assert payload["analysis_experience_v2_enabled"] is False
+    assert payload["analysis_experience_v2_enabled"] is True
+    assert payload["supported_analysis_experience_schema_versions"] == ["analysis-experience.v2"]
     assert str(tmp_path) not in str(payload)
     assert "runtime_root" not in payload
     assert "database_url" not in payload

@@ -2,6 +2,8 @@ import axios from "axios";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import { AnalysisExperienceV2 } from "../analysis-v2/contracts";
 import { AnalysisDetail, fetchAnalysis, fetchGrowthSummary, fetchSkaters, GrowthSummary, Skater } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import IslandIcon from "./IslandIcon";
@@ -14,12 +16,18 @@ function message(error: unknown) {
   return "岛上信号有点弱，部分成长信息暂时没有更新，请稍后再试。";
 }
 
+function claimValue(experience: AnalysisExperienceV2 | null, type: string): string | null {
+  const claim = experience?.claims.find((item) => item.claimType === type);
+  return claim?.status === "unobservable" ? null : claim?.value == null ? null : String(claim.value);
+}
+
 export default function ModernTodayIsland() {
   const { isParentMode } = useAppMode();
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [summary, setSummary] = useState<GrowthSummary | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisDetail | null>(null);
+  const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,14 +48,20 @@ export default function ModernTodayIsland() {
     setError(null);
     setSummary(null);
     setAnalysis(null);
+    setExperience(null);
     const loadSummary = async () => {
       try {
         const nextSummary = await fetchGrowthSummary(selectedId);
         if (cancelled) return;
         setSummary(nextSummary);
         if (nextSummary.latest_analysis_id) {
-          const nextAnalysis = await fetchAnalysis(nextSummary.latest_analysis_id);
-          if (!cancelled) setAnalysis(nextAnalysis);
+          try {
+            const nextExperience = await fetchAnalysisExperienceV2(nextSummary.latest_analysis_id);
+            if (!cancelled) setExperience(nextExperience);
+          } catch {
+            const nextAnalysis = await fetchAnalysis(nextSummary.latest_analysis_id);
+            if (!cancelled) setAnalysis(nextAnalysis);
+          }
         }
       } catch (reason) {
         if (!cancelled) setError(message(reason));
@@ -60,7 +74,9 @@ export default function ModernTodayIsland() {
   }, [selectedId]);
 
   const selected = useMemo(() => skaters.find((item) => item.id === selectedId), [selectedId, skaters]);
-  const nextAction = analysis?.report?.improvements?.[0]?.action ?? analysis?.report?.training_focus ?? summary?.current_focus?.label;
+  const nextAction = claimValue(experience, "next_action") ?? analysis?.report?.improvements?.[0]?.action ?? analysis?.report?.training_focus ?? summary?.current_focus?.label;
+  const latestSummary = claimValue(experience, "report_summary") ?? analysis?.report?.summary;
+  const latestProfile = experience?.events[0]?.profile ?? analysis?.action_type ?? summary?.current_focus?.label;
 
   return (
     <div className="today-island">
@@ -84,7 +100,7 @@ export default function ModernTodayIsland() {
             <div className="today-island__hero-copy">
               <IslandTitle as="h2">今天先做这件事</IslandTitle>
               <h2>{nextAction || "上传一段训练视频，开始第一次复盘"}</h2>
-              <p>{analysis?.report?.summary || "一次只看一个重点，让每次训练都留下清楚的成长线索。"}</p>
+              <p>{latestSummary || "一次只看一个重点，让每次训练都留下清楚的成长线索。"}</p>
               <Link className="island-cta" to="/review"><IslandIcon name="review" />开始复盘</Link>
             </div>
             <div className="today-island__rink" aria-hidden="true"><span>⛸</span><i /><b /></div>
@@ -108,8 +124,8 @@ export default function ModernTodayIsland() {
 
           <IslandCard className="today-island__latest">
             <IslandTitle>最近的进步</IslandTitle>
-            <h3>{analysis?.action_type || summary?.current_focus?.label || "等待第一次记录"}</h3>
-            <p>{analysis?.report?.summary || "完成复盘后，岛上会为你保存训练结论和成长里程碑。"}</p>
+            <h3>{latestProfile || "等待第一次记录"}</h3>
+            <p>{latestSummary || "完成复盘后，岛上会为你保存训练结论和成长里程碑。"}</p>
             <div className="today-island__latest-actions">
               {summary?.latest_analysis_id ? <Link to={`/analysis/${summary.latest_analysis_id}`}>查看分析 <IslandIcon name="arrow" /></Link> : null}
               <Link to="/growth">打开成长群岛 <IslandIcon name="arrow" /></Link>

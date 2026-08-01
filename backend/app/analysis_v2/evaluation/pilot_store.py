@@ -128,7 +128,7 @@ class PilotEvaluationStore:
             },
         )
 
-    def run(self, bundle: PilotPredictionBundle) -> dict[str, Any]:
+    def run(self, bundle: PilotPredictionBundle, *, diagnostic_snapshot: bool = False) -> dict[str, Any]:
         try:
             dataset = self.golden_store.ensure_initialized()
             progress = collection_progress(dataset, self.golden_store)
@@ -136,7 +136,7 @@ class PilotEvaluationStore:
             status = {"status": "invalid_labels", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "Golden labels could not be validated."}
             self._write(self.status_path, status)
             return status
-        if progress["status"] != "ready_for_evaluator":
+        if progress["status"] != "ready_for_evaluator" and not diagnostic_snapshot:
             status = {"status": "waiting_for_owner_labels", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "G1 needs owner-confirmed real labels before evaluation.", "progress": progress}
             self._write(self.status_path, status)
             return status
@@ -152,6 +152,9 @@ class PilotEvaluationStore:
             self._write(self.status_path, status)
             return status
 
+        run_scope = "snapshot_diagnostic" if diagnostic_snapshot else "formal_g1"
+        private["run_scope"] = run_scope
+        sanitized["run_scope"] = run_scope
         previous = self._read(self.sanitized_report_path) if self.sanitized_report_path.exists() else None
         diff = _sanitized_diff(previous, sanitized)
         has_failures = bool(sanitized["failed_events"])

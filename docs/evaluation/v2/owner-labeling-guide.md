@@ -14,10 +14,12 @@
 
 Protocol: collect at least five recording sessions (prefer eight or more), never split a source or session across development/validation/frozen-test, re-label at least 10 percent after a delay, and double-review ambiguous rotation and frozen-test crossings. Unobservable fields are excluded from ordinary accuracy denominators but are counted and reported. The first pose pass covers 50-100 representative frames across the whole dataset, not every frame.
 
-当前先完成 G1 的 36 个真实动作事件，不需要为了凑 60-80 个而复制或重复使用素材。之后只按 profile、场景和录制场次缺口补拍；没有足够素材时保持 gate 未通过，不用伪造覆盖率。
+当前执行顺序调整为：先使用已经标注的 12 个视频跑一轮端到端 pilot，再继续工程实现；实现完成后再按小批次慢慢补标。12 个视频的结果只用于发现流程、时间轴、身份、事件和资源问题，不自动视为 G1/G2 或发布验收。正式 G1 仍需 36 个真实动作事件，G2 仍需 60-80 个事件；按事件计数，不按视频数量计数。之后只按 profile、场景和录制场次缺口补拍；没有足够素材时保持 gate 未通过，不用伪造覆盖率。
+
+建议补标节奏：每批 6-12 个视频或 10-15 个动作事件，批次结束后检查重复源、录制场次分组、profile/场景缺口和延迟复标要求。先完成当前实现再补标，不需要为了等待 36 个事件而暂停工程验证。
 
 Suggestions are never Ground Truth. Frozen-test first-pass suggestions are rejected by the server; all human-confirmed fields carry annotator, timestamp, and revision history.
 
 ## Iteration 3 pilot
 
-The dashboard at `/golden` shows the exact G1 profile and scene gaps, raw denominators, confidence intervals, review requirements, and failed-event links. The 36-event pilot is diagnostic only and cannot be presented as release approval. Evaluator runs remain blocked as `waiting_for_owner_labels` until all real-event, grouping, duplicate, source-frame, delayed-review, and double-review checks pass.
+The dashboard at `/golden` shows the exact G1 profile and scene gaps, raw denominators, confidence intervals, review requirements, and failed-event links. The 12-video snapshot may be run only through the parent-authorized `diagnostic_snapshot=true` evaluator mode; it is diagnostic-only and cannot be presented as release approval. Formal G1 runs remain `waiting_for_owner_labels` until all real-event, grouping, duplicate, source-frame, delayed-review, and double-review checks pass.

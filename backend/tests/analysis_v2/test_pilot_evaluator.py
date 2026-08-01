@@ -10,6 +10,7 @@ from app.analysis_v2.evaluation.pilot_evaluator import (
     PilotPredictionBundle,
     evaluate_pilot,
 )
+from app.analysis_v2.evaluation.legacy_prediction_adapter import build_pilot_prediction_bundle
 
 
 HASH = "a" * 64
@@ -86,6 +87,46 @@ def _bundle(predictions: list[dict], masks: list[str]) -> PilotPredictionBundle:
 
 def _identity() -> dict:
     return {"source_sha256": HASH, "event_id": "event-a"}
+
+
+def test_legacy_prediction_adapter_maps_safe_action_fields_without_private_paths() -> None:
+    dataset = _dataset()
+    bundle = build_pilot_prediction_bundle(
+        dataset,
+        {
+            HASH: {
+                "analysis_profile": "spin",
+                "status": "failed",
+                "video_temporal_diagnostics": {
+                    "video_ai_provider": "mimo",
+                    "video_ai_model": "mimo-v2.5",
+                    "fallback_reason": "video_temporal_auth_error",
+                    "used_semantic_frames": False,
+                    "used_legacy_sampled_frames": True,
+                },
+                "video_path": "C:/private/video.mp4",
+            }
+        },
+        pipeline_fingerprint="legacy-api-pilot-20260801",
+        evaluation_masks=["action"],
+    )
+
+    prediction = bundle.predictions[0]
+    assert prediction.predicted_profile == "spin"
+    assert prediction.input_payload["provider"] == "mimo"
+    assert "video_path" not in prediction.input_payload
+
+
+def test_legacy_prediction_adapter_omits_missing_analysis_rows() -> None:
+    dataset = _dataset()
+    bundle = build_pilot_prediction_bundle(
+        dataset,
+        {},
+        pipeline_fingerprint="legacy-api-pilot-20260801",
+        evaluation_masks=["action"],
+    )
+
+    assert bundle.predictions == []
 
 
 def test_missing_track_frame_stays_in_denominator_and_lowers_coverage() -> None:

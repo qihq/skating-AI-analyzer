@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
+import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import { AnalysisExperienceV2 } from "../analysis-v2/contracts";
 import ReportPage from "../pages/ReportPage";
 import ReportWorkspacePage, { WorkspaceTab } from "../pages/ReportWorkspacePage";
 import { IslandPageHeader } from "./IslandSurface";
@@ -16,6 +19,7 @@ const ITEMS = [
 
 export default function ModernAnalysisDetail({ initialView }: { initialView?: AnalysisView }) {
   const { id } = useParams<{ id: string }>();
+  const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [params] = useSearchParams();
   const view = resolveAnalysisView({ initialView, view: params.get("view"), legacyTab: params.get("tab") });
   const sectionItems = ITEMS.map((item) => ({
@@ -26,6 +30,16 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
     moments: "evidence", body: "pose", ask: "followup", more: "diagnostics",
   };
 
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    setExperience(null);
+    void fetchAnalysisExperienceV2(id)
+      .then((next) => { if (!cancelled) setExperience(next); })
+      .catch(() => { if (!cancelled) setExperience(null); });
+    return () => { cancelled = true; };
+  }, [id]);
+
   return (
     <div className="modern-space modern-analysis-detail">
       <IslandPageHeader
@@ -34,6 +48,15 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
         action={<Link className="island-button island-button--secondary" to="/review">返回冰场小屋</Link>}
       />
       <SectionNav label="分析详情分区" items={sectionItems} activeId={view} />
+      {experience ? (
+        <section className="modern-analysis-detail__experience" data-testid="analysis-experience-contract" aria-label="分析契约状态">
+          <strong>{experience.authority === "v2" ? "V2" : "Legacy"}</strong>
+          <span>{experience.diagnosticOnly ? "Diagnostic only" : experience.familyUsable ? "Ready" : "Unavailable"}</span>
+          {experience.claims.find((claim) => claim.claimType === "report_summary")?.value != null ? (
+            <p>{String(experience.claims.find((claim) => claim.claimType === "report_summary")?.value)}</p>
+          ) : null}
+        </section>
+      ) : null}
       <div className="modern-analysis-detail__content">
         {view === "summary" ? <ReportPage /> : <ReportWorkspacePage forcedTab={workspaceTab[view]} hideHeader />}
       </div>

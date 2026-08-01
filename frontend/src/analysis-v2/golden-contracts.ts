@@ -82,12 +82,32 @@ export type PilotSanitizedResult = {
   dataset_fingerprint: string;
   pipeline_fingerprint: string;
   evaluation_masks: string[];
+  run_scope?: "snapshot_diagnostic" | "formal_g1";
   diagnostic_only: true;
   release_claim: false;
   deterministic_fingerprint: string;
   repeatability: { deterministic: true; fingerprint: string };
   aggregate: Record<string, unknown>;
   failed_events: Array<{ alias: string; profile: GoldenProfile; strata: string[]; failure_codes: string[] }>;
+};
+
+export type GoldenG2Status = {
+  schema_version: "golden-g2-status.v1";
+  gate: "G2";
+  status: "collecting" | "ready_to_freeze" | "frozen_waiting_for_baseline" | "baseline_recorded";
+  event_count: number;
+  required_event_range: number[];
+  distribution: {
+    profiles: Record<string, number>;
+    splits: Record<string, number>;
+    strata: Record<string, number>;
+    recording_session_count: number;
+  };
+  dataset_revision?: number | null;
+  dataset_fingerprint?: string | null;
+  legacy_pipeline_fingerprint?: string | null;
+  baseline_result_fingerprint?: string | null;
+  release_claim: false;
 };
 
 export function isPilotSanitizedResult(value: unknown): value is PilotSanitizedResult {

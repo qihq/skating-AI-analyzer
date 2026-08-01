@@ -29,19 +29,19 @@ describe("CapabilityProvider", () => {
     expect(screen.getByText("false")).toBeInTheDocument();
   });
 
-  it("accepts compatible capabilities without enabling V2 in shadow mode", async () => {
+  it("accepts the presenter contract while keeping legacy public authority in shadow mode", async () => {
     mockedFetch.mockResolvedValue({
       schemaVersion: "runtime-capabilities.v1",
-      supportedAnalysisExperienceSchemaVersions: [],
+      supportedAnalysisExperienceSchemaVersions: ["analysis-experience.v2"],
       runtimeMode: "shadow",
       publicAuthority: "legacy",
-      enableV2Components: false,
+      enableV2Components: true,
       parentTools: { shadow: true, golden: true, diagnostics: true },
       compatible: true,
     });
     render(<CapabilityProvider><Probe /></CapabilityProvider>);
     await waitFor(() => expect(screen.getByText("ready")).toBeInTheDocument());
     expect(screen.getByText("legacy")).toBeInTheDocument();
-    expect(screen.getByText("false")).toBeInTheDocument();
+    expect(screen.getByText("true")).toBeInTheDocument();
   });
 });

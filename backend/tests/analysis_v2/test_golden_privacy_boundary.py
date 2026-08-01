@@ -24,6 +24,31 @@ def test_committed_g1_waiting_evidence_contains_only_aggregate_state() -> None:
         assert forbidden not in encoded
 
 
+def test_committed_pilot_snapshot_evidence_is_sanitized_and_non_releasing() -> None:
+    evidence = ROOT / "docs" / "evaluation" / "v2" / "pilot-12-diagnostic-2026-08-01.json"
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    encoded = json.dumps(payload).lower()
+
+    assert payload["event_count"] == 12
+    assert payload["status"] == "failed"
+    assert payload["diagnostic_only"] is True
+    assert payload["release_claim"] is False
+    for forbidden in ("c:\\users", "source_sha256", "event_id", "annotator_alias", "filename", "embedding"):
+        assert forbidden not in encoded
+
+
+def test_committed_g2_waiting_evidence_is_sanitized_and_non_releasing() -> None:
+    evidence = ROOT / "docs" / "evaluation" / "v2" / "g2-waiting-for-owner-labels.json"
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    encoded = json.dumps(payload).lower()
+
+    assert payload["status"] == "collecting"
+    assert payload["release_claim"] is False
+    assert payload["current_snapshot"]["frozen"] is False
+    for forbidden in ("c:\\users", "source_sha256", "event_id", "annotator_alias", "filename", "embedding"):
+        assert forbidden not in encoded
+
+
 def test_private_golden_layout_is_ignored_and_never_committed() -> None:
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "golden/" in ignore

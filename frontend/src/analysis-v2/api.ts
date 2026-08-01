@@ -1,12 +1,22 @@
 import axios from "axios";
 
 import { apiClient } from "../api/client";
-import { AdvancedRuntimeCapabilities, decodeRuntimeCapabilities, RuntimeCapabilities } from "./contracts";
-import { GoldenCatalogSummary, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
+import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, RuntimeCapabilities } from "./contracts";
+import { GoldenCatalogSummary, GoldenG2Status, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
 
 export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
   const response = await apiClient.get<unknown>("/capabilities", { timeout: 10_000 });
   return decodeRuntimeCapabilities(response.data);
+}
+
+export async function fetchAnalysisExperienceV2(analysisId: string): Promise<AnalysisExperienceV2> {
+  const response = await apiClient.get<unknown>(`/analysis/${encodeURIComponent(analysisId)}/experience-v2`, { timeout: 10_000 });
+  return decodeAnalysisExperienceV2(response.data);
+}
+
+export async function fetchAnalysisExperienceV2Diagnostic(parentPin: string, analysisId: string): Promise<AnalysisExperienceV2> {
+  const response = await apiClient.get<unknown>(`/analysis/${encodeURIComponent(analysisId)}/experience-v2/diagnostic`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return decodeAnalysisExperienceV2(response.data);
 }
 
 export async function fetchAdvancedRuntimeCapabilities(parentPin: string): Promise<AdvancedRuntimeCapabilities> {
@@ -28,6 +38,11 @@ export async function fetchGoldenSchema(parentPin: string): Promise<GoldenSchema
 
 export async function fetchGoldenSanitizedExport(parentPin: string): Promise<GoldenSanitizedExport> {
   const response = await apiClient.get<GoldenSanitizedExport>("/golden/v2/sanitized-export", { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function fetchGoldenG2Status(parentPin: string): Promise<GoldenG2Status> {
+  const response = await apiClient.get<GoldenG2Status>("/golden/v2/g2/status", { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
   return response.data;
 }
 

@@ -8,6 +8,7 @@ import GoldenCatalogShell from "./GoldenCatalogShell";
 vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
 vi.mock("../api", () => ({ fetchGoldenCatalog: vi.fn(), fetchGoldenSchema: vi.fn(), fetchGoldenSanitizedExport: vi.fn() }));
 vi.mock("./GoldenPilotDashboard", () => ({ default: () => <div>Golden pilot dashboard</div> }));
+vi.mock("./GoldenG2StatusCard", () => ({ default: () => <div>Golden G2 status</div> }));
 
 const mode = vi.mocked(useAppMode);
 const catalog = vi.mocked(fetchGoldenCatalog);

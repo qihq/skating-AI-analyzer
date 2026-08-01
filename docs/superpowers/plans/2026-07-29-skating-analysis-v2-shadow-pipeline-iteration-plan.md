@@ -170,8 +170,8 @@ The iterations are sequential at their gate boundaries. Within an iteration, tes
 
 | Program block | Iterations | Primary owner action | User action | Exit evidence |
 |---|---:|---|---|---|
-| Isolation and labels | 0-2 | Build isolated runtime, contracts, and labeling workflow | Select new videos and learn the short labeling flow | Safe worktree plus usable private catalog |
-| Measurement | 3-4 | Repair evaluator, dedupe/split data, freeze baseline | Label 36-event pilot, then expand to 60-80 events; review ambiguity | G1 and G2 reports |
+| Isolation and labels | 0-2 | Build isolated runtime, contracts, and labeling workflow | Use the 12 already-labeled videos for a first pilot; no new labeling is required before the pilot | Safe worktree plus usable private catalog |
+| Measurement | 3-4 | Repair evaluator, run the 12-video pilot, then prepare the formal dataset | Review pilot failures only; resume labeling gradually after the core implementation is complete | Pilot report, then G1/G2 reports when event targets are met |
 | Foundations | 5-7 | Implement contracts, experience API, frontend adapter, exact PTS, observations, camera motion, proposals | Review representative source-frame alignment and family terminology | G3, UX1, and proposal diagnostics |
 | Identity and pose | 8-9 | Build identity fusion and trustworthy pose | Add anchors or review ambiguous crossings when requested | G4 and G5 reports |
 | Events and timing | 10-12 | Build proposals, classifiers, and source-frame moments | Review incorrect/ambiguous action labels, not production rules | G6-G8 reports |
@@ -192,6 +192,17 @@ Calendar time depends mainly on video collection, labeling, external-model laten
 No later estimate authorizes skipping a failed gate. If the Golden set exposes a need to replace a base detector or pose model, schedule a separate bounded bakeoff inside the owning iteration rather than silently extending the architecture.
 
 ## User Labeling Workload
+
+### Revised execution order (2026-08-01)
+
+The owner has already labeled 12 videos. Use those videos first as a bounded end-to-end pilot, then continue engineering and return to labeling in small batches after the implementation is complete. This changes the order of work, not the acceptance thresholds.
+
+1. **Register and freeze the current 12-video snapshot.** Inventory source hashes, recording sessions, event counts, profiles, and label completeness. Keep all files in the private NAS/runtime data root; do not copy videos or labels into Git.
+2. **Run the current 12-video pilot.** Execute the available legacy/shadow pipeline and evaluator against every valid event in the snapshot. Exercise source-time alignment, target identity, event proposals, profile moments, rotation observability, report evidence, and sanitized export paths.
+3. **Use pilot output diagnostically.** Record raw denominators, coverage, refusals, errors, latency, and resource behavior. The pilot is a smoke/calibration run only; it cannot satisfy G1, G2, or release approval unless the formal event, session, split, delayed-review, and double-review requirements are independently met.
+4. **Continue implementation after the pilot.** Fix blockers exposed by the pilot and proceed through the planned iterations. Do not wait for 36 events before testing the pipeline, and do not tune production thresholds against a future frozen-test split.
+5. **Resume labeling gradually after implementation.** Add small batches (suggested 6-12 videos or 10-15 events at a time), prioritizing missing profiles, scenes, recording sessions, and ambiguous cases. Re-check grouping and duplicate constraints after each batch.
+6. **Promote the accumulated data to formal gates only when ready.** Reach 36 valid new events for G1, then expand to 60-80 events for G2, with delayed re-labeling and required frozen split controls. If 12 videos contain more or fewer than the required events, count events—not videos—and report the actual denominator.
 
 The owner does not annotate every frame or every joint. For most events:
 
@@ -476,6 +487,8 @@ A usable labeling workflow plus a short owner-facing labeling guide.
 Produce the first trustworthy diagnostic dataset and correct evaluation semantics before tuning V2.
 
 ### Data target G1
+
+The formal G1 target remains 36 new events. The 12-video pilot above is an earlier operational checkpoint and does not replace this target.
 
 Collect 36 new events:
 

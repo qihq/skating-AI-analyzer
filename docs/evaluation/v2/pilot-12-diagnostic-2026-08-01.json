@@ -1,0 +1,31 @@
+{
+  "schema_version": "golden-pilot-diagnostic-evidence.v1",
+  "run_scope": "snapshot_diagnostic",
+  "source_snapshot": "private-runtime/pilot-12-run-20260801",
+  "event_count": 12,
+  "pipeline_fingerprint": "legacy-api-pilot-20260801.mimo-bearer-fix.v5.2.307",
+  "result_fingerprint": "6579deeb4041000f6dcd8c06106fe9582544b5c518d15a9b3b4e5ce13528e2b9",
+  "status": "failed",
+  "diagnostic_only": true,
+  "release_claim": false,
+  "repeatability": {
+    "deterministic": true,
+    "changed_on_repeat": false,
+    "failed_event_count": 12
+  },
+  "aggregate": {
+    "action_class_correct": 2,
+    "action_class_denominator": 12,
+    "action_proposal_recall": 0.0,
+    "tracking_confirmed_coverage": 0.0,
+    "key_moment_timing_coverage": 0.0,
+    "rotation_prediction_coverage": 0.0,
+    "pose_joint_denominator": 0
+  },
+  "interpretation": [
+    "The existing pipeline output is a legacy baseline only.",
+    "The evaluator and snapshot adapter are operational and deterministic.",
+    "The snapshot does not satisfy G1 and cannot authorize a release claim.",
+    "The first V2 implementation work must supply tracking, proposals, key moments, rotation, and pose evidence instead of rerunning legacy analyses."
+  ]
+}

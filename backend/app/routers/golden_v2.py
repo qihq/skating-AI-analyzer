@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis_v2.config import RuntimeConfig
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
+from app.analysis_v2.evaluation.g2_baseline import G2BaselineStore, G2FreezeError
 from app.analysis_v2.evaluation.pilot_evaluator import PilotPredictionBundle
 from app.analysis_v2.evaluation.pilot_store import PilotEvaluationStore, collection_progress
 from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, probe_source, source_frame_at
@@ -150,6 +151,25 @@ class GoldenReviewAttestationRequest(_StrictResponse):
     note: str | None = Field(default=None, max_length=500)
 
 
+class G2FreezeRequest(_StrictResponse):
+    confirmation: str
+    legacy_pipeline_fingerprint: str = Field(min_length=1, max_length=256)
+
+
+class G2StatusResponse(_StrictResponse):
+    schema_version: Literal["golden-g2-status.v1"] = "golden-g2-status.v1"
+    gate: Literal["G2"] = "G2"
+    status: Literal["collecting", "ready_to_freeze", "frozen_waiting_for_baseline", "baseline_recorded"]
+    event_count: int
+    required_event_range: list[int]
+    distribution: dict[str, Any]
+    dataset_revision: int | None = None
+    dataset_fingerprint: str | None = None
+    legacy_pipeline_fingerprint: str | None = None
+    baseline_result_fingerprint: str | None = None
+    release_claim: Literal[False] = False
+
+
 router = APIRouter(prefix="/api/golden/v2", tags=["golden-v2"])
 
 
@@ -159,6 +179,10 @@ def get_golden_store(config: RuntimeConfig = Depends(get_runtime_config)) -> Gol
 
 def get_pilot_store(store: GoldenCatalogStore = Depends(get_golden_store)) -> PilotEvaluationStore:
     return PilotEvaluationStore(store)
+
+
+def get_g2_store(store: GoldenCatalogStore = Depends(get_golden_store)) -> G2BaselineStore:
+    return G2BaselineStore(store)
 
 
 async def require_golden_parent(
@@ -437,10 +461,11 @@ async def get_pilot_evaluator_status(
 @router.post("/evaluator/runs", response_model=PilotEvaluationStatus)
 async def run_pilot_evaluator(
     payload: PilotPredictionBundle,
+    diagnostic_snapshot: bool = Query(default=False),
     _: None = Depends(require_golden_parent),
     evaluator: PilotEvaluationStore = Depends(get_pilot_store),
 ) -> PilotEvaluationStatus:
-    return PilotEvaluationStatus.model_validate(evaluator.run(payload))
+    return PilotEvaluationStatus.model_validate(evaluator.run(payload, diagnostic_snapshot=diagnostic_snapshot))
 
 
 @router.get("/evaluator/result")
@@ -486,6 +511,32 @@ async def get_golden_sanitized_export(
         redacted_aliases=list(payload["redacted_aliases"]),
         gate_template=GoldenGateTemplate.model_validate(payload["gate_template"]),
     )
+
+
+@router.get("/g2/status", response_model=G2StatusResponse)
+async def get_g2_status(
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+    g2_store: G2BaselineStore = Depends(get_g2_store),
+) -> G2StatusResponse:
+    return G2StatusResponse.model_validate(g2_store.public_status(store.ensure_initialized()))
+
+
+@router.post("/g2/freeze", response_model=G2StatusResponse)
+async def freeze_g2_dataset(
+    payload: G2FreezeRequest,
+    _: None = Depends(require_golden_parent),
+    store: GoldenCatalogStore = Depends(get_golden_store),
+    g2_store: G2BaselineStore = Depends(get_g2_store),
+) -> G2StatusResponse:
+    if payload.confirmation != "freeze_g2_dataset":
+        raise HTTPException(status_code=422, detail="Freezing G2 requires explicit confirmation.")
+    dataset = store.ensure_initialized()
+    try:
+        g2_store.freeze(dataset, legacy_pipeline_fingerprint=payload.legacy_pipeline_fingerprint)
+        return G2StatusResponse.model_validate(g2_store.public_status(dataset))
+    except G2FreezeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _catalog_response(payload: dict[str, object]) -> GoldenCatalogSummary:

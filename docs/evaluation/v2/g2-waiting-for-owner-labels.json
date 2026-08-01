@@ -1,0 +1,27 @@
+{
+  "schema_version": "golden-g2-gate-evidence.v1",
+  "gate": "G2",
+  "status": "collecting",
+  "release_claim": false,
+  "current_snapshot": {
+    "event_count": 12,
+    "required_event_range": [60, 80],
+    "frozen": false,
+    "legacy_baseline_recorded": false
+  },
+  "implemented": [
+    "group-consistent split validation",
+    "profile and event-count readiness checks",
+    "immutable frozen-test membership fingerprint",
+    "legacy baseline binding to the frozen dataset fingerprint",
+    "parent-authorized sanitized G2 status and explicit freeze endpoint",
+    "Golden dashboard G2 status card"
+  ],
+  "unmet": [
+    "60-80 valid new events",
+    "24-32 jump, 16-20 spin, 12-16 step, and 8-12 spiral events",
+    "development, validation, and frozen-test assignments grouped by recording session",
+    "parent review and explicit freeze confirmation",
+    "full legacy baseline run and sanitized aggregate report"
+  ]
+}

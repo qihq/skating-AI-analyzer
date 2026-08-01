@@ -26,6 +26,7 @@ apply_runtime_environment(runtime_config, os.environ)
 from app.database import AsyncSessionLocal, ensure_storage_dirs, init_db
 from app.routers.capabilities import configure_runtime_capabilities, router as capabilities_router
 from app.routers.golden_v2 import router as golden_v2_router
+from app.routers.analysis_v2 import router as analysis_v2_router
 from app.routers.debug import router as debug_router
 from app.routers.analysis import frames_router, plan_router, router as analysis_router
 from app.routers.auth import router as auth_router
@@ -157,6 +158,7 @@ app.include_router(snowball_router)
 configure_runtime_capabilities(runtime_config)
 app.include_router(capabilities_router)
 app.include_router(golden_v2_router)
+app.include_router(analysis_v2_router)
 
 
 @app.get("/api/health", response_model=HealthResponse)

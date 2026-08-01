@@ -17,7 +17,8 @@ def test_public_capability_route_uses_configured_runtime(tmp_path: Path) -> None
     payload = asyncio.run(capabilities.public_capabilities(config))
 
     assert payload.public_authority == "legacy"
-    assert payload.analysis_experience_v2_enabled is False
+    assert payload.analysis_experience_v2_enabled is True
+    assert payload.supported_analysis_experience_schema_versions == ["analysis-experience.v2"]
 
 
 def test_advanced_capability_route_requires_parent_pin(tmp_path: Path) -> None:

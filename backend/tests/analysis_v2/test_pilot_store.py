@@ -34,6 +34,41 @@ def test_run_with_insufficient_labels_persists_waiting_state_without_fake_result
     assert json.loads(evaluator.status_path.read_text(encoding="utf-8"))["status"] == "waiting_for_owner_labels"
 
 
+def test_snapshot_diagnostic_runs_with_insufficient_labels_without_releasing_g1(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    evaluator = PilotEvaluationStore(store)
+    bundle = PilotPredictionBundle.model_validate({"pipeline_fingerprint": "pipeline-12345678", "evaluation_masks": ["tracking"], "predictions": []})
+
+    status = evaluator.run(bundle, diagnostic_snapshot=True)
+
+    assert status["status"] == "passed_for_pilot_only"
+    result = evaluator.sanitized_result()
+    assert result is not None
+    assert result["diagnostic_only"] is True
+    assert result["release_claim"] is False
+    assert result["run_scope"] == "snapshot_diagnostic"
+
+
+def test_snapshot_diagnostic_route_is_explicit_and_does_not_change_formal_default() -> None:
+    calls: list[bool] = []
+
+    class Evaluator:
+        def run(self, bundle: PilotPredictionBundle, *, diagnostic_snapshot: bool = False) -> dict[str, object]:
+            del bundle
+            calls.append(diagnostic_snapshot)
+            return {"status": "passed_for_pilot_only", "evaluator_version": "v1", "diagnostic_only": True, "message": "ok"}
+
+    evaluator = Evaluator()
+    bundle = PilotPredictionBundle.model_validate({"pipeline_fingerprint": "pipeline-12345678", "evaluation_masks": ["action"], "predictions": []})
+
+    diagnostic = asyncio.run(golden_v2.run_pilot_evaluator(bundle, True, None, evaluator))
+    formal = asyncio.run(golden_v2.run_pilot_evaluator(bundle, False, None, evaluator))
+
+    assert diagnostic.status == "passed_for_pilot_only"
+    assert formal.status == "passed_for_pilot_only"
+    assert calls == [True, False]
+
+
 def test_evaluator_routes_still_require_parent_authorization() -> None:
     session = AsyncMock()
 
