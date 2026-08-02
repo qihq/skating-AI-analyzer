@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import { apiClient } from "../api/client";
-import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, RuntimeCapabilities } from "./contracts";
+import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, DetectionProposalDiagnostics, RuntimeCapabilities } from "./contracts";
 import { GoldenCatalogSummary, GoldenG2Status, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
 
 export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
@@ -23,6 +23,16 @@ export async function fetchAdvancedRuntimeCapabilities(parentPin: string): Promi
   const response = await apiClient.get<AdvancedRuntimeCapabilities>("/capabilities/advanced", {
     headers: { "X-Parent-Pin": parentPin }, timeout: 10_000,
   });
+  return response.data;
+}
+
+export async function fetchDetectionObservations(parentPin: string, analysisId: string): Promise<DetectionProposalDiagnostics> {
+  const response = await apiClient.get<DetectionProposalDiagnostics>(`/analysis/${encodeURIComponent(analysisId)}/observations`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function fetchPilot12DetectionDiagnostics(parentPin: string): Promise<Record<string, unknown>> {
+  const response = await apiClient.get<Record<string, unknown>>("/analysis/pilot12-detection", { headers: { "X-Parent-Pin": parentPin }, timeout: 60_000 });
   return response.data;
 }
 

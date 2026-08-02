@@ -184,8 +184,12 @@ export default function GoldenAnnotationWorkspace() {
     try {
       const next = await fetchGoldenSourceFrame(parentPin, source.source_sha256, Math.max(0, frameIndex + direction));
       pendingFrameSeek.current = next.pts; setFrame(next); setTime(next.pts);
-      const imageUrl = await fetchGoldenSourceFrameImageUrl(parentPin, source.source_sha256, next.sourceFrameIndex);
-      setSourceFrameImageUrl((previous) => { if (previous) URL.revokeObjectURL(previous); return imageUrl; });
+      try {
+        const imageUrl = await fetchGoldenSourceFrameImageUrl(parentPin, source.source_sha256, next.sourceFrameIndex);
+        setSourceFrameImageUrl((previous) => { if (previous) URL.revokeObjectURL(previous); return imageUrl; });
+      } catch {
+        // Exact PTS/frame remains valid when optional image refinement is unavailable.
+      }
       setMessage(`已定位到第 ${next.sourceFrameIndex} 帧（${next.pts.toFixed(6)} 秒）。`);
     } catch { setFrame(null); pendingFrameSeek.current = null; setMessage("源帧不可用，没有保存任何修改。"); }
   };

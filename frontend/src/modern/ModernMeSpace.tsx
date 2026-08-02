@@ -11,10 +11,11 @@ const ApiSettingsPage = lazy(() => import("../pages/ApiSettingsPage"));
 const DebugPage = lazy(() => import("../pages/DebugPage"));
 const SettingsPage = lazy(() => import("../pages/SettingsPage"));
 const ShadowStatusCard = lazy(() => import("../analysis-v2/components/ShadowStatusCard"));
+const DetectionObservationPanel = lazy(() => import("../analysis-v2/components/DetectionObservationPanel"));
 const GoldenCatalogShell = lazy(() => import("../analysis-v2/components/GoldenCatalogShell"));
 
 export type MeView = "overview" | "family" | "appearance" | "advanced" | "about";
-type AdvancedTool = "providers" | "debug" | "golden" | "shadow";
+type AdvancedTool = "providers" | "debug" | "golden" | "shadow" | "observations";
 
 const ITEMS = [
   { id: "overview", label: "总览", to: "/me" },
@@ -59,6 +60,6 @@ export default function ModernMeSpace() {
 export function ModernAdvancedTool({ initialTool }: { initialTool?: AdvancedTool } = {}) {
   const [params] = useSearchParams();
   const tool=(params.get("tool") as AdvancedTool|null)??initialTool??"providers";
-  const content:Record<AdvancedTool,ReactNode>={providers:<ApiSettingsPage/>,debug:<DebugPage/>,golden:<GoldenCatalogShell/>,shadow:<ShadowStatusCard/>};
-  return <MeFrame view="advanced"><div className="modern-advanced-tabs"><Link className={tool==="providers"?"is-active":""} to="/me/advanced?tool=providers">模型与 API</Link><Link className={tool==="debug"?"is-active":""} to="/me/advanced?tool=debug">诊断调试</Link><Link className={tool==="golden"?"is-active":""} to="/me/advanced?tool=golden">Golden 标注</Link><Link className={tool==="shadow"?"is-active":""} to="/me/advanced?tool=shadow">Shadow 状态</Link></div><div className="modern-legacy-surface"><Suspense fallback={<div className="island-route-loading">正在加载高级工具…</div>}>{content[tool]??content.providers}</Suspense></div></MeFrame>;
+  const content:Record<AdvancedTool,ReactNode>={providers:<ApiSettingsPage/>,debug:<DebugPage/>,golden:<GoldenCatalogShell/>,shadow:<ShadowStatusCard/>,observations:<DetectionObservationPanel analysisId={params.get("analysis") ?? undefined}/>};
+  return <MeFrame view="advanced"><div className="modern-advanced-tabs"><Link className={tool==="providers"?"is-active":""} to="/me/advanced?tool=providers">模型与 API</Link><Link className={tool==="debug"?"is-active":""} to="/me/advanced?tool=debug">诊断调试</Link><Link className={tool==="golden"?"is-active":""} to="/me/advanced?tool=golden">Golden 标注</Link><Link className={tool==="shadow"?"is-active":""} to="/me/advanced?tool=shadow">Shadow 状态</Link><Link className={tool==="observations"?"is-active":""} to="/me/advanced?tool=observations">候选观察</Link></div><div className="modern-legacy-surface"><Suspense fallback={<div className="island-route-loading">正在加载高级工具…</div>}>{content[tool]??content.providers}</Suspense></div></MeFrame>;
 }

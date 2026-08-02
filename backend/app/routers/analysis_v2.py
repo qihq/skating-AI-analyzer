@@ -10,6 +10,11 @@ from app.database import get_session
 from app.models import Analysis
 from app.services.parent_access import require_parent_pin
 from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_index
+from app.analysis_v2.contracts import DetectionProposalDiagnostics
+from app.analysis_v2.detection import build_proposal_diagnostics, resolve_provider_config
+from app.analysis_v2.evaluation.pilot12_detection import evaluate_pilot12_detection
+from app.routers.capabilities import get_runtime_config
+from app.analysis_v2.config import RuntimeConfig
 from pathlib import Path
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis-v2"])
@@ -54,3 +59,33 @@ async def get_analysis_experience_v2_diagnostic(
     await require_parent_pin(session, x_parent_pin)
     analysis = await _load_analysis(analysis_id, session)
     return AnalysisExperienceV2.model_validate(present_analysis_experience(analysis, diagnostic=True))
+
+
+@router.get("/{analysis_id}/observations", response_model=DetectionProposalDiagnostics)
+async def get_detection_observations(
+    analysis_id: str,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> DetectionProposalDiagnostics:
+    await require_parent_pin(session, x_parent_pin)
+    analysis = await _load_analysis(analysis_id, session)
+    # Shadow diagnostics are intentionally detached from legacy/family fields.
+    stored = getattr(analysis, "processing_logs", None)
+    if isinstance(stored, list):
+        for item in reversed(stored):
+            if isinstance(item, dict) and isinstance(item.get("detection_proposals"), dict):
+                return DetectionProposalDiagnostics.model_validate(item["detection_proposals"])
+    return build_proposal_diagnostics(config=resolve_provider_config(), status="not_run")
+
+
+@router.get("/pilot12-detection", response_model=dict[str, Any])
+async def get_pilot12_detection_diagnostics(
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+    config: RuntimeConfig = Depends(get_runtime_config),
+) -> dict[str, Any]:
+    await require_parent_pin(session, x_parent_pin)
+    fixture = config.runtime_paths["test_data"] / "pilot-12-run-20260801" / "api-analysis-index-live.json"
+    if not fixture.exists():
+        return {"schema_version": "iteration7-pilot12-detection-evidence.v1", "status": "unavailable", "analysis_count": 0, "candidate_count": 0, "proposal_count": 0, "diagnostic_only": True, "identity_decisions": False}
+    return evaluate_pilot12_detection(fixture)

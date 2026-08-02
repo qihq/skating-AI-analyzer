@@ -37,6 +37,17 @@ class AdvancedRuntimeCapabilities(BaseModel):
     writes_user_data: Literal[False] = False
     isolated_runtime: bool
     baseline_source_commit: str
+    detector_configured: str = "yolo"
+    detector_active: str = "unavailable"
+    tracker_configured: str = "bytetrack"
+    tracker_active: str = "unavailable"
+    model_source: str = "unknown"
+    model_hash: str | None = None
+    dependency_ready: bool = False
+    legacy_options_characterized: list[str] = []
+    v2_config_fingerprint: str | None = None
+    invalidation_scope: str = "shadow_diagnostics_only"
+    ds918_compatible: bool | None = None
 
 
 def build_public_capabilities(config: RuntimeConfig) -> RuntimeCapabilities:
@@ -55,10 +66,22 @@ def build_advanced_capabilities(config: RuntimeConfig) -> AdvancedRuntimeCapabil
         status = "not_configured"
     else:
         status = "ready"
+    from app.analysis_v2.detection import PERSON_TRACKER_OPTIONS, resolve_provider_config
+    provider = resolve_provider_config()
     return AdvancedRuntimeCapabilities(
         runtime_mode=config.pipeline_mode,
         public_authority="legacy",
         shadow_status=status,
         isolated_runtime=config.is_isolated,
         baseline_source_commit="c291324c62bcc930f96f3429dcdc9521e060b516",
+        detector_configured=provider.detector,
+        detector_active=provider.detector if provider.dependency_ready else "unavailable",
+        tracker_configured=provider.tracker,
+        tracker_active=provider.tracker if provider.dependency_ready else "unavailable",
+        model_source=provider.model_source,
+        model_hash=provider.model_hash,
+        dependency_ready=provider.dependency_ready,
+        legacy_options_characterized=list(PERSON_TRACKER_OPTIONS),
+        v2_config_fingerprint=provider.fingerprint(),
+        ds918_compatible=True,
     )

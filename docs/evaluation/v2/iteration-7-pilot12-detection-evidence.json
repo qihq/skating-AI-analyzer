@@ -1,0 +1,25 @@
+{
+  "schema_version": "iteration7-pilot12-detection-evidence.v1",
+  "status": "diagnostic_complete",
+  "fixture": "private-runtime/test-data/pilot-12-run-20260801/api-analysis-index-live.json",
+  "analysis_count": 12,
+  "candidate_count": 554,
+  "proposal_count": 12,
+  "candidate_recall_counts": {
+    "analyses_with_candidates": 12,
+    "analyses_without_candidates": 0,
+    "candidate_tracks": 554,
+    "uncertain_candidates": 45
+  },
+  "result_fingerprint": "sha256:da1963688f9b38f4b3cdde4a6f2cd62deb1444c77b85215baf109c862958473f",
+  "deterministic": true,
+  "diagnostic_only": true,
+  "identity_decisions": false,
+  "ordinary_family_response": "unchanged",
+  "gate_claim": false,
+  "limitations": [
+    "The imported snapshot contains legacy detector candidates; V2 provider integration remains shadow-only.",
+    "Background camera features were not persisted in the legacy fixture, so camera reliability is unavailable for these records.",
+    "Candidate recall is not identity accuracy and does not authorize Iteration 8 identity work."
+  ]
+}

@@ -121,6 +121,13 @@ class TrackCandidate(ContractModel):
     pose_shape_features: tuple[float, ...] | None = None
     camera_compensated_motion: tuple[float, float] | None = None
     evidence_sources: tuple[str, ...] = ()
+    quality_score: float | None = Field(default=None, ge=0, le=1)
+    uncertainty_reasons: tuple[str, ...] = ()
+    source_video_hash: str | None = None
+    source_frame_index: int | None = Field(default=None, ge=0)
+    pts_sec: float | None = Field(default=None, ge=0)
+    provider_version: str = "candidate-provider.v1"
+    model_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def valid_bbox(self) -> "TrackCandidate":
@@ -128,6 +135,61 @@ class TrackCandidate(ContractModel):
         if x2 <= x1 or y2 <= y1:
             raise ValueError("bbox must have positive area")
         return self
+
+
+class CameraMotion(ContractModel):
+    schema_version: Literal["camera-motion.v1"] = "camera-motion.v1"
+    transform: dict[str, float] = Field(default_factory=dict)
+    motion_type: Literal["static", "pan", "zoom", "shake", "mixed", "unknown"] = "unknown"
+    reliability: float = Field(ge=0, le=1)
+    feature_count: int = Field(default=0, ge=0)
+    masked_feature_count: int = Field(default=0, ge=0)
+    failure_reason: str | None = None
+
+
+class CandidateQuality(ContractModel):
+    schema_version: Literal["candidate-quality.v1"] = "candidate-quality.v1"
+    blur: float = Field(ge=0, le=1)
+    clipping: float = Field(ge=0, le=1)
+    full_body_visibility: float = Field(ge=0, le=1)
+    crowd_overlap: float = Field(ge=0, le=1)
+    small_target: float = Field(ge=0, le=1)
+    quality_score: float = Field(ge=0, le=1)
+    strata: Literal["high", "medium", "low"]
+
+
+class ShortTrackProposal(ContractModel):
+    schema_version: Literal["short-track-proposal.v1"] = "short-track-proposal.v1"
+    candidate_id: str = Field(min_length=1)
+    short_track_id: str = Field(min_length=1)
+    source_frame_indices: tuple[int, ...] = ()
+    pts_sec: tuple[float, ...] = ()
+    boxes: tuple[tuple[float, float, float, float], ...] = ()
+    detector_scores: tuple[float, ...] = ()
+    uncertainty: tuple[str, ...] = ()
+    quality: CandidateQuality | None = None
+    camera_motion: CameraMotion | None = None
+    provider_provenance: tuple[str, ...] = ()
+
+
+class DetectionProposalDiagnostics(ContractModel):
+    schema_version: Literal["detection-proposal-diagnostics.v1"] = "detection-proposal-diagnostics.v1"
+    status: Literal["not_run", "running", "unavailable", "failed", "complete"] = "not_run"
+    provider: str = "unconfigured"
+    detector: str = "unconfigured"
+    tracker: str = "unconfigured"
+    model_source: Literal["mounted", "default", "downloaded", "missing", "unknown"] = "unknown"
+    model_hash: str | None = None
+    dependency_ready: bool = False
+    candidates: tuple[TrackCandidate, ...] = ()
+    short_tracks: tuple[ShortTrackProposal, ...] = ()
+    camera: tuple[CameraMotion, ...] = ()
+    anchor_suggestions: tuple[str, ...] = ()
+    candidate_recall: float | None = Field(default=None, ge=0, le=1)
+    diagnostics_fingerprint: str = "unavailable"
+    invalidation_scope: str = "shadow_diagnostics_only"
+    ds918_compatible: bool | None = None
+    candidate_recall_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class TrackState(ContractModel):

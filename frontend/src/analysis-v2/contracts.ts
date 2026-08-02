@@ -22,6 +22,43 @@ export interface AdvancedRuntimeCapabilities {
   writes_user_data: false;
   isolated_runtime: boolean;
   baseline_source_commit: string;
+  detector_configured?: string;
+  detector_active?: string;
+  tracker_configured?: string;
+  tracker_active?: string;
+  model_source?: string;
+  model_hash?: string | null;
+  dependency_ready?: boolean;
+  legacy_options_characterized?: string[];
+  v2_config_fingerprint?: string | null;
+  invalidation_scope?: string;
+  ds918_compatible?: boolean | null;
+}
+
+export interface DetectionProposalDiagnostics {
+  schema_version: "detection-proposal-diagnostics.v1";
+  status: "not_run" | "running" | "unavailable" | "failed" | "complete";
+  provider: string;
+  detector: string;
+  tracker: string;
+  model_source: string;
+  model_hash: string | null;
+  dependency_ready: boolean;
+  candidates: Array<Record<string, unknown>>;
+  short_tracks: Array<Record<string, unknown>>;
+  camera: Array<Record<string, unknown>>;
+  anchor_suggestions: string[];
+  candidate_recall: number | null;
+  diagnostics_fingerprint: string;
+  invalidation_scope: string;
+  ds918_compatible: boolean | null;
+  candidate_recall_counts: Record<string, number>;
+}
+
+export function selectDetectionOverlays(diagnostics: DetectionProposalDiagnostics, sourceFrameIndex: number) {
+  const candidates = diagnostics.candidates.filter((item) => item.source_frame_index === sourceFrameIndex);
+  const shortTracks = diagnostics.short_tracks.filter((item) => Array.isArray(item.source_frame_indices) && item.source_frame_indices.includes(sourceFrameIndex));
+  return { candidates, shortTracks, anchorSuggestions: diagnostics.anchor_suggestions };
 }
 
 export type ExperienceAuthority = "legacy" | "v2";
