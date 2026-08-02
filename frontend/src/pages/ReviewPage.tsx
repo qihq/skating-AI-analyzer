@@ -23,6 +23,7 @@ import { childViewFromSkater, pickSkaterIdForChildView } from "../utils/childVie
 import { localDateKey } from "../utils/datetime";
 import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
 import SubmitButton from "../modern/SubmitButton";
+import IdentityReviewPanel from "../analysis-v2/components/IdentityReviewPanel";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -140,7 +141,7 @@ function sessionLabel(session: TrainingSessionRecord) {
 }
 
 export default function ReviewPage() {
-  const { isParentMode, childView, setChildView } = useAppMode();
+  const { isParentMode, parentPin, childView, setChildView } = useAppMode();
   const location = useLocation();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -175,6 +176,7 @@ export default function ReviewPage() {
   const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
   const [manualWindowStart, setManualWindowStart] = useState("");
   const [manualWindowEnd, setManualWindowEnd] = useState("");
+  const identityReviewAnalysisId = new URLSearchParams(location.search).get("analysis_id");
 
   useEffect(() => {
     let cancelled = false;
@@ -558,6 +560,7 @@ export default function ReviewPage() {
 
   return (
     <div className="space-y-4">
+      {isParentMode && parentPin && identityReviewAnalysisId ? <IdentityReviewPanel analysisId={identityReviewAnalysisId} parentPin={parentPin} /> : null}
       <section className="rounded-[24px] border border-slate-200 bg-white px-4 py-4 tablet:px-5">
         <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-center">
           <div className="min-w-0">

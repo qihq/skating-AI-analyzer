@@ -5,6 +5,7 @@ from typing import Any, Literal, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, Authority, Observability
+from app.analysis_v2.contracts import IdentityTimeline
 
 
 class AuthorityMismatchError(ValueError):
@@ -45,6 +46,7 @@ class AnalysisExperienceV2(BaseModel):
     claims: tuple[AnalysisFactV2, ...] = ()
     review_tasks: tuple[ReviewTaskV2, ...] = ()
     source_timeline: dict[str, Any] | None = None
+    identity: IdentityTimeline | None = None
 
     def __init__(self, **data: Any) -> None:
         authority = data.get("authority")
@@ -91,6 +93,7 @@ def build_experience_v2(
     review_tasks: Sequence[ReviewTaskV2 | dict[str, Any]] = (),
     requested_claim_types: Sequence[str] = (),
     source_timeline: dict[str, Any] | None = None,
+    identity: IdentityTimeline | dict[str, Any] | None = None,
 ) -> AnalysisExperienceV2:
     authority: Authority = "legacy" if pipeline_mode in ("legacy", "shadow") else "v2"
     if pipeline_mode == "shadow":
@@ -128,6 +131,7 @@ def build_experience_v2(
         claims=tuple(normalized_claims),
         review_tasks=normalized_tasks,
         source_timeline=source_timeline,
+        identity=IdentityTimeline.model_validate(identity) if isinstance(identity, dict) else identity,
     )
 
 
@@ -208,7 +212,7 @@ def present_legacy_record(record: Any) -> AnalysisExperienceV2:
     )
 
 
-def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy", "shadow", "v2"] = "legacy", source_pipeline_fingerprint: str | None = None, source_timeline: dict[str, Any] | None = None) -> AnalysisExperienceV2:
+def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy", "shadow", "v2"] = "legacy", source_pipeline_fingerprint: str | None = None, source_timeline: dict[str, Any] | None = None, identity: IdentityTimeline | dict[str, Any] | None = None) -> AnalysisExperienceV2:
     if pipeline_mode == "legacy":
         rendered = present_legacy_record(record)
         return rendered.model_copy(update={"source_timeline": source_timeline}) if source_timeline is not None else rendered
@@ -220,6 +224,7 @@ def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy",
         source_pipeline_fingerprint=source_pipeline_fingerprint or f"{pipeline_mode}:unfingerprinted",
         events=(),
         claims=(),
+        identity=identity,
         source_timeline=source_timeline if source_timeline is not None else (get("source_timeline") if isinstance(get("source_timeline"), dict) else None),
     )
 

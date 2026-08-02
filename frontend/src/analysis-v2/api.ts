@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import { apiClient } from "../api/client";
-import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, DetectionProposalDiagnostics, RuntimeCapabilities } from "./contracts";
+import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, DetectionProposalDiagnostics, IdentityRevisionPreview, IdentityTimeline, RuntimeCapabilities } from "./contracts";
 import { GoldenCatalogSummary, GoldenG2Status, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
 
 export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
@@ -28,6 +28,21 @@ export async function fetchAdvancedRuntimeCapabilities(parentPin: string): Promi
 
 export async function fetchDetectionObservations(parentPin: string, analysisId: string): Promise<DetectionProposalDiagnostics> {
   const response = await apiClient.get<DetectionProposalDiagnostics>(`/analysis/${encodeURIComponent(analysisId)}/observations`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function fetchIdentityTimeline(parentPin: string, analysisId: string): Promise<IdentityTimeline | null> {
+  const response = await apiClient.get<IdentityTimeline | null>(`/analysis/${encodeURIComponent(analysisId)}/identity`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function previewIdentityAnchorRevision(parentPin: string, analysisId: string, payload: { source_frame_index: number; pts_sec: number; bbox: [number, number, number, number]; annotator: string; quality_score: number; expected_revision: number; invalidated_interval?: [number, number] | null }): Promise<IdentityRevisionPreview> {
+  const response = await apiClient.post<IdentityRevisionPreview>(`/analysis/${encodeURIComponent(analysisId)}/identity/anchors/preview`, payload, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function confirmIdentityAnchorRevision(parentPin: string, analysisId: string, payload: { source_frame_index: number; pts_sec: number; bbox: [number, number, number, number]; annotator: string; quality_score: number; expected_revision: number; preview_revision: number; confirmation: "confirm_identity_anchor_revision"; invalidated_interval?: [number, number] | null }): Promise<IdentityRevisionPreview> {
+  const response = await apiClient.post<IdentityRevisionPreview>(`/analysis/${encodeURIComponent(analysisId)}/identity/anchors/confirm`, payload, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
   return response.data;
 }
 

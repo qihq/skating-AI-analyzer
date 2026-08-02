@@ -1,0 +1,10 @@
+{
+  "schema_version": "iteration8-optional-identity-model-decision.v1",
+  "decision": "not_adopted",
+  "reid": {"status": "not_benchmarked", "reason": "12-video pilot has not passed the bounded prerequisite showing existing evidence cannot meet G4."},
+  "face": {"status": "interface_only", "enabled": false, "reason": "No face evidence is required or persisted for the diagnostic pilot."},
+  "fallback": "YOLO+ByteTrack candidate generation remains operational when optional evidence is disabled.",
+  "privacy_retention": "No face crops or embeddings are stored in Git, ordinary API responses, or family artifacts.",
+  "runtime": {"parent_setting": "not_exposed_until_benchmark", "shadow_only": true, "ds918_resource_gate": "not_run"},
+  "rollback": "disable optional provider without changing detector/tracker configuration"
+}

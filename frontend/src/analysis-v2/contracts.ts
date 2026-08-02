@@ -94,7 +94,15 @@ export interface AnalysisExperienceV2 {
   claims: ExperienceClaim[];
   reviewTasks: ExperienceReviewTask[];
   sourceTimeline?: SourceTimeline | null;
+  identity?: IdentityTimeline | null;
 }
+
+export type IdentityState = "confirmed" | "uncertain" | "lost";
+export interface IdentityConflictInterval { schema_version: "identity-conflict-interval.v1"; start_pts_sec: number; end_pts_sec: number; reason: string; frame_indices: number[]; candidate_ids: string[]; }
+export interface IdentityAnchorRevision { schema_version: "identity-anchor-revision.v1"; revision: number; parent_revision: number | null; anchor_ids: string[]; invalidated_intervals: Array<[number, number]>; created_by: string; created_at: string; provenance: string; }
+export interface IdentityTimeline { schema_version: "identity-timeline.v1"; identity_id: string; state: IdentityState; confirmed_coverage: number; uncertain_coverage: number; lost_coverage: number; longest_lost_interval_sec: number; recommended_review_task: string | null; conflicts: IdentityConflictInterval[]; anchor_revisions: IdentityAnchorRevision[]; segments: Array<{ source_frame_index: number; pts_sec: number; state: IdentityState; conflict: boolean; bbox_is_display_hint: boolean; track_state: { bbox: [number, number, number, number] | null; bbox_source: string; identity_score: number; identity_margin: number | null } }>; anchors: Array<{ anchor_id: string; source_frame_index: number; pts_sec: number; bbox: [number, number, number, number]; revision: number; quality_score: number }>;
+}
+export interface IdentityRevisionPreview { schema_version: "identity-revision-preview.v1"; analysis_id: string; current_revision: number; next_revision: number; invalidated_intervals: Array<[number, number]>; anchor: IdentityTimeline["anchors"][number]; identity: IdentityTimeline | null; diagnostic_only: true; }
 
 export type ExperienceStatusLanguage = {
   code: "ready" | "diagnostic_only" | "unavailable" | "unsupported_schema" | "mixed_authority";
@@ -163,7 +171,9 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
   });
   const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });
   const reviewTasks = (Array.isArray(raw.review_tasks) ? raw.review_tasks : []).map((item) => { const t = record(item); if (t.authority !== raw.authority || typeof t.task_id !== "string" || typeof t.kind !== "string") throw new Error("cross-authority or invalid review task"); return { taskId: t.task_id, authority: t.authority as ExperienceAuthority, kind: t.kind, eventId: (t.event_id as string | null) ?? null }; });
-  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks, sourceTimeline: decodeSourceTimeline(raw.source_timeline) };
+  const identity = raw.identity == null ? null : raw.identity as IdentityTimeline;
+  if (identity && (identity.state !== "confirmed" && identity.state !== "uncertain" && identity.state !== "lost")) throw new Error("invalid identity state");
+  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks, sourceTimeline: decodeSourceTimeline(raw.source_timeline), identity };
 }
 export function selectClaim(experience: AnalysisExperienceV2, claimType: string, identity?: { authority: ExperienceAuthority; sourcePipelineFingerprint: string }): ExperienceClaim | { status: "unobservable"; observability: "unobservable" } {
   if (identity && (identity.authority !== experience.authority || identity.sourcePipelineFingerprint !== experience.sourcePipelineFingerprint)) throw new Error("selector identity does not match experience");

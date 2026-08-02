@@ -1,0 +1,11 @@
+{
+  "schema_version": "iteration8-runtime-privacy-evidence.v1",
+  "runtime_root": "private-runtime-only",
+  "ordinary_family_response": {"authority": "legacy", "shadow_mutation": false, "identity_diagnostics_parent_only": true},
+  "model_settings": {"detector": "YOLO", "tracker": "ByteTrack", "optional_reid": "disabled", "optional_face": "interface_only", "fingerprint_required": true},
+  "backup_restore": {"identity_timeline": "rebuildable_shadow_artifact_with_revision_provenance", "manual_anchor_revisions": "durable_private_runtime", "legacy_database": "unchanged"},
+  "privacy": {"raw_video": "outside_git", "face_crops": "not_persisted", "embeddings": "not_persisted", "sanitized_evidence": "aggregate_counts_and_status_only"},
+  "deployment": {"ds918_resource_gate": "not_run_for_optional_models", "yolo_bytetrack_disable_optional_path": "available"},
+  "diagnostic_only": true,
+  "release_claim": false
+}

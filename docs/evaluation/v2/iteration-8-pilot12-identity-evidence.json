@@ -1,0 +1,24 @@
+{
+  "schema_version": "iteration8-pilot12-identity-evidence.v1",
+  "iteration": 8,
+  "dataset": "private-runtime/pilot-12-run-20260801",
+  "analysis_count": 12,
+  "usage": "development_and_validation_pilot_only",
+  "diagnostic_only": true,
+  "release_claim": false,
+  "g1_g2_g4_authorized": false,
+  "frozen_test": false,
+  "candidate_status": "not_frozen",
+  "identity_contract": {
+    "states": ["confirmed", "uncertain", "lost"],
+    "wrong_person_priority": true,
+    "stale_fallback_confirmed": false,
+    "single_signal_takeover": false,
+    "forward_backward_conflict": "uncertain"
+  },
+  "limitations": [
+    "The 12 previously labeled videos are a diagnostic pilot and are not newly selected G1/G2 data.",
+    "No frozen-test threshold calibration or G4 acceptance claim is made from this snapshot.",
+    "Formal G1 still requires 36 valid new events; formal G2 still requires 60-80 frozen events."
+  ]
+}

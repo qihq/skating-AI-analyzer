@@ -43,7 +43,7 @@ FILES = [
     "plan.py",
     "vision_prompt_templates.py",
 ]
-V2_FILES = ["__init__.py", "timebase.py", "contracts.py"]
+V2_FILES = ["__init__.py", "timebase.py", "contracts.py", "identity.py"]
 
 def main():
     DST.mkdir(parents=True, exist_ok=True)

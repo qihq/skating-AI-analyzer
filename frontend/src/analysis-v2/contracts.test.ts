@@ -85,4 +85,10 @@ describe("analysis experience v2 contract", () => {
     expect(decoded.sourceTimeline?.timestampStatus).toBe("exact");
     expect(decoded.sourceTimeline?.frames[0].sourceFrameIndex).toBe(0);
   });
+
+  it("decodes identity state and forward/backward conflicts", () => {
+    const decoded = decodeAnalysisExperienceV2({ ...base, identity: { schema_version: "identity-timeline.v1", identity_id: "main-skater", state: "uncertain", confirmed_coverage: .5, uncertain_coverage: .5, lost_coverage: 0, longest_lost_interval_sec: 0, recommended_review_task: "confirm_main_skater_anchor", conflicts: [{ schema_version: "identity-conflict-interval.v1", start_pts_sec: 1, end_pts_sec: 2, reason: "forward_backward_conflict", frame_indices: [30], candidate_ids: ["a", "b"] }], anchor_revisions: [], segments: [], anchors: [] } });
+    expect(decoded.identity?.state).toBe("uncertain");
+    expect(decoded.identity?.conflicts[0].reason).toBe("forward_backward_conflict");
+  });
 });

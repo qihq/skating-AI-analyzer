@@ -121,6 +121,13 @@ class TrackCandidate(ContractModel):
     pose_shape_features: tuple[float, ...] | None = None
     camera_compensated_motion: tuple[float, float] | None = None
     evidence_sources: tuple[str, ...] = ()
+    quality_score: float | None = Field(default=None, ge=0, le=1)
+    uncertainty_reasons: tuple[str, ...] = ()
+    source_video_hash: str | None = None
+    source_frame_index: int | None = Field(default=None, ge=0)
+    pts_sec: float | None = Field(default=None, ge=0)
+    provider_version: str = "candidate-provider.v1"
+    model_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def valid_bbox(self) -> "TrackCandidate":
@@ -128,6 +135,61 @@ class TrackCandidate(ContractModel):
         if x2 <= x1 or y2 <= y1:
             raise ValueError("bbox must have positive area")
         return self
+
+
+class CameraMotion(ContractModel):
+    schema_version: Literal["camera-motion.v1"] = "camera-motion.v1"
+    transform: dict[str, float] = Field(default_factory=dict)
+    motion_type: Literal["static", "pan", "zoom", "shake", "mixed", "unknown"] = "unknown"
+    reliability: float = Field(ge=0, le=1)
+    feature_count: int = Field(default=0, ge=0)
+    masked_feature_count: int = Field(default=0, ge=0)
+    failure_reason: str | None = None
+
+
+class CandidateQuality(ContractModel):
+    schema_version: Literal["candidate-quality.v1"] = "candidate-quality.v1"
+    blur: float = Field(ge=0, le=1)
+    clipping: float = Field(ge=0, le=1)
+    full_body_visibility: float = Field(ge=0, le=1)
+    crowd_overlap: float = Field(ge=0, le=1)
+    small_target: float = Field(ge=0, le=1)
+    quality_score: float = Field(ge=0, le=1)
+    strata: Literal["high", "medium", "low"]
+
+
+class ShortTrackProposal(ContractModel):
+    schema_version: Literal["short-track-proposal.v1"] = "short-track-proposal.v1"
+    candidate_id: str = Field(min_length=1)
+    short_track_id: str = Field(min_length=1)
+    source_frame_indices: tuple[int, ...] = ()
+    pts_sec: tuple[float, ...] = ()
+    boxes: tuple[tuple[float, float, float, float], ...] = ()
+    detector_scores: tuple[float, ...] = ()
+    uncertainty: tuple[str, ...] = ()
+    quality: CandidateQuality | None = None
+    camera_motion: CameraMotion | None = None
+    provider_provenance: tuple[str, ...] = ()
+
+
+class DetectionProposalDiagnostics(ContractModel):
+    schema_version: Literal["detection-proposal-diagnostics.v1"] = "detection-proposal-diagnostics.v1"
+    status: Literal["not_run", "running", "unavailable", "failed", "complete"] = "not_run"
+    provider: str = "unconfigured"
+    detector: str = "unconfigured"
+    tracker: str = "unconfigured"
+    model_source: Literal["mounted", "default", "downloaded", "missing", "unknown"] = "unknown"
+    model_hash: str | None = None
+    dependency_ready: bool = False
+    candidates: tuple[TrackCandidate, ...] = ()
+    short_tracks: tuple[ShortTrackProposal, ...] = ()
+    camera: tuple[CameraMotion, ...] = ()
+    anchor_suggestions: tuple[str, ...] = ()
+    candidate_recall: float | None = Field(default=None, ge=0, le=1)
+    diagnostics_fingerprint: str = "unavailable"
+    invalidation_scope: str = "shadow_diagnostics_only"
+    ds918_compatible: bool | None = None
+    candidate_recall_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class TrackState(ContractModel):
@@ -152,6 +214,119 @@ class TrackState(ContractModel):
                 raise ValueError("confirmed bbox must have positive area")
             if self.bbox_source in {"stale", "fallback", "none"}:
                 raise ValueError("confirmed track cannot use stale/fallback bbox")
+        return self
+
+
+class IdentityFeatureReliability(ContractModel):
+    """Reliability is recorded per signal so no single cue can take over."""
+
+    schema_version: Literal["identity-feature-reliability.v1"] = "identity-feature-reliability.v1"
+    appearance: float = Field(default=0, ge=0, le=1)
+    body_shape: float = Field(default=0, ge=0, le=1)
+    camera_motion: float = Field(default=0, ge=0, le=1)
+    bbox_continuity: float = Field(default=0, ge=0, le=1)
+    face: float = Field(default=0, ge=0, le=1)
+
+
+class IdentityAnchor(ContractModel):
+    schema_version: Literal["identity-anchor.v1"] = "identity-anchor.v1"
+    anchor_id: str = Field(min_length=1)
+    source_frame_index: int = Field(ge=0)
+    pts_sec: float = Field(ge=0)
+    bbox: tuple[float, float, float, float]
+    provenance: Literal["manual", "manual_revision"] = "manual"
+    revision: int = Field(default=1, ge=1)
+    annotator: str = Field(min_length=1)
+    quality_score: float = Field(ge=0, le=1)
+    template_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def valid_bbox(self) -> "IdentityAnchor":
+        x1, y1, x2, y2 = self.bbox
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("identity anchor bbox must have positive area")
+        return self
+
+
+class IdentityEvidence(ContractModel):
+    schema_version: Literal["identity-evidence.v1"] = "identity-evidence.v1"
+    candidate_id: str = Field(min_length=1)
+    score: float = Field(ge=0, le=1)
+    reliability: IdentityFeatureReliability = Field(default_factory=IdentityFeatureReliability)
+    signal_scores: dict[str, float] = Field(default_factory=dict)
+    reasons: tuple[str, ...] = ()
+
+
+class IdentityTimelineSegment(ContractModel):
+    schema_version: Literal["identity-timeline-segment.v1"] = "identity-timeline-segment.v1"
+    source_frame_index: int = Field(ge=0)
+    pts_sec: float = Field(ge=0)
+    state: Literal["confirmed", "uncertain", "lost"]
+    track_state: TrackState
+    best_candidate_id: str | None = None
+    second_candidate_id: str | None = None
+    evidence: tuple[IdentityEvidence, ...] = ()
+    direction: Literal["forward", "backward", "fused"] = "fused"
+    conflict: bool = False
+    template_update_frozen: bool = True
+    bbox_is_display_hint: bool = False
+
+    @model_validator(mode="after")
+    def safe_state(self) -> "IdentityTimelineSegment":
+        if self.state == "confirmed" and (self.track_state.state != "confirmed" or self.bbox_is_display_hint):
+            raise ValueError("confirmed identity requires an authoritative measured track")
+        if self.state != "confirmed" and self.track_state.state == "confirmed":
+            raise ValueError("uncertain/lost identity cannot contain confirmed track state")
+        if self.conflict and self.state == "confirmed":
+            raise ValueError("identity conflicts must remain uncertain")
+        return self
+
+
+class IdentityConflictInterval(ContractModel):
+    schema_version: Literal["identity-conflict-interval.v1"] = "identity-conflict-interval.v1"
+    start_pts_sec: float = Field(ge=0)
+    end_pts_sec: float = Field(ge=0)
+    reason: Literal["forward_backward_conflict", "low_margin", "crossing", "false_relock", "recovery"]
+    frame_indices: tuple[int, ...] = ()
+    candidate_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def ordered(self) -> "IdentityConflictInterval":
+        if self.end_pts_sec < self.start_pts_sec:
+            raise ValueError("identity conflict interval must be ordered")
+        return self
+
+
+class IdentityAnchorRevision(ContractModel):
+    schema_version: Literal["identity-anchor-revision.v1"] = "identity-anchor-revision.v1"
+    revision: int = Field(ge=1)
+    parent_revision: int | None = Field(default=None, ge=1)
+    anchor_ids: tuple[str, ...] = ()
+    invalidated_intervals: tuple[tuple[float, float], ...] = ()
+    created_by: str = Field(min_length=1)
+    created_at: str = Field(min_length=1)
+    provenance: Literal["manual_confirmation", "additional_anchor", "system_relock"]
+
+
+class IdentityTimeline(ContractModel):
+    schema_version: Literal["identity-timeline.v1"] = "identity-timeline.v1"
+    identity_id: str = Field(min_length=1)
+    state: Literal["confirmed", "uncertain", "lost"]
+    segments: tuple[IdentityTimelineSegment, ...] = ()
+    anchors: tuple[IdentityAnchor, ...] = ()
+    anchor_revisions: tuple[IdentityAnchorRevision, ...] = ()
+    conflicts: tuple[IdentityConflictInterval, ...] = ()
+    confirmed_coverage: float = Field(default=0, ge=0, le=1)
+    uncertain_coverage: float = Field(default=0, ge=0, le=1)
+    lost_coverage: float = Field(default=0, ge=0, le=1)
+    longest_lost_interval_sec: float = Field(default=0, ge=0)
+    recommended_review_task: str | None = None
+    diagnostic_only: bool = True
+
+    @model_validator(mode="after")
+    def coverage_is_bounded(self) -> "IdentityTimeline":
+        if self.confirmed_coverage + self.uncertain_coverage + self.lost_coverage > 1.000001:
+            raise ValueError("identity coverage totals cannot exceed one")
         return self
 
 

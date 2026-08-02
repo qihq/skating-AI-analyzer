@@ -16,6 +16,7 @@ def _analysis() -> SimpleNamespace:
 
 def test_experience_endpoint_adapts_historical_legacy_record_without_shadow() -> None:
     session = AsyncMock()
+    session.add = lambda *_args, **_kwargs: None
     session.get = AsyncMock(return_value=_analysis())
     payload = {
         "schema_version": "analysis-experience.v2",
@@ -74,3 +75,37 @@ def test_diagnostic_endpoint_requires_parent_and_keeps_authority_consistent() ->
         result = asyncio.run(analysis_v2.get_analysis_experience_v2_diagnostic("a1", "1234", session))
     assert result.authority == "legacy"
     assert result.diagnostic_only is True
+
+
+def test_identity_revision_preview_requires_parent_and_preserves_causal_scope() -> None:
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=_analysis())
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        result = asyncio.run(analysis_v2.preview_identity_anchor_revision(
+            "a1",
+            analysis_v2.IdentityAnchorRequest(source_frame_index=10, pts_sec=.33, bbox=(.1, .1, .2, .3), annotator="parent", quality_score=.9, expected_revision=2, invalidated_interval=(1.0, 2.0)),
+            None,
+            session,
+        ))
+    assert result.diagnostic_only is True
+    assert result.next_revision == 3
+    assert result.invalidated_intervals == ((1.0, 2.0),)
+
+
+def test_identity_anchor_confirmation_is_parent_authorized_and_audited() -> None:
+    analysis = _analysis()
+    analysis.processing_logs = []
+    session = AsyncMock()
+    session.add = lambda *_args, **_kwargs: None
+    session.get = AsyncMock(return_value=analysis)
+    session.commit = AsyncMock()
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        result = asyncio.run(analysis_v2.confirm_identity_anchor_revision(
+            "a1",
+            analysis_v2.IdentityAnchorConfirmRequest(source_frame_index=10, pts_sec=.33, bbox=(.1, .1, .2, .3), annotator="parent", quality_score=.9, expected_revision=1, preview_revision=2, confirmation="confirm_identity_anchor_revision", invalidated_interval=(1.0, 2.0)),
+            None,
+            session,
+        ))
+    assert result.next_revision == 2
+    assert analysis.processing_logs[-1]["identity_audit"]["legacy_mutation"] is False
+    session.commit.assert_awaited_once()
