@@ -22,6 +22,12 @@ class EventV2(BaseModel):
     status: Literal["confirmed", "uncertain", "unobservable"] = "confirmed"
     observability: Observability = "observable"
     pose: PoseAvailabilitySummary | None = None
+    candidate_profile_scores: dict[str, float] = Field(default_factory=dict)
+    proposal_status: Literal["legacy", "pending_confirmation", "confirmed_window", "ignored", "ordinary_skating", "unknown"] = "legacy"
+    tracking_coverage: float | None = Field(default=None, ge=0, le=1)
+    pose_coverage: float | None = Field(default=None, ge=0, le=1)
+    provenance_fingerprint: str | None = None
+    revision: int = Field(default=1, ge=1)
 
 
 class ReviewTaskV2(BaseModel):

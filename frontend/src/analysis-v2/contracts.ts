@@ -96,7 +96,7 @@ export interface ExperienceClaim {
   observability: "observable" | "partially_observable" | "unobservable";
   confidence: number | null;
 }
-export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; pose?: PoseAvailabilitySummary | null; }
+export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; pose?: PoseAvailabilitySummary | null; candidateProfileScores?: Record<string, number>; proposalStatus?: "legacy" | "pending_confirmation" | "confirmed_window" | "ignored" | "ordinary_skating" | "unknown"; trackingCoverage?: number | null; poseCoverage?: number | null; provenanceFingerprint?: string | null; revision?: number; }
 export interface ExperienceReviewTask { taskId: string; authority: ExperienceAuthority; kind: string; eventId: string | null; }
 export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
 export interface SourceTimelineFrame { sourceFrameIndex: number; ptsSec: number | null; durationSec: number | null; status: "available" | "duplicate_pts" | "gap_after_previous" | "discontinuity" | "timestamp_unavailable"; gapBeforeSec: number; }
@@ -187,7 +187,15 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
     if (typeof event.event_id !== "string" || typeof event.profile !== "string" || !isExperienceStatus(event.status) || !isExperienceObservability(event.observability)) throw new Error("invalid experience event");
     if (event.start_pts !== undefined && event.start_pts !== null && typeof event.start_pts !== "number") throw new Error("invalid event start PTS");
     if (event.end_pts !== undefined && event.end_pts !== null && typeof event.end_pts !== "number") throw new Error("invalid event end PTS");
-    return { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability, pose: event.pose == null ? null : decodePoseAvailability(event.pose) };
+    const decoded: ExperienceEvent = { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability };
+    if (event.pose != null) decoded.pose = decodePoseAvailability(event.pose);
+    if (event.candidate_profile_scores != null) decoded.candidateProfileScores = record(event.candidate_profile_scores) as Record<string, number>;
+    if (event.proposal_status != null) decoded.proposalStatus = event.proposal_status as ExperienceEvent["proposalStatus"];
+    if (typeof event.tracking_coverage === "number") decoded.trackingCoverage = event.tracking_coverage;
+    if (typeof event.pose_coverage === "number") decoded.poseCoverage = event.pose_coverage;
+    if (typeof event.provenance_fingerprint === "string") decoded.provenanceFingerprint = event.provenance_fingerprint;
+    if (typeof event.revision === "number") decoded.revision = event.revision;
+    return decoded;
   });
   const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });
   const reviewTasks = (Array.isArray(raw.review_tasks) ? raw.review_tasks : []).map((item) => { const t = record(item); if (t.authority !== raw.authority || typeof t.task_id !== "string" || typeof t.kind !== "string") throw new Error("cross-authority or invalid review task"); return { taskId: t.task_id, authority: t.authority as ExperienceAuthority, kind: t.kind, eventId: (t.event_id as string | null) ?? null }; });

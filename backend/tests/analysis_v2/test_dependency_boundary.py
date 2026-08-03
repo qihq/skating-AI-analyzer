@@ -44,7 +44,7 @@ def test_analysis_v2_boundary_has_no_unallowlisted_raw_reads() -> None:
     exceptions = tuple(
         path
         for path in modules
-        if path.name in {"presentation.py", "legacy_prediction_adapter.py"}
+        if path.name in {"presentation.py", "legacy_prediction_adapter.py", "legacy_event_proposal_adapter.py", "pilot12_event_proposals.py"}
     )
 
     assert FORBIDDEN_LEGACY_FIELDS

@@ -16,6 +16,8 @@ from app.analysis_v2.identity import create_anchor_revision, immutable_template_
 from app.analysis_v2.detection import build_proposal_diagnostics, resolve_provider_config
 from app.analysis_v2.contracts import IdentityTimeline
 from app.analysis_v2.evaluation.pilot12_detection import evaluate_pilot12_detection
+from app.analysis_v2.evaluation.pilot12_event_proposals import evaluate_pilot12_event_proposals, evidence_from_legacy_analysis
+from app.analysis_v2.event_proposals import EventProposalCollection, merge_proposals, set_proposal_outcome, split_proposal
 from app.routers.capabilities import get_runtime_config
 from app.analysis_v2.config import RuntimeConfig
 from pathlib import Path
@@ -51,6 +53,17 @@ class IdentityAnchorConfirmRequest(IdentityAnchorRequest):
     confirmation: Literal["confirm_identity_anchor_revision"]
 
 
+class EventProposalMutationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["merge", "split", "ignore", "ordinary_skating", "unknown", "confirm"]
+    event_id: str | None = None
+    event_ids: tuple[str, ...] = ()
+    split_pts: float | None = Field(default=None, ge=0)
+    expected_revision: int = Field(ge=1)
+    scope: Literal["event", "analysis"]
+    confirmation: Literal["confirm_event_proposal_revision"]
+
+
 def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> dict[str, Any]:
     timeline = None
     video_path = getattr(analysis, "video_path", None)
@@ -64,16 +77,61 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
     identity = None
     pose_summary = None
     stored = getattr(analysis, "processing_logs", None)
+    event_proposals = None
     if diagnostic and isinstance(stored, list):
         for item in reversed(stored):
             if isinstance(item, dict) and isinstance(item.get("identity_timeline"), dict):
                 identity = IdentityTimeline.model_validate(item["identity_timeline"])
             if isinstance(item, dict) and isinstance(item.get("pose_summary"), dict):
                 pose_summary = PoseAvailabilitySummary.model_validate(item["pose_summary"])
-            if identity is not None and pose_summary is not None:
+            if isinstance(item, dict) and isinstance(item.get("event_proposals"), dict):
+                event_proposals = EventProposalCollection.model_validate(item["event_proposals"])
+            if identity is not None and pose_summary is not None and event_proposals is not None:
                 break
+    if diagnostic and event_proposals is None:
+        try:
+            event_proposals = _generate_event_proposals_for_analysis(analysis)
+        except (TypeError, ValueError, KeyError):
+            event_proposals = None
     rendered = build_analysis_experience(analysis, pipeline_mode="shadow" if diagnostic else "legacy", source_timeline=timeline, identity=identity, pose=pose_summary)
+    if diagnostic and event_proposals is not None:
+        rendered = rendered.model_copy(update={
+            "authority": "v2", "pipeline_mode": "v2", "diagnostic_only": True, "family_usable": False,
+            "source_pipeline_fingerprint": event_proposals.pipeline_fingerprint,
+            "claims": (),
+            "events": tuple({
+                "event_id": item.event_id, "profile": "unknown", "start_pts": item.start_pts, "end_pts": item.end_pts,
+                "status": "unobservable" if item.observability == "unobservable" else "uncertain", "observability": item.observability,
+                "candidate_profile_scores": item.candidate_profile_scores, "proposal_status": item.status,
+                "tracking_coverage": item.tracking_coverage, "pose_coverage": item.pose_coverage,
+                "provenance_fingerprint": item.provenance_fingerprint, "revision": item.revision,
+            } for item in event_proposals.proposals),
+            "review_tasks": tuple({"task_id": f"{item.event_id}:window", "authority": "v2", "kind": "confirm_action_window", "event_id": item.event_id} for item in event_proposals.proposals if item.status == "pending_confirmation"),
+        })
     return rendered.model_dump(mode="json")
+
+
+def _stored_event_proposals(analysis: Any) -> EventProposalCollection | None:
+    stored = getattr(analysis, "processing_logs", None)
+    if isinstance(stored, list):
+        for item in reversed(stored):
+            if isinstance(item, dict) and isinstance(item.get("event_proposals"), dict):
+                return EventProposalCollection.model_validate(item["event_proposals"])
+    return None
+
+
+def _generate_event_proposals_for_analysis(analysis: Any) -> EventProposalCollection:
+    source_hash = f"sha256:analysis:{getattr(analysis, 'id', 'unknown')}"
+    timeline = getattr(analysis, "processing_logs", None)
+    if isinstance(timeline, list):
+        for item in reversed(timeline):
+            if isinstance(item, dict) and isinstance(item.get("source_timeline"), dict) and item["source_timeline"].get("source_video_hash"):
+                source_hash = str(item["source_timeline"]["source_video_hash"])
+                break
+    mapping = {key: getattr(analysis, key, None) for key in ("frame_motion_scores", "pose_data", "video_temporal_diagnostics", "source_duration_sec")}
+    duration, samples = evidence_from_legacy_analysis(source_hash, mapping)
+    from app.analysis_v2.event_proposals import generate_event_proposals
+    return generate_event_proposals(source_video_hash=source_hash, source_duration_sec=duration, samples=samples, pipeline_fingerprint=f"v2:iteration10:{getattr(analysis, 'pipeline_version', 'unknown')}")
 
 
 async def _load_analysis(analysis_id: str, session: AsyncSession) -> Analysis:
@@ -101,6 +159,58 @@ async def get_analysis_experience_v2_diagnostic(
     await require_parent_pin(session, x_parent_pin)
     analysis = await _load_analysis(analysis_id, session)
     return AnalysisExperienceV2.model_validate(present_analysis_experience(analysis, diagnostic=True))
+
+
+@router.get("/{analysis_id}/event-proposals", response_model=EventProposalCollection)
+async def get_event_proposals(
+    analysis_id: str,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> EventProposalCollection:
+    await require_parent_pin(session, x_parent_pin)
+    analysis = await _load_analysis(analysis_id, session)
+    collection = _stored_event_proposals(analysis)
+    if collection is None:
+        collection = _generate_event_proposals_for_analysis(analysis)
+    return collection
+
+
+@router.post("/{analysis_id}/event-proposals/mutate", response_model=EventProposalCollection)
+async def mutate_event_proposals(
+    analysis_id: str,
+    payload: EventProposalMutationRequest,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> EventProposalCollection:
+    await require_parent_pin(session, x_parent_pin)
+    analysis = await _load_analysis(analysis_id, session)
+    collection = _stored_event_proposals(analysis)
+    if collection is None:
+        collection = _generate_event_proposals_for_analysis(analysis)
+    if payload.expected_revision != collection.revision:
+        raise HTTPException(status_code=409, detail={"code": "event_proposal_revision_conflict", "current_revision": collection.revision})
+    if payload.scope == "event" and payload.operation == "merge":
+        raise HTTPException(status_code=400, detail="merge requires explicit analysis scope")
+    try:
+        if payload.operation == "merge":
+            updated = merge_proposals(collection, payload.event_ids)
+        elif payload.operation == "split":
+            if payload.event_id is None or payload.split_pts is None:
+                raise ValueError("split requires event_id and split_pts")
+            updated = split_proposal(collection, payload.event_id, payload.split_pts)
+        else:
+            if payload.event_id is None:
+                raise ValueError("event-scoped outcome requires event_id")
+            outcome = {"ignore": "ignored", "ordinary_skating": "ordinary_skating", "unknown": "unknown", "confirm": "confirmed_window"}[payload.operation]
+            updated = set_proposal_outcome(collection, payload.event_id, outcome)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logs = list(analysis.processing_logs) if isinstance(analysis.processing_logs, list) else []
+    logs.append({"event_proposals": updated.model_dump(mode="json"), "event_proposal_audit": {"operation": payload.operation, "scope": payload.scope, "event_id": payload.event_id, "event_ids": list(payload.event_ids), "parent_revision": collection.revision, "revision": updated.revision, "legacy_mutation": False}})
+    analysis.processing_logs = logs
+    session.add(analysis)
+    await session.commit()
+    return updated
 
 
 @router.get("/{analysis_id}/observations", response_model=DetectionProposalDiagnostics)
@@ -226,3 +336,18 @@ async def get_pilot12_detection_diagnostics(
     if not fixture.exists():
         return {"schema_version": "iteration7-pilot12-detection-evidence.v1", "status": "unavailable", "analysis_count": 0, "candidate_count": 0, "proposal_count": 0, "diagnostic_only": True, "identity_decisions": False}
     return evaluate_pilot12_detection(fixture)
+
+
+@router.get("/pilot12-event-proposals", response_model=dict[str, Any])
+async def get_pilot12_event_proposal_diagnostics(
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+    config: RuntimeConfig = Depends(get_runtime_config),
+) -> dict[str, Any]:
+    await require_parent_pin(session, x_parent_pin)
+    root = config.runtime_paths["test_data"] / "pilot-12-run-20260801"
+    snapshot = root / "api-analysis-index-live.json"
+    labels = root / "snapshot-manifest.json"
+    if not snapshot.exists() or not labels.exists():
+        return {"schema_version": "iteration10-pilot12-event-proposals.v1", "status": "unavailable", "diagnostic_only": True, "release_claim": False}
+    return evaluate_pilot12_event_proposals(snapshot, labels)

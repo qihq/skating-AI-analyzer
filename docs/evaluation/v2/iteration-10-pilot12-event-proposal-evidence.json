@@ -1,0 +1,801 @@
+{
+  "schema_version": "iteration10-pilot12-event-proposals.v1",
+  "gate": "G6",
+  "status": "passed_for_pilot_only",
+  "diagnostic_only": true,
+  "release_claim": false,
+  "classifier_labels_consumed": false,
+  "dataset": "pilot-12-run-20260801",
+  "raw_n": 8,
+  "proposal_recall": {
+    "numerator": 8,
+    "denominator": 8,
+    "rate": 1.0,
+    "wilson_95_ci": [
+      0.675592,
+      1.0
+    ]
+  },
+  "false_proposals_per_minute_upper_bound": 7.498828,
+  "proposal_count": 16,
+  "video_minutes": 2.133667,
+  "proposal_coverage": 0.977958,
+  "strata": {
+    "blur": {
+      "numerator": 2,
+      "denominator": 2,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.34238,
+        1.0
+      ]
+    },
+    "crossing": {
+      "numerator": 4,
+      "denominator": 4,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.510109,
+        1.0
+      ]
+    },
+    "jump": {
+      "numerator": 4,
+      "denominator": 4,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.510109,
+        1.0
+      ]
+    },
+    "multi-skater": {
+      "numerator": 8,
+      "denominator": 8,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.675592,
+        1.0
+      ]
+    },
+    "normal": {
+      "numerator": 1,
+      "denominator": 1,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.206549,
+        1.0
+      ]
+    },
+    "occlusion": {
+      "numerator": 3,
+      "denominator": 3,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.438503,
+        1.0
+      ]
+    },
+    "small": {
+      "numerator": 2,
+      "denominator": 2,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.34238,
+        1.0
+      ]
+    },
+    "spin": {
+      "numerator": 2,
+      "denominator": 2,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.34238,
+        1.0
+      ]
+    },
+    "spiral": {
+      "numerator": 1,
+      "denominator": 1,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.206549,
+        1.0
+      ]
+    },
+    "step": {
+      "numerator": 1,
+      "denominator": 1,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.206549,
+        1.0
+      ]
+    }
+  },
+  "events": [
+    {
+      "event_id": "event-67d03ccd9b29fd05b806a0a2d2e0f4eb",
+      "source_alias": "20c375c3",
+      "matched": true,
+      "proposal_ids": [
+        "evt-d7e9e9397f0df45586ea"
+      ]
+    },
+    {
+      "event_id": "event-614cb5635578326aea097708a89c49dc",
+      "source_alias": "44d963bd",
+      "matched": true,
+      "proposal_ids": [
+        "evt-d5ef71f47f2622c0de04"
+      ]
+    },
+    {
+      "event_id": "event-b340289bb939a55c9e26a06084de42a4",
+      "source_alias": "8bee2056",
+      "matched": true,
+      "proposal_ids": [
+        "evt-6fd82a1b9911f60e5bc3"
+      ]
+    },
+    {
+      "event_id": "event-31fc6ddc4d16d229530849dc76ecc9c9",
+      "source_alias": "c1272431",
+      "matched": true,
+      "proposal_ids": [
+        "evt-7559ecb844d54e25bf86"
+      ]
+    },
+    {
+      "event_id": "event-4d7148a0d0d7ea4564b93743515cfe1b",
+      "source_alias": "dbda4eee",
+      "matched": true,
+      "proposal_ids": [
+        "evt-5e03b2aba1815088a746"
+      ]
+    },
+    {
+      "event_id": "event-b9371aac4de87ac78f0c05e3d77a23bf",
+      "source_alias": "8d9531d6",
+      "matched": true,
+      "proposal_ids": [
+        "evt-24e78ff6abe3f7c18a75"
+      ]
+    },
+    {
+      "event_id": "event-1708a4a715160776de53cdc96b2fc5c4",
+      "source_alias": "accd28d7",
+      "matched": true,
+      "proposal_ids": [
+        "evt-0b2f1af43cf4e93cfdaf"
+      ]
+    },
+    {
+      "event_id": "event-71904f36d2e4087179d5b461f1f46a17",
+      "source_alias": "890b7267",
+      "matched": true,
+      "proposal_ids": [
+        "evt-b7a34c67a725cd55b7f1"
+      ]
+    }
+  ],
+  "collections": {
+    "094b50d4": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "094b50d497896777bfaa37c9d8edc98984553ba87477392c2d51530af62a5144",
+      "source_duration_sec": 9.002,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-38c3b8d934f6c6ad9711",
+          "source_video_hash": "094b50d497896777bfaa37c9d8edc98984553ba87477392c2d51530af62a5144",
+          "start_pts": 0.0,
+          "end_pts": 9.002,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 53,
+          "candidate_profile_scores": {
+            "jump": 0.052953,
+            "spin": 0.293212,
+            "step": 0.217998,
+            "spiral": 0.040215
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.083333,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:8b2a16bf5be2382644dab99cd09f034a594c0029b6c94df5eac8c99ba2d114bc",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "20c375c3": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "20c375c37b6f6e60cbca88415b9d525a2746cdd58634c36e7a295564fba99f11",
+      "source_duration_sec": 11.135,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-d7e9e9397f0df45586ea",
+          "source_video_hash": "20c375c37b6f6e60cbca88415b9d525a2746cdd58634c36e7a295564fba99f11",
+          "start_pts": 0.0,
+          "end_pts": 11.135,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 47,
+          "candidate_profile_scores": {
+            "jump": 0.139444,
+            "spin": 0.426955,
+            "step": 0.324482,
+            "spiral": 0.109152
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.75,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:29fd1e5faca5cd560fd97530268c34da8e8d67776efbe7c8671a3b888bbc0bd6",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "44d963bd": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "44d963bdb1fe4b16a18bbc84716b3aa330a318cff0b4437d4383c9c09b020c2b",
+      "source_duration_sec": 12.068,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-d5ef71f47f2622c0de04",
+          "source_video_hash": "44d963bdb1fe4b16a18bbc84716b3aa330a318cff0b4437d4383c9c09b020c2b",
+          "start_pts": 0.0,
+          "end_pts": 12.068,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 66,
+          "candidate_profile_scores": {
+            "jump": 0.058897,
+            "spin": 0.336938,
+            "step": 0.257479,
+            "spiral": 0.038346
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:b0207cac0058558d5666cb455a28e9e516791f04e0974bd0d477de18213bc1e1",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "890b7267": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "890b726722c524d6b2b9c86831036f6733e64c7c7946e984d6c1b62ae871bdc9",
+      "source_duration_sec": 8.735,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-b7a34c67a725cd55b7f1",
+          "source_video_hash": "890b726722c524d6b2b9c86831036f6733e64c7c7946e984d6c1b62ae871bdc9",
+          "start_pts": 0.0,
+          "end_pts": 8.735,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 49,
+          "candidate_profile_scores": {
+            "jump": 0.051629,
+            "spin": 0.317549,
+            "step": 0.233262,
+            "spiral": 0.038172
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.208333,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:c7c5bf33f0a28832837d6278c9e24afc2ddb7168f010f137e0b38ccae9abcb2b",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "8bee2056": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "8bee205672a64ae472b25129193f9ddb9a485caa3871ebc6661d41c24f1f576a",
+      "source_duration_sec": 10.335,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-6fd82a1b9911f60e5bc3",
+          "source_video_hash": "8bee205672a64ae472b25129193f9ddb9a485caa3871ebc6661d41c24f1f576a",
+          "start_pts": 0.0,
+          "end_pts": 10.335,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 61,
+          "candidate_profile_scores": {
+            "jump": 0.170361,
+            "spin": 0.401801,
+            "step": 0.326906,
+            "spiral": 0.142821
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 1.0,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:13771affdb45c7b215801aec945d4ab8905ae71f5dd3246c38b02ad25e15e52d",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "8d9531d6": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "8d9531d67ef1245358667da17222f602246ba51b6b36c902711933f609e597d6",
+      "source_duration_sec": 7.702,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-71694d31787681dd7331",
+          "source_video_hash": "8d9531d67ef1245358667da17222f602246ba51b6b36c902711933f609e597d6",
+          "start_pts": 0.0,
+          "end_pts": 1.967,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 10,
+          "candidate_profile_scores": {
+            "jump": 0.018665,
+            "spin": 0.354932,
+            "step": 0.275238,
+            "spiral": 0.013066
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:9f67216a48d2840ff84bce5c7a0ba0e54522c600651e735761f292f1caa1dab8",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        },
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-c6956b47b6e3cb3fcbdb",
+          "source_video_hash": "8d9531d67ef1245358667da17222f602246ba51b6b36c902711933f609e597d6",
+          "start_pts": 2.367,
+          "end_pts": 2.967,
+          "anchor_start_frame": 16,
+          "anchor_end_frame": 16,
+          "candidate_profile_scores": {
+            "jump": 0.034112,
+            "spin": 0.16729,
+            "step": 0.113333,
+            "spiral": 0.023878
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:5ca05eab38d118e6cc2536cadfcc81a73cae3e788cec100eb84bd8e0e51cd367",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        },
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-24e78ff6abe3f7c18a75",
+          "source_video_hash": "8d9531d67ef1245358667da17222f602246ba51b6b36c902711933f609e597d6",
+          "start_pts": 3.367,
+          "end_pts": 7.467,
+          "anchor_start_frame": 22,
+          "anchor_end_frame": 43,
+          "candidate_profile_scores": {
+            "jump": 0.049292,
+            "spin": 0.266933,
+            "step": 0.184167,
+            "spiral": 0.034504
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0625,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:2197f22a9497655da8b9a440f431cd43eed98bbf94245e3b3a57d6195e097011",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "accd28d7": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "accd28d73bf2fcd1541ea4c3372e44a1ceb417ae8f127c07558354a429a48b26",
+      "source_duration_sec": 3.067,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-0b2f1af43cf4e93cfdaf",
+          "source_video_hash": "accd28d73bf2fcd1541ea4c3372e44a1ceb417ae8f127c07558354a429a48b26",
+          "start_pts": 0.0,
+          "end_pts": 3.067,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 17,
+          "candidate_profile_scores": {
+            "jump": 0.128772,
+            "spin": 0.328365,
+            "step": 0.301208,
+            "spiral": 0.075169
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:0fe2ba3133cbd5b7134fbd36405a5def375b3592dbe5dbe0d1c08b9ad8279c81",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "c1272431": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "c1272431c336b41944393f1b6157985c8925b144d9a42b5a594c3df8ee27fb21",
+      "source_duration_sec": 30.638,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-7559ecb844d54e25bf86",
+          "source_video_hash": "c1272431c336b41944393f1b6157985c8925b144d9a42b5a594c3df8ee27fb21",
+          "start_pts": 0.0,
+          "end_pts": 30.638,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 170,
+          "candidate_profile_scores": {
+            "jump": 0.086263,
+            "spin": 0.390565,
+            "step": 0.308433,
+            "spiral": 0.054318
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:e43348e23265e845d962a832107de643c95f017154d0a73bcc9cd2f6d7bd6b6b",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "d8c656d4": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "d8c656d49b3a3f21c803a02b085a27743e17f3c4173d840e10abfc87903c2814",
+      "source_duration_sec": 9.135,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-de2a69c53b898a7e2dde",
+          "source_video_hash": "d8c656d49b3a3f21c803a02b085a27743e17f3c4173d840e10abfc87903c2814",
+          "start_pts": 0.0,
+          "end_pts": 9.135,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 54,
+          "candidate_profile_scores": {
+            "jump": 0.135096,
+            "spin": 0.334095,
+            "step": 0.303905,
+            "spiral": 0.079325
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:dc06fd6b85a07b5eaa968ae616d1c66b4f0abc553f76df0c3b33ef516678d5a7",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "dbda4eee": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "dbda4eeeeaf52069a2e5f4f9b925fc520773eb4d8c02480558f0e9406731ccae",
+      "source_duration_sec": 10.735,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-5e03b2aba1815088a746",
+          "source_video_hash": "dbda4eeeeaf52069a2e5f4f9b925fc520773eb4d8c02480558f0e9406731ccae",
+          "start_pts": 0.0,
+          "end_pts": 10.735,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 58,
+          "candidate_profile_scores": {
+            "jump": 0.086156,
+            "spin": 0.375091,
+            "step": 0.302271,
+            "spiral": 0.05345
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.0,
+          "observability": "partially_observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:a7f39af4e18db93a30329c3f32c5d3f134ff4dd9c1e5910808680814a2073e95",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "ddfe0975": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "ddfe0975b5487bcd54f01c6d041ec68c35ca5c5b175fa0f49241d018c9420de5",
+      "source_duration_sec": 8.2,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-dcbe65be4dd2ecbbea27",
+          "source_video_hash": "ddfe0975b5487bcd54f01c6d041ec68c35ca5c5b175fa0f49241d018c9420de5",
+          "start_pts": 0.033,
+          "end_pts": 3.633,
+          "anchor_start_frame": 2,
+          "anchor_end_frame": 20,
+          "candidate_profile_scores": {
+            "jump": 0.164639,
+            "spin": 0.45921,
+            "step": 0.371855,
+            "spiral": 0.137753
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.909091,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:50a579a4764f0b59ed88e2af37711d5ff11a41c128413385ed885f30660e3ac3",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        },
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-027d6000fbc795fe66e7",
+          "source_video_hash": "ddfe0975b5487bcd54f01c6d041ec68c35ca5c5b175fa0f49241d018c9420de5",
+          "start_pts": 3.867,
+          "end_pts": 6.8,
+          "anchor_start_frame": 25,
+          "anchor_end_frame": 39,
+          "candidate_profile_scores": {
+            "jump": 0.209407,
+            "spin": 0.373492,
+            "step": 0.291401,
+            "spiral": 0.172871
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.909091,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:67eb83669c09c12ac212ad8ff89c94a6abb30f6d5b3ceca456a1fdf3380e7d69",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        },
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-c44ab52be91d243888ce",
+          "source_video_hash": "ddfe0975b5487bcd54f01c6d041ec68c35ca5c5b175fa0f49241d018c9420de5",
+          "start_pts": 7.367,
+          "end_pts": 7.967,
+          "anchor_start_frame": 46,
+          "anchor_end_frame": 46,
+          "candidate_profile_scores": {
+            "jump": 0.16177,
+            "spin": 0.230599,
+            "step": 0.181525,
+            "spiral": 0.134242
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 1.0,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "multi_signal_cluster"
+          ],
+          "provenance_fingerprint": "sha256:8bcaf5042add14ba1b11d5ae958f04e556edfb997ee011a7c3f0246cb43f5068",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    },
+    "fd136871": {
+      "schema_version": "event-proposal-collection.v1",
+      "source_video_hash": "fd13687100b0a2b6dd99cee91dffb466708318619a51cf1ff60858e5d3adbfd8",
+      "source_duration_sec": 7.268,
+      "pipeline_fingerprint": "iteration10-pilot12-proposals.v1",
+      "proposals": [
+        {
+          "schema_version": "event-proposal.v1",
+          "event_id": "evt-216f100929f91ee797d2",
+          "source_video_hash": "fd13687100b0a2b6dd99cee91dffb466708318619a51cf1ff60858e5d3adbfd8",
+          "start_pts": 0.0,
+          "end_pts": 7.268,
+          "anchor_start_frame": 0,
+          "anchor_end_frame": 35,
+          "candidate_profile_scores": {
+            "jump": 0.134176,
+            "spin": 0.377962,
+            "step": 0.303023,
+            "spiral": 0.111624
+          },
+          "proposed_profile": "unknown",
+          "status": "pending_confirmation",
+          "tracking_coverage": 1.0,
+          "pose_coverage": 0.916667,
+          "observability": "observable",
+          "evidence_sources": [
+            "bounded_untyped_semantic_hint",
+            "legacy_motion_fixture",
+            "legacy_pose_fixture",
+            "sparse_observability_envelope"
+          ],
+          "provenance_fingerprint": "sha256:0d6463cbfaa1f3c037b2256f11699094307cc75359c5e305cdb37a7bb6e9c1fc",
+          "revision": 1,
+          "parent_event_ids": [],
+          "superseded_event_ids": []
+        }
+      ],
+      "diagnostic_only": true,
+      "classifier_labels_consumed": false,
+      "revision": 1
+    }
+  },
+  "known_limitations": [
+    "This is the existing 12-video owner-labeled pilot, not a frozen G6 dataset.",
+    "False proposals/minute is an upper bound because ordinary-skating negative intervals are not exhaustively labeled.",
+    "Legacy sparse motion/pose inputs trigger a broad unknown observability envelope when localization would otherwise miss plausible action."
+  ],
+  "result_fingerprint": "sha256:d6f9520f227943512eb908ff0cb09d136a5954048e671f7b3b3b255706698564"
+}

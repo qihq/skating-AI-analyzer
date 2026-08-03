@@ -22,4 +22,17 @@ describe("ModernAnalysisDetail presenter contract", () => {
     expect(await screen.findByTestId("analysis-experience-contract")).toHaveTextContent("Legacy");
     expect(screen.getByText("presenter summary")).toBeInTheDocument();
   });
+
+  it("keeps a diagnostic multi-event selection in the deep link", async () => {
+    vi.mocked(experienceApi.fetchAnalysisExperienceV2).mockResolvedValue({
+      schemaVersion: "analysis-experience.v2", analysisId: "a1", authority: "v2", pipelineMode: "v2", sourcePipelineFingerprint: "v2:fp", diagnosticOnly: true, familyUsable: false, claims: [], reviewTasks: [],
+      events: [
+        { eventId: "e1", profile: "unknown", startPts: 1, endPts: 2, status: "uncertain", observability: "observable", proposalStatus: "pending_confirmation" },
+        { eventId: "e2", profile: "unknown", startPts: 3, endPts: 4, status: "uncertain", observability: "partially_observable", proposalStatus: "unknown" },
+      ],
+    });
+    render(<MemoryRouter initialEntries={["/analysis/a1?event=e2"]}><Routes><Route path="/analysis/:id" element={<ModernAnalysisDetail />} /></Routes></MemoryRouter>);
+    expect(await screen.findByTestId("selected-proposal")).toHaveTextContent("e2");
+    expect(screen.getByRole("option", { name: /Event 2/ })).toHaveAttribute("aria-selected", "true");
+  });
 });

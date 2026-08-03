@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
@@ -8,6 +8,7 @@ import ReportWorkspacePage, { WorkspaceTab } from "../pages/ReportWorkspacePage"
 import { IslandPageHeader } from "./IslandSurface";
 import SectionNav from "./SectionNav";
 import { AnalysisView, resolveAnalysisView } from "./analysisNavigation";
+import { orderedProposalEvents, proposalDeepLink, selectProposalEvent } from "../analysis-v2/eventProposals";
 
 const ITEMS = [
   { id: "summary", label: "总结", to: "summary" },
@@ -20,7 +21,7 @@ const ITEMS = [
 export default function ModernAnalysisDetail({ initialView }: { initialView?: AnalysisView }) {
   const { id } = useParams<{ id: string }>();
   const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const view = resolveAnalysisView({ initialView, view: params.get("view"), legacyTab: params.get("tab") });
   const sectionItems = ITEMS.map((item) => ({
     ...item,
@@ -29,6 +30,14 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
   const workspaceTab: Record<Exclude<AnalysisView, "summary">, WorkspaceTab> = {
     moments: "evidence", body: "pose", ask: "followup", more: "diagnostics",
   };
+  const selected = useMemo(() => experience ? selectProposalEvent(experience, params.get("event")) : { eventId: null, event: null }, [experience, params]);
+  const proposalEvents = useMemo(() => experience ? orderedProposalEvents(experience) : [], [experience]);
+  useEffect(() => {
+    if (!experience || !selected.eventId || params.get("event") === selected.eventId) return;
+    const next = new URLSearchParams(params);
+    next.set("event", selected.eventId);
+    setParams(next, { replace: true });
+  }, [experience, params, selected.eventId, setParams]);
 
   useEffect(() => {
     if (!id) return;
@@ -55,6 +64,16 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
           {experience.claims.find((claim) => claim.claimType === "report_summary")?.value != null ? (
             <p>{String(experience.claims.find((claim) => claim.claimType === "report_summary")?.value)}</p>
           ) : null}
+          {experience.diagnosticOnly && proposalEvents.length ? <div className="modern-analysis-detail__events" aria-label="Multi-event proposal overview">
+            <p>Multi-event proposals · parent diagnostic only</p>
+            <div role="listbox" aria-label="Event selector">
+              {proposalEvents.map((event, index) => <button type="button" role="option" aria-selected={event.eventId === selected.eventId} key={event.eventId} onClick={() => { const next = new URLSearchParams(params); next.set("event", event.eventId); setParams(next); }}>
+                Event {index + 1} · {event.profile} · {event.startPts?.toFixed(2) ?? "?"}–{event.endPts?.toFixed(2) ?? "?"}s · {event.proposalStatus ?? "legacy"}
+              </button>)}
+            </div>
+            {selected.event ? <p data-testid="selected-proposal">Selected {selected.event.eventId} · {selected.event.observability}</p> : null}
+            {selected.event ? <Link to={proposalDeepLink(experience.analysisId, selected.event.eventId)}>Copy event deep link</Link> : null}
+          </div> : null}
         </section>
       ) : null}
       <div className="modern-analysis-detail__content">

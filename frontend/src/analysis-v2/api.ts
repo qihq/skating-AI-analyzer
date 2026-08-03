@@ -2,6 +2,9 @@ import axios from "axios";
 
 import { apiClient } from "../api/client";
 import { AdvancedRuntimeCapabilities, AnalysisExperienceV2, decodeAnalysisExperienceV2, decodeRuntimeCapabilities, DetectionProposalDiagnostics, IdentityRevisionPreview, IdentityTimeline, RuntimeCapabilities } from "./contracts";
+
+export type EventProposal = { event_id: string; source_video_hash: string; start_pts: number; end_pts: number; anchor_start_frame: number; anchor_end_frame: number; candidate_profile_scores: Record<string, number>; proposed_profile: "unknown"; status: "pending_confirmation" | "confirmed_window" | "ignored" | "ordinary_skating" | "unknown"; tracking_coverage: number; pose_coverage: number; observability: "observable" | "partially_observable" | "unobservable"; evidence_sources: string[]; provenance_fingerprint: string; revision: number; parent_event_ids: string[]; superseded_event_ids: string[] };
+export type EventProposalCollection = { schema_version: "event-proposal-collection.v1"; source_video_hash: string; source_duration_sec: number; pipeline_fingerprint: string; proposals: EventProposal[]; diagnostic_only: boolean; classifier_labels_consumed: false; revision: number };
 import { GoldenCatalogSummary, GoldenG2Status, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
 
 export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
@@ -17,6 +20,16 @@ export async function fetchAnalysisExperienceV2(analysisId: string): Promise<Ana
 export async function fetchAnalysisExperienceV2Diagnostic(parentPin: string, analysisId: string): Promise<AnalysisExperienceV2> {
   const response = await apiClient.get<unknown>(`/analysis/${encodeURIComponent(analysisId)}/experience-v2/diagnostic`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
   return decodeAnalysisExperienceV2(response.data);
+}
+
+export async function fetchEventProposals(parentPin: string, analysisId: string): Promise<EventProposalCollection> {
+  const response = await apiClient.get<EventProposalCollection>(`/analysis/${encodeURIComponent(analysisId)}/event-proposals`, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
+}
+
+export async function mutateEventProposals(parentPin: string, analysisId: string, payload: { operation: "merge" | "split" | "ignore" | "ordinary_skating" | "unknown" | "confirm"; event_id?: string; event_ids?: string[]; split_pts?: number; expected_revision: number; scope: "event" | "analysis"; confirmation: "confirm_event_proposal_revision" }): Promise<EventProposalCollection> {
+  const response = await apiClient.post<EventProposalCollection>(`/analysis/${encodeURIComponent(analysisId)}/event-proposals/mutate`, payload, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
+  return response.data;
 }
 
 export async function fetchAdvancedRuntimeCapabilities(parentPin: string): Promise<AdvancedRuntimeCapabilities> {
