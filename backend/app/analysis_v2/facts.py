@@ -9,6 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Authority = Literal["legacy", "v2"]
 FactStatus = Literal["confirmed", "uncertain", "unobservable"]
+FactProvenance = Literal[
+    "measured",
+    "smoothed",
+    "interpolated-display-only",
+    "missing",
+    "clipped",
+    "identity-blocked",
+    "legacy-whole-record",
+]
 Observability = Literal["observable", "partially_observable", "unobservable"]
 
 
@@ -51,6 +60,12 @@ class AnalysisFactV2(BaseModel):
 
     @model_validator(mode="after")
     def _validate_status(self) -> "AnalysisFactV2":
+        forbidden_pose_provenance = {"interpolated-display-only", "identity-blocked"}
+        if forbidden_pose_provenance.intersection(self.provenance):
+            if self.permissions.aggregation or self.permissions.comparison or self.permissions.coaching or self.permissions.automation:
+                raise ValueError("interpolated-only or identity-blocked facts cannot be used downstream")
+            if self.status == "confirmed":
+                raise ValueError("blocked pose provenance cannot be confirmed")
         if self.status == "unobservable" or self.observability == "unobservable":
             if self.value is not None:
                 raise ValueError("unobservable fact cannot carry a value")
@@ -111,6 +126,7 @@ class AnalysisFactsV2(BaseModel):
             if getattr(fact.permissions, permission, False)
             and fact.status == "confirmed"
             and fact.observability == "observable"
+            and not {"interpolated-display-only", "identity-blocked"}.intersection(fact.provenance)
         )
 
 

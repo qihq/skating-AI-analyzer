@@ -63,6 +63,25 @@ export function selectDetectionOverlays(diagnostics: DetectionProposalDiagnostic
 
 export type ExperienceAuthority = "legacy" | "v2";
 export type ExperienceStatus = "confirmed" | "uncertain" | "unobservable";
+export type PoseJointProvenance = "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked";
+export type PoseAvailabilityStatus = "available" | "partial" | "unavailable" | "blocked";
+export interface PoseAvailabilitySummary {
+  schema_version: "pose-availability-summary.v1";
+  status: PoseAvailabilityStatus;
+  frame_count: number;
+  authoritative_frame_count: number;
+  measured_joint_count: number;
+  smoothed_joint_count: number;
+  interpolated_display_only_count: number;
+  missing_joint_count: number;
+  identity_blocked_frame_count: number;
+  clipped_joint_count: number;
+  usable_joint_mask: Record<string, boolean>;
+  per_phase_quality: Record<string, number | null>;
+  left_right_assignment_uncertainty: number | null;
+  source_method: string;
+  model_fingerprint: string | null;
+}
 export interface ExperienceClaim {
   analysisId: string;
   eventId: string | null;
@@ -77,7 +96,7 @@ export interface ExperienceClaim {
   observability: "observable" | "partially_observable" | "unobservable";
   confidence: number | null;
 }
-export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; }
+export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; pose?: PoseAvailabilitySummary | null; }
 export interface ExperienceReviewTask { taskId: string; authority: ExperienceAuthority; kind: string; eventId: string | null; }
 export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
 export interface SourceTimelineFrame { sourceFrameIndex: number; ptsSec: number | null; durationSec: number | null; status: "available" | "duplicate_pts" | "gap_after_previous" | "discontinuity" | "timestamp_unavailable"; gapBeforeSec: number; }
@@ -95,6 +114,7 @@ export interface AnalysisExperienceV2 {
   reviewTasks: ExperienceReviewTask[];
   sourceTimeline?: SourceTimeline | null;
   identity?: IdentityTimeline | null;
+  pose?: PoseAvailabilitySummary | null;
 }
 
 export type IdentityState = "confirmed" | "uncertain" | "lost";
@@ -167,13 +187,37 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
     if (typeof event.event_id !== "string" || typeof event.profile !== "string" || !isExperienceStatus(event.status) || !isExperienceObservability(event.observability)) throw new Error("invalid experience event");
     if (event.start_pts !== undefined && event.start_pts !== null && typeof event.start_pts !== "number") throw new Error("invalid event start PTS");
     if (event.end_pts !== undefined && event.end_pts !== null && typeof event.end_pts !== "number") throw new Error("invalid event end PTS");
-    return { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability };
+    return { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability, pose: event.pose == null ? null : decodePoseAvailability(event.pose) };
   });
   const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });
   const reviewTasks = (Array.isArray(raw.review_tasks) ? raw.review_tasks : []).map((item) => { const t = record(item); if (t.authority !== raw.authority || typeof t.task_id !== "string" || typeof t.kind !== "string") throw new Error("cross-authority or invalid review task"); return { taskId: t.task_id, authority: t.authority as ExperienceAuthority, kind: t.kind, eventId: (t.event_id as string | null) ?? null }; });
   const identity = raw.identity == null ? null : raw.identity as IdentityTimeline;
   if (identity && (identity.state !== "confirmed" && identity.state !== "uncertain" && identity.state !== "lost")) throw new Error("invalid identity state");
-  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks, sourceTimeline: decodeSourceTimeline(raw.source_timeline), identity };
+  const pose = raw.pose == null ? null : decodePoseAvailability(raw.pose);
+  return { schemaVersion: "analysis-experience.v2", analysisId: String(raw.analysis_id), authority: raw.authority as ExperienceAuthority, pipelineMode: raw.pipeline_mode as PipelineMode, sourcePipelineFingerprint: String(raw.source_pipeline_fingerprint), diagnosticOnly: Boolean(raw.diagnostic_only), familyUsable: raw.family_usable !== false, events, claims, reviewTasks, sourceTimeline: decodeSourceTimeline(raw.source_timeline), identity, pose };
+}
+
+function decodePoseAvailability(value: unknown): PoseAvailabilitySummary {
+  const raw = record(value);
+  const status = raw.status;
+  if (raw.schema_version !== "pose-availability-summary.v1" || status !== "available" && status !== "partial" && status !== "unavailable" && status !== "blocked" || typeof raw.frame_count !== "number" || typeof raw.authoritative_frame_count !== "number" || !record(raw.usable_joint_mask) || !record(raw.per_phase_quality)) throw new Error("invalid pose availability summary");
+  return {
+    schema_version: "pose-availability-summary.v1",
+    status,
+    frame_count: raw.frame_count,
+    authoritative_frame_count: raw.authoritative_frame_count,
+    measured_joint_count: Number(raw.measured_joint_count ?? 0),
+    smoothed_joint_count: Number(raw.smoothed_joint_count ?? 0),
+    interpolated_display_only_count: Number(raw.interpolated_display_only_count ?? 0),
+    missing_joint_count: Number(raw.missing_joint_count ?? 0),
+    identity_blocked_frame_count: Number(raw.identity_blocked_frame_count ?? 0),
+    clipped_joint_count: Number(raw.clipped_joint_count ?? 0),
+    usable_joint_mask: raw.usable_joint_mask as Record<string, boolean>,
+    per_phase_quality: raw.per_phase_quality as Record<string, number | null>,
+    left_right_assignment_uncertainty: typeof raw.left_right_assignment_uncertainty === "number" ? raw.left_right_assignment_uncertainty : null,
+    source_method: String(raw.source_method ?? "unknown"),
+    model_fingerprint: typeof raw.model_fingerprint === "string" ? raw.model_fingerprint : null,
+  };
 }
 export function selectClaim(experience: AnalysisExperienceV2, claimType: string, identity?: { authority: ExperienceAuthority; sourcePipelineFingerprint: string }): ExperienceClaim | { status: "unobservable"; observability: "unobservable" } {
   if (identity && (identity.authority !== experience.authority || identity.sourcePipelineFingerprint !== experience.sourcePipelineFingerprint)) throw new Error("selector identity does not match experience");

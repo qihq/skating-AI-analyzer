@@ -846,6 +846,14 @@ class PoseRuntimeStatusResponse(BaseModel):
     model_exists: bool
     num_poses: int
     reason: str
+    source_method: str | None = None
+    model_hash: str | None = None
+    model_version: str | None = None
+    legacy_use: bool = True
+    v2_use: bool = False
+    dependent_artifact_invalidation: str | None = None
+    active: bool = True
+    fallback: bool = False
 
 
 class PersonTrackerRuntimeStatusResponse(BaseModel):

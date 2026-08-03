@@ -45,3 +45,18 @@ def test_pipeline_fingerprint_redacts_nested_secret_fields():
         prompt_version="p1",
         contract_version="contracts.v1",
     )
+
+
+def test_pipeline_fingerprint_changes_when_pose_provider_configuration_changes():
+    base = dict(
+        source_commit="abc",
+        model_files={},
+        configuration={"pose_provider_fingerprint": "sha256:pose-a", "POSE_NUM_POSES": 1},
+        provider="mediapipe",
+        model="pose",
+        prompt_version="none",
+        contract_version="v2",
+    )
+    first = pipeline_fingerprint(**base)
+    changed = {**base, "configuration": {**base["configuration"], "pose_provider_fingerprint": "sha256:pose-b"}}
+    assert first != pipeline_fingerprint(**changed)

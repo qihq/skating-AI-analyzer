@@ -330,21 +330,64 @@ class IdentityTimeline(ContractModel):
         return self
 
 
+PoseJointProvenance = Literal[
+    "measured",
+    "smoothed",
+    "interpolated-display-only",
+    "missing",
+    "clipped",
+    "identity-blocked",
+]
+
+POSE_AUTHORITATIVE_PROVENANCE = frozenset({"measured", "smoothed", "clipped"})
+POSE_DISPLAY_ONLY_PROVENANCE = frozenset({"interpolated-display-only"})
+POSE_BLOCKED_PROVENANCE = frozenset({"missing", "identity-blocked"})
+
+
 class JointObservation(ContractModel):
     x: float
     y: float
     confidence: float = Field(ge=0, le=1)
-    provenance: Literal["measured", "smoothed", "interpolated", "missing"]
-    source: Literal["measured", "smoothed", "interpolated", "missing"] | None = None
+    visibility: float = Field(default=0, ge=0, le=1)
+    provenance: PoseJointProvenance
+    source: PoseJointProvenance | None = None
     coordinate_space: Literal["normalized", "pixel"] = "normalized"
+    raw_x: float | None = None
+    raw_y: float | None = None
+    raw_confidence: float | None = Field(default=None, ge=0, le=1)
+    raw_visibility: float | None = Field(default=None, ge=0, le=1)
+    crop_clipped: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_interpolation(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            value = dict(value)
+            if value.get("provenance") == "interpolated":
+                value["provenance"] = "interpolated-display-only"
+            if value.get("source") == "interpolated":
+                value["source"] = "interpolated-display-only"
+        return value
 
     @model_validator(mode="after")
     def valid_provenance(self) -> "JointObservation":
-        if self.source is not None and self.provenance == "interpolated" and self.source == "measured":
-            raise ValueError("interpolated joint cannot claim measured source")
-        if self.provenance == "missing" and self.confidence != 0:
+        if self.source is not None and self.provenance == "interpolated-display-only" and self.source in {"measured", "clipped"}:
+            raise ValueError("display-only interpolation cannot claim an authoritative source")
+        if self.provenance in {"missing", "identity-blocked"} and (self.confidence != 0 or self.visibility != 0):
             raise ValueError("missing joint confidence must be zero")
+        if self.provenance in {"measured", "clipped"} and self.source not in {None, "measured", "clipped"}:
+            raise ValueError("measured/clipped joints must retain a measured source")
+        if self.provenance == "smoothed" and self.raw_x is None and self.raw_y is None:
+            raise ValueError("smoothed joints must retain raw measured coordinates")
         return self
+
+    @property
+    def is_authoritative(self) -> bool:
+        return self.provenance in POSE_AUTHORITATIVE_PROVENANCE
+
+    @property
+    def is_display_only(self) -> bool:
+        return self.provenance in POSE_DISPLAY_ONLY_PROVENANCE
 
 
 class PoseObservation(ContractModel):
@@ -358,6 +401,59 @@ class PoseObservation(ContractModel):
     temporal_gap_sec: float = Field(default=0, ge=0)
     pose_quality: float | None = Field(default=None, ge=0, le=1)
     jitter_score: float | None = Field(default=None, ge=0, le=1)
+    identity_state: Literal["confirmed", "uncertain", "lost"] | None = None
+    authoritative: bool = True
+    source_method: str = "unknown"
+    model_fingerprint: str | None = None
+    crop_bbox: tuple[float, float, float, float] | None = None
+    crop_context_margin: float = Field(default=0, ge=0)
+    crop_clipped: bool = False
+    usable_joint_mask: dict[str, bool] = Field(default_factory=dict)
+    left_right_assignment_uncertainty: float | None = Field(default=None, ge=0, le=1)
+    scene_cut: bool = False
+    smoothing_break_reason: str | None = None
+
+    @model_validator(mode="after")
+    def identity_authorizes_pose(self) -> "PoseObservation":
+        state = self.identity_state or self.track_state.state
+        if state != self.track_state.state:
+            raise ValueError("pose identity_state must match originating track state")
+        if self.authoritative and state != "confirmed":
+            if any(joint.provenance not in POSE_BLOCKED_PROVENANCE for joint in self.joints.values()):
+                raise ValueError("uncertain/lost identity cannot carry authoritative joints")
+        if self.authoritative and state == "confirmed" and any(
+            joint.provenance == "identity-blocked" for joint in self.joints.values()
+        ):
+            raise ValueError("confirmed identity cannot use identity-blocked joints")
+        return self
+
+
+class PoseAvailabilitySummary(ContractModel):
+    schema_version: Literal["pose-availability-summary.v1"] = "pose-availability-summary.v1"
+    status: Literal["available", "partial", "unavailable", "blocked"]
+    frame_count: int = Field(default=0, ge=0)
+    authoritative_frame_count: int = Field(default=0, ge=0)
+    measured_joint_count: int = Field(default=0, ge=0)
+    smoothed_joint_count: int = Field(default=0, ge=0)
+    interpolated_display_only_count: int = Field(default=0, ge=0)
+    missing_joint_count: int = Field(default=0, ge=0)
+    identity_blocked_frame_count: int = Field(default=0, ge=0)
+    clipped_joint_count: int = Field(default=0, ge=0)
+    usable_joint_mask: dict[str, bool] = Field(default_factory=dict)
+    per_phase_quality: dict[str, float | None] = Field(default_factory=dict)
+    left_right_assignment_uncertainty: float | None = Field(default=None, ge=0, le=1)
+    source_method: str = "unknown"
+    model_fingerprint: str | None = None
+
+
+class PoseDetailResource(ContractModel):
+    schema_version: Literal["pose-detail-resource.v1"] = "pose-detail-resource.v1"
+    analysis_id: str = Field(min_length=1)
+    authority: Literal["legacy", "v2"]
+    diagnostic_only: bool = True
+    source_pipeline_fingerprint: str = Field(min_length=1)
+    summary: PoseAvailabilitySummary
+    observations: tuple[PoseObservation, ...] = ()
 
 
 class ActionEvent(ContractModel):
@@ -512,6 +608,9 @@ def adapt_legacy_pose_observations(
                 pts_sec=max(0.0, float(record.get("timestamp", record.get("pts", 0.0)))),
                 track_state=track,
                 joints=joints,
+                identity_state=track.state,
+                authoritative=False,
+                source_method="legacy_whole_record_adapter",
             )
         )
     return tuple(output)

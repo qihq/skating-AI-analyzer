@@ -530,6 +530,12 @@ export default function SettingsPage() {
               <p className="mt-2 text-xs leading-6 text-blue-600">这里只是在读取配置和文件可用性，不会像正式分析那样触发模型推理。</p>
             </div>
 
+            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <div className="stat-panel"><dt className="stat-label">模型版本 / hash</dt><dd className="break-all text-xs text-slate-700">{poseRuntime?.model_version ?? "--"} · {poseRuntime?.model_hash ?? "--"}</dd></div>
+              <div className="stat-panel"><dt className="stat-label">Legacy / V2 使用</dt><dd className="text-slate-700">{poseRuntime?.legacy_use ? "Legacy" : "—"} / {poseRuntime?.v2_use ? "V2" : "—"}</dd></div>
+              <div className="stat-panel sm:col-span-2"><dt className="stat-label">依赖产物失效范围</dt><dd className="text-slate-700">{poseRuntime?.dependent_artifact_invalidation ?? "--"}</dd></div>
+            </dl>
+
             <div className="mt-4 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
               <div className="flex flex-col gap-3 tablet:flex-row tablet:items-start tablet:justify-between">
                 <div>

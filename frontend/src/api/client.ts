@@ -121,6 +121,10 @@ export interface PoseKeypoint {
   z: number;
   visibility: number;
   interpolated?: boolean;
+  provenance?: "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked";
+  raw_x?: number | null;
+  raw_y?: number | null;
+  usable?: boolean;
 }
 
 export interface PoseFrame {
@@ -135,6 +139,12 @@ export interface PoseFrame {
   } | null;
   tracking_confidence?: number | null;
   tracking_state?: string | null;
+  identity_state?: "confirmed" | "uncertain" | "lost" | null;
+  pose_provenance?: "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked" | null;
+  source_pts_sec?: number | null;
+  pose_quality?: number | null;
+  usable_joint_mask?: Record<string, boolean>;
+  left_right_assignment_uncertainty?: number | null;
   pose_candidates?: Record<string, unknown>[];
 }
 
@@ -146,6 +156,22 @@ export interface PoseResponse {
   effective_fps?: number | null;
   source_timeline?: SourceTimeline | null;
   pose_diagnostics?: Record<string, unknown> | null;
+  pose_availability?: {
+    status: "available" | "partial" | "unavailable" | "blocked";
+    frame_count: number;
+    authoritative_frame_count: number;
+    measured_joint_count: number;
+    smoothed_joint_count: number;
+    interpolated_display_only_count: number;
+    missing_joint_count: number;
+    identity_blocked_frame_count: number;
+    clipped_joint_count: number;
+    usable_joint_mask: Record<string, boolean>;
+    per_phase_quality: Record<string, number | null>;
+    left_right_assignment_uncertainty?: number | null;
+    source_method?: string;
+    model_fingerprint?: string | null;
+  } | null;
 }
 
 export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
@@ -1043,6 +1069,14 @@ export interface PoseRuntimeStatus {
   model_exists: boolean;
   num_poses: number;
   reason: string;
+  source_method?: string;
+  model_hash?: string | null;
+  model_version?: string | null;
+  legacy_use?: boolean;
+  v2_use?: boolean;
+  dependent_artifact_invalidation?: string;
+  active?: boolean;
+  fallback?: boolean;
 }
 
 export interface PersonTrackerRuntimeStatus {

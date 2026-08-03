@@ -109,3 +109,34 @@ def test_identity_anchor_confirmation_is_parent_authorized_and_audited() -> None
     assert result.next_revision == 2
     assert analysis.processing_logs[-1]["identity_audit"]["legacy_mutation"] is False
     session.commit.assert_awaited_once()
+
+
+def test_pose_detail_resource_is_parent_authorized_and_raw_joints_stay_out_of_experience() -> None:
+    analysis = _analysis()
+    analysis.processing_logs = [{
+        "pose_v2_detail": {
+            "source_pipeline_fingerprint": "v2:pose",
+            "summary": {
+                "status": "available",
+                "frame_count": 1,
+                "authoritative_frame_count": 1,
+                "measured_joint_count": 1,
+                "usable_joint_mask": {"nose": True},
+                "source_method": "test",
+            },
+            "observations": [{
+                "source_video_hash": "sha256:v",
+                "source_frame_index": 0,
+                "pts_sec": 0.0,
+                "track_state": {"state": "confirmed", "bbox": [0.1, 0.1, 0.3, 0.8], "identity_score": 0.9, "bbox_source": "measured"},
+                "identity_state": "confirmed",
+                "joints": {"nose": {"x": 0.2, "y": 0.3, "confidence": 0.9, "visibility": 0.9, "provenance": "measured", "source": "measured"}},
+            }],
+        }
+    }]
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=analysis)
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        result = asyncio.run(analysis_v2.get_pose_v2_detail("a1", "1234", session))
+    assert result.diagnostic_only is True
+    assert result.observations[0].joints["nose"].provenance == "measured"

@@ -6,12 +6,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analysis_v2.presentation import AnalysisExperienceV2, present_analysis_experience as build_analysis_experience
+from app.analysis_v2.presentation import AnalysisExperienceV2, build_pose_detail_resource, present_analysis_experience as build_analysis_experience
 from app.database import get_session
 from app.models import Analysis
 from app.services.parent_access import require_parent_pin
 from app.analysis_v2.evaluation.source_media import SourceMediaError, probe_source, source_frame_index
-from app.analysis_v2.contracts import DetectionProposalDiagnostics, IdentityAnchor, IdentityAnchorRevision, IdentityTimeline
+from app.analysis_v2.contracts import DetectionProposalDiagnostics, IdentityAnchor, IdentityAnchorRevision, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
 from app.analysis_v2.identity import create_anchor_revision, immutable_template_fingerprint, replace_causal_interval
 from app.analysis_v2.detection import build_proposal_diagnostics, resolve_provider_config
 from app.analysis_v2.contracts import IdentityTimeline
@@ -62,13 +62,17 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
         except (OSError, SourceMediaError, RuntimeError, ValueError):
             timeline = {"schema_version": "source-timeline.v1", "source_video_hash": "", "duration_sec": None, "width": 1, "height": 1, "rotation_degrees": 0, "timebase": {"numerator": 1, "denominator": 1, "is_vfr": False}, "timestamp_status": "unavailable", "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "unavailable"}
     identity = None
+    pose_summary = None
     stored = getattr(analysis, "processing_logs", None)
     if diagnostic and isinstance(stored, list):
         for item in reversed(stored):
             if isinstance(item, dict) and isinstance(item.get("identity_timeline"), dict):
                 identity = IdentityTimeline.model_validate(item["identity_timeline"])
+            if isinstance(item, dict) and isinstance(item.get("pose_summary"), dict):
+                pose_summary = PoseAvailabilitySummary.model_validate(item["pose_summary"])
+            if identity is not None and pose_summary is not None:
                 break
-    rendered = build_analysis_experience(analysis, pipeline_mode="shadow" if diagnostic else "legacy", source_timeline=timeline, identity=identity)
+    rendered = build_analysis_experience(analysis, pipeline_mode="shadow" if diagnostic else "legacy", source_timeline=timeline, identity=identity, pose=pose_summary)
     return rendered.model_dump(mode="json")
 
 
@@ -130,6 +134,33 @@ async def get_identity_timeline(
             if isinstance(item, dict) and isinstance(item.get("identity_timeline"), dict):
                 return IdentityTimeline.model_validate(item["identity_timeline"])
     return None
+
+
+@router.get("/{analysis_id}/pose-v2/detail", response_model=PoseDetailResource)
+async def get_pose_v2_detail(
+    analysis_id: str,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
+    session: AsyncSession = Depends(get_session),
+) -> PoseDetailResource:
+    """Return raw V2 joints only from the parent-authorized diagnostic resource."""
+    await require_parent_pin(session, x_parent_pin)
+    analysis = await _load_analysis(analysis_id, session)
+    stored = getattr(analysis, "processing_logs", None)
+    if isinstance(stored, list):
+        for item in reversed(stored):
+            if not isinstance(item, dict) or not isinstance(item.get("pose_v2_detail"), dict):
+                continue
+            detail = item["pose_v2_detail"]
+            observations = tuple(PoseObservation.model_validate(value) for value in detail.get("observations", ()))
+            summary = PoseAvailabilitySummary.model_validate(detail.get("summary", {}))
+            return build_pose_detail_resource(
+                analysis_id=analysis_id,
+                source_pipeline_fingerprint=str(detail.get("source_pipeline_fingerprint", "v2:unfingerprinted")),
+                observations=observations,
+                summary=summary,
+                authority="v2",
+            )
+    raise HTTPException(status_code=404, detail="V2 pose detail is unavailable")
 
 
 @router.post("/{analysis_id}/identity/anchors/preview", response_model=IdentityRevisionPreview, status_code=status.HTTP_200_OK)

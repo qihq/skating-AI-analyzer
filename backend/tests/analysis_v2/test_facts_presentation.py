@@ -196,6 +196,23 @@ def test_fact_consumer_filters_by_permission_and_never_switches_authority() -> N
     assert consumer.source_fact_hash == facts.source_fact_hash
 
 
+def test_fact_consumer_rejects_interpolated_and_identity_blocked_pose_facts() -> None:
+    safe = AnalysisFactV2(
+        analysis_id="a",
+        claim_type="joint_angle",
+        value=25,
+        authority="v2",
+        source_pipeline_fingerprint="fp",
+        definition_version="pose.v2",
+        provenance=("measured",),
+        permissions=FactPermission(coaching=True, aggregation=True),
+    )
+    interpolated = safe.model_copy(update={"value": None, "status": "uncertain", "observability": "partially_observable", "provenance": ("interpolated-display-only",), "permissions": FactPermission(family_display=True)})
+    blocked = safe.model_copy(update={"value": None, "status": "uncertain", "observability": "partially_observable", "provenance": ("identity-blocked",), "permissions": FactPermission(family_display=True)})
+    facts = AnalysisFactsV2(analysis_id="a", authority="v2", facts=[safe, interpolated, blocked])
+    assert [fact.claim_type for fact in build_fact_consumer(facts, "coaching").facts] == ["joint_angle"]
+
+
 def test_presenter_projects_same_authority_facts() -> None:
     from app.analysis_v2.presentation import project_analysis_facts
 

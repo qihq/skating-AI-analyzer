@@ -1,0 +1,45 @@
+{
+  "schema_version": "iteration-9-pose-diagnostic.v1",
+  "iteration": 9,
+  "diagnostic_only": true,
+  "subset": {
+    "name": "pilot-12-run-20260801",
+    "video_count": 12,
+    "role": "candidate/reference subset only",
+    "frozen_test": false
+  },
+  "pose_labels": {
+    "status": "not_available",
+    "labeled_source_frames": 0,
+    "ground_truth_policy": "automatic pose output is never used as Ground Truth"
+  },
+  "metrics": {
+    "pck_at_0_2": null,
+    "pck_denominator": 0,
+    "joint_availability": null,
+    "wrong_person_authoritative_skeleton_rate": null,
+    "confidence_intervals": null
+  },
+  "g5_claim": false,
+  "g5_status": "blocked_waiting_for_owner_pose_labels",
+  "model_decision": {
+    "existing_provider": "MediaPipe target-only provider with fallback single-pose and task-based multi-pose resolution",
+    "existing_provider_retained": true,
+    "pretrained_alternatives": "not_benchmarked",
+    "replacement": false,
+    "reason": "No labeled pose subset is available, so no measurable accuracy win or approved tradeoff can be established."
+  },
+  "runtime_observation": {
+    "source_count": 12,
+    "event_count": 12,
+    "pose_observation_count": 0,
+    "authoritative_pose_count": 0,
+    "identity_gate": "confirmed target crops only",
+    "interpolation": "display-only and excluded from authoritative facts/biomechanics"
+  },
+  "limitations": [
+    "This snapshot is diagnostic only and cannot satisfy G4 or G5.",
+    "Formal pose Golden requires 50-100 stratified source frames across core, small target, blur, occlusion, front/back, and crossing strata.",
+    "Additional videos may be labeled later; until then G5 remains unpassed."
+  ]
+}

@@ -5,6 +5,9 @@ import { PoseFrame, PoseKeypoint, PoseResponse } from "../api/client";
 type PoseViewerProps = {
   pose: PoseResponse;
   activeFrameId?: string | null;
+  activeSourcePts?: number | null;
+  selectedEventId?: string | null;
+  selectedEventLabel?: string | null;
   onFrameChange?: (frameId: string) => void;
   variant?: "compact" | "debug";
   diagnosticsByFrame?: Record<string, PoseViewerDiagnostic>;
@@ -38,6 +41,10 @@ function frameIdFromName(frame: string) {
 }
 
 function keypointColor(point: PoseKeypoint) {
+  if (point.provenance === "smoothed") return "#A78BFA";
+  if (point.provenance === "clipped") return "#FB923C";
+  if (point.provenance === "interpolated-display-only") return "#94A3B8";
+  if (point.provenance === "identity-blocked" || point.provenance === "missing") return "#64748B";
   if (AXIS_POINTS.has(point.id)) {
     return "#F8FAFC";
   }
@@ -112,6 +119,11 @@ function drawPose(
     }
   }
 
+  // An uncertain or lost identity never renders an authoritative skeleton.
+  if (frame.identity_state === "uncertain" || frame.identity_state === "lost" || frame.pose_provenance === "identity-blocked") {
+    return;
+  }
+
   if (diagnostic?.predictionBBox) {
     context.strokeStyle = "rgba(168, 85, 247, 0.95)";
     context.lineWidth = 2;
@@ -157,11 +169,13 @@ function drawPose(
     if (!a || !b || a.visibility < 0.5 || b.visibility < 0.5) {
       continue;
     }
-    const interpolated = frame.tracking_state === "interpolated" || Boolean(a.interpolated) || Boolean(b.interpolated);
+    const interpolated = frame.tracking_state === "interpolated" || Boolean(a.interpolated) || Boolean(b.interpolated) || a.provenance === "interpolated-display-only" || b.provenance === "interpolated-display-only";
+    const smoothed = a.provenance === "smoothed" || b.provenance === "smoothed";
+    const clipped = a.provenance === "clipped" || b.provenance === "clipped";
     const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
-    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : lowConfidence ? "rgba(245, 158, 11, 0.46)" : "rgba(226, 232, 240, 0.82)";
+    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : clipped ? "rgba(251, 146, 60, 0.72)" : smoothed ? "rgba(167, 139, 250, 0.72)" : lowConfidence ? "rgba(245, 158, 11, 0.46)" : "rgba(226, 232, 240, 0.82)";
     context.lineWidth = interpolated ? 2 : 3;
-    context.setLineDash(interpolated ? [6, 6] : []);
+    context.setLineDash(interpolated ? [6, 6] : clipped ? [2, 5] : []);
     context.beginPath();
     context.moveTo(a.x * width, a.y * height);
     context.lineTo(b.x * width, b.y * height);
@@ -174,14 +188,14 @@ function drawPose(
       continue;
     }
     const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
-    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated ? "rgba(148, 163, 184, 0.62)" : lowConfidence ? "rgba(245, 158, 11, 0.72)" : keypointColor(point);
+    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated || point.provenance === "interpolated-display-only" ? "rgba(148, 163, 184, 0.62)" : lowConfidence ? "rgba(245, 158, 11, 0.72)" : keypointColor(point);
     context.beginPath();
     context.arc(point.x * width, point.y * height, AXIS_POINTS.has(point.id) ? 5 : 4, 0, Math.PI * 2);
     context.fill();
   }
 }
 
-export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant = "compact", diagnosticsByFrame = {} }: PoseViewerProps) {
+export default function PoseViewer({ pose, activeFrameId, activeSourcePts, selectedEventId, selectedEventLabel, onFrameChange, variant = "compact", diagnosticsByFrame = {} }: PoseViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -212,6 +226,25 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
       setIsPlaying(false);
     }
   }, [activeFrameId, frameIndex, frames]);
+
+  useEffect(() => {
+    if (activeSourcePts == null || !Number.isFinite(activeSourcePts) || !frames.length) return;
+    let nearestIndex = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    frames.forEach((frame, index) => {
+      const pts = frame.source_pts_sec ?? pose.frame_timestamps?.[frame.frame] ?? pose.frame_timestamps?.[frameIdFromName(frame.frame)];
+      if (typeof pts !== "number") return;
+      const distance = Math.abs(pts - activeSourcePts);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+    if (nearestIndex !== frameIndex) {
+      setFrameIndex(nearestIndex);
+      setIsPlaying(false);
+    }
+  }, [activeSourcePts, frameIndex, frames, pose.frame_timestamps]);
 
   useEffect(() => {
     if (!currentFrame) {
@@ -289,6 +322,14 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
 
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600" aria-label="姿态证据图例">
+        {selectedEventId ? <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 font-semibold text-blue-700">事件 {selectedEventLabel ?? selectedEventId}</span> : null}
+        <span className="rounded-full border border-slate-200 bg-white px-3 py-1"><i className="mr-1 inline-block h-2 w-2 rounded-full bg-slate-400" />实测</span>
+        <span className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-violet-700"><i className="mr-1 inline-block h-2 w-2 rounded-full bg-violet-400" />平滑</span>
+        <span className="rounded-full border border-slate-300 bg-slate-100 px-3 py-1 text-slate-700">虚线：仅显示插值</span>
+        <span className="rounded-full border border-orange-200 bg-orange-50 px-3 py-1 text-orange-700">裁剪 / 可见性不足</span>
+        <span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-rose-700">身份不确定：不显示骨架</span>
+      </div>
       <div className={viewerFrameClass}>
         <div className={aspectClass}>
           {currentFrameUrl && !frameImageError ? (
@@ -345,6 +386,9 @@ export default function PoseViewer({ pose, activeFrameId, onFrameChange, variant
         <span className="rounded-full bg-slate-950/70 px-3 py-2 text-sm text-slate-100">
           {currentFrame ? frameIdFromName(currentFrame.frame) : "--"} · {frameIndex + 1}/{frames.length}
         </span>
+        <span className="rounded-full bg-slate-950/70 px-3 py-2 text-sm text-slate-100">PTS {typeof currentFrame?.source_pts_sec === "number" ? currentFrame.source_pts_sec.toFixed(3) : "--"}s</span>
+        {currentFrame?.identity_state === "uncertain" || currentFrame?.identity_state === "lost" ? <span className="rounded-full bg-rose-100 px-3 py-2 text-sm font-semibold text-rose-800">身份{currentFrame.identity_state === "lost" ? "丢失" : "不确定"} · 骨架已隐藏</span> : null}
+        {currentFrame?.pose_provenance ? <span className="rounded-full bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700">pose: {currentFrame.pose_provenance}</span> : null}
         {currentDiagnostic?.state ? (
           <span className="rounded-full bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
             tracker {currentDiagnostic.state}

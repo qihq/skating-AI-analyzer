@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, Authority, Observability
-from app.analysis_v2.contracts import IdentityTimeline
+from app.analysis_v2.contracts import IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
 
 
 class AuthorityMismatchError(ValueError):
@@ -21,6 +21,7 @@ class EventV2(BaseModel):
     end_pts: float | None = None
     status: Literal["confirmed", "uncertain", "unobservable"] = "confirmed"
     observability: Observability = "observable"
+    pose: PoseAvailabilitySummary | None = None
 
 
 class ReviewTaskV2(BaseModel):
@@ -47,6 +48,7 @@ class AnalysisExperienceV2(BaseModel):
     review_tasks: tuple[ReviewTaskV2, ...] = ()
     source_timeline: dict[str, Any] | None = None
     identity: IdentityTimeline | None = None
+    pose: PoseAvailabilitySummary | None = None
 
     def __init__(self, **data: Any) -> None:
         authority = data.get("authority")
@@ -94,6 +96,8 @@ def build_experience_v2(
     requested_claim_types: Sequence[str] = (),
     source_timeline: dict[str, Any] | None = None,
     identity: IdentityTimeline | dict[str, Any] | None = None,
+    pose: PoseAvailabilitySummary | dict[str, Any] | None = None,
+    event_pose: Mapping[str, PoseAvailabilitySummary | dict[str, Any]] | None = None,
 ) -> AnalysisExperienceV2:
     authority: Authority = "legacy" if pipeline_mode in ("legacy", "shadow") else "v2"
     if pipeline_mode == "shadow":
@@ -116,7 +120,14 @@ def build_experience_v2(
                         observability="unobservable",
                     )
                 )
-    normalized_events = tuple(event if isinstance(event, EventV2) else EventV2.model_validate(event) for event in events)
+    normalized_events_list: list[EventV2] = []
+    for event in events:
+        normalized = event if isinstance(event, EventV2) else EventV2.model_validate(event)
+        if event_pose and normalized.event_id in event_pose:
+            detail = event_pose[normalized.event_id]
+            normalized = normalized.model_copy(update={"pose": PoseAvailabilitySummary.model_validate(detail) if isinstance(detail, dict) else detail})
+        normalized_events_list.append(normalized)
+    normalized_events = tuple(normalized_events_list)
     normalized_tasks = tuple(task if isinstance(task, ReviewTaskV2) else ReviewTaskV2.model_validate(task) for task in review_tasks)
     if pipeline_mode == "shadow":
         normalized_tasks = tuple(task for task in normalized_tasks if task.authority == "legacy")
@@ -132,6 +143,7 @@ def build_experience_v2(
         review_tasks=normalized_tasks,
         source_timeline=source_timeline,
         identity=IdentityTimeline.model_validate(identity) if isinstance(identity, dict) else identity,
+        pose=PoseAvailabilitySummary.model_validate(pose) if isinstance(pose, dict) else pose,
     )
 
 
@@ -212,10 +224,15 @@ def present_legacy_record(record: Any) -> AnalysisExperienceV2:
     )
 
 
-def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy", "shadow", "v2"] = "legacy", source_pipeline_fingerprint: str | None = None, source_timeline: dict[str, Any] | None = None, identity: IdentityTimeline | dict[str, Any] | None = None) -> AnalysisExperienceV2:
+def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy", "shadow", "v2"] = "legacy", source_pipeline_fingerprint: str | None = None, source_timeline: dict[str, Any] | None = None, identity: IdentityTimeline | dict[str, Any] | None = None, pose: PoseAvailabilitySummary | dict[str, Any] | None = None) -> AnalysisExperienceV2:
     if pipeline_mode == "legacy":
         rendered = present_legacy_record(record)
-        return rendered.model_copy(update={"source_timeline": source_timeline}) if source_timeline is not None else rendered
+        updates = {}
+        if source_timeline is not None:
+            updates["source_timeline"] = source_timeline
+        if pose is not None:
+            updates["pose"] = PoseAvailabilitySummary.model_validate(pose) if isinstance(pose, dict) else pose
+        return rendered.model_copy(update=updates) if updates else rendered
     analysis_id = str(record.get("id") if isinstance(record, dict) else getattr(record, "id"))
     get = record.get if isinstance(record, dict) else lambda key, default=None: getattr(record, key, default)
     return build_experience_v2(
@@ -225,7 +242,27 @@ def present_analysis_experience(record: Any, *, pipeline_mode: Literal["legacy",
         events=(),
         claims=(),
         identity=identity,
+        pose=pose,
         source_timeline=source_timeline if source_timeline is not None else (get("source_timeline") if isinstance(get("source_timeline"), dict) else None),
+    )
+
+
+def build_pose_detail_resource(
+    *,
+    analysis_id: str,
+    source_pipeline_fingerprint: str,
+    observations: Sequence[PoseObservation],
+    summary: PoseAvailabilitySummary,
+    authority: Authority = "v2",
+) -> PoseDetailResource:
+    """Parent-authorized raw joint detail; ordinary experience only carries summary."""
+    return PoseDetailResource(
+        analysis_id=analysis_id,
+        authority=authority,
+        diagnostic_only=True,
+        source_pipeline_fingerprint=source_pipeline_fingerprint,
+        summary=summary,
+        observations=tuple(observations),
     )
 
 

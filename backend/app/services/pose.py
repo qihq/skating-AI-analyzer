@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +202,16 @@ def get_pose_runtime_status() -> dict[str, Any]:
         mode = "fallback_single_pose"
         reason = "model_path_not_set"
 
+    model_hash = None
+    if model_path and model_path.is_file():
+        digest = hashlib.sha256()
+        with model_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        model_hash = "sha256:" + digest.hexdigest()
+    pipeline_mode = os.getenv("SKATING_ANALYSIS_PIPELINE", "legacy").strip().lower()
+    v2_use = pipeline_mode in {"shadow", "v2"}
+
     return {
         "mode": mode,
         "configured": configured,
@@ -208,6 +219,14 @@ def get_pose_runtime_status() -> dict[str, Any]:
         "model_exists": exists,
         "num_poses": num_poses,
         "reason": reason,
+        "source_method": "mediapipe_tasks" if mode == "multi_pose" else "mediapipe_legacy_single_pose",
+        "model_hash": model_hash,
+        "model_version": "mediapipe-pose-task.v2" if mode == "multi_pose" else "mediapipe-single-pose.legacy",
+        "legacy_use": not v2_use,
+        "v2_use": v2_use,
+        "active": True,
+        "fallback": mode != "multi_pose",
+        "dependent_artifact_invalidation": "pose_v2_and_biomechanics_shadow_only" if v2_use else "legacy_pose_dependents_preserved",
     }
 
 
