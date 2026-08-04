@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Authority = Literal["legacy", "v2"]
 FactStatus = Literal["confirmed", "uncertain", "unobservable"]
+ActionProfile = Literal["jump", "spin", "step", "spiral"]
 FactProvenance = Literal[
     "measured",
     "smoothed",
@@ -128,6 +129,44 @@ class AnalysisFactsV2(BaseModel):
             and fact.observability == "observable"
             and not {"interpolated-display-only", "identity-blocked"}.intersection(fact.provenance)
         )
+
+    def confirmed_profile(
+        self,
+        *,
+        compatible_with: ActionProfile | None = None,
+        permission: str = "family_display",
+    ) -> ActionProfile | None:
+        """Return a family only when the action-profile fact is confirmed and observable."""
+        candidates = [fact for fact in self.eligible(permission) if fact.claim_type == "action_profile"]
+        for fact in candidates:
+            value = fact.value if isinstance(fact.value, str) else None
+            if value not in {"jump", "spin", "step", "spiral"}:
+                continue
+            if compatible_with is None or value == compatible_with:
+                return value  # type: ignore[return-value]
+        return None
+
+    def profile_eligibility(
+        self,
+        *,
+        compatible_with: ActionProfile | None = None,
+        permission: str = "family_display",
+    ) -> dict[str, Any]:
+        profile = self.confirmed_profile(compatible_with=compatible_with, permission=permission)
+        if profile is not None:
+            return {"eligible": True, "profile": profile, "reason": None}
+        profile_facts = [fact for fact in self.facts if fact.claim_type == "action_profile"]
+        if not profile_facts:
+            reason = "missing_confirmed_profile"
+        elif any(fact.status == "uncertain" for fact in profile_facts):
+            reason = "ambiguous_profile"
+        elif any(fact.status == "unobservable" or fact.observability != "observable" for fact in profile_facts):
+            reason = "unknown_profile"
+        elif compatible_with is not None:
+            reason = "incompatible_profile"
+        else:
+            reason = "profile_not_eligible"
+        return {"eligible": False, "profile": None, "reason": reason}
 
 
 class DerivedArtifactReferenceV2(BaseModel):

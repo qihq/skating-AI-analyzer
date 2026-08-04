@@ -1,0 +1,144 @@
+{
+  "schema_version": "iteration11-pilot14-profile-classification.v1",
+  "gate": "G7",
+  "status": "diagnostic_complete",
+  "gate_passed": false,
+  "thresholds": {
+    "macro_f1_minimum": 0.9,
+    "macro_f1_target": 0.95,
+    "high_confidence_error_maximum": 0.02
+  },
+  "diagnostic_only": true,
+  "release_claim": false,
+  "pilot_only": true,
+  "dataset": "iteration-11-pilot14",
+  "classifier_fingerprint": "iteration11-pilot14-profile-classifier.v1",
+  "raw_n": 5,
+  "macro_f1": 0.0,
+  "macro_f1_percent": 0.0,
+  "confusion_matrix": {
+    "jump": {
+      "ambiguous": 1
+    },
+    "spin": {
+      "ambiguous": 1
+    },
+    "spiral": {
+      "ambiguous": 1
+    },
+    "step": {
+      "ambiguous": 2
+    }
+  },
+  "high_confidence_error_rate": null,
+  "high_confidence_raw_n": 0,
+  "coverage": 0.0,
+  "confirmed_count": 0,
+  "decision_coverage": 1.0,
+  "rejection_count": 0,
+  "rejection_rate": 0.0,
+  "ambiguous_count": 5,
+  "ambiguous_rate": 1.0,
+  "strata": {
+    "blur": {
+      "numerator": 0,
+      "denominator": 2,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.65762
+      ]
+    },
+    "crossing": {
+      "numerator": 0,
+      "denominator": 3,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.561497
+      ]
+    },
+    "jump": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.793451
+      ]
+    },
+    "multi-skater": {
+      "numerator": 0,
+      "denominator": 5,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.434482
+      ]
+    },
+    "normal": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.793451
+      ]
+    },
+    "occlusion": {
+      "numerator": 0,
+      "denominator": 2,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.65762
+      ]
+    },
+    "small": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.793451
+      ]
+    },
+    "spin": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.793451
+      ]
+    },
+    "spiral": {
+      "numerator": 0,
+      "denominator": 1,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.793451
+      ]
+    },
+    "step": {
+      "numerator": 0,
+      "denominator": 2,
+      "rate": 0.0,
+      "wilson_95_ci": [
+        0.0,
+        0.65762
+      ]
+    }
+  },
+  "known_limitations": [
+    "Temporary pilot only; owner manifest is not frozen and G2 is not passed.",
+    "Validation split is source-grouped and fixed before this evaluation; frozen test was not used.",
+    "Subtype labels are underpowered and are not promoted to confirmed automatically.",
+    "Path A and Path B semantic cues are bounded support/contradiction only; neither localizes or identifies the skater."
+  ],
+  "result_fingerprint": "sha256:94323cfd76f0cd35f405d3b8ab3e09159fc73dc8465ae29110a5f98e5f3008e7",
+  "development_source_count": 7,
+  "validation_source_count": 4,
+  "excluded_weak_label_source_count": 3
+}
