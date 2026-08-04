@@ -58,6 +58,12 @@ describe("analysis experience v2 contract", () => {
     expect(decoded.events).toEqual([{ eventId: "e1", profile: "jump", startPts: 1, endPts: 2, status: "confirmed", observability: "observable" }]);
   });
 
+  it("enforces the V2 state/profile discriminated union", () => {
+    expect(() => decodeAnalysisExperienceV2({ ...base, authority: "v2", pipeline_mode: "v2", events: [{ event_id: "e1", profile: "step", state: "unknown", status: "uncertain", observability: "observable" }] })).toThrow(/cannot carry/);
+    expect(() => decodeAnalysisExperienceV2({ ...base, authority: "v2", pipeline_mode: "v2", events: [{ event_id: "e1", profile: "unknown", state: "confirmed", status: "confirmed", observability: "observable" }] })).toThrow(/known profile/);
+    expect(decodeAnalysisExperienceV2({ ...base, authority: "v2", pipeline_mode: "v2", events: [{ event_id: "e1", profile: "step", state: "ambiguous", status: "uncertain", observability: "observable" }] }).events[0]).toMatchObject({ profile: "step", state: "ambiguous" });
+  });
+
   it("rejects unsupported schema versions and mixed authorities", () => {
     expect(() => decodeAnalysisExperienceV2({ ...base, schema_version: "analysis-experience.v3" })).toThrow();
     expect(() => decodeAnalysisExperienceV2({ ...base, claims: [{ analysis_id: "a1", claim_type: "x", authority: "v2", source_pipeline_fingerprint: "x", definition_version: "x" }] })).toThrow();

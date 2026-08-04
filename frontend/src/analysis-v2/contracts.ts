@@ -63,6 +63,21 @@ export function selectDetectionOverlays(diagnostics: DetectionProposalDiagnostic
 
 export type ExperienceAuthority = "legacy" | "v2";
 export type ExperienceStatus = "confirmed" | "uncertain" | "unobservable";
+export type ActionClassificationState = "confirmed" | "ambiguous" | "unknown";
+export type ActionProfile = "jump" | "spin" | "step" | "spiral" | "unknown";
+export type KnownActionProfile = Exclude<ActionProfile, "unknown">;
+export type JumpMomentKey = "takeoff" | "apex" | "landing";
+export type SpinMomentKey = "spin_entry" | "spin_main" | "spin_exit";
+export type SpiralMomentKey = "spiral_entry" | "spiral_hold" | "spiral_exit";
+export type StepMomentKey = "step_sequence_interval" | "step_representative_1" | "step_representative_2" | "step_representative_3";
+export type ProfileMomentKey = JumpMomentKey | SpinMomentKey | SpiralMomentKey | StepMomentKey;
+export interface MomentCandidateV2 { sourceFrameIndex: number; ptsSec: number; endSourceFrameIndex: number | null; endPtsSec: number | null; score: number; observability: "observed" | "partial" | "unobservable"; evidence: string[]; provenance: string[]; warnings: string[]; }
+export interface KeyMomentV2 { semanticKey: ProfileMomentKey; kind: "point" | "interval" | "representative"; status: "confirmed" | "ambiguous" | "unavailable"; sourceFrameIndex: number | null; ptsSec: number | null; endSourceFrameIndex: number | null; endPtsSec: number | null; definitionVersion: string; candidateEvidence: string[]; confidence: number; warnings: string[]; observability: "observed" | "partial" | "unobservable"; provenance: string[]; competingCandidates: MomentCandidateV2[]; reviewResolvable: boolean; }
+export interface EventMomentSetV2 { schemaVersion: "event-moment-set.v1"; eventId: string; profile: KnownActionProfile; definitionVersion: string; moments: KeyMomentV2[]; expectedKeys: ProfileMomentKey[]; requiredKeys: ProfileMomentKey[]; presentKeys: ProfileMomentKey[]; missingKeys: ProfileMomentKey[]; completeness: "complete" | "incomplete" | "ambiguous" | "unobservable"; warnings: string[]; sourceTimelineFingerprint: string; stateMachineFingerprint: string; semanticLabelsConsumed: false; revision: number; }
+export type ClassifiedActionIdentity =
+  | { state: "confirmed"; profile: KnownActionProfile }
+  | { state: "ambiguous"; profile: KnownActionProfile }
+  | { state: "unknown"; profile: "unknown" };
 export type PoseJointProvenance = "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked";
 export type PoseAvailabilityStatus = "available" | "partial" | "unavailable" | "blocked";
 export interface PoseAvailabilitySummary {
@@ -96,7 +111,8 @@ export interface ExperienceClaim {
   observability: "observable" | "partially_observable" | "unobservable";
   confidence: number | null;
 }
-export interface ExperienceEvent { eventId: string; profile: string; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; pose?: PoseAvailabilitySummary | null; candidateProfileScores?: Record<string, number>; proposalStatus?: "legacy" | "pending_confirmation" | "confirmed_window" | "ignored" | "ordinary_skating" | "unknown"; trackingCoverage?: number | null; poseCoverage?: number | null; provenanceFingerprint?: string | null; revision?: number; }
+type ExperienceEventFields = { eventId: string; subtype?: string | null; startPts: number | null; endPts: number | null; status: ExperienceStatus; observability: ExperienceClaim["observability"]; pose?: PoseAvailabilitySummary | null; candidateProfileScores?: Record<string, number>; proposalStatus?: "legacy" | "pending_confirmation" | "confirmed_window" | "ignored" | "ordinary_skating" | "unknown"; trackingCoverage?: number | null; poseCoverage?: number | null; provenanceFingerprint?: string | null; revision?: number; evidenceSummary?: Record<string, unknown>; confirmationTask?: string | null; definitionVersion?: string; moments?: EventMomentSetV2 | null; momentDefinitionVersion?: string | null; momentCompleteness?: EventMomentSetV2["completeness"] | null; };
+export type ExperienceEvent = ExperienceEventFields & (ClassifiedActionIdentity | { profile: string; state?: undefined });
 export interface ExperienceReviewTask { taskId: string; authority: ExperienceAuthority; kind: string; eventId: string | null; }
 export type SourceTimelineStatus = "exact" | "approximate_legacy" | "unavailable";
 export interface SourceTimelineFrame { sourceFrameIndex: number; ptsSec: number | null; durationSec: number | null; status: "available" | "duplicate_pts" | "gap_after_previous" | "discontinuity" | "timestamp_unavailable"; gapBeforeSec: number; }
@@ -166,6 +182,29 @@ function record(value: unknown): Record<string, unknown> {
 function isExperienceStatus(value: unknown): value is ExperienceStatus {
   return value === "confirmed" || value === "uncertain" || value === "unobservable";
 }
+function isActionClassificationState(value: unknown): value is ActionClassificationState {
+  return value === "confirmed" || value === "ambiguous" || value === "unknown";
+}
+function isActionProfile(value: unknown): value is ActionProfile {
+  return value === "jump" || value === "spin" || value === "step" || value === "spiral" || value === "unknown";
+}
+
+function isProfileMomentKey(value: unknown): value is ProfileMomentKey {
+  return typeof value === "string" && ["takeoff", "apex", "landing", "spin_entry", "spin_main", "spin_exit", "spiral_entry", "spiral_hold", "spiral_exit", "step_sequence_interval", "step_representative_1", "step_representative_2", "step_representative_3"].includes(value);
+}
+
+function decodeMomentCandidate(value: unknown): MomentCandidateV2 {
+  const raw = record(value);
+  if (raw.schema_version !== "moment-candidate.v1" || typeof raw.source_frame_index !== "number" || typeof raw.pts_sec !== "number" || typeof raw.score !== "number" || !Array.isArray(raw.evidence) || !Array.isArray(raw.provenance) || !Array.isArray(raw.warnings)) throw new Error("invalid moment candidate");
+  return { sourceFrameIndex: raw.source_frame_index, ptsSec: raw.pts_sec, endSourceFrameIndex: typeof raw.end_source_frame_index === "number" ? raw.end_source_frame_index : null, endPtsSec: typeof raw.end_pts_sec === "number" ? raw.end_pts_sec : null, score: raw.score, observability: raw.observability as MomentCandidateV2["observability"], evidence: raw.evidence.map(String), provenance: raw.provenance.map(String), warnings: raw.warnings.map(String) };
+}
+
+function decodeEventMoments(value: unknown): EventMomentSetV2 {
+  const raw = record(value);
+  if (raw.schema_version !== "event-moment-set.v1" || typeof raw.event_id !== "string" || !isActionProfile(raw.profile) || raw.profile === "unknown" || !Array.isArray(raw.moments) || !Array.isArray(raw.expected_keys) || !Array.isArray(raw.present_keys) || !Array.isArray(raw.missing_keys) || raw.semantic_labels_consumed !== false) throw new Error("invalid event moment set");
+  const moments = raw.moments.map((value) => { const moment = record(value); if (moment.schema_version !== "key-moment.v2" || !isProfileMomentKey(moment.semantic_key) || !Array.isArray(moment.competing_candidates) || !Array.isArray(moment.warnings) || !Array.isArray(moment.provenance) || !Array.isArray(moment.candidate_evidence)) throw new Error("invalid key moment"); return { semanticKey: moment.semantic_key, kind: moment.kind as KeyMomentV2["kind"], status: moment.status as KeyMomentV2["status"], sourceFrameIndex: typeof moment.source_frame_index === "number" ? moment.source_frame_index : null, ptsSec: typeof moment.pts_sec === "number" ? moment.pts_sec : null, endSourceFrameIndex: typeof moment.end_source_frame_index === "number" ? moment.end_source_frame_index : null, endPtsSec: typeof moment.end_pts_sec === "number" ? moment.end_pts_sec : null, definitionVersion: String(moment.definition_version), candidateEvidence: moment.candidate_evidence.map(String), confidence: Number(moment.confidence), warnings: moment.warnings.map(String), observability: moment.observability as KeyMomentV2["observability"], provenance: moment.provenance.map(String), competingCandidates: moment.competing_candidates.map(decodeMomentCandidate), reviewResolvable: moment.review_resolvable === true }; });
+  return { schemaVersion: "event-moment-set.v1", eventId: raw.event_id, profile: raw.profile, definitionVersion: String(raw.definition_version), moments, expectedKeys: raw.expected_keys.filter(isProfileMomentKey), requiredKeys: Array.isArray(raw.required_keys) ? raw.required_keys.filter(isProfileMomentKey) : raw.expected_keys.filter(isProfileMomentKey), presentKeys: raw.present_keys.filter(isProfileMomentKey), missingKeys: raw.missing_keys.filter(isProfileMomentKey), completeness: raw.completeness as EventMomentSetV2["completeness"], warnings: Array.isArray(raw.warnings) ? raw.warnings.map(String) : [], sourceTimelineFingerprint: String(raw.source_timeline_fingerprint), stateMachineFingerprint: String(raw.state_machine_fingerprint), semanticLabelsConsumed: false, revision: Number(raw.revision) };
+}
 
 function isExperienceObservability(value: unknown): value is ExperienceClaim["observability"] {
   return value === "observable" || value === "partially_observable" || value === "unobservable";
@@ -184,10 +223,18 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
   if (raw.schema_version !== "analysis-experience.v2" || (raw.authority !== "legacy" && raw.authority !== "v2") || !isPipelineMode(raw.pipeline_mode) || typeof raw.analysis_id !== "string" || typeof raw.source_pipeline_fingerprint !== "string") throw new Error("unsupported analysis experience schema");
   const events = (Array.isArray(raw.events) ? raw.events : []).map((item) => {
     const event = record(item);
-    if (typeof event.event_id !== "string" || typeof event.profile !== "string" || !isExperienceStatus(event.status) || !isExperienceObservability(event.observability)) throw new Error("invalid experience event");
+    if (typeof event.event_id !== "string" || (typeof event.profile !== "string") || !isExperienceStatus(event.status) || !isExperienceObservability(event.observability)) throw new Error("invalid experience event");
+    if (event.state !== undefined && !isActionClassificationState(event.state)) throw new Error("invalid action classification state");
+    if (raw.authority === "v2" && raw.pipeline_mode === "v2") {
+      if (event.state === "unknown" && event.profile !== "unknown") throw new Error("unknown V2 event cannot carry a family profile");
+      if ((event.state === "confirmed" || event.state === "ambiguous") && !isActionProfile(event.profile)) throw new Error("classified V2 event requires a known profile");
+      if ((event.state === "confirmed" || event.state === "ambiguous") && event.profile === "unknown") throw new Error("classified V2 event requires a known profile");
+    }
     if (event.start_pts !== undefined && event.start_pts !== null && typeof event.start_pts !== "number") throw new Error("invalid event start PTS");
     if (event.end_pts !== undefined && event.end_pts !== null && typeof event.end_pts !== "number") throw new Error("invalid event end PTS");
-    const decoded: ExperienceEvent = { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability };
+    const decoded = { eventId: event.event_id, profile: event.profile, startPts: (event.start_pts as number | null) ?? null, endPts: (event.end_pts as number | null) ?? null, status: event.status, observability: event.observability } as ExperienceEvent;
+    if (event.subtype !== undefined) decoded.subtype = (event.subtype as string | null) ?? null;
+    if (event.state !== undefined) decoded.state = event.state as ActionClassificationState;
     if (event.pose != null) decoded.pose = decodePoseAvailability(event.pose);
     if (event.candidate_profile_scores != null) decoded.candidateProfileScores = record(event.candidate_profile_scores) as Record<string, number>;
     if (event.proposal_status != null) decoded.proposalStatus = event.proposal_status as ExperienceEvent["proposalStatus"];
@@ -195,6 +242,12 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
     if (typeof event.pose_coverage === "number") decoded.poseCoverage = event.pose_coverage;
     if (typeof event.provenance_fingerprint === "string") decoded.provenanceFingerprint = event.provenance_fingerprint;
     if (typeof event.revision === "number") decoded.revision = event.revision;
+    if (event.evidence_summary != null) decoded.evidenceSummary = record(event.evidence_summary);
+    if (event.confirmation_task === null || typeof event.confirmation_task === "string") decoded.confirmationTask = event.confirmation_task as string | null;
+    if (typeof event.definition_version === "string") decoded.definitionVersion = event.definition_version;
+    if (event.moments != null) decoded.moments = decodeEventMoments(event.moments);
+    if (event.moment_definition_version === null || typeof event.moment_definition_version === "string") decoded.momentDefinitionVersion = event.moment_definition_version as string | null;
+    if (event.moment_completeness === null || event.moment_completeness === "complete" || event.moment_completeness === "incomplete" || event.moment_completeness === "ambiguous" || event.moment_completeness === "unobservable") decoded.momentCompleteness = event.moment_completeness as EventMomentSetV2["completeness"] | null;
     return decoded;
   });
   const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });

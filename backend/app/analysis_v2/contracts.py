@@ -460,6 +460,8 @@ class ActionEvent(ContractModel):
     schema_version: Literal["action-event.v1"] = "action-event.v1"
     event_id: str = Field(min_length=1)
     profile: Literal["jump", "spin", "step", "spiral", "unknown"]
+    subtype: str | None = None
+    state: Literal["confirmed", "ambiguous", "unknown"] = "unknown"
     start_pts_sec: float = Field(ge=0)
     end_pts_sec: float = Field(ge=0)
     proposal_source: str | None = None
@@ -470,6 +472,9 @@ class ActionEvent(ContractModel):
     observability: Literal["observed", "partial", "unobservable"]
     confidence: float = Field(ge=0, le=1)
     calibration_version: str | None = None
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    confirmation_task: str | None = None
+    definition_version: str = "action-event.v1"
 
     @model_validator(mode="after")
     def ordered_interval(self) -> "ActionEvent":
@@ -477,20 +482,121 @@ class ActionEvent(ContractModel):
             raise ValueError("event interval must be ordered")
         if self.observability == "unobservable" and self.confidence > 0:
             raise ValueError("unobservable event confidence must be zero")
+        if self.state == "unknown" and self.profile != "unknown":
+            raise ValueError("unknown state cannot carry a family profile")
+        if self.state == "confirmed" and self.profile == "unknown":
+            raise ValueError("confirmed event requires a family profile")
+        return self
+
+
+class MomentCandidate(ContractModel):
+    schema_version: Literal["moment-candidate.v1"] = "moment-candidate.v1"
+    source_frame_index: int = Field(ge=0)
+    pts_sec: float = Field(ge=0)
+    end_source_frame_index: int | None = Field(default=None, ge=0)
+    end_pts_sec: float | None = Field(default=None, ge=0)
+    score: float = Field(ge=0, le=1)
+    observability: Literal["observed", "partial", "unobservable"] = "observed"
+    evidence: tuple[str, ...] = ()
+    provenance: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def ordered_candidate(self) -> "MomentCandidate":
+        if (self.end_source_frame_index is None) != (self.end_pts_sec is None):
+            raise ValueError("candidate interval endpoints must be supplied together")
+        if self.end_source_frame_index is not None and self.end_source_frame_index < self.source_frame_index:
+            raise ValueError("candidate source interval must be ordered")
+        if self.end_pts_sec is not None and self.end_pts_sec < self.pts_sec:
+            raise ValueError("candidate PTS interval must be ordered")
         return self
 
 
 class KeyMoment(ContractModel):
-    schema_version: Literal["key-moment.v1"] = "key-moment.v1"
+    schema_version: Literal["key-moment.v2"] = "key-moment.v2"
     event_id: str = Field(min_length=1)
     semantic_key: str = Field(min_length=1)
-    source_frame_index: int = Field(ge=0)
-    pts_sec: float = Field(ge=0)
+    kind: Literal["point", "interval", "representative"] = "point"
+    status: Literal["confirmed", "ambiguous", "unavailable"] = "confirmed"
+    source_frame_index: int | None = Field(default=None, ge=0)
+    pts_sec: float | None = Field(default=None, ge=0)
+    end_source_frame_index: int | None = Field(default=None, ge=0)
+    end_pts_sec: float | None = Field(default=None, ge=0)
     definition_version: str = Field(min_length=1)
     candidate_evidence: tuple[str, ...] = ()
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(default=0, ge=0, le=1)
     warnings: tuple[str, ...] = ()
     observability: Literal["observed", "partial", "unobservable"]
+    provenance: tuple[str, ...] = ()
+    competing_candidates: tuple[MomentCandidate, ...] = ()
+    review_resolvable: bool = False
+
+    @model_validator(mode="after")
+    def valid_moment(self) -> "KeyMoment":
+        has_start = self.source_frame_index is not None and self.pts_sec is not None
+        if (self.source_frame_index is None) != (self.pts_sec is None):
+            raise ValueError("moment source frame and PTS must be supplied together")
+        has_end = self.end_source_frame_index is not None and self.end_pts_sec is not None
+        if (self.end_source_frame_index is None) != (self.end_pts_sec is None):
+            raise ValueError("moment interval endpoints must be supplied together")
+        if self.kind == "interval" and self.status != "unavailable" and not has_end:
+            raise ValueError("available interval moments require an end source reference")
+        if self.kind != "interval" and has_end:
+            raise ValueError("point moments cannot carry interval endpoints")
+        if has_end and (
+            self.end_source_frame_index < self.source_frame_index  # type: ignore[operator]
+            or self.end_pts_sec < self.pts_sec  # type: ignore[operator]
+        ):
+            raise ValueError("moment interval must be ordered")
+        if self.status == "unavailable":
+            if has_start or self.confidence != 0 or self.observability != "unobservable":
+                raise ValueError("unavailable moments cannot synthesize a source marker")
+            if self.review_resolvable:
+                raise ValueError("absent evidence is not parent-resolvable ambiguity")
+        elif not has_start:
+            raise ValueError("available moments require an exact source reference")
+        if self.status == "ambiguous" and len(self.competing_candidates) < 2:
+            raise ValueError("ambiguous moments must preserve competing candidates")
+        if self.review_resolvable and self.status != "ambiguous":
+            raise ValueError("only ambiguous moments may create a review task")
+        return self
+
+
+class EventMomentSet(ContractModel):
+    schema_version: Literal["event-moment-set.v1"] = "event-moment-set.v1"
+    event_id: str = Field(min_length=1)
+    profile: Literal["jump", "spin", "step", "spiral"]
+    definition_version: str = Field(min_length=1)
+    moments: tuple[KeyMoment, ...] = ()
+    expected_keys: tuple[str, ...] = ()
+    required_keys: tuple[str, ...] = ()
+    present_keys: tuple[str, ...] = ()
+    missing_keys: tuple[str, ...] = ()
+    completeness: Literal["complete", "incomplete", "ambiguous", "unobservable"]
+    warnings: tuple[str, ...] = ()
+    source_timeline_fingerprint: str = Field(min_length=1)
+    state_machine_fingerprint: str = Field(min_length=1)
+    semantic_labels_consumed: Literal[False] = False
+    revision: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def valid_collection(self) -> "EventMomentSet":
+        keys = [item.semantic_key for item in self.moments]
+        if len(keys) != len(set(keys)):
+            raise ValueError("event moments must have unique semantic keys")
+        if any(item.event_id != self.event_id for item in self.moments):
+            raise ValueError("event moment IDs must match the collection")
+        actual_present = tuple(item.semantic_key for item in self.moments if item.status != "unavailable")
+        actual_missing = tuple(item.semantic_key for item in self.moments if item.status == "unavailable")
+        if self.present_keys != actual_present or self.missing_keys != actual_missing:
+            raise ValueError("moment completeness keys must match the moment states")
+        if set(self.expected_keys) != set(keys):
+            raise ValueError("moment collection must exhaust the profile definition")
+        if not set(self.required_keys).issubset(self.expected_keys):
+            raise ValueError("required moment keys must belong to the profile definition")
+        if self.completeness == "complete" and set(actual_missing).intersection(self.required_keys):
+            raise ValueError("complete moment sets cannot omit a required stage")
+        return self
 
 
 class RotationEstimate(ContractModel):
@@ -636,6 +742,7 @@ def adapt_legacy_key_moments(
                 confidence=0.5,
                 warnings=("legacy_approximate_timing",),
                 observability="partial",
+                provenance=("legacy_snapshot",),
             )
         )
     return tuple(output)

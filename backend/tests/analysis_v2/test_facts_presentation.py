@@ -36,6 +36,20 @@ def test_legacy_record_is_adapted_as_one_authority_without_mutating_source() -> 
     assert record == before
 
 
+def test_legacy_record_preserves_non_english_action_name_without_claiming_v2_identity() -> None:
+    record = {
+        "id": "legacy-cn",
+        "action_type": "自由滑",
+        "pipeline_version": "legacy-2026",
+    }
+
+    experience = present_legacy_record(record)
+
+    assert experience.events[0].profile == "自由滑"
+    assert experience.events[0].state == "unknown"
+    assert next(claim.value for claim in experience.claims if claim.claim_type == "action_profile") == "自由滑"
+
+
 def test_missing_v2_claim_is_unavailable_and_never_filled_from_legacy() -> None:
     experience = build_experience_v2(
         analysis_id="v2-1",

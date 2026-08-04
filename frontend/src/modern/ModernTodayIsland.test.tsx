@@ -18,11 +18,12 @@ describe("ModernTodayIsland presenter contract", () => {
     vi.mocked(api.fetchGrowthSummary).mockResolvedValue({ latest_analysis_id: "a1", current_month_analysis_count: 1, milestone_count: 0, current_focus: null } as api.GrowthSummary);
     vi.mocked(analysisApi.fetchAnalysisExperienceV2).mockResolvedValue({
       schemaVersion: "analysis-experience.v2", analysisId: "a1", authority: "legacy", pipelineMode: "legacy", sourcePipelineFingerprint: "legacy:v1", diagnosticOnly: false, familyUsable: true,
-      events: [{ eventId: "e1", profile: "跳跃", startPts: null, endPts: null, status: "confirmed", observability: "observable" }],
+      events: [{ eventId: "e1", profile: "jump", state: "ambiguous", startPts: null, endPts: null, status: "uncertain", observability: "observable" }],
       claims: [{ analysisId: "a1", eventId: null, claimType: "report_summary", value: "来自 presenter", authority: "legacy", sourcePipelineFingerprint: "legacy:v1", definitionVersion: "v1", unit: null, convention: null, status: "confirmed", observability: "observable", confidence: null }], reviewTasks: [],
     });
     render(<MemoryRouter><ModernTodayIsland /></MemoryRouter>);
     expect((await screen.findAllByText("来自 presenter")).length).toBeGreaterThan(0);
+    expect(screen.getByText("跳跃 · 有歧义")).toBeInTheDocument();
     expect(api.fetchAnalysis).not.toHaveBeenCalled();
   });
 });

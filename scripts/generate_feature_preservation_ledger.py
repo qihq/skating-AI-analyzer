@@ -22,6 +22,8 @@ def _owner(kind: str, name: str) -> int:
     lowered = name.lower()
     if "evaluator" in lowered or "pilot" in lowered or "review-attestations" in lowered:
         return 3
+    if "moment" in lowered or "source-frame" in lowered or "source_frame" in lowered:
+        return 12
     if kind in {"environment_setting", "package_entrypoint", "startup_or_scheduled_job"}:
         return 0 if not any(term in lowered for term in ("v2", "shadow", "golden")) else 15
     if kind == "database_model":
@@ -259,6 +261,32 @@ def generate_ledger() -> dict[str, Any]:
             "interpolation_policy": "display-only; excluded from authoritative facts and biomechanics",
             "legacy_adapter": "whole-record legacy pose remains isolated",
             "pilot_evidence": "docs/evaluation/v2/iteration-9-pilot12-pose-diagnostic.json",
+        },
+        "iteration_11_profile_classification": {
+            "status": "implemented_pilot_diagnostic_only",
+            "profiles": ["jump", "spin", "step", "spiral"],
+            "states": ["confirmed", "ambiguous", "unknown"],
+            "classifier_isolation": True,
+            "step_fallthrough": False,
+            "path_a_role": "bounded semantic support or contradiction only",
+            "subtype_policy": "underpowered specialties remain unconfirmed",
+            "automatic_skill_unlock": "disabled_until_iteration14",
+            "pilot_evidence": "docs/evaluation/v2/iteration-11-pilot14-action-classification-evidence.json",
+        },
+        "iteration_12_profile_specific_moments": {
+            "status": "implemented_shadow_diagnostic_g8_blocked",
+            "definition_versions": [
+                "jump-tal.source-contact.v1",
+                "spin-phases.periodic-axis.v1",
+                "spiral-phases.extension-hold.v1",
+                "step-sequence.edge-complexity.v1",
+            ],
+            "authoritative_timebase": "original_source_pts_and_frame_index",
+            "semantic_keyframe_role": "review_evidence_only",
+            "missing_stage_policy": "unavailable_without_legacy_fallback_or_synthetic_marker",
+            "revision_boundary": "event_scoped_propose_apply_dismiss_with_before_after_snapshots",
+            "g8_status": "blocked_waiting_for_frozen_candidate",
+            "pilot_evidence": "docs/evaluation/v2/iteration-12-pilot12-profile-moments-evidence.json",
         },
         "inventory_fingerprint": fingerprint,
         "entry_count": len(entries),

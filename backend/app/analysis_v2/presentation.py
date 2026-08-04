@@ -5,7 +5,7 @@ from typing import Any, Literal, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, Authority, Observability
-from app.analysis_v2.contracts import IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
+from app.analysis_v2.contracts import EventMomentSet, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
 
 
 class AuthorityMismatchError(ValueError):
@@ -17,6 +17,8 @@ class EventV2(BaseModel):
 
     event_id: str
     profile: str
+    subtype: str | None = None
+    state: Literal["confirmed", "ambiguous", "unknown"] = "unknown"
     start_pts: float | None = None
     end_pts: float | None = None
     status: Literal["confirmed", "uncertain", "unobservable"] = "confirmed"
@@ -28,6 +30,12 @@ class EventV2(BaseModel):
     pose_coverage: float | None = Field(default=None, ge=0, le=1)
     provenance_fingerprint: str | None = None
     revision: int = Field(default=1, ge=1)
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    confirmation_task: str | None = None
+    definition_version: str = "action-event.v1"
+    moments: EventMomentSet | None = None
+    moment_definition_version: str | None = None
+    moment_completeness: Literal["complete", "incomplete", "ambiguous", "unobservable"] | None = None
 
 
 class ReviewTaskV2(BaseModel):
@@ -159,7 +167,15 @@ def present_legacy_record(record: Any) -> AnalysisExperienceV2:
     analysis_id = str(get("id", "unknown"))
     fingerprint = f"legacy:{get('pipeline_version', 'unknown')}"
     action = str(get("action_type", "unknown"))
-    events = [EventV2(event_id=f"{analysis_id}:event:0", profile=action)]
+    action_lower = action.lower()
+    classified_profile = next((item for item in ("jump", "spin", "step", "spiral") if item in action_lower), None)
+    events = [
+        EventV2(
+            event_id=f"{analysis_id}:event:0",
+            profile=action,
+            state="ambiguous" if classified_profile is not None else "unknown",
+        )
+    ]
     permissions = {
         "family_display": True,
         "aggregation": True,

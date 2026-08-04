@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
 import { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { actionEventLabel } from "../analysis-v2/profilePresentation";
 import { AnalysisDetail, fetchAnalysis, fetchGrowthSummary, fetchSkaters, GrowthSummary, Skater } from "../api/client";
 import { useAppMode } from "../components/AppModeContext";
 import IslandIcon from "./IslandIcon";
@@ -76,7 +77,8 @@ export default function ModernTodayIsland() {
   const selected = useMemo(() => skaters.find((item) => item.id === selectedId), [selectedId, skaters]);
   const nextAction = claimValue(experience, "next_action") ?? analysis?.report?.improvements?.[0]?.action ?? analysis?.report?.training_focus ?? summary?.current_focus?.label;
   const latestSummary = claimValue(experience, "report_summary") ?? analysis?.report?.summary;
-  const latestProfile = experience?.events[0]?.profile ?? analysis?.action_type ?? summary?.current_focus?.label;
+  const latestEvent = experience?.events[0];
+  const latestProfile = latestEvent ? actionEventLabel(latestEvent) : analysis?.action_type ?? summary?.current_focus?.label;
 
   return (
     <div className="today-island">

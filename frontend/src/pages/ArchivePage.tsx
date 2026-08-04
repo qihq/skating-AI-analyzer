@@ -11,6 +11,7 @@ import SubmitButton from "../modern/SubmitButton";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey, parseApiDate } from "../utils/datetime";
+import GrowthAdmissionCard from "../analysis-v2/components/GrowthAdmissionCard";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 const RANGE_OPTIONS = [
@@ -297,7 +298,7 @@ const actionIconClassName =
 export default function ArchivePage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { isParentMode, childView, pinLength } = useAppMode();
+  const { isParentMode, childView, pinLength, parentPin } = useAppMode();
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [archiveBySkaterId, setArchiveBySkaterId] = useState<Record<string, ArchiveResponse>>({});
   const [activeScope, setActiveScope] = useState("");
@@ -529,6 +530,10 @@ export default function ArchivePage() {
     }
     return computeAggregateStats(activeTimeline);
   }, [activeScope, activeTimeline, archiveBySkaterId, isParentMode, selectedSkater, skaters]);
+  const growthAdmissionAnalysisIds = useMemo(
+    () => [...new Set(activeTimeline.map((entry) => entry.analysis_id).filter((value): value is string => Boolean(value)))],
+    [activeTimeline],
+  );
 
   const skaterIdsNeedingMore = useMemo(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
@@ -955,6 +960,8 @@ export default function ArchivePage() {
             </div>
           </div>
         </div>
+
+        {isParentMode && parentPin ? <GrowthAdmissionCard analysisIds={growthAdmissionAnalysisIds} parentPin={parentPin} /> : null}
 
         {isLoading ? (
           <div className="mt-6 rounded-[24px] bg-slate-50 px-5 py-6 text-sm text-slate-500">正在加载练习档案...</div>

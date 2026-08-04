@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import * as experienceApi from "../analysis-v2/api";
 import ModernAnalysisDetail from "./ModernAnalysisDetail";
 
-vi.mock("../analysis-v2/api", () => ({ fetchAnalysisExperienceV2: vi.fn() }));
+vi.mock("../analysis-v2/api", () => ({ fetchAnalysisExperienceV2: vi.fn(), fetchAnalysisExperienceV2Diagnostic: vi.fn() }));
+vi.mock("../components/AppModeContext", () => ({ useAppMode: () => ({ isParentMode: false, parentPin: null }) }));
 vi.mock("../pages/ReportPage", () => ({ default: () => <div>legacy report</div> }));
 vi.mock("../pages/ReportWorkspacePage", () => ({ default: () => <div>legacy workspace</div> }));
 

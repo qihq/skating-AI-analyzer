@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import { fetchAnalysisExperienceV2, fetchAnalysisExperienceV2Diagnostic } from "../analysis-v2/api";
 import { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { useAppMode } from "../components/AppModeContext";
 import ReportPage from "../pages/ReportPage";
 import ReportWorkspacePage, { WorkspaceTab } from "../pages/ReportWorkspacePage";
 import { IslandPageHeader } from "./IslandSurface";
 import SectionNav from "./SectionNav";
 import { AnalysisView, resolveAnalysisView } from "./analysisNavigation";
 import { orderedProposalEvents, proposalDeepLink, selectProposalEvent } from "../analysis-v2/eventProposals";
+import { actionEventLabel } from "../analysis-v2/profilePresentation";
+import ActionPhaseStrip from "../components/ActionPhaseStrip";
+import type { ProfileMomentKey } from "../analysis-v2/contracts";
 
 const ITEMS = [
   { id: "summary", label: "总结", to: "summary" },
@@ -20,7 +24,9 @@ const ITEMS = [
 
 export default function ModernAnalysisDetail({ initialView }: { initialView?: AnalysisView }) {
   const { id } = useParams<{ id: string }>();
+  const { isParentMode, parentPin } = useAppMode();
   const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
+  const [selectedMomentKey, setSelectedMomentKey] = useState<ProfileMomentKey | null>(null);
   const [params, setParams] = useSearchParams();
   const view = resolveAnalysisView({ initialView, view: params.get("view"), legacyTab: params.get("tab") });
   const sectionItems = ITEMS.map((item) => ({
@@ -38,16 +44,18 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
     next.set("event", selected.eventId);
     setParams(next, { replace: true });
   }, [experience, params, selected.eventId, setParams]);
+  useEffect(() => { setSelectedMomentKey(null); }, [selected.eventId]);
 
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     setExperience(null);
-    void fetchAnalysisExperienceV2(id)
+    const request = isParentMode && parentPin ? fetchAnalysisExperienceV2Diagnostic(parentPin, id) : fetchAnalysisExperienceV2(id);
+    void request
       .then((next) => { if (!cancelled) setExperience(next); })
       .catch(() => { if (!cancelled) setExperience(null); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, isParentMode, parentPin]);
 
   return (
     <div className="modern-space modern-analysis-detail">
@@ -64,20 +72,21 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
           {experience.claims.find((claim) => claim.claimType === "report_summary")?.value != null ? (
             <p>{String(experience.claims.find((claim) => claim.claimType === "report_summary")?.value)}</p>
           ) : null}
-          {experience.diagnosticOnly && proposalEvents.length ? <div className="modern-analysis-detail__events" aria-label="Multi-event proposal overview">
-            <p>Multi-event proposals · parent diagnostic only</p>
-            <div role="listbox" aria-label="Event selector">
+          {experience.diagnosticOnly && proposalEvents.length ? <div className="modern-analysis-detail__events" aria-label="动作事件概览">
+            <p>动作候选 · 仅供家长诊断查看</p>
+            <div role="listbox" aria-label="动作事件选择">
               {proposalEvents.map((event, index) => <button type="button" role="option" aria-selected={event.eventId === selected.eventId} key={event.eventId} onClick={() => { const next = new URLSearchParams(params); next.set("event", event.eventId); setParams(next); }}>
-                Event {index + 1} · {event.profile} · {event.startPts?.toFixed(2) ?? "?"}–{event.endPts?.toFixed(2) ?? "?"}s · {event.proposalStatus ?? "legacy"}
+                事件 {index + 1} (Event {index + 1}) · {actionEventLabel(event)} · {event.startPts?.toFixed(2) ?? "?"}–{event.endPts?.toFixed(2) ?? "?"} 秒
               </button>)}
             </div>
-            {selected.event ? <p data-testid="selected-proposal">Selected {selected.event.eventId} · {selected.event.observability}</p> : null}
-            {selected.event ? <Link to={proposalDeepLink(experience.analysisId, selected.event.eventId)}>Copy event deep link</Link> : null}
+            {selected.event ? <p data-testid="selected-proposal">当前事件 {selected.event.eventId}：{actionEventLabel(selected.event)} · {selected.event.observability}</p> : null}
+            {selected.event?.confirmationTask ? <p role="status">需要人工确认：{selected.event.confirmationTask}</p> : null}
+            {selected.event ? <Link to={proposalDeepLink(experience.analysisId, selected.event.eventId)}>复制事件链接</Link> : null}
           </div> : null}
         </section>
       ) : null}
       <div className="modern-analysis-detail__content">
-        {view === "summary" ? <ReportPage /> : <ReportWorkspacePage forcedTab={workspaceTab[view]} hideHeader />}
+        {experience?.authority === "v2" && view === "moments" ? <ActionPhaseStrip analysisId={id} pose={null} event={selected.event} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} parentPin={parentPin} showVideo /> : view === "summary" ? <ReportPage /> : <ReportWorkspacePage forcedTab={workspaceTab[view]} hideHeader />}
       </div>
     </div>
   );

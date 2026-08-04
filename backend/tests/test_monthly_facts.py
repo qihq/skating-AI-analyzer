@@ -340,3 +340,60 @@ class MonthlyFactsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("timestamp", frame)
             self.assertIn("phase", frame)
             self.assertIn("evidence_source", frame)
+
+    async def test_representative_frame_prefers_applied_v2_source_reference(self) -> None:
+        from app.analysis_v2.event_moment_facts import apply_event_moments, propose_event_moments
+        from app.analysis_v2.profile_moments import MomentEvidenceSample, localize_profile_moments
+
+        moment_set = localize_profile_moments(
+            event_id="event-jump",
+            profile="jump",
+            event_start_pts=0,
+            event_end_pts=.5,
+            source_timeline_fingerprint="source-timeline",
+            samples=(
+                MomentEvidenceSample(source_frame_index=10, pts_sec=.10, ice_contact=.8, airborne=.1, body_center_y=.5),
+                MomentEvidenceSample(source_frame_index=11, pts_sec=.14, ice_contact=.2, airborne=.8, body_center_y=.4),
+                MomentEvidenceSample(source_frame_index=12, pts_sec=.18, ice_contact=.1, airborne=.9, body_center_y=.2),
+                MomentEvidenceSample(source_frame_index=13, pts_sec=.24, ice_contact=.9, airborne=.1, body_center_y=.4),
+            ),
+        )
+        applied = apply_event_moments(propose_event_moments(analysis_id="a-v2", event_id="event-jump", after=moment_set))
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(self.models.Skater(id="skater-1", name="tantan"))
+            session.add(self._analysis(
+                id="a-v2",
+                report={"data_quality": "good"},
+                bio_data={"key_frame_candidates": {"L": {"frame_id": "legacy_landing"}}, "key_frame_timestamps": {"L": .4}},
+                processing_logs=[{"event_moment_proposal": applied.model_dump(mode="json")}],
+            ))
+            await session.commit()
+
+        frame = (await self._snapshot())["representative_frames"][0]
+        self.assertEqual(frame["event_id"], "event-jump")
+        self.assertEqual(frame["semantic_key"], "apex")
+        self.assertEqual(frame["source_frame_index"], 12)
+        self.assertEqual(frame["source_pts"], .18)
+        self.assertEqual(frame["definition_version"], "jump-tal.source-contact.v1")
+        self.assertEqual(frame["authority"], "v2")
+
+    async def test_unobservable_v2_moments_do_not_fall_back_to_legacy_frame(self) -> None:
+        from app.analysis_v2.event_moment_facts import apply_event_moments, propose_event_moments
+        from app.analysis_v2.profile_moments import localize_profile_moments
+
+        refused = localize_profile_moments(
+            event_id="event-refused", profile="jump", event_start_pts=0, event_end_pts=.5,
+            samples=(), source_timeline_fingerprint="source-timeline",
+        )
+        applied = apply_event_moments(propose_event_moments(analysis_id="a-refused", event_id="event-refused", after=refused))
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(self.models.Skater(id="skater-1", name="tantan"))
+            session.add(self._analysis(
+                id="a-refused",
+                report={"data_quality": "good"},
+                bio_data={"key_frame_candidates": {"L": {"frame_id": "legacy_landing"}}, "key_frame_timestamps": {"L": .4}},
+                processing_logs=[{"event_moment_proposal": applied.model_dump(mode="json")}],
+            ))
+            await session.commit()
+
+        self.assertEqual((await self._snapshot())["representative_frames"], [])

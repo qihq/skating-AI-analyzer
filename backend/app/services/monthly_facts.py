@@ -265,7 +265,7 @@ def _representative_frames(
     metadata only — never image bytes.
     """
     milestone_set = set(milestone_source_analysis_ids)
-    candidates: list[tuple[int, Analysis, str, str, float]] = []
+    candidates: list[tuple[int, Analysis, dict[str, Any]]] = []
     for analysis in analyses:
         report = _report(analysis)
         quality = _data_quality(report)
@@ -277,6 +277,31 @@ def _representative_frames(
         elif quality == "partial":
             priority = 2
         else:
+            continue
+        from app.analysis_v2.moment_selectors import applied_moment_sets_from_record, select_profile_moment
+        v2_moment_sets = applied_moment_sets_from_record(analysis)
+        if v2_moment_sets:
+            for moment_set in v2_moment_sets:
+                reference = select_profile_moment(moment_set, consumer="monthly_representative")
+                if reference is None:
+                    continue
+                candidates.append((priority, analysis, {
+                    "analysis_id": analysis.id,
+                    "event_id": reference.event_id,
+                    "frame_id": f"source-frame:{reference.source_frame_index}",
+                    "timestamp": reference.source_pts_sec,
+                    "source_frame_index": reference.source_frame_index,
+                    "source_pts": reference.source_pts_sec,
+                    "timing_status": "exact",
+                    "phase": reference.semantic_key,
+                    "semantic_key": reference.semantic_key,
+                    "definition_version": reference.definition_version,
+                    "evidence_source": "v2_profile_moment",
+                    "authority": "v2",
+                }))
+                break
+            # A V2 analysis never falls back to legacy keyframes when its
+            # profile moment set refuses representative media.
             continue
         bio = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
         candidates_obj = bio.get("key_frame_candidates") if bio else None
@@ -310,28 +335,29 @@ def _representative_frames(
                 pass
             label = {"L": "落冰", "A": "腾空", "T": "起跳"}.get(phase_code, phase_code)
             evidence = "milestone" if priority == 0 else quality
-            candidates.append((priority, analysis, frame_id, label, ts_value))
+            candidates.append((priority, analysis, {
+                "analysis_id": analysis.id,
+                "frame_id": frame_id,
+                "timestamp": ts_value,
+                "source_frame_index": source_frame_index,
+                "source_pts": source_pts,
+                "timing_status": timing_status,
+                "phase": label,
+                "semantic_key": phase_code,
+                "definition_version": "legacy-key-moment.v1",
+                "evidence_source": "milestone" if analysis.id in milestone_set else "quality",
+                "authority": "legacy",
+            }))
             break
 
     candidates.sort(key=lambda item: (item[0], _utc(item[1].created_at) or datetime.min.replace(tzinfo=timezone.utc)))
     selected: list[dict[str, Any]] = []
     seen_analyses: set[str] = set()
-    for _priority, analysis, frame_id, label, ts in candidates:
+    for _priority, analysis, reference in candidates:
         if analysis.id in seen_analyses:
             continue
         seen_analyses.add(analysis.id)
-        selected.append(
-            {
-                "analysis_id": analysis.id,
-                "frame_id": frame_id,
-                "timestamp": ts,
-                "source_frame_index": source_frame_index,
-                "source_pts": source_pts,
-                "timing_status": timing_status,
-                "phase": label,
-                "evidence_source": "milestone" if analysis.id in milestone_set else "quality",
-            }
-        )
+        selected.append(reference)
         if len(selected) >= 4:
             break
     return selected

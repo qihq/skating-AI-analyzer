@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -140,3 +141,189 @@ def test_pose_detail_resource_is_parent_authorized_and_raw_joints_stay_out_of_ex
         result = asyncio.run(analysis_v2.get_pose_v2_detail("a1", "1234", session))
     assert result.diagnostic_only is True
     assert result.observations[0].joints["nose"].provenance == "measured"
+
+
+def test_event_label_fact_routes_keep_revision_and_legacy_snapshot() -> None:
+    analysis = SimpleNamespace(id="a1", status="completed", action_type="自由滑", action_subtype="节目片段", analysis_profile="step", pipeline_version="legacy", processing_logs=[])
+    session = AsyncMock()
+    session.add = lambda *_args, **_kwargs: None
+    session.get = AsyncMock(return_value=analysis)
+    session.commit = AsyncMock()
+    request = analysis_v2.EventLabelFactRequest(profile="jump", subtype=None, state="confirmed", reviewer="parent", expected_revision=0, confirmation="propose_event_label_fact")
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        proposed = asyncio.run(analysis_v2.propose_event_label_fact_route("a1", "e1", request, "1234", session))
+        applied = asyncio.run(analysis_v2.apply_event_label_fact_route("a1", "e1", proposed.revision, "1234", session))
+    assert proposed.revision == 1
+    assert proposed.legacy_snapshot["analysis_profile"] == "step"
+    assert applied.status == "applied"
+    assert analysis.processing_logs[-1]["event_label_fact_audit"]["legacy_mutation"] is False
+
+
+def test_growth_admission_excludes_shadow_events_with_reason() -> None:
+    analysis = SimpleNamespace(id="a1")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [analysis])))
+    experience = {
+        "schema_version": "analysis-experience.v2",
+        "analysis_id": "a1",
+        "authority": "v2",
+        "pipeline_mode": "v2",
+        "source_pipeline_fingerprint": "v2:fp",
+        "diagnostic_only": True,
+        "family_usable": False,
+        "events": [{"event_id": "e1", "profile": "jump", "state": "confirmed", "status": "confirmed", "observability": "observable"}],
+        "claims": [],
+        "review_tasks": [],
+    }
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)), patch.object(analysis_v2, "present_analysis_experience", return_value=experience):
+        report = asyncio.run(analysis_v2.get_growth_admission(analysis_v2.GrowthAdmissionRequest(analysis_ids=("a1",)), "1234", session))
+    assert report.included_count == 0
+    assert report.excluded_count == 1
+    assert report.excluded_reasons == {"shadow_diagnostic": 1}
+
+
+def test_applied_event_label_fact_projects_without_mutating_legacy_fields() -> None:
+    from app.analysis_v2.event_proposals import EventProposal, EventProposalCollection
+
+    proposed = analysis_v2.propose_event_label_fact(
+        analysis_id="a1",
+        event_id="e1",
+        profile="jump",
+        subtype="toe_loop",
+        state="confirmed",
+        legacy_snapshot={"analysis_profile": "step"},
+        reviewer="parent",
+    )
+    applied = analysis_v2.apply_event_label_fact(proposed)
+    analysis = SimpleNamespace(
+        id="a1",
+        action_type="step",
+        analysis_profile="step",
+        pipeline_version="legacy",
+        video_path=None,
+        processing_logs=[
+            {"event_proposals": EventProposalCollection(
+                source_video_hash="sha256:v",
+                source_duration_sec=2,
+                pipeline_fingerprint="v2:proposal",
+                proposals=(EventProposal(
+                    event_id="e1",
+                    source_video_hash="sha256:v",
+                    start_pts=0,
+                    end_pts=1,
+                    anchor_start_frame=0,
+                    anchor_end_frame=10,
+                    candidate_profile_scores={"jump": 0, "spin": 0, "step": 0, "spiral": 0},
+                    tracking_coverage=1,
+                    pose_coverage=1,
+                    observability="observable",
+                    evidence_sources=("motion",),
+                    provenance_fingerprint="proposal:fp",
+                ),),
+            ).model_dump(mode="json")},
+            {"event_label_fact": proposed.model_dump(mode="json")},
+            {"event_label_fact": applied.model_dump(mode="json")},
+        ],
+        frame_motion_scores={},
+        pose_data={},
+        vision_path_a={},
+        vision_path_b={},
+        cross_validation={},
+        source_duration_sec=2,
+    )
+    with patch.object(analysis_v2, "evidence_from_legacy_analysis", return_value=(2, ())) :
+        rendered = analysis_v2.present_analysis_experience(analysis, diagnostic=True)
+    event = rendered["events"][0]
+    assert event["profile"] == "jump"
+    assert event["subtype"] == "toe_loop"
+    assert event["state"] == "confirmed"
+    assert event["evidence_summary"]["classifier_state"] in {"ambiguous", "unknown"}
+    assert analysis.analysis_profile == "step"
+
+
+def _jump_moment_set(event_id: str = "e1"):
+    from app.analysis_v2.profile_moments import MomentEvidenceSample, localize_profile_moments
+    samples = [
+        MomentEvidenceSample(source_frame_index=0, pts_sec=0, ice_contact=.8, airborne=.1, body_center_y=.5),
+        MomentEvidenceSample(source_frame_index=1, pts_sec=.1, ice_contact=.2, airborne=.8, body_center_y=.4),
+        MomentEvidenceSample(source_frame_index=2, pts_sec=.2, ice_contact=.1, airborne=.9, body_center_y=.2),
+        MomentEvidenceSample(source_frame_index=3, pts_sec=.3, ice_contact=.9, airborne=.1, body_center_y=.4),
+    ]
+    return localize_profile_moments(event_id=event_id, profile="jump", event_start_pts=0, event_end_pts=.5, samples=samples, source_timeline_fingerprint="timeline")
+
+
+def test_event_moment_proposal_routes_keep_snapshots_invalidation_and_regeneration_trigger() -> None:
+    analysis = SimpleNamespace(id="a1", status="completed", processing_logs=[])
+    session = AsyncMock()
+    session.add = lambda *_args, **_kwargs: None
+    session.get = AsyncMock(return_value=analysis)
+    session.commit = AsyncMock()
+    request = analysis_v2.EventMomentProposalRequest(after=_jump_moment_set(), reviewer="parent", expected_revision=0, confirmation="propose_event_moments")
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)):
+        proposed = asyncio.run(analysis_v2.propose_event_moment_route("a1", "e1", request, "1234", session))
+        applied = asyncio.run(analysis_v2.apply_event_moment_route("a1", "e1", proposed.revision, "1234", session))
+        dismissed = asyncio.run(analysis_v2.dismiss_event_moment_route("a1", "e1", proposed.revision, "1234", session))
+    assert proposed.before is None
+    assert proposed.after.event_id == "e1"
+    assert proposed.report_regeneration_required is True
+    assert "report" in proposed.invalidates
+    assert applied.status == "applied"
+    assert dismissed.status == "dismissed"
+    assert analysis.processing_logs[-1]["event_moment_audit"]["legacy_mutation"] is False
+
+
+def test_review_tasks_exist_only_for_parent_resolvable_moment_ambiguity() -> None:
+    from app.analysis_v2.event_proposals import EventProposal, EventProposalCollection
+    from app.analysis_v2.profile_moments import MomentEvidenceSample
+
+    proposal = EventProposal(event_id="e1", source_video_hash="sha256:v", start_pts=0, end_pts=1, anchor_start_frame=0, anchor_end_frame=10, candidate_profile_scores={"jump": 1, "spin": 0, "step": 0, "spiral": 0}, tracking_coverage=1, pose_coverage=1, observability="observable", evidence_sources=("motion",), provenance_fingerprint="proposal")
+    moments = [
+        MomentEvidenceSample(source_frame_index=0, pts_sec=0, ice_contact=.8, airborne=.1, body_center_y=.5),
+        MomentEvidenceSample(source_frame_index=1, pts_sec=.1, ice_contact=.2, airborne=.8, body_center_y=.4),
+        MomentEvidenceSample(source_frame_index=2, pts_sec=.2, ice_contact=.1, airborne=.9, body_center_y=.2),
+        MomentEvidenceSample(source_frame_index=3, pts_sec=.3, ice_contact=.82, airborne=.1, body_center_y=.4),
+        MomentEvidenceSample(source_frame_index=4, pts_sec=.4, ice_contact=.2, airborne=.8, body_center_y=.4),
+        MomentEvidenceSample(source_frame_index=5, pts_sec=.5, ice_contact=.80, airborne=.1, body_center_y=.4),
+    ]
+    classification = SimpleNamespace(profile="jump", subtype=SimpleNamespace(subtype=None), state="confirmed", confirmation_task=None, classifier_fingerprint="classifier", definition_version="profile.v1", evidence_summary={})
+    analysis = SimpleNamespace(id="a1", action_type="jump", analysis_profile="jump", pipeline_version="legacy", video_path=None, processing_logs=[{"event_proposals": EventProposalCollection(source_video_hash="sha256:v", source_duration_sec=1, pipeline_fingerprint="pipeline", proposals=(proposal,)).model_dump(mode="json")}, {"moment_evidence": {"event_id": "e1", "samples": [item.model_dump(mode="json") for item in moments]}}], frame_motion_scores={}, pose_data={}, vision_path_a={}, vision_path_b={}, cross_validation={}, source_duration_sec=1)
+    with patch.object(analysis_v2, "classify_proposal", return_value=classification), patch.object(analysis_v2, "evidence_from_legacy_analysis", return_value=(1, ())):
+        rendered = analysis_v2.present_analysis_experience(analysis, diagnostic=True)
+    tasks = [item for item in rendered["review_tasks"] if item["kind"].startswith("confirm_event_moment")]
+    assert len(tasks) == 1
+    assert tasks[0]["event_id"] == "e1"
+
+
+def test_exact_source_frame_thumbnail_requires_parent_before_extraction(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"private-source")
+    analysis = SimpleNamespace(id="a1", status="completed", video_path=str(source))
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=analysis)
+
+    async def reject(*_args, **_kwargs):
+        raise HTTPException(status_code=403, detail="parent PIN required")
+
+    extractor = AsyncMock()
+    with patch.object(analysis_v2, "require_parent_pin", new=reject), patch.object(analysis_v2, "extract_source_frame_bytes", new=extractor):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(analysis_v2.get_analysis_source_frame_image("a1", 42, None, session))
+    assert exc.value.status_code == 403
+    extractor.assert_not_called()
+
+
+def test_exact_source_frame_thumbnail_preserves_index_and_private_cache(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"private-source")
+    analysis = SimpleNamespace(id="a1", status="completed", video_path=str(source))
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=analysis)
+
+    with patch.object(analysis_v2, "require_parent_pin", new=AsyncMock(return_value=None)), patch.object(
+        analysis_v2, "extract_source_frame_bytes", return_value=b"jpeg-frame"
+    ) as extractor:
+        response = asyncio.run(analysis_v2.get_analysis_source_frame_image("a1", 42, "1234", session))
+    extractor.assert_called_once_with(source, 42)
+    assert response.body == b"jpeg-frame"
+    assert response.headers["x-source-frame-index"] == "42"
+    assert response.headers["cache-control"].startswith("private")

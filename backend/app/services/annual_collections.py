@@ -30,16 +30,20 @@ def _chapter_snapshot(chapter: MonthlyChapter) -> dict[str, Any]:
     safe_frames = [
         {
             "analysis_id": str(frame.get("analysis_id") or ""),
+            "event_id": str(frame.get("event_id") or ""),
             "frame_id": str(frame.get("frame_id") or ""),
             "timestamp": frame.get("timestamp"),
             "source_frame_index": frame.get("source_frame_index"),
             "source_pts": frame.get("source_pts"),
             "timing_status": str(frame.get("timing_status") or "approximate_legacy"),
             "phase": str(frame.get("phase") or ""),
+            "semantic_key": str(frame.get("semantic_key") or ""),
+            "definition_version": str(frame.get("definition_version") or "legacy-key-moment.v1"),
+            "authority": str(frame.get("authority") or "legacy"),
             "evidence_source": str(frame.get("evidence_source") or ""),
         }
         for frame in frames
-        if isinstance(frame, dict) and frame.get("analysis_id") and frame.get("frame_id")
+        if isinstance(frame, dict) and frame.get("analysis_id") and (frame.get("frame_id") or frame.get("source_frame_index") is not None)
     ]
     quote_facts = [
         {

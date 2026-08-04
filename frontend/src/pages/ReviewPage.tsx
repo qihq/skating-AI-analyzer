@@ -24,7 +24,9 @@ import { localDateKey } from "../utils/datetime";
 import { appendManualWindow, readVideoDuration, validateManualWindow } from "../utils/videoMetadata";
 import SubmitButton from "../modern/SubmitButton";
 import IdentityReviewPanel from "../analysis-v2/components/IdentityReviewPanel";
-import { fetchEventProposals, mutateEventProposals, type EventProposalCollection } from "../analysis-v2/api";
+import { fetchAnalysisExperienceV2Diagnostic, fetchEventProposals, mutateEventProposals, type EventProposalCollection } from "../analysis-v2/api";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { actionEventLabel } from "../analysis-v2/profilePresentation";
 
 const ACCEPTED_TYPES = ".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo";
 const DRAFT_STORAGE_KEY = "icebuddy.review-draft";
@@ -180,13 +182,14 @@ export default function ReviewPage() {
   const identityReviewAnalysisId = new URLSearchParams(location.search).get("analysis_id");
   const proposalReviewAnalysisId = new URLSearchParams(location.search).get("proposal_analysis_id");
   const [proposalCollection, setProposalCollection] = useState<EventProposalCollection | null>(null);
+  const [proposalExperience, setProposalExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [proposalError, setProposalError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isParentMode || !parentPin || !proposalReviewAnalysisId) return;
     let cancelled = false;
-    void fetchEventProposals(parentPin, proposalReviewAnalysisId)
-      .then((next) => { if (!cancelled) setProposalCollection(next); })
+    void Promise.all([fetchEventProposals(parentPin, proposalReviewAnalysisId), fetchAnalysisExperienceV2Diagnostic(parentPin, proposalReviewAnalysisId)])
+      .then(([next, experience]) => { if (!cancelled) { setProposalCollection(next); setProposalExperience(experience); } })
       .catch(() => { if (!cancelled) setProposalError("动作窗口候选暂时不可用。"); });
     return () => { cancelled = true; };
   }, [isParentMode, parentPin, proposalReviewAnalysisId]);
@@ -585,7 +588,7 @@ export default function ReviewPage() {
       {isParentMode && proposalCollection ? <section className="rounded-[24px] border border-amber-200 bg-amber-50/70 px-4 py-4 tablet:px-5" aria-label="Pending action-window confirmations">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-700">Parent review</p><h2 className="mt-1 text-xl font-semibold text-slate-900">动作窗口候选 · {proposalCollection.proposals.length}</h2><p className="mt-1 text-sm text-slate-600">候选生成与最终动作分类分离；请确认、忽略或标记普通滑行。</p></div><Link className="app-pill" to={`/analysis/${proposalReviewAnalysisId}?event=${encodeURIComponent(proposalCollection.proposals[0]?.event_id ?? "")}`}>打开事件时间轴</Link></div>
         {proposalError ? <p className="mt-3 text-sm text-rose-700">{proposalError}</p> : null}
-        <div className="mt-4 grid gap-3">{proposalCollection.proposals.map((proposal, index) => <div key={proposal.event_id} className="rounded-2xl border border-amber-200 bg-white p-4"><div className="flex flex-wrap items-center justify-between gap-2"><strong>Event {index + 1} · unknown</strong><span className="text-xs text-slate-500">{proposal.start_pts.toFixed(2)}–{proposal.end_pts.toFixed(2)}s · {proposal.observability}</span></div><p className="mt-1 text-xs text-slate-500">tracking {Math.round(proposal.tracking_coverage * 100)}% · pose {Math.round(proposal.pose_coverage * 100)}% · {proposal.status}</p><div className="mt-3 flex flex-wrap gap-2"><button type="button" className="app-pill" onClick={() => void mutateProposal("confirm", proposal.event_id)}>确认动作窗口</button><button type="button" className="app-pill" onClick={() => void mutateProposal("ordinary_skating", proposal.event_id)}>普通滑行</button><button type="button" className="app-pill" onClick={() => void mutateProposal("unknown", proposal.event_id)}>未知</button><button type="button" className="app-pill" onClick={() => void mutateProposal("ignore", proposal.event_id)}>忽略</button></div></div>)}</div>
+        <div className="mt-4 grid gap-3">{proposalCollection.proposals.map((proposal, index) => { const classified = proposalExperience?.events.find((event) => event.eventId === proposal.event_id); const momentTasks = proposalExperience?.reviewTasks.filter((task) => task.eventId === proposal.event_id && (task.kind === "confirm_event_moment" || task.kind === "confirm_event_interval")) ?? []; return <div key={proposal.event_id} className="rounded-2xl border border-amber-200 bg-white p-4"><div className="flex flex-wrap items-center justify-between gap-2"><strong>事件 {index + 1} · {classified ? actionEventLabel(classified) : "未知动作 · 未知"}</strong><span className="text-xs text-slate-500">{proposal.start_pts.toFixed(2)}–{proposal.end_pts.toFixed(2)} 秒 · {proposal.observability}</span></div><p className="mt-1 text-xs text-slate-500">跟踪 {Math.round(proposal.tracking_coverage * 100)}% · 姿态 {Math.round(proposal.pose_coverage * 100)}% · {proposal.status}</p>{classified?.confirmationTask ? <p className="mt-1 text-xs text-amber-700">需要人工确认动作家庭</p> : null}{classified?.moments ? <p className="mt-1 text-xs text-slate-500">技术时刻：{classified.moments.completeness} · {classified.moments.definitionVersion}</p> : null}{momentTasks.length ? <div className="mt-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status"><p>这些歧义可由家长查看候选后解决：</p><ul>{momentTasks.map((task) => { const taskParts = task.taskId.split(":"); return <li key={task.taskId}>{task.kind === "confirm_event_interval" ? "确认阶段区间" : "确认关键时刻"} · {taskParts[taskParts.length - 1]}</li>; })}</ul></div> : null}<div className="mt-3 flex flex-wrap gap-2"><button type="button" className="app-pill" onClick={() => void mutateProposal("confirm", proposal.event_id)}>确认动作窗口</button><button type="button" className="app-pill" onClick={() => void mutateProposal("ordinary_skating", proposal.event_id)}>普通滑行</button><button type="button" className="app-pill" onClick={() => void mutateProposal("unknown", proposal.event_id)}>未知</button><button type="button" className="app-pill" onClick={() => void mutateProposal("ignore", proposal.event_id)}>忽略</button></div></div>; })}</div>
       </section> : null}
       <section className="rounded-[24px] border border-slate-200 bg-white px-4 py-4 tablet:px-5">
         <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-center">

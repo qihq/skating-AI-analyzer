@@ -1,0 +1,69 @@
+{
+  "schema_version": "g8-profile-moments-evidence.v1",
+  "gate": "G8",
+  "status": "blocked_waiting_for_frozen_candidate",
+  "gate_passed": false,
+  "release_claim": false,
+  "diagnostic_only": true,
+  "pilot_only": true,
+  "dataset": "pilot-12-run-20260801",
+  "candidate_fingerprint": "iteration12-profile-moments.v1",
+  "dataset_frozen": false,
+  "validation_calibrated": false,
+  "frozen_candidate_runs": 0,
+  "protocol": {
+    "reason": "G2 is not frozen and G7 has no confirmed validation classifications; prediction profile selection must not consume Golden family labels.",
+    "semantic_labels_consumed": false,
+    "golden_labels_used_for_prediction": false,
+    "formal_run_performed": false
+  },
+  "definitions": {
+    "jump": "jump-tal.source-contact.v1",
+    "spin": "spin-phases.periodic-axis.v1",
+    "spiral": "spiral-phases.extension-hold.v1",
+    "step": "step-sequence.edge-complexity.v1"
+  },
+  "jump": {
+    "labeled_event_raw_n": 6,
+    "observable_event_raw_n": 4,
+    "observable_moment_raw_n": 12,
+    "predicted_moment_raw_n": 0,
+    "refused_moment_raw_n": 12,
+    "completeness": { "numerator": 0, "denominator": 12, "rate": 0.0, "wilson_95_ci": [0.0, 0.242494] },
+    "refusal": { "numerator": 12, "denominator": 12, "rate": 1.0, "wilson_95_ci": [0.757506, 1.0] },
+    "median_absolute_error_sec": null,
+    "p95_absolute_error_sec": null,
+    "each_moment": {
+      "takeoff": { "raw_n": 0, "median_absolute_error_sec": null, "p95_absolute_error_sec": null },
+      "apex": { "raw_n": 0, "median_absolute_error_sec": null, "p95_absolute_error_sec": null },
+      "landing": { "raw_n": 0, "median_absolute_error_sec": null, "p95_absolute_error_sec": null }
+    },
+    "thresholds_met": false,
+    "event_core_tracking_coverage": {
+      "source": "iteration-8-pilot12-identity-evidence.json",
+      "raw_n": 12,
+      "confirmed_coverage": 0.0,
+      "note": "No identity-authoritative target timeline was available for the pilot moment run."
+    }
+  },
+  "other_profiles": {
+    "spin": { "raw_n": 3, "definition_version": "spin-phases.periodic-axis.v1", "complete": 0, "incomplete": 3, "status": "reported_separately_no_jump_threshold" },
+    "step": { "raw_n": 2, "definition_version": "step-sequence.edge-complexity.v1", "complete": 0, "incomplete": 2, "status": "reported_separately_no_jump_threshold" },
+    "spiral": { "raw_n": 1, "definition_version": "spiral-phases.extension-hold.v1", "complete": 0, "incomplete": 1, "status": "reported_separately_no_jump_threshold" }
+  },
+  "strata": {
+    "observable_jump": { "raw_n": 4, "predicted_complete": 0, "refusal_rate": 1.0 },
+    "multi_skater": { "raw_n": 4, "predicted_complete": 0, "refusal_rate": 1.0 },
+    "small": { "raw_n": 2, "predicted_complete": 0, "refusal_rate": 1.0 },
+    "crossing": { "raw_n": 2, "predicted_complete": 0, "refusal_rate": 1.0 },
+    "occlusion": { "raw_n": 2, "predicted_complete": 0, "refusal_rate": 1.0 },
+    "blur": { "raw_n": 2, "predicted_complete": 0, "refusal_rate": 1.0 }
+  },
+  "known_limitations": [
+    "This temporary owner-labeled pilot is not the frozen G8 dataset.",
+    "No point error is reported when a stage is refused; refused stages are not converted to zero-error or synthetic markers.",
+    "Jump thresholds do not authorize spin, step, or spiral claims.",
+    "A validation-calibrated candidate must be frozen before the single formal G8 run.",
+    "Private source paths, full hashes, and event labels are not included in this sanitized evidence."
+  ]
+}
