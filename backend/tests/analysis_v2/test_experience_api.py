@@ -294,6 +294,32 @@ def test_review_tasks_exist_only_for_parent_resolvable_moment_ambiguity() -> Non
     assert tasks[0]["event_id"] == "e1"
 
 
+def test_rotation_evidence_projects_strict_event_contract_fact_and_exact_pts_review_task() -> None:
+    import math
+    from app.analysis_v2.event_proposals import EventProposal, EventProposalCollection
+    from app.analysis_v2.rotation import RotationEvidenceSample
+
+    proposal = EventProposal(event_id="e1", source_video_hash="sha256:v", start_pts=0, end_pts=1, anchor_start_frame=0, anchor_end_frame=30, candidate_profile_scores={"jump": 1, "spin": 0, "step": 0, "spiral": 0}, tracking_coverage=1, pose_coverage=1, observability="observable", evidence_sources=("motion",), provenance_fingerprint="proposal")
+    samples = []
+    for index in range(31):
+        progress = index / 30
+        samples.append(RotationEvidenceSample(source_frame_index=index, pts_sec=progress, phase="airborne", pose_quality=.95, left_right_assignment_confidence=.98, shoulder_orientation_rad=3 * math.pi * progress, hip_orientation_rad=3 * math.pi * progress, torso_appearance_phase_rad=4 * math.pi * progress, silhouette_orientation_rad=4 * math.pi * progress, silhouette_confidence=.9, limb_appearance_phase_rad=4 * math.pi * progress, optical_flow_rotation_rad=0 if index == 0 else 4 * math.pi / 30, optical_flow_confidence=.9))
+    classification = SimpleNamespace(profile="jump", subtype=SimpleNamespace(subtype="toe_loop", confidence=.9), state="confirmed", confirmation_task=None, classifier_fingerprint="classifier", definition_version="profile.v1", evidence_summary={})
+    source_timeline = {"schema_version": "source-timeline.v1", "source_video_hash": "sha256:v", "duration_sec": 1, "width": 1280, "height": 720, "rotation_degrees": 0, "timebase": {"numerator": 1, "denominator": 30, "is_vfr": False}, "timestamp_status": "exact", "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "timeline"}
+    analysis = SimpleNamespace(id="a1", action_type="jump", analysis_profile="jump", pipeline_version="legacy", video_path=None, processing_logs=[{"source_timeline": source_timeline}, {"event_proposals": EventProposalCollection(source_video_hash="sha256:v", source_duration_sec=1, pipeline_fingerprint="pipeline", proposals=(proposal,)).model_dump(mode="json")}, {"rotation_evidence": {"event_id": "e1", "samples": [item.model_dump(mode="json") for item in samples]}}], frame_motion_scores={}, pose_data={}, vision_path_a={}, vision_path_b={}, cross_validation={}, source_duration_sec=1)
+    with patch.object(analysis_v2, "classify_proposal", return_value=classification), patch.object(analysis_v2, "evidence_from_legacy_analysis", return_value=(1, ())):
+        rendered = analysis_v2.present_analysis_experience(analysis, diagnostic=True)
+    rotation = rendered["events"][0]["rotation"]
+    assert rotation["status"] == "range"
+    assert rotation["refusal_reason"] == "conflicting_turn_hypotheses"
+    assert rendered["claims"][0]["claim_type"] == "airborne_body_rotation_turns_v1"
+    assert rendered["claims"][0]["status"] == "uncertain"
+    review = next(task for task in rendered["review_tasks"] if task["kind"] == "confirm_rotation_estimate")
+    assert review["start_pts"] == 0
+    assert review["end_pts"] == 1
+    assert review["convention"] == "airborne_body_rotation"
+
+
 def test_exact_source_frame_thumbnail_requires_parent_before_extraction(tmp_path: Path) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"private-source")

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis_v2.config import RuntimeConfig
@@ -150,6 +150,19 @@ class GoldenReviewAttestationRequest(_StrictResponse):
     reviewer_alias: str = Field(min_length=1, max_length=160)
     review_type: Literal["delayed_relabel", "ambiguous_rotation", "frozen_identity_crossing"]
     note: str | None = Field(default=None, max_length=500)
+    rotation_definition: Literal["airborne_body_rotation", "competition_naming", "observed_spin_rotation"] | None = None
+    review_start_pts: float | None = Field(default=None, ge=0)
+    review_end_pts: float | None = Field(default=None, ge=0)
+    review_method: Literal["source_frame_step"] = "source_frame_step"
+
+    @model_validator(mode="after")
+    def valid_rotation_review(self) -> "GoldenReviewAttestationRequest":
+        if self.review_type == "ambiguous_rotation":
+            if self.rotation_definition is None or self.review_start_pts is None or self.review_end_pts is None:
+                raise ValueError("ambiguous rotation review requires definition and exact source PTS interval")
+            if self.review_end_pts <= self.review_start_pts:
+                raise ValueError("ambiguous rotation review interval must be ordered")
+        return self
 
 
 class G2FreezeRequest(_StrictResponse):
@@ -443,9 +456,20 @@ async def add_golden_review_attestation(
         rotation = event.jump.rotation if event.jump else event.spin.rotation if event.spin else None
         if not rotation or (rotation.observability == "observable" and rotation.observed_turns_min == rotation.observed_turns_max):
             raise HTTPException(status_code=422, detail="This event does not require ambiguous-rotation review.")
+        label_reviewer = event.field_revisions.get("rotation", event.revision).annotator_alias
+        if payload.reviewer_alias == label_reviewer:
+            raise HTTPException(status_code=422, detail="Ambiguous rotation requires a different reviewer.")
+        if payload.rotation_definition != rotation.definition:
+            raise HTTPException(status_code=422, detail="Rotation review definition does not match the current label.")
+        if payload.review_start_pts < event.start_pts or payload.review_end_pts > event.end_pts:
+            raise HTTPException(status_code=422, detail="Rotation review interval must stay inside the event source PTS interval.")
+        expected_start = rotation.review_start_pts if rotation.review_start_pts is not None else event.start_pts
+        expected_end = rotation.review_end_pts if rotation.review_end_pts is not None else event.end_pts
+        if abs(payload.review_start_pts - expected_start) > 1e-6 or abs(payload.review_end_pts - expected_end) > 1e-6:
+            raise HTTPException(status_code=422, detail="Rotation review must use the current label's exact source PTS interval.")
     if payload.review_type == "frozen_identity_crossing" and not (event.split == "frozen_test" and any(item.category == "crossing" for item in event.challenge_intervals)):
         raise HTTPException(status_code=422, detail="This event does not require frozen crossing review.")
-    store.add_review_attestation(event_id, {"review_type": payload.review_type, "reviewer_alias": payload.reviewer_alias, "reviewed_at": datetime.now(timezone.utc).isoformat(), "note": payload.note})
+    store.add_review_attestation(event_id, {"review_type": payload.review_type, "reviewer_alias": payload.reviewer_alias, "reviewed_at": datetime.now(timezone.utc).isoformat(), "note": payload.note, "event_revision": event.revision.revision, "rotation_definition": payload.rotation_definition, "review_start_pts": payload.review_start_pts, "review_end_pts": payload.review_end_pts, "review_method": payload.review_method})
     return {"event_id": event_id, "review_type": payload.review_type, "recorded": True}
 
 
@@ -466,7 +490,7 @@ async def get_golden_event_suggestions(
 async def get_golden_review_queue(
     _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
 ) -> list[GoldenReviewItem]:
-    return _review_queue(store.ensure_initialized())
+    return _review_queue(store.ensure_initialized(), store)
 
 
 @router.get("/evaluator/progress")
@@ -636,7 +660,7 @@ def _next_dataset(current: GoldenDatasetV2, expected_revision: int, annotator_al
     return GoldenDatasetV2.model_validate(payload)
 
 
-def _review_queue(dataset: GoldenDatasetV2) -> list[GoldenReviewItem]:
+def _review_queue(dataset: GoldenDatasetV2, store: GoldenCatalogStore | None = None) -> list[GoldenReviewItem]:
     items: list[GoldenReviewItem] = []
     for event in dataset.events:
         if not event.main_skater_confirmed:
@@ -646,7 +670,19 @@ def _review_queue(dataset: GoldenDatasetV2) -> list[GoldenReviewItem]:
         if event.ambiguity_tags:
             items.append(GoldenReviewItem(event_id=event.event_id, status="ambiguous", message="Ambiguity tags require an explicit reviewer decision."))
         rotation = event.jump.rotation if event.jump else event.spin.rotation if event.spin else None
-        if rotation and (rotation.observability != "observable" or rotation.observed_turns_min != rotation.observed_turns_max):
+        rotation_reviews = store.review_attestations(event.event_id) if store is not None else []
+        label_reviewer = event.field_revisions.get("rotation", event.revision).annotator_alias
+        rotation_reviewed = any(
+            review.get("review_type") == "ambiguous_rotation"
+            and review.get("reviewer_alias") != label_reviewer
+            and review.get("event_revision") == event.revision.revision
+            and review.get("rotation_definition") == rotation.definition
+            and review.get("review_method") == "source_frame_step"
+            and abs(float(review.get("review_start_pts", -1)) - (rotation.review_start_pts if rotation.review_start_pts is not None else event.start_pts)) <= 1e-6
+            and abs(float(review.get("review_end_pts", -1)) - (rotation.review_end_pts if rotation.review_end_pts is not None else event.end_pts)) <= 1e-6
+            for review in rotation_reviews
+        ) if rotation else False
+        if rotation and (rotation.observability != "observable" or rotation.observed_turns_min != rotation.observed_turns_max) and not rotation_reviewed:
             items.append(GoldenReviewItem(event_id=event.event_id, status="double-review-required", message="Ambiguous rotation requires a second reviewer."))
         if event.split == "frozen_test" and any(challenge.category == "crossing" for challenge in event.challenge_intervals):
             items.append(GoldenReviewItem(event_id=event.event_id, status="double-review-required", message="Frozen-test identity crossings require a second reviewer."))

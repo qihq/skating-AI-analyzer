@@ -599,27 +599,141 @@ class EventMomentSet(ContractModel):
         return self
 
 
-class RotationEstimate(ContractModel):
-    schema_version: Literal["rotation-estimate.v1"] = "rotation-estimate.v1"
-    pre_takeoff_rotation: float | None = None
-    airborne_rotation: float | None = None
-    post_landing_continuation: float | None = None
-    total_observed_rotation: float | None = None
-    rotation_class: str | None = None
-    convention: Literal["axel", "non_axel", "unknown"] = "unknown"
-    signal_estimates: dict[str, float] = {}
-    reliability: float | None = Field(default=None, ge=0, le=1)
-    fused_estimate: float | None = None
-    fused_interval: tuple[float, float] | None = None
-    observability: Literal["observed", "partial", "unobservable"] = "unobservable"
-    rejection_reason: str | None = None
+RotationPhase = Literal["pre_takeoff", "airborne", "post_landing", "spin_main", "whole_event"]
+RotationSignalKind = Literal[
+    "shoulder_orientation",
+    "hip_orientation",
+    "torso_appearance_periodicity",
+    "silhouette_orientation",
+    "limb_appearance_periodicity",
+    "target_crop_optical_flow",
+]
+RotationRefusalReason = Literal[
+    "identity_not_confirmed",
+    "timestamp_unavailable",
+    "insufficient_sampling",
+    "insufficient_independent_signals",
+    "occlusion",
+    "camera_roll_unresolved",
+    "changing_arm_position",
+    "left_right_assignment_uncertain",
+    "signal_aliasing",
+    "conflicting_turn_hypotheses",
+    "airborne_interval_unavailable",
+    "required_phase_unobservable",
+]
+
+
+class RotationSignalEstimate(ContractModel):
+    schema_version: Literal["rotation-signal-estimate.v1"] = "rotation-signal-estimate.v1"
+    signal: RotationSignalKind
+    phase: RotationPhase
+    estimate_turns: float | None = Field(default=None, ge=0, le=20)
+    interval_turns: tuple[float, float] | None = None
+    class_likelihoods: dict[str, float] = Field(default_factory=dict)
+    reliability: float = Field(ge=0, le=1)
+    observability: Literal["observed", "partial", "unobservable"]
+    sample_count: int = Field(default=0, ge=0)
+    duration_sec: float | None = Field(default=None, ge=0)
+    warnings: tuple[str, ...] = ()
+    provenance: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def valid_interval(self) -> "RotationEstimate":
-        if self.fused_interval is not None and self.fused_interval[1] < self.fused_interval[0]:
-            raise ValueError("rotation interval must be ordered")
-        if self.observability == "unobservable" and self.fused_estimate is not None:
-            raise ValueError("unobservable rotation cannot have fused estimate")
+    def valid_signal(self) -> "RotationSignalEstimate":
+        if self.interval_turns is not None:
+            low, high = self.interval_turns
+            if low < 0 or high < low:
+                raise ValueError("rotation signal interval must be non-negative and ordered")
+            if self.estimate_turns is not None and not low <= self.estimate_turns <= high:
+                raise ValueError("rotation signal estimate must lie inside its interval")
+        if self.observability == "unobservable" and (self.estimate_turns is not None or self.interval_turns is not None or self.reliability != 0):
+            raise ValueError("unobservable rotation signals cannot carry an estimate or reliability")
+        if any(value < 0 or value > 1 for value in self.class_likelihoods.values()):
+            raise ValueError("rotation class likelihoods must be bounded")
+        return self
+
+
+class RotationPhaseEstimate(ContractModel):
+    schema_version: Literal["rotation-phase-estimate.v1"] = "rotation-phase-estimate.v1"
+    phase: RotationPhase
+    status: Literal["exact", "range", "unobservable"]
+    value_turns: float | None = Field(default=None, ge=0, le=20)
+    range_turns: tuple[float, float] | None = None
+    confidence: float = Field(ge=0, le=1)
+    observability: Literal["observed", "partial", "unobservable"]
+    refusal_reason: RotationRefusalReason | None = None
+
+    @model_validator(mode="after")
+    def valid_phase(self) -> "RotationPhaseEstimate":
+        if self.range_turns is not None and (self.range_turns[0] < 0 or self.range_turns[1] < self.range_turns[0]):
+            raise ValueError("rotation phase range must be non-negative and ordered")
+        if self.status == "exact" and (self.value_turns is None or self.range_turns is not None or self.observability != "observed" or self.refusal_reason is not None):
+            raise ValueError("exact rotation phases require one observed value")
+        if self.status == "range" and (self.value_turns is not None or self.range_turns is None or self.observability != "partial" or self.refusal_reason is None):
+            raise ValueError("range rotation phases require a bounded interval and uncertainty reason")
+        if self.status == "unobservable" and (self.value_turns is not None or self.range_turns is not None or self.confidence != 0 or self.observability != "unobservable" or self.refusal_reason is None):
+            raise ValueError("unobservable rotation phases require an explicit refusal")
+        return self
+
+
+class RotationEstimate(ContractModel):
+    schema_version: Literal["rotation-estimate.v2"] = "rotation-estimate.v2"
+    event_id: str = Field(min_length=1)
+    profile: Literal["jump", "spin"]
+    definition_version: str = "airborne-body-rotation.source-pts.v1"
+    status: Literal["exact", "range", "unobservable"]
+    value_turns: float | None = Field(default=None, ge=0, le=20)
+    range_turns: tuple[float, float] | None = None
+    class_turns: float | None = Field(default=None, ge=0, le=20)
+    class_kind: Literal["integer", "half_integer"] | None = None
+    confidence: float = Field(ge=0, le=1)
+    observability: Literal["observed", "partial", "unobservable"]
+    refusal_reason: RotationRefusalReason | None = None
+    value_convention: Literal["airborne_body_rotation", "observed_spin_rotation"]
+    competition_convention: Literal["not_applied", "axel", "non_axel", "unknown"] = "not_applied"
+    competition_naming_turns: float | None = Field(default=None, ge=0, le=20)
+    competition_naming_class: str | None = None
+    subtype_support: float | None = Field(default=None, ge=0, le=1)
+    phases: tuple[RotationPhaseEstimate, ...] = ()
+    signals: tuple[RotationSignalEstimate, ...] = ()
+    evidence_summary: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    estimator_fingerprint: str = Field(min_length=1)
+    source_timeline_fingerprint: str = Field(min_length=1)
+    review_required: bool = False
+
+    @model_validator(mode="after")
+    def valid_estimate(self) -> "RotationEstimate":
+        expected_definition = "airborne-body-rotation.source-pts.v1" if self.profile == "jump" else "observed-spin-rotation.source-pts.v1"
+        expected_convention = "airborne_body_rotation" if self.profile == "jump" else "observed_spin_rotation"
+        if self.definition_version != expected_definition or self.value_convention != expected_convention:
+            raise ValueError("rotation profile, definition, and value convention must match")
+        if self.profile == "spin" and self.competition_convention != "not_applied":
+            raise ValueError("competition naming is jump-specific")
+        if self.range_turns is not None and (self.range_turns[0] < 0 or self.range_turns[1] < self.range_turns[0]):
+            raise ValueError("rotation estimate range must be non-negative and ordered")
+        if self.status == "exact":
+            if self.value_turns is None or self.range_turns is not None or self.observability != "observed" or self.refusal_reason is not None:
+                raise ValueError("exact rotation requires one supported observed value")
+            if self.class_turns is None or self.class_kind is None:
+                raise ValueError("exact rotation requires an integer/half-integer class")
+        elif self.status == "range":
+            if self.value_turns is not None or self.range_turns is None or self.observability != "partial" or self.refusal_reason is None:
+                raise ValueError("range rotation requires a bounded interval and uncertainty reason")
+            if self.class_turns is not None or self.class_kind is not None:
+                raise ValueError("uncertain intervals cannot be rounded into a confident class")
+        else:
+            if self.value_turns is not None or self.range_turns is not None or self.class_turns is not None or self.class_kind is not None:
+                raise ValueError("unobservable rotation cannot carry a value, range, or class")
+            if self.confidence != 0 or self.observability != "unobservable" or self.refusal_reason is None:
+                raise ValueError("unobservable rotation requires zero confidence and an explicit refusal")
+        if self.competition_convention == "axel" and (self.subtype_support is None or self.subtype_support < .75):
+            raise ValueError("Axel convention requires sufficient subtype support")
+        if self.competition_convention == "not_applied" and (self.competition_naming_turns is not None or self.competition_naming_class is not None):
+            raise ValueError("competition naming cannot be populated when the convention is not applied")
+        if any(item.phase == "airborne" for item in self.phases) and self.profile != "jump":
+            raise ValueError("airborne phase rotation is jump-specific")
         return self
 
 

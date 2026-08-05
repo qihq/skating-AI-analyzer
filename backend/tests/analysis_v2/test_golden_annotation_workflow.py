@@ -73,6 +73,31 @@ def test_review_queue_reports_ambiguous_and_incomplete_labels(tmp_path: Path) ->
     assert {item.status for item in queue} >= {"incomplete", "low-confidence", "ambiguous"}
 
 
+def test_ambiguous_rotation_requires_exact_time_matching_definition_double_review(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    initial = store.ensure_initialized()
+    event = _event("event-a", start=1, end=2, split="frozen_test")
+    event["jump"]["rotation"] = {
+        "observed_turns_min": 1,
+        "observed_turns_max": 1.5,
+        "reported_turns": None,
+        "convention": "non_axel_airborne",
+        "definition": "airborne_body_rotation",
+        "observability": "uncertain",
+        "review_start_pts": 1.1,
+        "review_end_pts": 1.9,
+    }
+    seeded = golden_v2._next_dataset(initial, 1, "owner", "seed", sources=[_source()], events=[event], tracks=[], poses=[])
+    store.save(seeded, expected_revision=1)
+    assert any(item.status == "double-review-required" for item in asyncio.run(golden_v2.get_golden_review_queue(None, store)))
+    with pytest.raises(HTTPException, match="different reviewer"):
+        asyncio.run(golden_v2.add_golden_review_attestation("event-a", golden_v2.GoldenReviewAttestationRequest(reviewer_alias="owner", review_type="ambiguous_rotation", rotation_definition="airborne_body_rotation", review_start_pts=1.1, review_end_pts=1.9), None, store))
+    with pytest.raises(HTTPException, match="definition"):
+        asyncio.run(golden_v2.add_golden_review_attestation("event-a", golden_v2.GoldenReviewAttestationRequest(reviewer_alias="reviewer-2", review_type="ambiguous_rotation", rotation_definition="competition_naming", review_start_pts=1.1, review_end_pts=1.9), None, store))
+    asyncio.run(golden_v2.add_golden_review_attestation("event-a", golden_v2.GoldenReviewAttestationRequest(reviewer_alias="reviewer-2", review_type="ambiguous_rotation", rotation_definition="airborne_body_rotation", review_start_pts=1.1, review_end_pts=1.9), None, store))
+    assert not any(item.status == "double-review-required" for item in asyncio.run(golden_v2.get_golden_review_queue(None, store)))
+
+
 def test_private_media_and_frame_identity_require_parent_and_never_return_paths(tmp_path: Path) -> None:
     store = GoldenCatalogStore(tmp_path / "golden")
     store.ensure_initialized()

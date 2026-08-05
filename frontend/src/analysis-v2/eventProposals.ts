@@ -1,4 +1,4 @@
-import type { AnalysisExperienceV2, ExperienceEvent } from "./contracts";
+import type { AnalysisExperienceV2, ExperienceEvent, ExperienceReviewTask } from "./contracts";
 
 export type ProposalSelection = { eventId: string | null; event: ExperienceEvent | null };
 
@@ -14,6 +14,11 @@ export function selectProposalEvent(experience: AnalysisExperienceV2, eventId: s
 
 export function proposalDeepLink(analysisId: string, eventId: string): string {
   return `/analysis/${encodeURIComponent(analysisId)}?event=${encodeURIComponent(eventId)}`;
+}
+
+export function rotationReviewDeepLink(analysisId: string, task: Pick<ExperienceReviewTask, "eventId" | "startPts">): string {
+  if (!task.eventId || task.startPts == null || !Number.isFinite(task.startPts)) throw new Error("rotation review task requires exact event and source PTS");
+  return `/analysis/${encodeURIComponent(analysisId)}?view=moments&event=${encodeURIComponent(task.eventId)}&t=${task.startPts}`;
 }
 
 export function proposalTimelineMarkers(experience: AnalysisExperienceV2): Array<{ id: string; timestamp: number; label: string }> {

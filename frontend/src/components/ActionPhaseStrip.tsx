@@ -7,6 +7,7 @@ import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlay
 import { analysisMediaMarkers } from "../media/analysisMarkers";
 import { buildCurrentKeyframeEvidenceItems, formatKeyframeTimestamp, keyframeConfidenceLabel } from "../utils/keyframeEvidence";
 import PoseFrameCanvas from "./PoseFrameCanvas";
+import RotationEstimateCard from "../analysis-v2/components/RotationEstimateCard";
 
 type Props = {
   analysis?: AnalysisDetail | null;
@@ -17,6 +18,7 @@ type Props = {
   selectedMomentKey?: ProfileMomentKey | null;
   onSelectMoment?: (key: ProfileMomentKey) => void;
   parentPin?: string | null;
+  initialSeekPts?: number | null;
 };
 
 type PhaseItem = {
@@ -55,7 +57,7 @@ function v2Item(moment: KeyMomentV2): PhaseItem {
   };
 }
 
-export default function ActionPhaseStrip({ analysis, analysisId, pose, event, showVideo = true, selectedMomentKey, onSelectMoment, parentPin }: Props) {
+export default function ActionPhaseStrip({ analysis, analysisId, pose, event, showVideo = true, selectedMomentKey, onSelectMoment, parentPin, initialSeekPts = null }: Props) {
   const playerRef = useRef<IceMediaPlayerHandle | null>(null);
   const items = useMemo<PhaseItem[]>(() => {
     if (event) return orderedMoments(event).map(v2Item);
@@ -86,9 +88,10 @@ export default function ActionPhaseStrip({ analysis, analysisId, pose, event, sh
         <p className="mt-2 text-sm leading-6 text-slate-500">{isV2 ? "所有标记都来自原视频 source PTS；语义关键帧只用于复核，不会直接成为时间真值。" : "历史分析按原有 T/A/L 快照显示，不改写旧定义。"}</p>
         {event?.moments ? <p className="mt-2 text-xs text-slate-500" role="status">完整性：{event.moments.completeness} · 定义 {event.moments.definitionVersion}</p> : event ? <p className="mt-2 text-sm text-amber-700" role="status">此事件尚无可用的 V2 技术时刻，不使用历史关键帧补齐。</p> : null}
       </div>
+      {event?.rotation ? <div className="mt-4"><RotationEstimateCard rotation={event.rotation} /></div> : null}
       {showVideo && resolvedAnalysisId ? (
         <div className="mt-5 overflow-hidden rounded-[22px] bg-slate-950">
-          <IceMediaPlayer ref={playerRef} manifest={analysis?.media_manifest} fallbackSrc={`/api/analysis/${resolvedAnalysisId}/video`} markers={markers} />
+          <IceMediaPlayer ref={playerRef} manifest={analysis?.media_manifest} fallbackSrc={`/api/analysis/${resolvedAnalysisId}/video`} markers={markers} seekTime={initialSeekPts} />
         </div>
       ) : null}
       <div className="mt-5 flex snap-x gap-4 overflow-x-auto pb-2 tablet:grid tablet:grid-cols-3 tablet:overflow-visible">

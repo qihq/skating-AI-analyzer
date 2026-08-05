@@ -84,11 +84,19 @@ class PhaseInterval(_StrictModel):
 
 
 class RotationLabel(_StrictModel):
+    schema_version: Literal["rotation-label.v2"] = "rotation-label.v2"
     observed_turns_min: float = Field(ge=0, le=12)
     observed_turns_max: float = Field(ge=0, le=12)
     reported_turns: float | None = Field(default=None, ge=0, le=12)
     convention: Literal["axel_includes_forward_takeoff", "non_axel_airborne", "unknown"]
     observability: Literal["observable", "uncertain", "unobservable"]
+    definition: Literal["airborne_body_rotation", "competition_naming", "observed_spin_rotation"] | None = None
+    status: Literal["exact", "range", "unobservable"] | None = None
+    value_turns: float | None = Field(default=None, ge=0, le=12)
+    range_turns: tuple[float, float] | None = None
+    review_start_pts: float | None = Field(default=None, ge=0)
+    review_end_pts: float | None = Field(default=None, ge=0)
+    review_method: Literal["source_frame_step"] = "source_frame_step"
 
     @model_validator(mode="after")
     def rotation_range_is_consistent(self) -> "RotationLabel":
@@ -100,6 +108,40 @@ class RotationLabel(_StrictModel):
             raise ValueError("reported_turns must be inside the observed rotation range")
         if self.observability == "unobservable" and self.reported_turns is not None:
             raise ValueError("unobservable rotation cannot report an exact turn count")
+        definition = self.definition
+        if definition is None:
+            definition = "competition_naming" if self.convention == "axel_includes_forward_takeoff" else "airborne_body_rotation"
+            object.__setattr__(self, "definition", definition)
+        if self.convention == "axel_includes_forward_takeoff" and definition != "competition_naming":
+            raise ValueError("Axel competition naming cannot be stored as airborne body rotation")
+        if self.convention == "non_axel_airborne" and definition != "airborne_body_rotation":
+            raise ValueError("non-Axel airborne labels require the airborne body rotation definition")
+        status = self.status
+        if status is None:
+            status = "unobservable" if self.observability == "unobservable" else "exact" if self.reported_turns is not None and self.observed_turns_min == self.observed_turns_max else "range"
+            object.__setattr__(self, "status", status)
+        if status == "exact":
+            value = self.value_turns if self.value_turns is not None else self.reported_turns
+            if value is None or self.observability != "observable" or self.observed_turns_min != self.observed_turns_max:
+                raise ValueError("exact rotation labels require one clear observed value")
+            object.__setattr__(self, "value_turns", value)
+            if self.range_turns is not None:
+                raise ValueError("exact rotation labels cannot carry a range")
+        elif status == "range":
+            interval = self.range_turns or (self.observed_turns_min, self.observed_turns_max)
+            if interval[0] < 0 or interval[1] < interval[0] or interval[0] == interval[1] or self.observability == "unobservable":
+                raise ValueError("partial rotation labels require an ordered non-zero interval")
+            object.__setattr__(self, "range_turns", interval)
+            object.__setattr__(self, "value_turns", None)
+            object.__setattr__(self, "reported_turns", None)
+        else:
+            if self.observability != "unobservable" or self.value_turns is not None or self.range_turns is not None:
+                raise ValueError("unobservable rotation labels cannot carry values")
+            object.__setattr__(self, "reported_turns", None)
+        if (self.review_start_pts is None) != (self.review_end_pts is None):
+            raise ValueError("rotation review interval requires both source PTS endpoints")
+        if self.review_start_pts is not None and self.review_end_pts is not None and self.review_end_pts <= self.review_start_pts:
+            raise ValueError("rotation review interval must be ordered")
         return self
 
 
@@ -203,8 +245,12 @@ class GoldenEventLabel(_StrictModel):
         intervals: list[PhaseInterval] = []
         if self.jump:
             moments.extend(value for value in (self.jump.takeoff, self.jump.apex, self.jump.landing) if value)
+            if self.jump.rotation and self.jump.rotation.review_start_pts is not None and self.jump.rotation.review_end_pts is not None:
+                intervals.append(PhaseInterval(start_pts=self.jump.rotation.review_start_pts, end_pts=self.jump.rotation.review_end_pts))
         if self.spin:
             intervals.extend(value for value in (self.spin.entry, self.spin.main, self.spin.exit) if value)
+            if self.spin.rotation and self.spin.rotation.review_start_pts is not None and self.spin.rotation.review_end_pts is not None:
+                intervals.append(PhaseInterval(start_pts=self.spin.rotation.review_start_pts, end_pts=self.spin.rotation.review_end_pts))
         for detail in (self.step, self.spiral):
             if detail:
                 if detail.phase:

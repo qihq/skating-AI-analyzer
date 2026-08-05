@@ -56,6 +56,8 @@ V2_FILES = [
     "profile_moments.py",
     "moment_selectors.py",
     "event_moment_facts.py",
+    "rotation.py",
+    "rotation_facts.py",
 ]
 
 def main():

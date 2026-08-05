@@ -5,7 +5,7 @@ from typing import Any, Literal, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, Authority, Observability
-from app.analysis_v2.contracts import EventMomentSet, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
+from app.analysis_v2.contracts import EventMomentSet, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation, RotationEstimate
 
 
 class AuthorityMismatchError(ValueError):
@@ -36,6 +36,7 @@ class EventV2(BaseModel):
     moments: EventMomentSet | None = None
     moment_definition_version: str | None = None
     moment_completeness: Literal["complete", "incomplete", "ambiguous", "unobservable"] | None = None
+    rotation: RotationEstimate | None = None
 
 
 class ReviewTaskV2(BaseModel):
@@ -45,6 +46,16 @@ class ReviewTaskV2(BaseModel):
     authority: Authority
     kind: str
     event_id: str | None = None
+    start_pts: float | None = Field(default=None, ge=0)
+    end_pts: float | None = Field(default=None, ge=0)
+    definition_version: str | None = None
+    convention: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered_review_interval(self) -> "ReviewTaskV2":
+        if self.start_pts is not None and self.end_pts is not None and self.end_pts < self.start_pts:
+            raise ValueError("review task end PTS must not precede start PTS")
+        return self
 
 
 class AnalysisExperienceV2(BaseModel):

@@ -1,0 +1,54 @@
+{
+  "schema_version": "g9-multi-signal-rotation-evidence.v1",
+  "gate": "G9",
+  "status": "blocked_waiting_for_frozen_candidate",
+  "gate_passed": false,
+  "release_claim": false,
+  "diagnostic_only": true,
+  "candidate_fingerprint": "multi-signal-rotation.v1-source-pts",
+  "dataset_frozen": false,
+  "validation_calibrated": false,
+  "frozen_candidate_runs": 0,
+  "blockers": [
+    "G2 status is collecting and no frozen dataset fingerprint exists.",
+    "The current private Golden catalog contains zero events and zero rotation labels.",
+    "The Iteration 11 validation diagnostic contains zero confirmed classifications.",
+    "No frozen-test G9 run was attempted."
+  ],
+  "thresholds": {
+    "observable_mae_max_turns": 0.25,
+    "class_accuracy_min": 0.9,
+    "confidently_wrong_max": 0.02
+  },
+  "metrics": {
+    "raw_n": 0,
+    "observable_n": 0,
+    "clear_exact_label_n": 0,
+    "exact_prediction_n": 0,
+    "mae_turns": null,
+    "mae_bootstrap_95_ci": null,
+    "class_accuracy": { "numerator": 0, "denominator": 0, "rate": null, "wilson_95_ci": null },
+    "confidently_wrong": { "numerator": 0, "denominator": 0, "rate": null, "wilson_95_ci": null },
+    "refusal": { "numerator": 0, "denominator": 0, "rate": null, "wilson_95_ci": null },
+    "coverage": { "numerator": 0, "denominator": 0, "rate": null, "wilson_95_ci": null },
+    "coverage_protocol_met": false,
+    "convention_mismatch_n": 0
+  },
+  "strata": {
+    "single": { "raw_n": 0 },
+    "double": { "raw_n": 0 },
+    "triple_or_more": { "raw_n": 0 },
+    "axel": { "raw_n": 0 },
+    "non_axel": { "raw_n": 0 },
+    "observable": { "raw_n": 0 },
+    "uncertain": { "raw_n": 0 },
+    "unobservable": { "raw_n": 0 }
+  },
+  "failure_strata": [],
+  "known_limitations": [
+    "An empty diagnostic cannot estimate MAE, class accuracy, confidently-wrong rate, refusal, coverage, or confidence intervals.",
+    "Unobservable labels must remain visible in raw N and refusal/coverage accounting when labels exist.",
+    "Airborne-body and competition-naming conventions are never mixed.",
+    "Ranges remain context and are never rounded into class metrics."
+  ]
+}

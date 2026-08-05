@@ -13,6 +13,7 @@ import { orderedProposalEvents, proposalDeepLink, selectProposalEvent } from "..
 import { actionEventLabel } from "../analysis-v2/profilePresentation";
 import ActionPhaseStrip from "../components/ActionPhaseStrip";
 import type { ProfileMomentKey } from "../analysis-v2/contracts";
+import RotationEstimateCard from "../analysis-v2/components/RotationEstimateCard";
 
 const ITEMS = [
   { id: "summary", label: "总结", to: "summary" },
@@ -80,13 +81,14 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
               </button>)}
             </div>
             {selected.event ? <p data-testid="selected-proposal">当前事件 {selected.event.eventId}：{actionEventLabel(selected.event)} · {selected.event.observability}</p> : null}
+            {selected.event?.rotation ? <div className="mt-3"><RotationEstimateCard rotation={selected.event.rotation} compact /></div> : null}
             {selected.event?.confirmationTask ? <p role="status">需要人工确认：{selected.event.confirmationTask}</p> : null}
             {selected.event ? <Link to={proposalDeepLink(experience.analysisId, selected.event.eventId)}>复制事件链接</Link> : null}
           </div> : null}
         </section>
       ) : null}
       <div className="modern-analysis-detail__content">
-        {experience?.authority === "v2" && view === "moments" ? <ActionPhaseStrip analysisId={id} pose={null} event={selected.event} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} parentPin={parentPin} showVideo /> : view === "summary" ? <ReportPage /> : <ReportWorkspacePage forcedTab={workspaceTab[view]} hideHeader />}
+        {experience?.authority === "v2" && view === "moments" ? <ActionPhaseStrip analysisId={id} pose={null} event={selected.event} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} parentPin={parentPin} showVideo initialSeekPts={params.has("t") && Number.isFinite(Number(params.get("t"))) ? Number(params.get("t")) : null} /> : view === "summary" ? <ReportPage /> : <ReportWorkspacePage forcedTab={workspaceTab[view]} hideHeader />}
       </div>
     </div>
   );

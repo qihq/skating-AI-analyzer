@@ -13,7 +13,7 @@ from app.database import get_session
 from app.models import Analysis
 from app.services.parent_access import require_parent_pin
 from app.analysis_v2.evaluation.source_media import SourceMediaError, extract_source_frame_bytes, probe_source, source_frame_index
-from app.analysis_v2.contracts import DetectionProposalDiagnostics, EventMomentSet, IdentityAnchor, IdentityAnchorRevision, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation
+from app.analysis_v2.contracts import DetectionProposalDiagnostics, EventMomentSet, IdentityAnchor, IdentityAnchorRevision, IdentityTimeline, PoseAvailabilitySummary, PoseDetailResource, PoseObservation, RotationEstimate
 from app.analysis_v2.identity import create_anchor_revision, immutable_template_fingerprint, replace_causal_interval
 from app.analysis_v2.detection import build_proposal_diagnostics, resolve_provider_config
 from app.analysis_v2.evaluation.pilot12_detection import evaluate_pilot12_detection
@@ -25,6 +25,8 @@ from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, FactPermissio
 from app.analysis_v2.profile_eligibility import growth_admission
 from app.analysis_v2.profile_moments import MomentEvidenceSample, localize_profile_moments
 from app.analysis_v2.event_moment_facts import EventMomentProposalRevision, apply_event_moments, dismiss_event_moments, latest_applied_event_moments, propose_event_moments
+from app.analysis_v2.rotation import RotationEvidenceSample, estimate_rotation
+from app.analysis_v2.rotation_facts import rotation_fact_from_estimate
 from app.routers.capabilities import get_runtime_config
 from app.analysis_v2.config import RuntimeConfig
 from pathlib import Path
@@ -151,6 +153,30 @@ def _stored_moment_samples(analysis: Any, event_id: str) -> tuple[MomentEvidence
     return ()
 
 
+def _stored_rotation_samples(analysis: Any, event_id: str) -> tuple[RotationEvidenceSample, ...]:
+    stored = getattr(analysis, "processing_logs", None)
+    if isinstance(stored, list):
+        for item in reversed(stored):
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("rotation_evidence")
+            if isinstance(payload, dict) and payload.get("event_id") == event_id and isinstance(payload.get("samples"), list):
+                return tuple(RotationEvidenceSample.model_validate(sample) for sample in payload["samples"])
+    return ()
+
+
+def _stored_rotation_estimate(analysis: Any, event_id: str, source_timeline_fingerprint: str) -> RotationEstimate | None:
+    stored = getattr(analysis, "processing_logs", None)
+    if isinstance(stored, list):
+        for item in reversed(stored):
+            if not isinstance(item, dict) or not isinstance(item.get("rotation_estimate"), dict):
+                continue
+            estimate = RotationEstimate.model_validate(item["rotation_estimate"])
+            if estimate.event_id == event_id and estimate.source_timeline_fingerprint == source_timeline_fingerprint:
+                return estimate
+    return None
+
+
 def _event_label_fact_history(analysis: Any, event_id: str) -> list[EventLabelFactRevision]:
     history: list[EventLabelFactRevision] = []
     stored = getattr(analysis, "processing_logs", None)
@@ -171,6 +197,7 @@ def _append_event_label_fact(analysis: Any, fact: EventLabelFactRevision, *, act
 
 def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> dict[str, Any]:
     timeline = None
+    stored = getattr(analysis, "processing_logs", None)
     video_path = getattr(analysis, "video_path", None)
     if video_path:
         try:
@@ -179,9 +206,13 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
                 timeline = source_frame_index(path, metadata=probe_source(path)).to_timeline()
         except (OSError, SourceMediaError, RuntimeError, ValueError):
             timeline = {"schema_version": "source-timeline.v1", "source_video_hash": "", "duration_sec": None, "width": 1, "height": 1, "rotation_degrees": 0, "timebase": {"numerator": 1, "denominator": 1, "is_vfr": False}, "timestamp_status": "unavailable", "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "unavailable"}
+    if timeline is None and isinstance(stored, list):
+        for item in reversed(stored):
+            if isinstance(item, dict) and isinstance(item.get("source_timeline"), dict):
+                timeline = item["source_timeline"]
+                break
     identity = None
     pose_summary = None
-    stored = getattr(analysis, "processing_logs", None)
     event_proposals = None
     if diagnostic and isinstance(stored, list):
         for item in reversed(stored):
@@ -247,6 +278,22 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
                         samples=samples,
                         source_timeline_fingerprint=timeline_fingerprint,
                     )
+            rotation = None
+            if profile in {"jump", "spin"}:
+                timeline_fingerprint = str((rendered.source_timeline or {}).get("fingerprint") or "source-timeline:unavailable")
+                rotation = _stored_rotation_estimate(analysis, item.event_id, timeline_fingerprint)
+                if rotation is None:
+                    subtype_support = 1.0 if correction is not None and correction.state == "confirmed" and subtype else float(getattr(result.subtype, "confidence", 0.0))
+                    rotation = estimate_rotation(
+                        event_id=item.event_id,
+                        profile=profile,
+                        event_start_pts=item.start_pts,
+                        event_end_pts=item.end_pts,
+                        samples=_stored_rotation_samples(analysis, item.event_id),
+                        source_timeline_fingerprint=timeline_fingerprint,
+                        subtype=subtype,
+                        subtype_support=subtype_support,
+                    )
             return EventV2(
                 event_id=item.event_id, profile=profile, subtype=subtype,
                 state=state, start_pts=item.start_pts, end_pts=item.end_pts,
@@ -260,6 +307,7 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
                 moments=moment_set,
                 moment_definition_version=moment_set.definition_version if moment_set else None,
                 moment_completeness=moment_set.completeness if moment_set else None,
+                rotation=rotation,
             )
 
         effective_events = tuple(effective_event(item, result, correction) for item, result, correction in classified)
@@ -274,10 +322,30 @@ def present_analysis_experience(analysis: Any, *, diagnostic: bool = False) -> d
             kind="confirm_event_moment" if moment.kind != "interval" else "confirm_event_interval",
             event_id=event.event_id,
         ) for event in effective_events if event.moments is not None for moment in event.moments.moments if moment.review_resolvable)
+        review_tasks += tuple(ReviewTaskV2(
+            task_id=f"{event.event_id}:rotation",
+            authority="v2",
+            kind="confirm_rotation_estimate",
+            event_id=event.event_id,
+            start_pts=next((moment.pts_sec for moment in event.moments.moments if moment.semantic_key in {"takeoff", "spin_main"} and moment.pts_sec is not None), event.start_pts) if event.moments else event.start_pts,
+            end_pts=next((moment.pts_sec if moment.end_pts_sec is None else moment.end_pts_sec for moment in reversed(event.moments.moments) if moment.semantic_key in {"landing", "spin_main"} and (moment.pts_sec is not None or moment.end_pts_sec is not None)), event.end_pts) if event.moments else event.end_pts,
+            definition_version=event.rotation.definition_version,
+            convention=event.rotation.value_convention,
+        ) for event in effective_events if event.rotation is not None and event.rotation.review_required)
+        rotation_claims = tuple(
+            rotation_fact_from_estimate(
+                analysis_id=str(getattr(analysis, "id", "unknown")),
+                estimate=event.rotation,
+                source_pipeline_fingerprint=event_proposals.pipeline_fingerprint,
+                diagnostic_only=True,
+            )
+            for event in effective_events
+            if event.rotation is not None
+        )
         rendered = rendered.model_copy(update={
             "authority": "v2", "pipeline_mode": "v2", "diagnostic_only": True, "family_usable": False,
             "source_pipeline_fingerprint": event_proposals.pipeline_fingerprint,
-            "claims": (),
+            "claims": rotation_claims,
             "events": effective_events,
             "review_tasks": review_tasks,
         })

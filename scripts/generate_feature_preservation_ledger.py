@@ -24,6 +24,8 @@ def _owner(kind: str, name: str) -> int:
         return 3
     if "moment" in lowered or "source-frame" in lowered or "source_frame" in lowered:
         return 12
+    if "rotation" in lowered:
+        return 13
     if kind in {"environment_setting", "package_entrypoint", "startup_or_scheduled_job"}:
         return 0 if not any(term in lowered for term in ("v2", "shadow", "golden")) else 15
     if kind == "database_model":
@@ -287,6 +289,26 @@ def generate_ledger() -> dict[str, Any]:
             "revision_boundary": "event_scoped_propose_apply_dismiss_with_before_after_snapshots",
             "g8_status": "blocked_waiting_for_frozen_candidate",
             "pilot_evidence": "docs/evaluation/v2/iteration-12-pilot12-profile-moments-evidence.json",
+        },
+        "iteration_13_multi_signal_rotation": {
+            "status": "implemented_shadow_diagnostic_g9_blocked",
+            "definition_version": "airborne-body-rotation.source-pts.v1",
+            "signals": [
+                "shoulder_orientation",
+                "hip_orientation",
+                "torso_appearance_periodicity",
+                "silhouette_orientation",
+                "limb_appearance_periodicity",
+                "target_crop_optical_flow",
+            ],
+            "authoritative_timebase": "source_pts_only",
+            "fusion_policy": "independent_signal_families_with_single_signal_contribution_cap_0.45_and_unassigned_uncertainty_mass",
+            "uncertainty_policy": "exact_range_or_explicit_unobservable_without_legacy_fill",
+            "competition_convention": "separate_from_airborne_rotation_and_axel_only_with_supported_subtype",
+            "downstream_policy": "confirmed_matching_definition_unit_convention_only",
+            "legacy_metric_policy": "estimated_rotations_retained_in_historical_bucket",
+            "g9_status": "blocked_waiting_for_frozen_candidate",
+            "pilot_evidence": "docs/evaluation/v2/iteration-13-multi-signal-rotation-evidence.json",
         },
         "inventory_fingerprint": fingerprint,
         "entry_count": len(entries),

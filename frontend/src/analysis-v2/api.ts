@@ -221,6 +221,6 @@ export async function fetchPilotEventDiagnostic(parentPin: string, alias: string
   return response.data;
 }
 
-export async function attestGoldenReview(parentPin: string, eventId: string, payload: { reviewer_alias: string; review_type: "delayed_relabel" | "ambiguous_rotation" | "frozen_identity_crossing"; note?: string | null }): Promise<void> {
+export async function attestGoldenReview(parentPin: string, eventId: string, payload: { reviewer_alias: string; review_type: "delayed_relabel" | "ambiguous_rotation" | "frozen_identity_crossing"; note?: string | null; rotation_definition?: "airborne_body_rotation" | "competition_naming" | "observed_spin_rotation" | null; review_start_pts?: number | null; review_end_pts?: number | null; review_method?: "source_frame_step" }): Promise<void> {
   await apiClient.post(`/golden/v2/events/${encodeURIComponent(eventId)}/review-attestations`, payload, { headers: { "X-Parent-Pin": parentPin }, timeout: 10_000 });
 }

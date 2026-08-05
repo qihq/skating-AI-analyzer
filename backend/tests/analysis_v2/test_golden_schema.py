@@ -88,6 +88,47 @@ def test_rotation_consistency_is_rejected() -> None:
         GoldenDatasetV2.model_validate(dataset(events=[invalid]))
 
 
+def test_rotation_label_distinguishes_exact_range_unobservable_and_convention() -> None:
+    exact = GoldenDatasetV2.model_validate(dataset()).events[0].jump.rotation
+    assert exact.schema_version == "rotation-label.v2"
+    assert exact.status == "range"
+    assert exact.definition == "airborne_body_rotation"
+    assert exact.value_turns is None
+    assert exact.range_turns == (1.0, 1.5)
+
+    invalid = event()
+    jump = invalid["jump"]
+    assert isinstance(jump, dict)
+    jump["rotation"] = {
+        "observed_turns_min": 1.5,
+        "observed_turns_max": 1.5,
+        "reported_turns": 1.5,
+        "convention": "axel_includes_forward_takeoff",
+        "definition": "airborne_body_rotation",
+        "observability": "observable",
+    }
+    with pytest.raises(ValidationError, match="Axel competition naming"):
+        GoldenDatasetV2.model_validate(dataset(events=[invalid]))
+
+
+def test_unobservable_rotation_cannot_carry_a_value() -> None:
+    invalid = event()
+    jump = invalid["jump"]
+    assert isinstance(jump, dict)
+    jump["rotation"] = {
+        "observed_turns_min": 0,
+        "observed_turns_max": 0,
+        "reported_turns": None,
+        "value_turns": 1,
+        "convention": "unknown",
+        "definition": "airborne_body_rotation",
+        "status": "unobservable",
+        "observability": "unobservable",
+    }
+    with pytest.raises(ValidationError, match="cannot carry values"):
+        GoldenDatasetV2.model_validate(dataset(events=[invalid]))
+
+
 def test_out_of_window_challenge_interval_is_rejected() -> None:
     invalid = event()
     invalid["challenge_intervals"] = [{"start_pts": 0.5, "end_pts": 1.5, "category": "occlusion", "observability": "uncertain"}]

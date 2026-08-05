@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { useAppMode } from "../../components/AppModeContext";
 import { deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, saveGoldenAnnotations } from "../api";
-import type { GoldenWorkspace } from "../golden-contracts";
+import type { GoldenEvent, GoldenWorkspace } from "../golden-contracts";
 import GoldenAnnotationWorkspace from "./GoldenAnnotationWorkspace";
 
 vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
@@ -93,6 +93,57 @@ describe("GoldenAnnotationWorkspace", () => {
     await waitFor(() => expect(save).toHaveBeenCalled());
     const payload = save.mock.calls[save.mock.calls.length - 1][1];
     expect(payload.events[0]).toMatchObject({ jump: { takeoff: { pts: .033, source_frame_index: 1 } } });
+  });
+
+  it("stores a clear rotation as an exact convention-specific source-PTS label", async () => {
+    mockData(); save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
+    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+    fireEvent.change(screen.getByLabelText("Profile"), { target: { value: "jump" } });
+    fireEvent.change(await screen.findByLabelText("jump rotation definition"), { target: { value: "competition_naming" } });
+    fireEvent.change(screen.getByLabelText("jump rotation status"), { target: { value: "exact" } });
+    fireEvent.change(screen.getByLabelText("jump reported turns"), { target: { value: "2.5" } });
+    fireEvent.change(screen.getByLabelText("jump rotation review start PTS"), { target: { value: "1.234" } });
+    fireEvent.change(screen.getByLabelText("jump rotation review end PTS"), { target: { value: "1.456" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const event = save.mock.calls[save.mock.calls.length - 1]?.[1].events[0] as GoldenEvent;
+    const rotation = event.jump?.rotation;
+    expect(rotation).toMatchObject({
+      status: "exact",
+      value_turns: 2.5,
+      range_turns: null,
+      definition: "competition_naming",
+      convention: "axel_includes_forward_takeoff",
+      review_start_pts: 1.234,
+      review_end_pts: 1.456,
+      review_method: "source_frame_step",
+    });
+  });
+
+  it("stores a partial rotation only as an interval", async () => {
+    mockData(); save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
+    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+    fireEvent.change(screen.getByLabelText("Profile"), { target: { value: "jump" } });
+    fireEvent.change(await screen.findByLabelText("jump minimum turns"), { target: { value: "1.5" } });
+    fireEvent.change(screen.getByLabelText("jump maximum turns"), { target: { value: "2.25" } });
+    fireEvent.change(screen.getByLabelText("jump rotation review start PTS"), { target: { value: ".75" } });
+    fireEvent.change(screen.getByLabelText("jump rotation review end PTS"), { target: { value: "1.25" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const event = save.mock.calls[save.mock.calls.length - 1]?.[1].events[0] as GoldenEvent;
+    const rotation = event.jump?.rotation;
+    expect(rotation).toMatchObject({
+      status: "range",
+      value_turns: null,
+      reported_turns: null,
+      range_turns: [1.5, 2.25],
+      definition: "airborne_body_rotation",
+      review_start_pts: .75,
+      review_end_pts: 1.25,
+      review_method: "source_frame_step",
+    });
   });
 
   it("explains the required workflow and deletes a source only after confirmation", async () => {
