@@ -9,6 +9,7 @@ export type EventLabelFactRevision = { schema_version: "event-label-fact.v1"; an
 export type GrowthAdmissionReport = { schema_version: "growth-profile-admission.v1"; included_count: number; excluded_count: number; excluded_reasons: Record<string, number>; diagnostic_only: true };
 export type EventMomentProposalRevision = { schema_version: "event-moment-proposal.v1"; analysis_id: string; event_id: string; revision: number; parent_revision: number | null; status: "proposed" | "applied" | "dismissed"; source: "manual" | "legacy_keyframe_correction" | "video_keyframe_rerun"; before: Record<string, unknown> | null; after: Record<string, unknown>; legacy_snapshot: Record<string, unknown>; human_provenance: Record<string, unknown>; invalidates: string[]; report_regeneration_required: boolean; created_at: string };
 import { GoldenCatalogSummary, GoldenG2Status, GoldenReviewItem, GoldenSanitizedExport, GoldenSchemaInfo, GoldenWorkspace, PilotEvaluatorStatus, PilotProgress, PilotSanitizedResult } from "./golden-contracts";
+import type { ShadowArtifactReference, ShadowArtifactResponse, ShadowCapabilitiesResponse, ShadowCleanupResponse, ShadowDecisionResponse, ShadowDiffResponse, ShadowRecoveryResponse, ShadowReviewDecision, ShadowRunListResponse, ShadowRunRequest, ShadowRunResponse, ShadowStage, ShadowStatusResponse } from "./shadow-contracts";
 
 export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
   const response = await apiClient.get<unknown>("/capabilities", { timeout: 10_000 });
@@ -96,6 +97,86 @@ export async function fetchAdvancedRuntimeCapabilities(parentPin: string): Promi
   const response = await apiClient.get<AdvancedRuntimeCapabilities>("/capabilities/advanced", {
     headers: { "X-Parent-Pin": parentPin }, timeout: 10_000,
   });
+  return response.data;
+}
+
+function shadowHeaders(parentPin: string) { return { headers: { "X-Parent-Pin": parentPin }, timeout: 15_000 }; }
+
+export async function fetchShadowCapabilities(parentPin: string): Promise<ShadowCapabilitiesResponse> {
+  const response = await apiClient.get<ShadowCapabilitiesResponse>("/shadow/capabilities", shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function createShadowRun(parentPin: string, payload: ShadowRunRequest): Promise<ShadowRunResponse> {
+  const response = await apiClient.post<ShadowRunResponse>("/shadow/runs", payload, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowRuns(parentPin: string, analysisId: string): Promise<ShadowRunListResponse> {
+  const response = await apiClient.get<ShadowRunListResponse>(`/shadow/analyses/${encodeURIComponent(analysisId)}/runs`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowStatus(parentPin: string, runId: string): Promise<ShadowStatusResponse> {
+  const response = await apiClient.get<ShadowStatusResponse>(`/shadow/runs/${encodeURIComponent(runId)}/status`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowDiff(parentPin: string, runId: string): Promise<ShadowDiffResponse> {
+  const response = await apiClient.get<ShadowDiffResponse>(`/shadow/runs/${encodeURIComponent(runId)}/diff`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowArtifact(parentPin: string, runId: string, artifactId: string): Promise<ShadowArtifactResponse> {
+  const response = await apiClient.get<ShadowArtifactResponse>(`/shadow/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function retryShadowRun(parentPin: string, runId: string, payload: { stage?: ShadowStage | null; reason?: string | null; confirmation: "confirm_shadow_retry" }): Promise<ShadowRunResponse> {
+  const response = await apiClient.post<ShadowRunResponse>(`/shadow/runs/${encodeURIComponent(runId)}/retry`, payload, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function recoverShadowRun(parentPin: string, runId: string): Promise<ShadowRecoveryResponse> {
+  const response = await apiClient.post<ShadowRecoveryResponse>(`/shadow/runs/${encodeURIComponent(runId)}/recover`, {}, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function cleanupShadowRun(parentPin: string, runId: string): Promise<ShadowCleanupResponse> {
+  const response = await apiClient.post<ShadowCleanupResponse>(`/shadow/runs/${encodeURIComponent(runId)}/cleanup`, {}, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function updateShadowFingerprints(parentPin: string, runId: string, payload: {
+  source_fingerprint?: string | null;
+  model_fingerprint?: string | null;
+  config_fingerprint?: string | null;
+  prompt_fingerprint?: string | null;
+  contract_fingerprint?: string | null;
+  requested_by?: string;
+  confirmation: "confirm_shadow_fingerprint_update";
+}): Promise<ShadowRunResponse> {
+  const response = await apiClient.post<ShadowRunResponse>(`/shadow/runs/${encodeURIComponent(runId)}/fingerprints`, payload, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowArtifacts(parentPin: string, runId: string): Promise<ShadowArtifactReference[]> {
+  const response = await apiClient.get<ShadowArtifactReference[]>(`/shadow/runs/${encodeURIComponent(runId)}/artifacts`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function fetchShadowReviewDecisions(parentPin: string, runId: string): Promise<ShadowReviewDecision[]> {
+  const response = await apiClient.get<ShadowReviewDecision[]>(`/shadow/runs/${encodeURIComponent(runId)}/review-decisions`, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function submitShadowReviewDecision(parentPin: string, runId: string, payload: { stage: ShadowStage; decision: "accept_shadow" | "reject_shadow" | "defer" | "promote_candidate"; reviewer: string; note?: string | null; confirmation: "confirm_shadow_review_decision"; promotion_scope?: "shadow_only" }): Promise<ShadowDecisionResponse> {
+  const response = await apiClient.post<ShadowDecisionResponse>(`/shadow/runs/${encodeURIComponent(runId)}/review-decisions`, payload, shadowHeaders(parentPin));
+  return response.data;
+}
+
+export async function addShadowNote(parentPin: string, runId: string, note: string, author = "parent") {
+  const response = await apiClient.post<{ schema_version: "shadow-orchestration.v1"; run_id: string; notes: Array<{ author: string; note: string; created_at: string }> }>(`/shadow/runs/${encodeURIComponent(runId)}/notes`, { note, author }, shadowHeaders(parentPin));
   return response.data;
 }
 

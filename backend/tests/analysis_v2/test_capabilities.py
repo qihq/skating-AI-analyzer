@@ -40,7 +40,7 @@ def test_advanced_capability_reports_honest_noop_state(tmp_path: Path) -> None:
     payload = build_advanced_capabilities(config).model_dump(mode="json")
 
     assert payload["shadow_status"] == "ready"
-    assert payload["shadow_execution"] == "noop"
+    assert payload["shadow_execution"] == "bounded_local_queue"
     assert payload["writes_user_data"] is False
     assert str(tmp_path) not in str(payload)
 

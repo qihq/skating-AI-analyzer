@@ -77,6 +77,20 @@ V2_FILES = [
     "pose_v2.py",
     "presentation.py",
     "status.py",
+    # Iteration 15 end-to-end Shadow orchestration.  These modules are part
+    # of the generated V2 snapshot so standalone consumers see the same
+    # checkpoint/queue/contracts implementation as the backend.  They do
+    # not write legacy result fields; callers still opt into Shadow through
+    # the parent-authorized runtime API.
+    "contamination_inventory.py",
+    "shadow_contracts.py",
+    "shadow_dispatch.py",
+    # Parent-authorized API execution bridge.  Keep this in the standalone
+    # snapshot so consumers that enqueue Shadow runs use the same bounded
+    # coordinator implementation as the backend.
+    "shadow_execution.py",
+    "shadow_pipeline.py",
+    "shadow_store.py",
 ]
 
 def main():

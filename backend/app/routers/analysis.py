@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Response, UploadFile, status
@@ -158,6 +158,7 @@ from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, FactPermissio
 from app.analysis_v2.claim_fusion import ClaimSourceState, fuse_evidence_claims, source_state_from_payload
 from app.analysis_v2.claim_report import constrain_report_payload
 from app.analysis_v2.fusion_inputs import build_deterministic_claims, claims_from_payload, v2_pipeline_fingerprint
+from app.analysis_v2.shadow_dispatch import dispatch_legacy_shadow_after_completion
 from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
@@ -4297,6 +4298,92 @@ def _log_analysis_timings(
     logger.info("Analysis %s timings (%s): %s", analysis_id, context, timings)
 
 
+def _legacy_shadow_snapshot(
+    *,
+    analysis_id: str,
+    action_type: str | None,
+    action_subtype: str | None,
+    analysis_profile: str | None,
+    pipeline_version: str | None,
+    report: Mapping[str, Any] | None,
+    vision_structured: Mapping[str, Any] | None,
+    vision_path_a: Mapping[str, Any] | None,
+    vision_path_b: Mapping[str, Any] | None,
+    cross_validation: Mapping[str, Any] | None,
+    pose_data: Mapping[str, Any] | None,
+    bio_data: Mapping[str, Any] | None,
+    frame_motion_scores: Mapping[str, Any] | None,
+    processing_timings: Mapping[str, Any] | None,
+    target_lock: Mapping[str, Any] | None,
+    action_window_start: float | None,
+    action_window_end: float | None,
+    source_fps: float | None,
+    is_slow_motion: bool,
+    force_score: int | None,
+    note: str | None,
+) -> dict[str, Any]:
+    """Build an immutable-at-dispatch snapshot of legacy-owned outputs.
+
+    The snapshot is intentionally a plain mapping: the Shadow adapter can
+    serialize it into its isolated runtime without importing SQLAlchemy or
+    receiving a live ``Analysis`` row.  Values are copied before the async
+    runner starts, and no Shadow fields are included here.
+    """
+    return copy.deepcopy(
+        {
+            "schema_version": "legacy-analysis-snapshot.v1",
+            "analysis_id": str(analysis_id),
+            "authority": "legacy",
+            "status": "completed",
+            "action_type": action_type,
+            "action_subtype": action_subtype,
+            "analysis_profile": analysis_profile,
+            "pipeline_version": pipeline_version,
+            "report": dict(report) if isinstance(report, Mapping) else report,
+            "vision_structured": dict(vision_structured) if isinstance(vision_structured, Mapping) else vision_structured,
+            "vision_path_a": dict(vision_path_a) if isinstance(vision_path_a, Mapping) else vision_path_a,
+            "vision_path_b": dict(vision_path_b) if isinstance(vision_path_b, Mapping) else vision_path_b,
+            "cross_validation": dict(cross_validation) if isinstance(cross_validation, Mapping) else cross_validation,
+            "pose_data": dict(pose_data) if isinstance(pose_data, Mapping) else pose_data,
+            "bio_data": dict(bio_data) if isinstance(bio_data, Mapping) else bio_data,
+            "frame_motion_scores": dict(frame_motion_scores) if isinstance(frame_motion_scores, Mapping) else frame_motion_scores,
+            "processing_timings": dict(processing_timings) if isinstance(processing_timings, Mapping) else processing_timings,
+            "target_lock": dict(target_lock) if isinstance(target_lock, Mapping) else target_lock,
+            "action_window_start": action_window_start,
+            "action_window_end": action_window_end,
+            "source_fps": source_fps,
+            "is_slow_motion": bool(is_slow_motion),
+            "force_score": force_score,
+            "note": note,
+        }
+    )
+
+
+def _dispatch_shadow_for_completed_legacy(
+    *,
+    analysis_id: str,
+    snapshot: Mapping[str, Any],
+    video_identity: Mapping[str, Any] | None = None,
+    pipeline_fingerprint: str | None = None,
+) -> None:
+    """Schedule Shadow after legacy commit; never raise into the pipeline."""
+    identity = {
+        "analysis_id": str(analysis_id),
+        "video_hash": str((video_identity or {}).get("sha256") or ""),
+    }
+    try:
+        dispatch_legacy_shadow_after_completion(
+            analysis_id=analysis_id,
+            source_identity=identity,
+            legacy_result=snapshot,
+            pipeline_fingerprint=pipeline_fingerprint,
+        )
+    except Exception:  # noqa: BLE001
+        # The adapter already fail-closes, but retain this boundary so a
+        # future adapter regression cannot downgrade a committed legacy run.
+        logger.exception("Analysis %s Shadow dispatch setup failed after legacy completion", analysis_id)
+
+
 async def _persist_processing_timings(analysis_id: str, timings: dict[str, float]) -> None:
     async def _write() -> None:
         async with AsyncSessionLocal() as session:
@@ -4410,6 +4497,9 @@ async def _regenerate_report_from_saved_analysis(
 
         async def _save_regenerated_report() -> None:
             saved_skater_id: str | None = None
+            shadow_snapshot: dict[str, Any] | None = None
+            shadow_video_identity: dict[str, Any] | None = None
+            shadow_pipeline_fingerprint: str | None = None
             async with AsyncSessionLocal() as session:
                 analysis = await session.get(Analysis, analysis_id)
                 if analysis is None:
@@ -4432,6 +4522,44 @@ async def _regenerate_report_from_saved_analysis(
                     saved_skater_id = analysis.skater_id
                     await sync_skater_progress(session, analysis.skater_id)
                 await session.commit()
+                try:
+                    shadow_snapshot = _legacy_shadow_snapshot(
+                        analysis_id=analysis.id,
+                        action_type=analysis.action_type,
+                        action_subtype=analysis.action_subtype,
+                        analysis_profile=analysis.analysis_profile,
+                        pipeline_version=analysis.pipeline_version,
+                        report=analysis.report,
+                        vision_structured=analysis.vision_structured,
+                        vision_path_a=analysis.vision_path_a,
+                        vision_path_b=analysis.vision_path_b,
+                        cross_validation=analysis.cross_validation,
+                        pose_data=analysis.pose_data,
+                        bio_data=analysis.bio_data,
+                        frame_motion_scores=analysis.frame_motion_scores,
+                        processing_timings=analysis.processing_timings,
+                        target_lock=analysis.target_lock,
+                        action_window_start=analysis.action_window_start,
+                        action_window_end=analysis.action_window_end,
+                        source_fps=analysis.source_fps,
+                        is_slow_motion=analysis.is_slow_motion,
+                        force_score=analysis.force_score,
+                        note=analysis.note,
+                    )
+                    shadow_video_identity = _video_identity_from_motion(
+                        analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+                    )
+                    shadow_pipeline_fingerprint = str(analysis.source_pipeline_fingerprint or "").strip() or None
+                except Exception:  # noqa: BLE001
+                    logger.exception("Analysis %s could not build post-commit Shadow snapshot", analysis_id)
+
+            if shadow_snapshot is not None:
+                _dispatch_shadow_for_completed_legacy(
+                    analysis_id=analysis_id,
+                    snapshot=shadow_snapshot,
+                    video_identity=shadow_video_identity,
+                    pipeline_fingerprint=shadow_pipeline_fingerprint,
+                )
 
             if saved_skater_id:
                 try:
@@ -5952,6 +6080,7 @@ async def process_analysis(
             async def _save_completed_analysis() -> None:
                 saved_skater_id: str | None = None
                 should_update_skill_progress = True
+                shadow_snapshot: dict[str, Any] | None = None
                 async with AsyncSessionLocal() as session:
                     analysis = await session.get(Analysis, analysis_id)
                     if analysis is None:
@@ -5996,6 +6125,40 @@ async def process_analysis(
                         saved_skater_id = analysis.skater_id
                         await sync_skater_progress(session, analysis.skater_id)
                     await session.commit()
+                    try:
+                        shadow_snapshot = _legacy_shadow_snapshot(
+                            analysis_id=analysis.id,
+                            action_type=analysis.action_type,
+                            action_subtype=analysis.action_subtype,
+                            analysis_profile=analysis.analysis_profile,
+                            pipeline_version=analysis.pipeline_version,
+                            report=analysis.report,
+                            vision_structured=analysis.vision_structured,
+                            vision_path_a=analysis.vision_path_a,
+                            vision_path_b=analysis.vision_path_b,
+                            cross_validation=analysis.cross_validation,
+                            pose_data=analysis.pose_data,
+                            bio_data=analysis.bio_data,
+                            frame_motion_scores=analysis.frame_motion_scores,
+                            processing_timings=analysis.processing_timings,
+                            target_lock=analysis.target_lock,
+                            action_window_start=analysis.action_window_start,
+                            action_window_end=analysis.action_window_end,
+                            source_fps=analysis.source_fps,
+                            is_slow_motion=analysis.is_slow_motion,
+                            force_score=analysis.force_score,
+                            note=analysis.note,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Analysis %s could not build post-commit Shadow snapshot", analysis_id)
+
+                if shadow_snapshot is not None:
+                    _dispatch_shadow_for_completed_legacy(
+                        analysis_id=analysis_id,
+                        snapshot=shadow_snapshot,
+                        video_identity=video_identity,
+                        pipeline_fingerprint=fused_pipeline_fingerprint,
+                    )
 
                 if saved_skater_id:
                     try:

@@ -1,0 +1,157 @@
+{
+  "schema_version": "iteration15-shadow-orchestration-g11-evidence.v1",
+  "iteration": 15,
+  "scope": "end-to-end Shadow orchestration with legacy-authoritative family output",
+  "authority": {
+    "ordinary_family_pages": "legacy",
+    "committed_report": "legacy",
+    "shadow": "parent-authorized diagnostic-only",
+    "shadow_writes_user_data": false,
+    "candidate_promotion": "shadow_only and audited; never rewrites legacy report"
+  },
+  "orchestration": {
+    "stage_count": 10,
+    "stages": [
+      "timebase",
+      "observations",
+      "candidates",
+      "identity",
+      "pose",
+      "events",
+      "moments",
+      "rotation",
+      "path_reviews",
+      "claims"
+    ],
+    "checkpoint_fields": [
+      "status",
+      "fingerprint",
+      "input_hash",
+      "output_hash",
+      "dependency_hashes",
+      "artifact_reference",
+      "error",
+      "retry_count",
+      "attempt"
+    ],
+    "artifact_layout": "versioned isolated Shadow runtime",
+    "queue": {
+      "execution": "bounded local asynchronous queue",
+      "duplicate_coalescing": true,
+      "legacy_completion_decoupled": true,
+      "legacy_failure_propagation": false
+    }
+  },
+  "invalidation_and_recovery": {
+    "resume_point": "first invalid, incomplete, cancelled, or missing-artifact stage",
+    "selective_invalidation": true,
+    "pose_configuration": "pose and descendants; decode/observations reusable",
+    "report_prompt": "claims descendants only; tracking reusable",
+    "source_model_config_contract": "dependent descendants only",
+    "cleanup": "rebuildable Shadow artifacts only; source, labels, reviews, corrections, and audits retained"
+  },
+  "diff_and_review": {
+    "stage_diff": true,
+    "first_divergent_stage": true,
+    "covered_evidence": [
+      "timebase",
+      "coverage",
+      "identity conflicts",
+      "pose provenance",
+      "events",
+      "moments",
+      "rotation",
+      "path claims",
+      "fused claims"
+    ],
+    "same_source_pts_inspector": "read-only synchronized evidence lane",
+    "review_decisions": "isolated audited Shadow records",
+    "default_comparison": "read-only",
+    "legacy_report_rewritten": false
+  },
+  "downstream_dry_run": {
+    "statuses": ["would_change", "excluded", "incompatible", "unchanged"],
+    "executed": false,
+    "families_excluded_from_shadow": [
+      "chat_corrections",
+      "plans_sessions",
+      "growth_compare",
+      "skills_xp",
+      "memories",
+      "chapters_annual",
+      "shares_exports_notifications",
+      "settings_providers",
+      "published_completed_artifacts",
+      "backup_inventory"
+    ]
+  },
+  "contamination_sentinel": {
+    "domains_checked": 10,
+    "changed_domain_count": 0,
+    "unchanged": true,
+    "audit_storage": "isolated Shadow audit hashes only",
+    "secrets_or_report_content_in_audit": false,
+    "golden_manifest_unchanged": true,
+    "media_inventory_unchanged": true,
+    "staging_inventory_unchanged": true
+  },
+  "golden_repeatability": {
+    "golden_revision": 70,
+    "formal_source_count": 18,
+    "repeat_run_count": 36,
+    "complete_pairs": 18,
+    "stage_comparisons": 180,
+    "stage_equal_count": 180,
+    "agreement_percent": 100.0,
+    "error_count": 0,
+    "excluded_diagnostic_run_count": 2,
+    "excluded_from_g11_denominator": true,
+    "repeat_first_divergence_count": 0,
+    "legacy_shadow_diagnostic_first_divergence": {
+      "stage": "timebase",
+      "pair_count": 18,
+      "interpretation": "hash-only legacy adapter and V2 stage fingerprints are intentionally non-equivalent; the diagnostic still identifies the first stage and is not used as repeatability evidence"
+    }
+  },
+  "new_video_policy": {
+    "diagnostic_candidates": 2,
+    "labels": "not_found",
+    "golden_authority": "not_promoted",
+    "status": "excluded_diagnostic",
+    "diagnostic_shadow_eligible": true,
+    "g11_denominator": false,
+    "remote_manifest_mutated": false
+  },
+  "verification": {
+    "backend_analysis_v2": "304 passed",
+    "iteration15_boundary_and_privacy": "50 passed",
+    "frontend": "160 tests across 60 files passed",
+    "production_build": "passed",
+    "standalone_generation": "5 passed",
+    "compileall": "passed",
+    "diff_check": "passed",
+    "isolated_downstream_regressions": "each previously flaky combined-run case passed in isolation",
+    "frontend_import_boundary": "passed",
+    "raw_shadow_ordinary_page_boundary": "passed"
+  },
+  "g11": {
+    "gate_passed": true,
+    "release_or_deployment_authorized": false,
+    "criteria": {
+      "fixed_fingerprint_repeated_agreement_at_least_95_percent": true,
+      "every_unexplained_difference_has_first_divergent_stage": true,
+      "complete_golden_shadow_without_private_data_in_committed_evidence": true,
+      "legacy_public_api_zero_regression": true,
+      "full_stack_evidence": true
+    },
+    "ordinary_production_authority_change": false
+  },
+  "privacy": {
+    "committed_evidence_contains_private_paths": false,
+    "committed_evidence_contains_source_names": false,
+    "committed_evidence_contains_source_hashes": false,
+    "committed_evidence_contains_event_ids": false,
+    "committed_evidence_contains_report_body": false,
+    "committed_evidence_contains_provider_secrets": false
+  }
+}

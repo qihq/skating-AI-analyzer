@@ -52,7 +52,7 @@ describe("ShadowStatusCard", () => {
       runtime_mode: "shadow",
       public_authority: "legacy",
       shadow_status: "ready",
-      shadow_execution: "noop",
+      shadow_execution: "bounded_local_queue",
       writes_user_data: false,
       isolated_runtime: true,
       baseline_source_commit: "c291324c62bcc930f96f3429dcdc9521e060b516",
@@ -60,7 +60,7 @@ describe("ShadowStatusCard", () => {
     render(<ShadowStatusCard />);
     expect(screen.getByText("正在读取 Shadow 状态…")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("heading", { name: "准备就绪" })).toBeInTheDocument());
-    expect(screen.getByText("Iteration 0 no-op")).toBeInTheDocument();
+    expect(screen.getByText("Bounded local queue")).toBeInTheDocument();
     expect(screen.getByText("无")).toBeInTheDocument();
     expect(screen.getByText("Legacy")).toBeInTheDocument();
   });

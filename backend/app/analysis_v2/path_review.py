@@ -274,17 +274,22 @@ def normalize_path_a_review(
             review_task="confirm_target_clip" if blocked else None,
             provenance=("target_clip_review", "refused") if (blocked or error_reason) else ("target_clip_review",),
         ))
-    stages = raw.get("broad_stages", raw.get("stages"))
-    if stages is None and isinstance(raw.get("action_phase_summary"), Mapping):
-        stages = raw["action_phase_summary"].get("detected_phases")
-    if stages:
-        claims.append(EvidenceClaim(event_id=event_id, claim_type="broad_stage_support", value=list(_text_list(stages)), sources=("path_a",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
-    observations = raw.get("visible_observations", raw.get("observations", raw.get("top_positives")))
-    for index, text in enumerate(_text_list(observations)):
-        claims.append(EvidenceClaim(event_id=event_id, claim_type="visible_observation", value=text, sources=("path_a",), source_references=(f"observation:{index}",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
-    contradictions = raw.get("contradictions", raw.get("top_issues"))
-    for index, text in enumerate(_text_list(contradictions)):
-        claims.append(EvidenceClaim(event_id=event_id, claim_type="path_a_contradiction", value=text, sources=("path_a",), source_references=(f"contradiction:{index}",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
+    # An unobservable review may still contain stale/model-generated text.  Do
+    # not project that text into an EvidenceClaim: the contract requires an
+    # unobservable claim to have status ``unobservable`` and a null value.
+    # The refusal claim above carries the actionable reason instead.
+    if observability != "unobservable":
+        stages = raw.get("broad_stages", raw.get("stages"))
+        if stages is None and isinstance(raw.get("action_phase_summary"), Mapping):
+            stages = raw["action_phase_summary"].get("detected_phases")
+        if stages:
+            claims.append(EvidenceClaim(event_id=event_id, claim_type="broad_stage_support", value=list(_text_list(stages)), sources=("path_a",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
+        observations = raw.get("visible_observations", raw.get("observations", raw.get("top_positives")))
+        for index, text in enumerate(_text_list(observations)):
+            claims.append(EvidenceClaim(event_id=event_id, claim_type="visible_observation", value=text, sources=("path_a",), source_references=(f"observation:{index}",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
+        contradictions = raw.get("contradictions", raw.get("top_issues"))
+        for index, text in enumerate(_text_list(contradictions)):
+            claims.append(EvidenceClaim(event_id=event_id, claim_type="path_a_contradiction", value=text, sources=("path_a",), source_references=(f"contradiction:{index}",), source_fingerprints=fingerprints, confidence=confidence, observability=observability, status="uncertain" if observability != "observed" else "confirmed", provenance=("target_clip_review",)))
     return tuple(claims)
 
 

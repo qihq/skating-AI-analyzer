@@ -18,7 +18,7 @@ export interface AdvancedRuntimeCapabilities {
   runtime_mode: PipelineMode;
   public_authority: PublicAuthority;
   shadow_status: "not_configured" | "disabled" | "ready";
-  shadow_execution: "noop";
+  shadow_execution: "bounded_local_queue";
   writes_user_data: false;
   isolated_runtime: boolean;
   baseline_source_commit: string;

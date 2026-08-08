@@ -33,7 +33,7 @@ class AdvancedRuntimeCapabilities(BaseModel):
     runtime_mode: PipelineMode
     public_authority: Literal["legacy"]
     shadow_status: Literal["not_configured", "disabled", "ready"]
-    shadow_execution: Literal["noop"] = "noop"
+    shadow_execution: Literal["bounded_local_queue"] = "bounded_local_queue"
     writes_user_data: Literal[False] = False
     isolated_runtime: bool
     baseline_source_commit: str
