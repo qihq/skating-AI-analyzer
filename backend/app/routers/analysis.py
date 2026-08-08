@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import copy
+import hashlib
 import json
 import shutil
 import time
@@ -29,7 +30,7 @@ from app.database import (
     run_db_read_with_retry,
     run_db_write_with_retry,
 )
-from app.models import Analysis, AnalysisComparison, DebugRun, Skater, TrainingPlan, TrainingSession
+from app.models import Analysis, AnalysisComparison, DebugRun, Skater, TrainingPlan, TrainingPlanRevision, TrainingSession
 from app.schemas import (
     AnalysisChatShareRequest,
     AnalysisChatShareResponse,
@@ -51,6 +52,7 @@ from app.schemas import (
     AnalysisSessionUpdateRequest,
     AnalysisUploadResponse,
     CompareDelta,
+    CompareFactEvidence,
     CompareKeyframePair,
     CompareKeyframeSide,
     CompareQualityPayload,
@@ -73,6 +75,7 @@ from app.schemas import (
     TargetLockRequest,
     TargetPreviewResponse,
     TrainingPlanDetail,
+    TrainingPlanRevisionPublic,
     UpdatePlanSessionRequest,
 )
 from app.services.golden_overrides import (
@@ -87,6 +90,7 @@ from app.services.analysis_corrections import (
     AnalysisCorrectionError,
     apply_analysis_correction,
     build_chat_share_image_payload,
+    build_chat_share_title,
     build_chat_share_text,
     create_analysis_correction,
     dismiss_analysis_correction,
@@ -117,6 +121,7 @@ from app.services.analysis_errors import (
     stringify_exception,
 )
 from app.services.auth import get_parent_auth, validate_pin, verify_pin_hash
+from app.services.parent_access import require_parent_pin
 from app.services.auto_eval import AUTO_EVAL_VERSION, build_auto_eval_payload
 from app.services.biomechanics import (
     analyze_biomechanics,
@@ -139,6 +144,20 @@ from app.services.person_tracker import (
     track_person_bbox_detailed,
 )
 from app.services.plan import PlanGenerationError, build_fallback_plan, extend_training_plan, generate_training_plan
+from app.analysis_v2.fact_consumers import (
+    apply_artifact_metadata,
+    artifact_reference,
+    consumer_for_analysis,
+    facts_for_analysis,
+    generation_fingerprint,
+    persist_analysis_facts,
+)
+from app.analysis_v2.comparison import compare_fact_sets
+from app.analysis_v2.contracts import EvidenceClaim
+from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, FactPermission
+from app.analysis_v2.claim_fusion import ClaimSourceState, fuse_evidence_claims, source_state_from_payload
+from app.analysis_v2.claim_report import constrain_report_payload
+from app.analysis_v2.fusion_inputs import build_deterministic_claims, claims_from_payload, v2_pipeline_fingerprint
 from app.services.memory_suggest import suggest_memory_updates
 from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
@@ -200,6 +219,7 @@ from app.services.video_temporal import (
     semantic_keyframes_are_reliable,
 )
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
+from app.services.vision_dual import _identity_conflicts_from_target_lock
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.video_temporal import analyze_video_temporal
 
@@ -702,6 +722,252 @@ async def _save_analysis_fields_with_retry(
             return True
 
     return bool(await run_db_write_with_retry(_write, context=context))
+
+
+def _v2_target_clip_policy(
+    target_lock: dict[str, Any] | None,
+    *,
+    action_window_start: float,
+    action_window_end: float,
+) -> dict[str, Any]:
+    """Build the bounded target/context contract passed to Path A."""
+
+    # A Path A crop is only valid when the deterministic tracker has produced a
+    # confirmed target and a positive bbox.  Keep the policy serializable so
+    # the crop/marking artifact and its fingerprint can be persisted alongside
+    # fused claims.
+    confirmed = _is_confirmed_target_lock(target_lock)
+    bbox = _selected_target_bbox(target_lock or {}) if isinstance(target_lock, dict) and confirmed else None
+    crop_bbox = None
+    if isinstance(bbox, dict):
+        try:
+            crop_bbox = (
+                float(bbox.get("x", 0.0)),
+                float(bbox.get("y", 0.0)),
+                float(bbox.get("x", 0.0)) + float(bbox.get("width", bbox.get("w", 0.0))),
+                float(bbox.get("y", 0.0)) + float(bbox.get("height", bbox.get("h", 0.0))),
+            )
+        except (TypeError, ValueError):
+            crop_bbox = None
+    duration = max(0.0, float(action_window_end) - float(action_window_start))
+    context = min(1.0, max(0.25, duration * 0.12)) if duration > 0 else 0.0
+    return {
+        "identity_state": "confirmed" if confirmed else "unknown",
+        "target_id": str((target_lock or {}).get("selected_candidate_id") or "target"),
+        "crop_bbox": crop_bbox,
+        "context_before_sec": context,
+        "context_after_sec": context,
+        "includes_travel_context": duration >= 1.0,
+        "includes_ice_contact_context": duration >= 0.5,
+        "target_marking": (
+            "tracked_bbox_overlay"
+            if confirmed and isinstance((target_lock or {}).get("bbox_per_frame"), list)
+            else "confirmed_bbox_overlay"
+            if confirmed and bbox is not None
+            else "none"
+        ),
+        "crop_policy_version": "target-clip-policy.v2",
+    }
+
+
+def _v2_structured_measurements(bio_data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return only source-linked measurements Path B may explain."""
+
+    if not isinstance(bio_data, dict):
+        return []
+    output: list[dict[str, Any]] = []
+    series = (
+        ("knee_angles", ("left", "right", "min_angle"), "deg"),
+        ("trunk_tilts", ("tilt_degrees",), "deg"),
+        ("arm_symmetry", ("symmetry",), "ratio"),
+    )
+    for series_name, fields, unit in series:
+        records = bio_data.get(series_name)
+        if not isinstance(records, list):
+            continue
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            provenance = "interpolated" if record.get("interpolated") else str(record.get("provenance") or "measured")
+            frame_index = record.get("frame_idx", index + 1)
+            for field in fields:
+                value = record.get(field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                output.append({
+                    "claim_type": f"{series_name}.{field}",
+                    "value": float(value),
+                    "unit": unit,
+                    "provenance": provenance,
+                    "source_reference": f"bio_data.{series_name}:{frame_index}:{field}",
+                    "confidence": float(record.get("confidence", 0.85) or 0.85),
+                    "required": field in {"left", "right", "tilt_degrees"},
+                })
+    metrics = bio_data.get("jump_metrics")
+    if isinstance(metrics, dict) and str(bio_data.get("jump_metrics_status") or "").lower() == "ok":
+        units = {"air_time_seconds": "s", "estimated_height_cm": "cm", "takeoff_speed_mps": "m/s", "rotation_rps": "rps"}
+        for name, unit in units.items():
+            value = metrics.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                output.append({
+                    "claim_type": f"jump_metrics.{name}",
+                    "value": float(value),
+                    "unit": unit,
+                    "provenance": "measured",
+                    "source_reference": f"bio_data.jump_metrics:{name}",
+                    "confidence": 0.9,
+                })
+    return output
+
+
+def _evidence_claim_to_fact(
+    claim: EvidenceClaim,
+    *,
+    analysis_id: str,
+    pipeline_fingerprint: str,
+    revision: int = 1,
+) -> AnalysisFactV2:
+    technical = claim.claim_type not in {"path_a_contradiction", "target_observability", "camera_observability"}
+    confirmed = claim.status == "confirmed" and claim.observability == "observed" and not claim.conflicts
+    permissions = FactPermission(
+        family_display=True,
+        aggregation=confirmed and technical,
+        comparison=confirmed and technical,
+        coaching=confirmed and technical and claim.claim_type not in {"key_moment", "pose_observability"},
+        correction=True,
+        automation=confirmed and claim.claim_type in {"action_profile", "force_score"},
+        share=True,
+        export=True,
+    )
+    provenance = tuple(getattr(claim, "provenance", ()) or ())
+    if claim.refusal_reason == "identity_conflict" and "identity-blocked" not in provenance:
+        provenance = (*provenance, "identity-blocked")
+    return AnalysisFactV2(
+        analysis_id=analysis_id,
+        event_id=claim.event_id,
+        claim_type=claim.claim_type,
+        value=claim.value,
+        authority="v2",
+        source_pipeline_fingerprint=pipeline_fingerprint,
+        source_fact_revision=revision,
+        definition_version=claim.definition_version,
+        compatibility_group=claim.compatibility_group,
+        unit=claim.unit,
+        convention=claim.convention,
+        status=claim.status,
+        observability={"observed": "observable", "partial": "partially_observable", "unobservable": "unobservable"}[claim.observability],
+        confidence=claim.confidence,
+        sources=claim.sources,
+        conflicts=claim.conflicts,
+        source_fingerprints=claim.source_fingerprints,
+        provenance=provenance,
+        source_references=claim.source_references,
+        permissions=permissions,
+    )
+
+
+def _facts_from_fused_claims(
+    *,
+    analysis_id: str,
+    claims: Sequence[EvidenceClaim],
+    pipeline_fingerprint: str,
+    revision: int = 1,
+) -> AnalysisFactsV2:
+    return AnalysisFactsV2(
+        analysis_id=analysis_id,
+        authority="v2",
+        facts=tuple(
+            _evidence_claim_to_fact(
+                claim,
+                analysis_id=analysis_id,
+                pipeline_fingerprint=pipeline_fingerprint,
+                revision=revision,
+            )
+            for claim in claims
+        ),
+    )
+
+
+def _facts_payload_for_storage(facts: AnalysisFactsV2) -> dict[str, Any]:
+    """Serialize the V2 authority envelope for the Analysis JSON column."""
+
+    return {"schema_version": "analysis-facts.v2", **facts.model_dump(mode="json")}
+
+
+def _claims_from_persisted_facts(payload: object, *, analysis_id: str) -> tuple[EvidenceClaim, ...]:
+    """Rehydrate report-safe claims from the persisted V2 facts envelope.
+
+    This intentionally does not fall back to ``bio_data``/``vision_structured``:
+    a V2 report retry must either use the same persisted authority or fail closed.
+    """
+
+    if not isinstance(payload, dict):
+        return ()
+    raw = dict(payload)
+    raw.pop("schema_version", None)
+    try:
+        facts = AnalysisFactsV2.model_validate(raw)
+    except Exception:  # noqa: BLE001
+        logger.warning("Analysis %s has invalid persisted V2 facts", analysis_id, exc_info=True)
+        return ()
+    if facts.authority != "v2" or facts.analysis_id != analysis_id:
+        return ()
+    claims: list[EvidenceClaim] = []
+    observability_map = {
+        "observable": "observed",
+        "partially_observable": "partial",
+        "unobservable": "unobservable",
+    }
+    for fact in facts.facts:
+        try:
+            claims.append(EvidenceClaim.model_validate({
+                "analysis_id": fact.analysis_id,
+                "event_id": fact.event_id,
+                "claim_type": fact.claim_type,
+                "value": fact.value,
+                "definition_version": fact.definition_version,
+                "unit": fact.unit,
+                "convention": fact.convention,
+                "compatibility_group": fact.compatibility_group,
+                "sources": fact.sources,
+                "source_references": fact.source_references,
+                "source_fingerprints": fact.source_fingerprints,
+                "provenance": fact.provenance,
+                "conflicts": fact.conflicts,
+                "confidence": fact.confidence or 0.0,
+                "observability": observability_map[fact.observability],
+                "status": fact.status,
+                "authority": "v2",
+                "source_fact_hash": facts.source_fact_hash,
+                "refusal_reason": ";".join(fact.conflicts) if fact.status != "confirmed" and fact.conflicts else None,
+            }))
+        except Exception:  # noqa: BLE001
+            logger.warning("Analysis %s skipped invalid persisted fact %s", analysis_id, fact.claim_type, exc_info=True)
+    return tuple(claims)
+
+
+def _has_v2_facts_authority(record: Any) -> bool:
+    return str(getattr(record, "facts_authority", "") or "").strip().lower() == "v2" and isinstance(
+        getattr(record, "analysis_facts", None), dict
+    )
+
+
+def _claim_payload_for_legacy_slot(claims: Sequence[EvidenceClaim], fusion_payload: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility payload stored in ``vision_structured`` for old clients."""
+
+    observations = [str(claim.value) for claim in claims if claim.claim_type == "visible_observation" and claim.value]
+    contradictions = [str(claim.value) for claim in claims if claim.claim_type in {"path_a_contradiction", "path_b_contradiction"} and claim.value]
+    stages = next((claim.value for claim in claims if claim.claim_type == "broad_stage_support" and claim.value), [])
+    return {
+        "schema_version": "fused-vision-compat.v2",
+        "authority": "v2",
+        "frame_analysis": [],
+        "action_phase_summary": {"detected_phases": stages if isinstance(stages, list) else [], "weakest_phase": "", "strongest_phase": ""},
+        "visible_observations": observations,
+        "contradictions": contradictions,
+        "evidence_claims": [claim.model_dump(mode="json") for claim in claims],
+        "claim_fusion": fusion_payload,
+    }
 
 
 def _provider_fallback_note(provider: Any) -> str | None:
@@ -4052,21 +4318,35 @@ async def _regenerate_report_from_saved_analysis(
     total_start: float,
 ) -> None:
     try:
+        persisted_claims: tuple[EvidenceClaim, ...] = ()
+        persisted_v2_authority = False
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
             if analysis is None:
                 return
-            if not isinstance(analysis.vision_structured, dict):
+            persisted_v2_authority = getattr(analysis, "facts_authority", None) == "v2"
+            persisted_claims = _claims_from_persisted_facts(
+                analysis.analysis_facts,
+                analysis_id=analysis_id,
+            ) if persisted_v2_authority else ()
+            # A record that declares V2 authority must remain claim-only.  If
+            # its persisted envelope is missing or invalid, fail closed
+            # instead of silently borrowing the legacy compatibility slots.
+            # This protects report retries from producing a mixed-source
+            # report when a V2 facts write was incomplete or corrupted.
+            if persisted_v2_authority and not persisted_claims:
+                raise RuntimeError("report-only retry requires valid saved V2 facts")
+            if not persisted_claims and not isinstance(analysis.vision_structured, dict):
                 raise RuntimeError("report-only retry requires saved vision_structured")
-            if not isinstance(analysis.bio_data, dict):
+            if not persisted_claims and not isinstance(analysis.bio_data, dict):
                 raise RuntimeError("report-only retry requires saved bio_data")
             action_type = analysis.action_type
             action_subtype = analysis.action_subtype
             skill_category = analysis.skill_category
             analysis_profile = analysis.analysis_profile
             skater_id = analysis.skater_id
-            vision_structured = analysis.vision_structured
-            bio_data = analysis.bio_data
+            vision_structured = analysis.vision_structured if isinstance(analysis.vision_structured, dict) else {}
+            bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
             frame_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
             dual_path_meta = _merge_video_temporal_cross_validation(
                 analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None,
@@ -4078,6 +4358,12 @@ async def _regenerate_report_from_saved_analysis(
             )
             user_note = analysis.note
             profile_evidence = bio_data.get("profile_evidence") if isinstance(bio_data.get("profile_evidence"), dict) else None
+            if persisted_claims:
+                # Keep prompt context and report generation claim-only for V2;
+                # compatibility slots are not an authority fallback.
+                vision_structured = {}
+                bio_data = {}
+                profile_evidence = None
 
         await _append_analysis_log(
             analysis_id,
@@ -4107,6 +4393,7 @@ async def _regenerate_report_from_saved_analysis(
                 skater_id=skater_id,
                 user_note=user_note,
             ),
+            fused_claims=persisted_claims if persisted_v2_authority else None,
         )
         force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
         timings["report_s"] = _elapsed_seconds(report_start)
@@ -4129,6 +4416,8 @@ async def _regenerate_report_from_saved_analysis(
                     return
                 should_update_skill_progress = analysis.status != "completed"
                 analysis.report = report
+                # The persisted fact envelope is immutable for a report-only
+                # retry; report regeneration references the same source hash.
                 analysis.force_score = force_score
                 analysis.processing_timings = dict(timings)
                 analysis.pipeline_version = CURRENT_PIPELINE_VERSION
@@ -4270,6 +4559,9 @@ async def process_analysis(
     resolved_keyframes: dict[str, Any] | None = None
     video_temporal_duration_sec: float | None = None
     video_identity: dict[str, Any] | None = None
+    fused_claims: tuple[EvidenceClaim, ...] = ()
+    fused_pipeline_fingerprint: str | None = None
+    v2_facts: AnalysisFactsV2 | None = None
     retry_from_stage: str | None = retry_from if _is_retry_stage(retry_from) else None
     try:
         async with AsyncSessionLocal() as session:
@@ -4296,43 +4588,53 @@ async def process_analysis(
             analysis_profile_hint = _analysis_profile_hint_for_sampling(action_type, action_subtype, analysis.analysis_profile)
             skater_id = analysis.skater_id
             skill_category = analysis.skill_category
-            video_path = _video_path_for_analysis(analysis)
-            upload_frames_dir = video_path.parent / 'frames'
-            _, processing_frames_dir = build_processing_frames_dir(analysis_id)
             analysis.action_subtype = action_subtype
             analysis.pipeline_version = CURRENT_PIPELINE_VERSION
             await session.commit()
-            existing_target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else None
-            golden_overrides = analysis.golden_overrides if isinstance(analysis.golden_overrides, dict) else None
-            golden_anchors = (
-                golden_overrides.get("tracking_anchors")
-                if isinstance(golden_overrides, dict) and isinstance(golden_overrides.get("tracking_anchors"), list)
-                else []
-            )
-            if golden_anchors:
-                first_anchor = golden_anchors[0] if isinstance(golden_anchors[0], dict) else {}
-                first_bbox = first_anchor.get("bbox") if isinstance(first_anchor.get("bbox"), dict) else None
-                if first_bbox is not None:
-                    existing_target_lock = {
-                        **(existing_target_lock or {}),
-                        "status": "manual",
-                        "manual_override": True,
-                        "selected_bbox": first_bbox,
-                        "preview_frame_index": 0,
-                        "golden_tracking_anchors": copy.deepcopy(golden_anchors),
-                        "golden_label_revision": golden_overrides.get("source_label_revision"),
-                    }
-            saved_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-            saved_action_window_start = float(analysis.action_window_start or 0.0)
-            saved_action_window_end = float(analysis.action_window_end or 0.0)
-            saved_source_fps = float(analysis.source_fps or 30.0)
-            saved_is_slow_motion = bool(analysis.is_slow_motion)
-            input_window = build_video_input_window(
-                video_path,
-                manual_start_sec=analysis.manual_action_window_start,
-                manual_end_sec=analysis.manual_action_window_end,
-            )
-            video_identity = _video_identity_from_motion(saved_motion_scores)
+
+            # A report-only retry is claim-only.  It must not resolve or probe
+            # the source video (which may have been archived/cleaned already).
+            # All source-dependent state below is only needed for the earlier
+            # pipeline stages.
+            if retry_from_stage != "report":
+                video_path = _video_path_for_analysis(analysis)
+                upload_frames_dir = video_path.parent / 'frames'
+                _, processing_frames_dir = build_processing_frames_dir(analysis_id)
+                existing_target_lock = analysis.target_lock if isinstance(analysis.target_lock, dict) else None
+                golden_overrides = analysis.golden_overrides if isinstance(analysis.golden_overrides, dict) else None
+                golden_anchors = (
+                    golden_overrides.get("tracking_anchors")
+                    if isinstance(golden_overrides, dict) and isinstance(golden_overrides.get("tracking_anchors"), list)
+                    else []
+                )
+                if golden_anchors:
+                    first_anchor = golden_anchors[0] if isinstance(golden_anchors[0], dict) else {}
+                    first_bbox = first_anchor.get("bbox") if isinstance(first_anchor.get("bbox"), dict) else None
+                    if first_bbox is not None:
+                        existing_target_lock = {
+                            **(existing_target_lock or {}),
+                            "status": "manual",
+                            "manual_override": True,
+                            "selected_bbox": first_bbox,
+                            "preview_frame_index": 0,
+                            "golden_tracking_anchors": copy.deepcopy(golden_anchors),
+                            "golden_label_revision": golden_overrides.get("source_label_revision"),
+                        }
+                saved_motion_scores = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
+                saved_action_window_start = float(analysis.action_window_start or 0.0)
+                saved_action_window_end = float(analysis.action_window_end or 0.0)
+                saved_source_fps = float(analysis.source_fps or 30.0)
+                saved_is_slow_motion = bool(analysis.is_slow_motion)
+                input_window = build_video_input_window(
+                    video_path,
+                    manual_start_sec=analysis.manual_action_window_start,
+                    manual_end_sec=analysis.manual_action_window_end,
+                )
+                video_identity = _video_identity_from_motion(saved_motion_scores)
+
+        if retry_from_stage == "report":
+            await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
+            return
 
         if video_identity is None:
             try:
@@ -4342,10 +4644,6 @@ async def process_analysis(
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Analysis %s failed to compute video hash: %s", analysis_id, exc)
-
-        if retry_from_stage == "report":
-            await _regenerate_report_from_saved_analysis(analysis_id, timings, total_start)
-            return
 
         await _append_analysis_log(
             analysis_id,
@@ -5352,12 +5650,61 @@ async def process_analysis(
                     video_temporal=video_temporal_result,
                     resolved_keyframes=resolved_keyframes,
                     target_lock=target_lock,
+                    v2_mode=True,
+                    analysis_id=analysis_id,
+                    target_clip_policy=_v2_target_clip_policy(
+                        target_lock,
+                        action_window_start=sampling_metadata.action_window_start,
+                        action_window_end=sampling_metadata.action_window_end,
+                    ),
+                    structured_measurements=_v2_structured_measurements(bio_data),
+                    identity_state="confirmed" if _is_confirmed_target_lock(target_lock) else "unknown",
+                    identity={
+                        "state": "confirmed" if _is_confirmed_target_lock(target_lock) else "uncertain",
+                        "conflicts": _identity_conflicts_from_target_lock(
+                            target_lock,
+                            frame_payloads=raw_payloads,
+                            window_start_sec=sampling_metadata.action_window_start,
+                            effective_fps=sampling_metadata.effective_fps,
+                        ),
+                    },
+                    source_fingerprints={
+                        "path_a": getattr(provider_path_a, "fingerprint", ""),
+                        "path_b": getattr(provider_path_b, "fingerprint", ""),
+                    },
                 )
-                vision_structured = dual.path_a
-                vision_path_a = dual.path_a
-                vision_path_b = dual.path_b
-                dual_path_meta = dual.dual_path_meta
-                cross_validation = {**dual.validation.to_dict(), **dual_path_meta}
+                # V2 ordinary semantics are sourced from the fused claim list;
+                # the old Path A/B payloads remain compatibility diagnostics.
+                # A few legacy/unit-test adapters still return a lightweight
+                # SimpleNamespace without the new ``fused_claims`` field.  Keep
+                # that adapter boundary safe without promoting its raw payload
+                # into V2 facts.
+                dual_has_fused_claims = hasattr(dual, "fused_claims")
+                dual_fused_claims = tuple(getattr(dual, "fused_claims", ()) or ())
+                vision_path_a = getattr(dual, "path_a", None)
+                vision_path_b = getattr(dual, "path_b", None)
+                dual_path_meta = getattr(dual, "dual_path_meta", {}) or {}
+                if not isinstance(dual_path_meta, dict):
+                    dual_path_meta = {}
+                if dual_has_fused_claims:
+                    vision_structured = _claim_payload_for_legacy_slot(
+                        dual_fused_claims,
+                        dual_path_meta.get("claim_fusion", {}),
+                    )
+                    fused_claims = dual_fused_claims
+                else:
+                    vision_structured = vision_path_a if isinstance(vision_path_a, dict) else {}
+                    fused_claims = ()
+                fused_pipeline_fingerprint = str(dual_path_meta.get("v2_pipeline_fingerprint") or "") or None
+                if dual_has_fused_claims and fused_pipeline_fingerprint:
+                    v2_facts = _facts_from_fused_claims(
+                        analysis_id=analysis_id,
+                        claims=fused_claims,
+                        pipeline_fingerprint=fused_pipeline_fingerprint,
+                    )
+                validation = getattr(dual, "validation", None)
+                validation_payload = validation.to_dict() if hasattr(validation, "to_dict") else {}
+                cross_validation = {**validation_payload, **dual_path_meta}
                 ui_summary = dual_path_summary(dual)
                 dual_path_log_detail = _build_dual_path_log_detail(
                     path_a=vision_path_a,
@@ -5439,6 +5786,14 @@ async def process_analysis(
                         "cross_validation": cross_validation,
                         "processing_timings": dict(timings),
                         "retry_from_stage": "report",
+                        **({
+                            "analysis_facts": _facts_payload_for_storage(v2_facts),
+                            "facts_authority": "v2",
+                            "facts_schema_version": "analysis-facts.v2",
+                            "source_fact_hash": v2_facts.source_fact_hash,
+                            "source_fact_revision": max((fact.source_fact_revision for fact in v2_facts.facts), default=1),
+                            "source_pipeline_fingerprint": fused_pipeline_fingerprint,
+                        } if v2_facts is not None else {}),
                     },
                     context=f"save_vision:{analysis_id}",
                 )
@@ -5473,6 +5828,15 @@ async def process_analysis(
                 analysis = await session.get(Analysis, analysis_id)
                 if analysis is None or not isinstance(analysis.vision_structured, dict):
                     raise RuntimeError("缺少已保存的 vision_structured，无法从当前阶段继续。")
+                if _has_v2_facts_authority(analysis):
+                    # A V2 stage retry must preserve the existing authority;
+                    # do not silently re-promote compatibility slots or raw
+                    # biomechanics into a new report.
+                    fused_claims = _claims_from_persisted_facts(
+                        analysis.analysis_facts,
+                        analysis_id=analysis_id,
+                    )
+                    fused_pipeline_fingerprint = str(analysis.source_pipeline_fingerprint or "") or None
                 vision_structured = analysis.vision_structured
                 vision_raw = analysis.vision_raw or json.dumps(vision_structured, ensure_ascii=False)
                 vision_path_a = analysis.vision_path_a if isinstance(analysis.vision_path_a, dict) else vision_structured
@@ -5558,6 +5922,7 @@ async def process_analysis(
                         user_note=analysis.note,
                     )
                 ),
+                fused_claims=(fused_claims if (v2_facts is not None or _has_v2_facts_authority(analysis)) else None),
             )
             force_score = apply_child_score_floor(calculate_force_score(report), report, dual_path_meta)
             timings['report_s'] = _elapsed_seconds(report_start)
@@ -5599,6 +5964,8 @@ async def process_analysis(
                     analysis.vision_path_b = vision_path_b
                     analysis.cross_validation = cross_validation
                     analysis.report = report
+                    if v2_facts is not None:
+                        persist_analysis_facts(analysis, v2_facts)
                     analysis.pose_data = pose_data
                     analysis.bio_data = bio_data
                     analysis.frame_motion_scores = motion_scores
@@ -5746,6 +6113,7 @@ async def _mark_analysis_failed(
     stage: str = "pipeline",
     timings: dict[str, float] | None = None,
 ) -> None:
+    logger.error("Analysis %s failed at %s (%s): %s", analysis_id, stage, code.value, detail)
     async def _write() -> None:
         async with AsyncSessionLocal() as session:
             analysis = await session.get(Analysis, analysis_id)
@@ -5839,10 +6207,16 @@ async def _get_skater_map(session: AsyncSession, skater_ids: set[str]) -> dict[s
 
 
 def _report_summary(analysis: Analysis) -> str:
-    if isinstance(analysis.report, dict):
-        summary = str(analysis.report.get("summary", "")).strip()
-        if summary:
-            return summary
+    try:
+        consumer = consumer_for_analysis(analysis, "family_display")
+    except (TypeError, ValueError):
+        consumer = None
+    if consumer is not None:
+        summary_fact = next((fact for fact in consumer.facts if fact.claim_type == "report_summary" and fact.value), None)
+        if summary_fact is not None:
+            summary = str(summary_fact.value).strip()
+            if summary:
+                return summary
     if analysis.error_message:
         return analysis.error_message
     if analysis.note:
@@ -5887,9 +6261,50 @@ def _join_export_items(items: list[str], fallback: str) -> str:
     return "，".join(cleaned[:2])
 
 
+def _export_fact_value(consumer: Any, claim_types: set[str]) -> Any | None:
+    """Read one export-eligible fact from the record's single authority."""
+    for fact in getattr(consumer, "facts", ()):
+        if fact.claim_type in claim_types and fact.value not in (None, "", [], {}):
+            return fact.value
+    return None
+
+
+def _export_action_title(consumer: Any) -> str:
+    value = _export_fact_value(consumer, {"action_label", "action_confirmation", "action_profile", "action_family"})
+    if isinstance(value, dict):
+        value = value.get("confirmed_action") or value.get("action_label") or value.get("action_family")
+    return str(value).strip() if value not in (None, "") else "本次复盘"
+
+
+def _export_score_label(value: Any) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return "--"
+
+
 def _build_export_text(analysis: Analysis, skater_name: str | None, session_date: str | None = None) -> str:
-    report = analysis.report if isinstance(analysis.report, dict) else {}
-    vision_structured = analysis.vision_structured if isinstance(analysis.vision_structured, dict) else {}
+    declared_v2_authority = str(getattr(analysis, "facts_authority", "") or "").strip().lower() == "v2"
+    try:
+        consumer = consumer_for_analysis(analysis, "export")
+    except (TypeError, ValueError):
+        consumer = None
+    # A declared V2 record stays fail-closed even if its persisted envelope is
+    # malformed.  It must never borrow a legacy report/score as an export.
+    report = {} if declared_v2_authority else (analysis.report if isinstance(analysis.report, dict) else {})
+    if consumer is not None and consumer.authority == "v2":
+        eligible = consumer.facts
+        report = {
+            "summary": next((str(f.value) for f in eligible if f.claim_type == "report_summary" and f.value), ""),
+            "training_focus": next((str(f.value) for f in eligible if f.claim_type == "training_focus" and f.value), ""),
+            "issues": [f.value for f in eligible if f.claim_type == "technical_issue" and isinstance(f.value, dict)],
+            "improvements": [],
+            "subscores": {},
+        }
+    vision_structured = (
+        analysis.vision_structured
+        if not declared_v2_authority and (consumer is None or consumer.authority == "legacy")
+        else {}
+    )
     phase_summary = (
         vision_structured.get("action_phase_summary")
         if isinstance(vision_structured.get("action_phase_summary"), dict)
@@ -5956,15 +6371,21 @@ def _build_export_text(analysis: Analysis, skater_name: str | None, session_date
         for key, label in detail_labels.items()
         if key in subscores
     ]
+    score_value = _export_fact_value(consumer, {"force_score", "score"})
     if not detail_parts:
-        detail_parts = [f"[综合表现 {_score_to_stars(analysis.force_score)}]"]
+        detail_parts = [
+            f"[综合表现 {_score_to_stars(score_value)}]"
+            if isinstance(score_value, (int, float)) and not isinstance(score_value, bool)
+            else "[综合表现 --]"
+        ]
 
     export_date = session_date or analysis.created_at.date().isoformat()
     skater_label = skater_name or "小运动员"
-    score_label = analysis.force_score if analysis.force_score is not None else "--"
+    score_label = _export_score_label(score_value)
+    action_title = _export_action_title(consumer)
 
     return (
-        f"[冰宝诊断] {skater_label} · {analysis.action_type} · {export_date}\n"
+        f"[冰宝诊断] {skater_label} · {action_title} · {export_date}\n"
         f"综合评分：{score_label}分\n\n"
         f"亮点：{highlight}\n"
         f"待改善：{improvement}\n\n"
@@ -8236,6 +8657,305 @@ def _ordered_compare_pair(analysis_a: Analysis, analysis_b: Analysis) -> tuple[A
     return analysis_b, analysis_a
 
 
+def _analysis_has_v2_authority(analysis: Analysis) -> bool:
+    """Return whether this record has a persisted V2 fact envelope.
+
+    The comparison boundary treats a pair as V2-aware when either side is V2.
+    This is deliberate: a V2 record must never be silently compared through
+    its compatibility ``report``/``bio_data`` columns against a legacy row.
+    """
+
+    return _has_v2_facts_authority(analysis)
+
+
+def _fact_event_profile(facts: AnalysisFactsV2, event_id: str | None) -> str | None:
+    for fact in facts.facts:
+        if fact.event_id != event_id or fact.claim_type not in {"action_profile", "action_family", "action_family_support"}:
+            continue
+        if isinstance(fact.value, str) and fact.value.strip():
+            return fact.value.strip().lower()
+        if isinstance(fact.value, dict):
+            for key in ("profile", "action_family", "family"):
+                value = fact.value.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip().lower()
+    return None
+
+
+def _fact_event_ids(facts: AnalysisFactsV2) -> list[str | None]:
+    values = list(dict.fromkeys(fact.event_id for fact in facts.facts if fact.event_id is not None))
+    # A whole-analysis claim is still comparable as one event when no explicit
+    # event id was persisted.  ``compare_fact_sets`` uses ``None`` for that
+    # scope, so keep it as a last-resort pair rather than inventing an id.
+    return values or [None]
+
+
+def _v2_event_pairs(left: AnalysisFactsV2, right: AnalysisFactsV2) -> tuple[tuple[str | None, str | None], ...]:
+    """Match events by confirmed family/profile and stable ordinal.
+
+    Persisted event ids are analysis-local, so equality of ids is not a valid
+    cross-analysis match.  Profile matching is the strongest available
+    semantic key; ordinal matching is only used for otherwise unknown events.
+    """
+
+    left_ids, right_ids = _fact_event_ids(left), _fact_event_ids(right)
+    pairs: list[tuple[str | None, str | None]] = []
+    used_right: set[str | None] = set()
+    for left_id in left_ids:
+        left_profile = _fact_event_profile(left, left_id)
+        candidate = next(
+            (
+                right_id
+                for right_id in right_ids
+                if right_id not in used_right
+                and left_profile is not None
+                and _fact_event_profile(right, right_id) == left_profile
+            ),
+            None,
+        )
+        if candidate is None:
+            index = left_ids.index(left_id)
+            if index < len(right_ids) and right_ids[index] not in used_right:
+                candidate = right_ids[index]
+        if candidate is not None or (left_id is None and None in right_ids):
+            pairs.append((left_id, candidate))
+            used_right.add(candidate)
+    for right_id in right_ids:
+        if right_id not in used_right:
+            pairs.append((None, right_id))
+    return tuple(pairs) or ((None, None),)
+
+
+def _v2_compare_payload(analysis_a: Analysis, analysis_b: Analysis) -> tuple[AnalysisFactsV2, AnalysisFactsV2, dict[str, Any]] | None:
+    """Build a same-authority fact comparison or return ``None`` for legacy."""
+
+    if not (_analysis_has_v2_authority(analysis_a) or _analysis_has_v2_authority(analysis_b)):
+        return None
+    try:
+        left = facts_for_analysis(analysis_a)
+        right = facts_for_analysis(analysis_b)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Comparison fact envelope unavailable: %s", exc)
+        # Fail closed with explicit unavailable envelopes.  We do not project
+        # either record from raw compatibility fields in this branch.
+        def unavailable(record: Analysis) -> AnalysisFactsV2:
+            fingerprint = str(record.source_pipeline_fingerprint or "v2:invalid-envelope")
+            return AnalysisFactsV2(
+                analysis_id=record.id,
+                authority="v2",
+                facts=(AnalysisFactV2(
+                    analysis_id=record.id,
+                    claim_type="comparison_authority_unavailable",
+                    authority="v2",
+                    source_pipeline_fingerprint=fingerprint,
+                    definition_version="comparison-authority-unavailable.v1",
+                    status="unobservable",
+                    observability="unobservable",
+                    permissions=FactPermission(comparison=False),
+                ),),
+            )
+        left, right = unavailable(analysis_a), unavailable(analysis_b)
+    event_pairs = _v2_event_pairs(left, right)
+    result = compare_fact_sets(left, right, event_pairs=event_pairs)
+    result["event_pairs"] = [
+        {"left_event_id": left_id, "right_event_id": right_id}
+        for left_id, right_id in event_pairs
+    ]
+    result["left_source_fact_revision"] = max((fact.source_fact_revision for fact in left.facts), default=1)
+    result["right_source_fact_revision"] = max((fact.source_fact_revision for fact in right.facts), default=1)
+    result["left_source_pipeline_fingerprint"] = next((fact.source_pipeline_fingerprint for fact in left.facts), None)
+    result["right_source_pipeline_fingerprint"] = next((fact.source_pipeline_fingerprint for fact in right.facts), None)
+    result["authority_mismatch"] = left.authority != right.authority
+    if result["authority_mismatch"]:
+        result["excluded"].append({
+            "claim_type": "authority",
+            "left_event_id": None,
+            "right_event_id": None,
+            "reason": "cross_authority_delta_refused",
+            "cross_definition": True,
+        })
+        result["deltas"] = []
+    return left, right, result
+
+
+def _compare_fact_evidence_model(payload: dict[str, Any]) -> CompareFactEvidence:
+    return CompareFactEvidence.model_validate(payload)
+
+
+def _v2_fact_delta_items(payload: dict[str, Any]) -> list[CompareDelta]:
+    labels = {
+        "force_score": ("综合评分", "分"),
+        "quality_score": ("综合评分", "分"),
+        "score": ("综合评分", "分"),
+        "metric_air_time_seconds": ("滞空时间", "s"),
+        "metric_estimated_height_cm": ("跳跃高度", "cm"),
+        "metric_takeoff_speed_mps": ("起跳速度", "m/s"),
+        "metric_rotation_rps": ("转速", "rev/s"),
+        "metric_estimated_rotations": ("估算圈数", "圈"),
+    }
+    output: list[CompareDelta] = []
+    for item in payload.get("deltas", []) if isinstance(payload.get("deltas"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        claim_type = str(item.get("claim_type") or "").strip()
+        before = _to_number(item.get("before"))
+        after = _to_number(item.get("after"))
+        delta = _to_number(item.get("delta"))
+        if before is None or after is None or delta is None:
+            continue
+        label, default_unit = labels.get(claim_type, (claim_type.replace("_", " "), item.get("unit")))
+        unit = str(item.get("unit") or default_unit or "") or None
+        output.append(CompareDelta(
+            key=claim_type,
+            label=label,
+            before=_round_delta_value(before),
+            after=_round_delta_value(after),
+            delta=_round_delta_value(delta),
+            unit=unit,
+            trend=_delta_trend(delta),
+            available=True,
+        ))
+    return output
+
+
+def _v2_keyframe_compare(left: AnalysisFactsV2, right: AnalysisFactsV2) -> list[CompareKeyframePair]:
+    """Render key moments from fused claims only (never raw bio/motion fields)."""
+
+    def records(facts: AnalysisFactsV2) -> dict[str, AnalysisFactV2]:
+        output: dict[str, AnalysisFactV2] = {}
+        for fact in facts.eligible("comparison"):
+            if fact.claim_type not in {"key_moment", "moment", "key_moment_candidate"} or not isinstance(fact.value, dict):
+                continue
+            phase = str(fact.value.get("phase") or fact.value.get("key") or "").strip()
+            if phase:
+                output.setdefault(phase, fact)
+        return output
+
+    left_records, right_records = records(left), records(right)
+    keys = list(dict.fromkeys([*left_records.keys(), *right_records.keys()]))
+    pairs: list[CompareKeyframePair] = []
+    for key in keys:
+        left_fact, right_fact = left_records.get(key), right_records.get(key)
+        def side(analysis_id: str, fact: AnalysisFactV2 | None) -> CompareKeyframeSide:
+            value = fact.value if fact is not None and isinstance(fact.value, dict) else {}
+            frame_id = _normalize_frame_stem(value.get("frame") or value.get("frame_id"))
+            timestamp = _to_number(value.get("timestamp") or value.get("pts_sec"))
+            available = bool(frame_id)
+            if frame_id:
+                path = UPLOADS_DIR / analysis_id / "frames" / f"{frame_id}.jpg"
+                semantic_path = UPLOADS_DIR / analysis_id / "semantic_frames" / f"{frame_id}.jpg"
+                available = path.exists() or semantic_path.exists()
+            return CompareKeyframeSide(
+                frame_id=frame_id,
+                frame_url=f"/api/frames/{analysis_id}/{frame_id}.jpg" if frame_id and available else None,
+                timestamp=_round_delta_value(timestamp, 3),
+                confidence=_round_delta_value(fact.confidence if fact is not None else None, 3),
+                source="fused_fact" if fact is not None else None,
+                phase_label=key,
+                quality_flags=list(fact.conflicts) if fact is not None else [],
+                available=available and timestamp is not None,
+                missing_reason=None if available and timestamp is not None else "同源关键时刻不可用",
+            )
+        before, after = side(left.analysis_id, left_fact), side(right.analysis_id, right_fact)
+        delta = _round_delta_value(after.timestamp - before.timestamp, 3) if before.timestamp is not None and after.timestamp is not None else None
+        pairs.append(CompareKeyframePair(key=key, label=key, before=before, after=after, delta_seconds=delta))
+    return pairs
+
+
+def _v2_compare_quality(left: AnalysisFactsV2, right: AnalysisFactsV2) -> CompareQualityPayload:
+    def quality(facts: AnalysisFactsV2) -> str | None:
+        for fact in facts.facts:
+            if fact.claim_type == "data_quality" and fact.value:
+                return str(fact.value)
+        return None
+    def flags(facts: AnalysisFactsV2) -> list[str]:
+        values: list[str] = []
+        for fact in facts.facts:
+            values.extend(str(value) for value in fact.conflicts if value)
+            values.extend(str(value) for value in fact.provenance if value in {"identity-blocked", "missing", "interpolated-display-only"})
+        return list(dict.fromkeys(values))
+    left_flags, right_flags = flags(left), flags(right)
+    warnings: list[str] = []
+    if left.authority != right.authority:
+        warnings.append("两次复盘来源不一致，未计算技术差值。")
+    left_profile = left.confirmed_profile(permission="comparison")
+    right_profile = right.confirmed_profile(permission="comparison")
+    if left_profile is not None and right_profile is not None and left_profile != right_profile:
+        warnings.append("两次复盘的动作大类不一致，未计算跨动作技术差值。")
+    if left_flags or right_flags:
+        warnings.append("部分同源证据存在冲突、不确定或不可观察内容，相关差值已排除。")
+    return CompareQualityPayload(
+        before_data_quality=quality(left),
+        after_data_quality=quality(right),
+        before_flags=left_flags,
+        after_flags=right_flags,
+        warnings=warnings,
+    )
+
+
+def _v2_compare_summary(payload: dict[str, Any]) -> CompareSummary:
+    """Keep V2 report summary claim-only; no legacy issue map is consulted."""
+
+    return CompareSummary()
+
+
+def _v2_score_value(facts: AnalysisFactsV2) -> float | None:
+    for fact in facts.eligible("comparison"):
+        if fact.claim_type in {"force_score", "quality_score", "score"}:
+            value = _to_number(fact.value)
+            if value is not None:
+                return value
+    return None
+
+
+def _v2_video_compare(
+    analysis_a: Analysis,
+    analysis_b: Analysis,
+    keyframes: list[CompareKeyframePair],
+) -> CompareVideoPayload:
+    """Build media sync metadata without consulting V2 compatibility payloads."""
+
+    before = _build_video_side(analysis_a)
+    after = _build_video_side(analysis_b)
+    anchor = next((pair for pair in keyframes if pair.before.timestamp is not None and pair.after.timestamp is not None), None)
+    if anchor is not None:
+        before.sync_start = _round_delta_value(max(0.0, float(anchor.before.timestamp or 0.0) - 0.35), 3)
+        after.sync_start = _round_delta_value(max(0.0, float(anchor.after.timestamp or 0.0) - 0.35), 3)
+        before.sync_duration = _round_delta_value(_keyframe_sync_duration_from_pairs(keyframes, "before"), 3)
+        after.sync_duration = _round_delta_value(_keyframe_sync_duration_from_pairs(keyframes, "after"), 3)
+        return CompareVideoPayload(before=before, after=after, sync_mode="fact_keyframe", sync_anchor_key=anchor.key)
+    return CompareVideoPayload(before=before, after=after, sync_mode="action_window_start")
+
+
+def _keyframe_sync_duration_from_pairs(keyframes: list[CompareKeyframePair], side: str) -> float | None:
+    values = []
+    for pair in keyframes:
+        item = pair.before if side == "before" else pair.after
+        if item.timestamp is not None:
+            values.append(float(item.timestamp))
+    if len(values) < 2:
+        return None
+    return max(values) - min(values)
+
+
+def _v2_compare_artifact_metadata(left: AnalysisFactsV2, right: AnalysisFactsV2, result: AnalysisCompareResponse) -> dict[str, Any]:
+    source_hash = hashlib.sha256(f"{left.source_fact_hash}|{right.source_fact_hash}".encode("ascii")).hexdigest()
+    source_fp = hashlib.sha256(f"{left.source_fact_hash}|{right.source_fact_hash}|analysis-fact-comparison.v2".encode("ascii")).hexdigest()
+    return {
+        "facts_authority": "v2" if left.authority == right.authority == "v2" else None,
+        "facts_schema_version": "analysis-facts.v2" if left.authority == right.authority == "v2" else None,
+        "source_fact_hash": source_hash if left.authority == right.authority == "v2" else None,
+        "source_fact_revision": max((fact.source_fact_revision for fact in (*left.facts, *right.facts)), default=1),
+        "source_pipeline_fingerprint": source_fp if left.authority == right.authority == "v2" else None,
+        "generation_fingerprint": generation_fingerprint(
+            artifact_type="analysis_comparison",
+            source_fact_hash=source_hash,
+            renderer_version="analysis-compare.v2",
+            extra={"result_schema": "analysis-facts.v2", "score_delta": result.score_delta},
+        ) if left.authority == right.authority == "v2" else None,
+    }
+
+
 def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
     raw_plan = dict(plan.plan_json) if isinstance(plan.plan_json, dict) else {}
     if raw_plan.get("generation_status") is None:
@@ -8246,6 +8966,13 @@ def _plan_detail_from_model(plan: TrainingPlan) -> TrainingPlanDetail:
         skater_id=plan.skater_id,
         plan_json=raw_plan,
         created_at=plan.created_at,
+        facts_authority=plan.facts_authority,
+        facts_schema_version=plan.facts_schema_version,
+        source_fact_hash=plan.source_fact_hash,
+        source_fact_revision=plan.source_fact_revision,
+        source_pipeline_fingerprint=plan.source_pipeline_fingerprint,
+        generation_fingerprint=plan.generation_fingerprint,
+        source_updated=bool(plan.source_updated),
     )
 
 
@@ -8300,6 +9027,68 @@ def _minimal_report_context_for_plan(analysis: Analysis) -> dict[str, Any]:
     return report
 
 
+def _fact_report_context_for_plan(analysis: Analysis) -> tuple[Any, str, dict[str, Any]]:
+    """Return the plan authority, action label, and bounded coaching context.
+
+    Legacy records are adapted wholesale by ``consumer_for_analysis`` but keep
+    their existing report-shaped generation input for historical parity.  A V2
+    record never reads the compatibility report/action columns here: both the
+    action label and the coachable context come from the persisted fact set.
+    """
+
+    consumer = consumer_for_analysis(analysis, "coaching")
+    eligible = consumer.facts
+    if not eligible:
+        raise HTTPException(
+            status_code=400,
+            detail="当前分析没有已确认且可用于训练计划的事实。",
+        )
+    if consumer.authority == "legacy":
+        return consumer, analysis.action_type, _minimal_report_context_for_plan(analysis)
+
+    def first_text(*claim_types: str) -> str:
+        for fact in eligible:
+            if fact.claim_type not in claim_types or fact.value in (None, "", [], {}):
+                continue
+            value = fact.value
+            if isinstance(value, dict):
+                value = (
+                    value.get("confirmed_action")
+                    or value.get("action_label")
+                    or value.get("action_family")
+                    or value.get("summary")
+                    or value.get("text")
+                )
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    action_label = first_text(
+        "action_label",
+        "action_confirmation",
+        "action_profile",
+        "action_family",
+        "action_family_support",
+    ) or "unknown"
+    issues = [
+        fact.value
+        for fact in eligible
+        if fact.claim_type in {"technical_issue", "technique_observation", "visible_observation", "issue"}
+        and isinstance(fact.value, dict)
+    ]
+    context = {
+        "summary": first_text("report_summary", "analysis_summary", "summary"),
+        "training_focus": first_text("training_focus", "next_action", "review_action"),
+        "issues": issues,
+        "improvements": [],
+        "data_quality": "good" if all(fact.observability == "observable" for fact in eligible) else "partial",
+        "facts_authority": consumer.authority,
+        "source_fact_hash": consumer.source_fact_hash,
+        "source_fact_revision": consumer.source_fact_revision,
+    }
+    return consumer, action_label, context
+
+
 def _fallback_extended_plan_after_ai_failure(
     *,
     original_plan: dict[str, Any],
@@ -8351,6 +9140,61 @@ def _skater_context(skater: Skater) -> str:
 async def _get_plan_by_analysis(session: AsyncSession, analysis_id: str) -> TrainingPlan | None:
     result = await session.execute(select(TrainingPlan).where(TrainingPlan.analysis_id == analysis_id).limit(1))
     return result.scalar_one_or_none()
+
+
+async def _snapshot_training_plan(session: AsyncSession, plan: TrainingPlan) -> TrainingPlanRevision:
+    """Persist an immutable pre-mutation plan revision.
+
+    The current ``training_plans`` row remains the stable API identity used by
+    existing clients.  Regeneration and extension call this helper before
+    changing that row, so historical payloads and their fact provenance remain
+    reproducible even when the current plan advances.
+    """
+
+    latest = await session.scalar(
+        select(TrainingPlanRevision.revision)
+        .where(TrainingPlanRevision.plan_id == plan.id)
+        .order_by(TrainingPlanRevision.revision.desc())
+        .limit(1)
+    )
+    revision = int(latest or 0) + 1
+    snapshot = TrainingPlanRevision(
+        plan_id=plan.id,
+        analysis_id=plan.analysis_id,
+        skater_id=plan.skater_id,
+        revision=revision,
+        plan_json=copy.deepcopy(plan.plan_json) if isinstance(plan.plan_json, dict) else {},
+        facts_authority=plan.facts_authority,
+        facts_schema_version=plan.facts_schema_version,
+        source_fact_hash=plan.source_fact_hash,
+        source_fact_revision=plan.source_fact_revision,
+        source_pipeline_fingerprint=plan.source_pipeline_fingerprint,
+        generation_fingerprint=plan.generation_fingerprint,
+    )
+    session.add(snapshot)
+    await session.flush()
+    return snapshot
+
+
+def _plan_revision_detail_from_model(revision: TrainingPlanRevision) -> TrainingPlanRevisionPublic:
+    raw_plan = dict(revision.plan_json) if isinstance(revision.plan_json, dict) else {}
+    if raw_plan.get("generation_status") is None:
+        raw_plan["generation_status"] = raw_plan.get("generation_source") or "ai"
+    return TrainingPlanRevisionPublic(
+        id=revision.id,
+        plan_id=revision.plan_id,
+        analysis_id=revision.analysis_id,
+        skater_id=revision.skater_id,
+        revision=revision.revision,
+        plan_json=raw_plan,
+        facts_authority=revision.facts_authority,
+        facts_schema_version=revision.facts_schema_version,
+        source_fact_hash=revision.source_fact_hash,
+        source_fact_revision=revision.source_fact_revision,
+        source_pipeline_fingerprint=revision.source_pipeline_fingerprint,
+        generation_fingerprint=revision.generation_fingerprint,
+        created_at=revision.created_at,
+    )
 
 
 async def _get_latest_plan_for_skater(session: AsyncSession, skater_id: str) -> TrainingPlan | None:
@@ -8881,6 +9725,65 @@ async def _build_analysis_compare_response(
         session,
         {analysis.skater_id for analysis in (analysis_a, analysis_b) if analysis.skater_id},
     )
+
+    # Iteration 14 cutover: once either side has a persisted V2 envelope, the
+    # comparison is a fact-level operation.  Do not let the compatibility
+    # ``force_score``, ``report``, ``bio_data``, or raw Path A/B slots leak back
+    # into the semantic result.  A mixed V2/legacy pair is retained as an
+    # explicit authority mismatch and receives no technical delta.
+    v2_payload = _v2_compare_payload(analysis_a, analysis_b)
+    if v2_payload is not None:
+        left_facts, right_facts, fact_payload = v2_payload
+        left_score = _v2_score_value(left_facts)
+        right_score = _v2_score_value(right_facts)
+        score_delta_value = (
+            right_score - left_score
+            if left_score is not None
+            and right_score is not None
+            and left_facts.authority == right_facts.authority
+            and not fact_payload.get("authority_mismatch")
+            and not fact_payload.get("profile_mismatch")
+            else None
+        )
+        score_delta = int(round(score_delta_value)) if score_delta_value is not None else None
+        all_fact_deltas = _v2_fact_delta_items(fact_payload)
+        subscore_deltas = [item for item in all_fact_deltas if item.key in {"force_score", "quality_score", "score"}]
+        metric_deltas = [item for item in all_fact_deltas if item.key not in {"force_score", "quality_score", "score"}]
+        keyframe_compare = _v2_keyframe_compare(left_facts, right_facts)
+        video_compare = _v2_video_compare(analysis_a, analysis_b, keyframe_compare)
+        quality = _v2_compare_quality(left_facts, right_facts)
+        _append_video_ai_quality_warning(quality, video_ai_json)
+        if fact_payload.get("excluded"):
+            quality.warnings.append("部分事实因缺少确认、冲突或定义不兼容而排除，未计算无效差值。")
+        summary = _v2_compare_summary(fact_payload)
+        if score_delta is None and not metric_deltas:
+            ai_narrative = "当前两次复盘没有足够的同源、已确认量化事实可计算变化；请先完成标记或家长复核。"
+        elif fact_payload.get("excluded"):
+            ai_narrative = f"本次仅显示已确认且定义兼容的共同事实；另有 {len(fact_payload['excluded'])} 项证据未进入差值。"
+        else:
+            ai_narrative = "本次对比仅解释两份复盘中已确认、可追踪且定义兼容的共同事实。"
+        response = AnalysisCompareResponse(
+            analysis_a=_detail_from_analysis(
+                analysis_a,
+                _skater_display_name(skater_map[analysis_a.skater_id]) if analysis_a.skater_id in skater_map else None,
+            ),
+            analysis_b=_detail_from_analysis(
+                analysis_b,
+                _skater_display_name(skater_map[analysis_b.skater_id]) if analysis_b.skater_id in skater_map else None,
+            ),
+            score_delta=score_delta,
+            summary=summary,
+            subscore_deltas=subscore_deltas,
+            metric_deltas=metric_deltas,
+            keyframe_compare=keyframe_compare,
+            video_compare=video_compare,
+            quality=quality,
+            ai_narrative=ai_narrative,
+            video_ai_report=None,
+            fact_comparison=_compare_fact_evidence_model(fact_payload),
+        )
+        return response
+
     score_delta = (analysis_b.force_score or 0) - (analysis_a.force_score or 0)
     subscore_deltas = _build_subscore_deltas(analysis_a, analysis_b)
     metric_deltas = _build_metric_deltas(analysis_a, analysis_b)
@@ -8964,8 +9867,19 @@ def _comparison_summary_from_model(
     result = _comparison_result_from_model(comparison)
     before_created_at = result.analysis_a.created_at if result else (_coerce_utc_datetime(analysis_a.created_at) if analysis_a else None)
     after_created_at = result.analysis_b.created_at if result else (_coerce_utc_datetime(analysis_b.created_at) if analysis_b else None)
-    before_score = result.analysis_a.force_score if result else (analysis_a.force_score if analysis_a else None)
-    after_score = result.analysis_b.force_score if result else (analysis_b.force_score if analysis_b else None)
+    if result and result.fact_comparison is not None:
+        score_fact = next(
+            (
+                item for item in result.fact_comparison.deltas
+                if item.get("claim_type") in {"force_score", "quality_score", "score"}
+            ),
+            None,
+        )
+        before_score = int(round(float(score_fact["before"]))) if isinstance(score_fact, dict) and _to_number(score_fact.get("before")) is not None else None
+        after_score = int(round(float(score_fact["after"]))) if isinstance(score_fact, dict) and _to_number(score_fact.get("after")) is not None else None
+    else:
+        before_score = result.analysis_a.force_score if result else (analysis_a.force_score if analysis_a else None)
+        after_score = result.analysis_b.force_score if result else (analysis_b.force_score if analysis_b else None)
     return AnalysisComparisonSummary(
         id=comparison.id,
         analysis_a_id=comparison.analysis_a_id,
@@ -8984,6 +9898,12 @@ def _comparison_summary_from_model(
         after_score=after_score,
         created_at=_coerce_utc_datetime(comparison.created_at) or comparison.created_at,
         updated_at=_coerce_utc_datetime(comparison.updated_at) or comparison.updated_at,
+        facts_authority=comparison.facts_authority,
+        facts_schema_version=comparison.facts_schema_version,
+        source_fact_hash=comparison.source_fact_hash,
+        source_fact_revision=comparison.source_fact_revision,
+        source_pipeline_fingerprint=comparison.source_pipeline_fingerprint,
+        generation_fingerprint=comparison.generation_fingerprint,
     )
 
 
@@ -9095,7 +10015,13 @@ async def process_analysis_comparison(comparison_id: str) -> None:
             await session.commit()
 
             analysis_a, analysis_b = await _load_compare_pair(session, comparison.analysis_a_id, comparison.analysis_b_id)
-            video_ai_json = await _run_full_video_ai_for_compare(analysis_a, analysis_b, session)
+            # V2 comparisons are deterministic fact artifacts.  Running a
+            # fresh whole-video model here would create an unpersisted third
+            # semantic source (and could leak raw Path A/B observations back
+            # through the comparison artifact).  Media sync remains available
+            # from the source-linked fact/keyframe envelope; the legacy branch
+            # retains the historical optional video-AI enrichment.
+            video_ai_json = None if (_analysis_has_v2_authority(analysis_a) or _analysis_has_v2_authority(analysis_b)) else await _run_full_video_ai_for_compare(analysis_a, analysis_b, session)
             result = await _build_analysis_compare_response(
                 session,
                 analysis_a,
@@ -9105,6 +10031,11 @@ async def process_analysis_comparison(comparison_id: str) -> None:
 
             comparison.video_ai_json = video_ai_json
             comparison.result_json = result.model_dump(mode="json")
+            v2_payload = _v2_compare_payload(analysis_a, analysis_b)
+            if v2_payload is not None:
+                left_facts, right_facts, _ = v2_payload
+                for key, value in _v2_compare_artifact_metadata(left_facts, right_facts, result).items():
+                    setattr(comparison, key, value)
             comparison.status = "completed"
             comparison.error_message = None
             comparison.updated_at = datetime.now(timezone.utc)
@@ -9142,6 +10073,21 @@ async def create_analysis_comparison(
         action_type=analysis_b.action_type,
         status="pending",
     )
+    # Persist the pair's current authority envelope up front.  The background
+    # result later replaces this with the immutable combined artifact hash.
+    if _analysis_has_v2_authority(analysis_a) or _analysis_has_v2_authority(analysis_b):
+        try:
+            left_facts, right_facts, _ = _v2_compare_payload(analysis_a, analysis_b) or (None, None, None)
+            if left_facts is not None and right_facts is not None and left_facts.authority == right_facts.authority == "v2":
+                comparison.facts_authority = "v2"
+                comparison.facts_schema_version = "analysis-facts.v2"
+                comparison.source_fact_hash = hashlib.sha256(f"{left_facts.source_fact_hash}|{right_facts.source_fact_hash}".encode("ascii")).hexdigest()
+                comparison.source_fact_revision = max((fact.source_fact_revision for fact in (*left_facts.facts, *right_facts.facts)), default=1)
+                comparison.source_pipeline_fingerprint = hashlib.sha256(f"{left_facts.source_fact_hash}|{right_facts.source_fact_hash}|analysis-fact-comparison.v2".encode("ascii")).hexdigest()
+        except (TypeError, ValueError):
+            # The worker will retain explicit unavailable/excluded evidence;
+            # creation itself remains readable and retryable.
+            pass
     session.add(comparison)
     await session.commit()
     await session.refresh(comparison)
@@ -9216,6 +10162,12 @@ async def retry_analysis_comparison(
     comparison.error_message = None
     comparison.video_ai_json = None
     comparison.result_json = None
+    comparison.facts_authority = None
+    comparison.facts_schema_version = None
+    comparison.source_fact_hash = None
+    comparison.source_fact_revision = None
+    comparison.source_pipeline_fingerprint = None
+    comparison.generation_fingerprint = None
     comparison.updated_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(comparison)
@@ -9293,8 +10245,10 @@ async def list_auto_eval_snapshots(
     limit: int = Query(default=50, ge=1, le=500),
     analysis_profile: str | None = Query(default=None),
     action_type: str | None = Query(default=None),
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> list[AnalysisAutoEvalSnapshot]:
+    await require_parent_pin(session, x_parent_pin)
     limit_value = limit if isinstance(limit, int) else 50
     analysis_profile_value = analysis_profile if isinstance(analysis_profile, str) and analysis_profile.strip() else None
     action_type_value = action_type if isinstance(action_type, str) and action_type.strip() else None
@@ -9322,10 +10276,12 @@ async def create_training_plan(
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能生成训练计划。")
-    report_context = _minimal_report_context_for_plan(analysis)
+    consumer, action_label, report_context = _fact_report_context_for_plan(analysis)
 
     existing_plan = await _get_plan_by_analysis(session, analysis_id)
     if existing_plan is not None and not force:
+        existing_plan.source_updated = bool(existing_plan.source_fact_hash and existing_plan.source_fact_hash != consumer.source_fact_hash)
+        await session.commit()
         return _plan_detail_from_model(existing_plan)
 
     skater = await _resolve_skater(session, analysis.skater_id)
@@ -9337,7 +10293,7 @@ async def create_training_plan(
 
     try:
         plan_json = await generate_training_plan(
-            analysis.action_type,
+            action_label,
             report_context,
             _skater_context(skater),
             skater.id,
@@ -9347,10 +10303,27 @@ async def create_training_plan(
         logger.warning("Analysis %s training plan AI failed, using fallback plan: %s", analysis_id, exc)
         if existing_plan is not None and _plan_generation_source(existing_plan.plan_json) == "ai":
             return _plan_detail_from_model(existing_plan)
-        plan_json = _fallback_plan_after_ai_failure(analysis.action_type, report_context, _skater_context(skater))
+        plan_json = _fallback_plan_after_ai_failure(action_label, report_context, _skater_context(skater))
 
     if existing_plan is not None:
+        # Explicit regeneration is the only operation allowed to replace the
+        # current plan payload.  Preserve the previous artifact first so old
+        # facts, completion state, and generation fingerprints remain readable.
+        await _snapshot_training_plan(session, existing_plan)
         existing_plan.plan_json = plan_json
+        existing_plan.source_updated = False
+        existing_plan.facts_authority = consumer.authority
+        existing_plan.facts_schema_version = "analysis-facts.v2"
+        existing_plan.source_fact_hash = consumer.source_fact_hash
+        existing_plan.source_fact_revision = consumer.source_fact_revision
+        existing_plan.source_pipeline_fingerprint = consumer.source_pipeline_fingerprint
+        existing_plan.generation_fingerprint = generation_fingerprint(
+            artifact_type="training_plan",
+            source_fact_hash=consumer.source_fact_hash,
+            provider="deterministic-fallback" if _plan_generation_source(plan_json) == "fallback" else "report",
+            prompt_version="training-plan.v2",
+            extra={"analysis_id": analysis.id},
+        )
         await session.commit()
         await session.refresh(existing_plan)
         return _plan_detail_from_model(existing_plan)
@@ -9359,6 +10332,18 @@ async def create_training_plan(
         analysis_id=analysis.id,
         skater_id=skater.id,
         plan_json=plan_json,
+        facts_authority=consumer.authority,
+        facts_schema_version="analysis-facts.v2",
+        source_fact_hash=consumer.source_fact_hash,
+        source_fact_revision=consumer.source_fact_revision,
+        source_pipeline_fingerprint=consumer.source_pipeline_fingerprint,
+        generation_fingerprint=generation_fingerprint(
+            artifact_type="training_plan",
+            source_fact_hash=consumer.source_fact_hash,
+            provider="deterministic-fallback" if _plan_generation_source(plan_json) == "fallback" else "report",
+            prompt_version="training-plan.v2",
+            extra={"analysis_id": analysis.id},
+        ),
     )
     session.add(plan)
     await session.commit()
@@ -9403,6 +10388,7 @@ async def post_analysis_chat(
             analysis,
             message=payload.message,
             provider_id=payload.provider_id,
+            selected_event_id=payload.selected_event_id,
         )
     except AnalysisChatError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -9577,6 +10563,70 @@ async def regenerate_report_from_corrections(
     if analysis.status != "completed":
         raise HTTPException(status_code=400, detail="只有 completed 状态的分析才能重新生成报告。")
 
+    # A V2 correction regeneration is claim-only.  The persisted
+    # ``AnalysisFactsV2`` envelope is the sole semantic authority; legacy
+    # compatibility columns (vision/bio/Path A/B) must not be reintroduced
+    # through ``effective_analysis_for_read``.  This branch intentionally
+    # runs before the legacy effective overlay below.
+    if _has_v2_facts_authority(analysis):
+        fused_claims = _claims_from_persisted_facts(
+            analysis.analysis_facts,
+            analysis_id=analysis_id,
+        )
+        if not fused_claims:
+            raise HTTPException(status_code=400, detail="当前 V2 分析缺少可用于报告重生成的 EvidenceClaim。")
+        profile_claim = next(
+            (
+                claim
+                for claim in fused_claims
+                if claim.claim_type in {"action_profile", "action_family", "action_family_support"}
+                and isinstance(claim.value, str)
+                and claim.value.strip()
+            ),
+            None,
+        )
+        action_type = str(profile_claim.value).strip() if profile_claim is not None else "unknown"
+        report = await generate_report(
+            action_type,
+            {},
+            {},
+            None,
+            dual_path_meta={},
+            prompt_context=None,
+            fused_claims=fused_claims,
+        )
+        # A regeneration does not create a new semantic fact revision.  Keep
+        # the current score snapshot unchanged unless a separately supported
+        # V2 score claim exists; the report artifact remains tied to the same
+        # source fact hash through the correction metadata.
+        score_claim = next(
+            (
+                claim for claim in fused_claims
+                if claim.claim_type in {"force_score", "score"}
+                and claim.status == "confirmed"
+                and isinstance(claim.value, (int, float))
+            ),
+            None,
+        )
+        force_score = int(score_claim.value) if score_claim is not None else None
+        try:
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="report_regeneration",
+                payload={
+                    "report": report,
+                    "force_score": force_score,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                rationale="Regenerated V2 report from persisted fused EvidenceClaims.",
+                source="manual",
+                status="applied",
+            )
+        except AnalysisCorrectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await _correction_mutation_response(session, analysis, correction)
+
     effective_analysis = await effective_analysis_for_read(session, analysis)
     if not isinstance(effective_analysis.vision_structured, dict):
         raise HTTPException(status_code=400, detail="当前分析缺少视觉结构化数据。")
@@ -9655,7 +10705,7 @@ async def share_analysis_chat(
         skater = await session.get(Skater, analysis.skater_id)
         skater_name = _skater_display_name(skater) if skater else None
     include_pending = True if payload is None else payload.include_pending_corrections
-    title = f"{skater_name + ' · ' if skater_name else ''}{effective_analysis.action_subtype or effective_analysis.action_type}"
+    title = build_chat_share_title(effective_analysis, skater_name=skater_name)
     return AnalysisChatShareResponse(
         title=title,
         text=build_chat_share_text(
@@ -9700,7 +10750,7 @@ async def get_analysis_media(analysis_id: str, session: AsyncSession = Depends(g
 @router.get("/{analysis_id}/video")
 async def get_analysis_video(
     analysis_id: str,
-    quality: str = Query(default="original"),
+    quality: str = "original",
     session: AsyncSession = Depends(get_session),
 ) -> FileResponse:
     if quality not in MEDIA_QUALITIES:
@@ -9827,12 +10877,25 @@ async def retry_analysis(
         retry_from_stage = None
     if retry_from_stage == 'biomechanics' and not isinstance(analysis.pose_data, dict):
         retry_from_stage = None
-    if retry_from_stage == 'vision' and (not isinstance(analysis.pose_data, dict) or not isinstance(analysis.bio_data, dict)):
+    is_persisted_v2 = _has_v2_facts_authority(analysis)
+    persisted_v2_claims = _claims_from_persisted_facts(
+        analysis.analysis_facts,
+        analysis_id=analysis_id,
+    ) if is_persisted_v2 else ()
+    if retry_from_stage == 'vision' and not is_persisted_v2 and (
+        not isinstance(analysis.pose_data, dict) or not isinstance(analysis.bio_data, dict)
+    ):
         retry_from_stage = None
-    if retry_from_stage == 'report' and not isinstance(analysis.vision_structured, dict):
-        retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) and isinstance(analysis.bio_data, dict) else None
-    if retry_from_stage == 'report' and not isinstance(analysis.bio_data, dict):
-        retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) else None
+    # V2 report retries are claim-only.  Compatibility slots may be absent and
+    # the source video may have been cleaned up; persisted claims remain enough
+    # to regenerate the report safely.
+    if retry_from_stage == 'report' and not is_persisted_v2:
+        if not isinstance(analysis.vision_structured, dict):
+            retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) and isinstance(analysis.bio_data, dict) else None
+        if retry_from_stage == 'report' and not isinstance(analysis.bio_data, dict):
+            retry_from_stage = 'vision' if isinstance(analysis.pose_data, dict) else None
+    elif retry_from_stage == 'report' and not persisted_v2_claims:
+        retry_from_stage = None
 
     upload_dir = UPLOADS_DIR / analysis_id
     source_video_path = (
@@ -10159,6 +11222,19 @@ async def get_latest_skater_plan(skater_id: str, session: AsyncSession = Depends
     return _plan_detail_from_model(plan)
 
 
+@plan_router.get("/{plan_id}/revisions", response_model=list[TrainingPlanRevisionPublic])
+async def list_plan_revisions(plan_id: str, session: AsyncSession = Depends(get_session)) -> list[TrainingPlanRevisionPublic]:
+    plan = await session.get(TrainingPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="未找到该训练计划。")
+    result = await session.execute(
+        select(TrainingPlanRevision)
+        .where(TrainingPlanRevision.plan_id == plan_id)
+        .order_by(TrainingPlanRevision.revision.asc())
+    )
+    return [_plan_revision_detail_from_model(item) for item in result.scalars().all()]
+
+
 @plan_router.get("/{plan_id}", response_model=TrainingPlanDetail)
 async def get_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> TrainingPlanDetail:
     plan = await session.get(TrainingPlan, plan_id)
@@ -10224,16 +11300,27 @@ async def extend_plan(
         raise HTTPException(status_code=400, detail="当前计划缺少原始分析背景，无法续期。")
 
     skater = await session.get(Skater, plan.skater_id)
-    report_context = _minimal_report_context_for_plan(analysis)
+    consumer, action_label, report_context = _fact_report_context_for_plan(analysis)
     completed_days = sorted({day for day in payload.completed_days if 1 <= day <= 7})
     if len(completed_days) < 3:
         raise HTTPException(status_code=400, detail="至少完成 3 天后才能续期计划。")
+
+    # Extension is an explicit plan mutation.  Preserve the pre-extension
+    # payload before recording the new authority/hash on the current row.
+    await _snapshot_training_plan(session, plan)
+    # Record the current authority/hash on the regenerated plan only after the
+    # immutable pre-extension snapshot has been flushed.
+    plan.facts_authority = consumer.authority
+    plan.facts_schema_version = "analysis-facts.v2"
+    plan.source_fact_hash = consumer.source_fact_hash
+    plan.source_fact_revision = consumer.source_fact_revision
+    plan.source_pipeline_fingerprint = consumer.source_pipeline_fingerprint
 
     try:
         plan.plan_json = await extend_training_plan(
             original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
             completed_days=completed_days,
-            action_type=analysis.action_type,
+            action_type=action_label,
             report=report_context,
             skater_context=_skater_context(skater) if skater else None,
             skater_id=skater.id if skater else None,
@@ -10243,7 +11330,7 @@ async def extend_plan(
         plan.plan_json = _fallback_extended_plan_after_ai_failure(
             original_plan=plan.plan_json if isinstance(plan.plan_json, dict) else {},
             completed_days=completed_days,
-            action_type=analysis.action_type,
+            action_type=action_label,
             report=report_context,
             skater_context=_skater_context(skater) if skater else None,
         )

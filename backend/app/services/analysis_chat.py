@@ -9,6 +9,13 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis_v2.fact_consumers import (
+    apply_artifact_metadata,
+    artifact_reference,
+    consumer_for_analysis,
+    family_safe_fact_payload,
+    generation_fingerprint,
+)
 from app.models import Analysis, AnalysisChatMessage, AnalysisCorrection
 from app.services.llm_context import split_user_note_questions
 from app.services.analysis_corrections import (
@@ -234,137 +241,42 @@ def _limit_list(value: Any, limit: int) -> list[Any]:
     return value[:limit] if isinstance(value, list) else []
 
 
-def _extract_video_temporal_diagnostics(frame_motion_scores: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(frame_motion_scores, dict):
-        return {}
-    video_temporal = frame_motion_scores.get("video_temporal")
-    resolved = frame_motion_scores.get("resolved_keyframes")
-    if not isinstance(video_temporal, dict) and not isinstance(resolved, dict):
-        return {}
-    return {
-        "action_confirmation": video_temporal.get("action_confirmation") if isinstance(video_temporal, dict) else None,
-        "video_ai_confidence": video_temporal.get("confidence") if isinstance(video_temporal, dict) else None,
-        "video_ai_provider": video_temporal.get("provider") if isinstance(video_temporal, dict) else None,
-        "video_ai_model": video_temporal.get("model") if isinstance(video_temporal, dict) else None,
-        "selected_semantic_frames": _limit_list(resolved.get("selected") if isinstance(resolved, dict) else None, 8),
-        "partial_semantic_frames": _limit_list(resolved.get("partial_selected") if isinstance(resolved, dict) else None, 8),
-        "resolved_confidence": resolved.get("confidence") if isinstance(resolved, dict) else None,
-        "resolver_source": resolved.get("source") if isinstance(resolved, dict) else None,
-        "quality_flags": resolved.get("quality_flags") if isinstance(resolved, dict) else [],
-        "fallback_reason": (
-            video_temporal.get("fallback_reason") or video_temporal.get("fallback_recommendation")
-            if isinstance(video_temporal, dict)
-            else None
-        ),
-    }
-
-
-def _report_evidence(report: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(report, dict):
-        return {}
-    return {
-        "summary": report.get("summary"),
-        "issues": _limit_list(report.get("issues"), 8),
-        "improvements": _limit_list(report.get("improvements"), 8),
-        "training_focus": report.get("training_focus"),
-        "subscores": report.get("subscores") if isinstance(report.get("subscores"), dict) else {},
-        "data_quality": report.get("data_quality"),
-        "user_note": report.get("user_note"),
-        "user_note_response": report.get("user_note_response"),
-        "action_confirmation": report.get("action_confirmation") if isinstance(report.get("action_confirmation"), dict) else None,
-    }
-
-
-def _vision_evidence(value: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    return {
-        "action_phase_summary": value.get("action_phase_summary"),
-        "frame_analysis": _limit_list(value.get("frame_analysis"), 12),
-        "model_results": _limit_list(value.get("model_results"), 4),
-        "fusion_decisions": _limit_list(value.get("fusion_decisions"), 6),
-        "data_quality_hint": value.get("data_quality_hint"),
-        "quality_flags": value.get("quality_flags") if isinstance(value.get("quality_flags"), list) else [],
-        "conflict_level": value.get("conflict_level"),
-    }
-
-
-def _cross_validation_evidence(value: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    return {
-        "recommended_path": value.get("recommended_path"),
-        "conflict_level": value.get("conflict_level"),
-        "downgraded_reasons": value.get("downgraded_reasons") if isinstance(value.get("downgraded_reasons"), list) else [],
-        "fusion_diagnostics": value.get("fusion_diagnostics") if isinstance(value.get("fusion_diagnostics"), dict) else {},
-        "path_b_evidence": value.get("path_b_evidence") if isinstance(value.get("path_b_evidence"), dict) else {},
-        "auto_eval": value.get("auto_eval") if isinstance(value.get("auto_eval"), dict) else {},
-    }
-
-
-def _bio_evidence(value: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    return {
-        "key_frames": value.get("key_frames") if isinstance(value.get("key_frames"), dict) else {},
-        "key_frame_candidates": value.get("key_frame_candidates") if isinstance(value.get("key_frame_candidates"), dict) else {},
-        "jump_metrics": value.get("jump_metrics") if isinstance(value.get("jump_metrics"), dict) else {},
-        "jump_metrics_status": value.get("jump_metrics_status"),
-        "jump_metrics_warning": value.get("jump_metrics_warning"),
-        "bio_subscores": value.get("bio_subscores") if isinstance(value.get("bio_subscores"), dict) else {},
-        "quality_flags": value.get("quality_flags") if isinstance(value.get("quality_flags"), list) else [],
-    }
-
-
 def build_analysis_chat_context(
     analysis: Analysis,
     *,
     memory_context: str = "",
     corrections: list[AnalysisCorrection] | None = None,
+    selected_event_id: str | None = None,
 ) -> dict[str, Any]:
-    report = analysis.report if isinstance(analysis.report, dict) else None
-    effective = build_effective_analysis_payload(analysis, corrections)
-    effective_analysis = effective.get("analysis") if isinstance(effective.get("analysis"), dict) else {}
-    effective_report = effective.get("report") if isinstance(effective.get("report"), dict) else {}
-    effective_bio = effective.get("bio_data") if isinstance(effective.get("bio_data"), dict) else {}
-    effective_motion = effective.get("frame_motion_scores") if isinstance(effective.get("frame_motion_scores"), dict) else {}
+    all_facts = consumer_for_analysis(analysis, "family_display")
+    # Chat must be able to explain uncertainty/conflict/unobservable coverage
+    # from the same authority.  The payload remains bounded semantic facts;
+    # it never includes raw Path A/B, pose, or biomechanics dictionaries.
+    safe_payload = family_safe_fact_payload(all_facts, include_noneligible=True)
+    if selected_event_id:
+        safe_payload["facts"] = [
+            fact
+            for fact in safe_payload["facts"]
+            if fact.get("event_id") in {None, selected_event_id}
+        ]
     context = {
-        "analysis": {
-            "id": analysis.id,
-            "action_type": analysis.action_type,
-            "action_subtype": analysis.action_subtype,
-            "skill_category": analysis.skill_category,
-            "analysis_profile": analysis.analysis_profile,
-            "status": analysis.status,
-            "force_score": analysis.force_score,
-            "pipeline_version": analysis.pipeline_version,
-            "created_at": analysis.created_at,
-            "user_comments": analysis.note,
+        "selection": {
+            "event_id": selected_event_id,
+            "scope": "event" if selected_event_id else "whole_analysis",
         },
-        "effective_analysis": {
-            "action_type": effective_analysis.get("action_type"),
-            "action_subtype": effective_analysis.get("action_subtype"),
-            "analysis_profile": effective_analysis.get("analysis_profile"),
-            "force_score": effective_analysis.get("force_score"),
-            "has_applied_corrections": bool(effective.get("has_applied_corrections")),
-            "applied_corrections": effective_analysis.get("corrections_applied") or [],
-        },
-        "report": _report_evidence(report),
-        "effective_report": _report_evidence(effective_report),
-        "video_temporal_diagnostics": _extract_video_temporal_diagnostics(
-            analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None
-        ),
-        "effective_video_temporal_diagnostics": _extract_video_temporal_diagnostics(effective_motion),
-        "vision_structured": _vision_evidence(analysis.vision_structured if isinstance(analysis.vision_structured, dict) else None),
-        "vision_path_b": _vision_evidence(analysis.vision_path_b if isinstance(analysis.vision_path_b, dict) else None),
-        "cross_validation": _cross_validation_evidence(analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None),
-        "bio_data": _bio_evidence(analysis.bio_data if isinstance(analysis.bio_data, dict) else None),
-        "effective_bio_data": _bio_evidence(effective_bio),
-        "corrections": effective.get("corrections") or [],
+        "analysis_facts": safe_payload,
+        "correction_history": [
+            {
+                "id": item.id,
+                "event_id": getattr(item, "event_id", None),
+                "kind": item.kind,
+                "status": item.status,
+                "source": item.source,
+                "rationale": item.rationale,
+            }
+            for item in (corrections or [])
+        ],
     }
-    note_questions = split_user_note_questions(analysis.note)
-    if note_questions:
-        context["user_comment_questions"] = note_questions
     if _clean_text(memory_context):
         context["skater_memory"] = memory_context
     return context
@@ -389,6 +301,9 @@ def serialize_chat_message(message: AnalysisChatMessage) -> dict[str, Any]:
         "provider_id": provider.get("id") if message.role == "assistant" else None,
         "provider_name": provider.get("name") if message.role == "assistant" else None,
         "model_id": provider.get("model_id") if message.role == "assistant" else None,
+        "selected_event_id": message.selected_event_id,
+        "facts_authority": message.facts_authority,
+        "source_fact_hash": message.source_fact_hash,
     }
 
 
@@ -471,19 +386,26 @@ async def create_analysis_chat_reply(
     *,
     message: str,
     provider_id: str | None = None,
+    selected_event_id: str | None = None,
 ) -> tuple[AnalysisChatMessage, list[AnalysisChatMessage], dict[str, Any] | None]:
     user_text = message.strip()
     if not user_text:
         raise AnalysisChatError("追问内容不能为空。")
     if analysis.status != "completed":
         raise AnalysisChatError("只有 completed 状态的分析才能继续追问。")
-    if not isinstance(analysis.report, dict) and not isinstance(analysis.vision_structured, dict):
+    consumer = consumer_for_analysis(analysis, "family_display")
+    if not consumer.facts:
         raise AnalysisChatError("当前分析缺少可用于追问的结构化证据。")
 
     previous = await list_analysis_chat_messages(session, analysis.id)
     corrections = await list_analysis_corrections(session, analysis.id)
     memory_context = await build_memory_context(analysis.skater_id, session)
-    context = build_analysis_chat_context(analysis, memory_context=memory_context, corrections=corrections)
+    context = build_analysis_chat_context(
+        analysis,
+        memory_context=memory_context,
+        corrections=corrections,
+        selected_event_id=selected_event_id,
+    )
     provider = await _resolve_chat_provider(session, provider_id)
     provider_identity = _provider_identity_payload(provider)
     context = {"request_model": provider_identity, **context}
@@ -533,6 +455,7 @@ async def create_analysis_chat_reply(
         role="user",
         content=user_text,
         context_snapshot=None,
+        selected_event_id=selected_event_id,
         created_at=user_created_at,
     )
     assistant_message = AnalysisChatMessage(
@@ -541,8 +464,20 @@ async def create_analysis_chat_reply(
         role="assistant",
         content=assistant_text,
         context_snapshot=context_snapshot,
+        selected_event_id=selected_event_id,
         created_at=assistant_created_at,
     )
+    generation = generation_fingerprint(
+        artifact_type="analysis_chat_message",
+        source_fact_hash=consumer.source_fact_hash,
+        provider=provider.provider,
+        model=provider.model_id,
+        prompt_version="analysis-chat.v2",
+        extra={"selected_event_id": selected_event_id or "whole_analysis"},
+    )
+    reference = artifact_reference(consumer, artifact_type="analysis_chat_message", generation=generation)
+    apply_artifact_metadata(user_message, reference)
+    apply_artifact_metadata(assistant_message, reference)
     session.add(user_message)
     session.add(assistant_message)
     await session.commit()

@@ -1,11 +1,15 @@
 import { useMemo, useRef, useState } from "react";
 
 import { AnalysisDetail } from "../api/client";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { momentMarkers, orderedMoments } from "../analysis-v2/momentSelectors";
 import { IceMediaPlayer, type IceMediaPlayerHandle } from "../media/IceMediaPlayer";
 import { analysisMediaMarkers } from "../media/analysisMarkers";
 import {
   buildCurrentKeyframeEvidenceItems,
   buildDraftKeyframeEvidenceItems,
+  buildExperienceDraftKeyframeEvidenceItems,
+  buildExperienceKeyframeEvidenceItems,
   buildSemanticKeyframeEvidenceItems,
   formatKeyframeTimestamp,
   keyframeOrderForAnalysis,
@@ -28,17 +32,36 @@ type KeyframeEvidenceSource = {
 
 type KeyframeEvidencePanelProps = {
   analysis: AnalysisDetail;
+  /** Same-authority experience for V2 pages; raw analysis evidence is legacy/parent-only. */
+  experience?: AnalysisExperienceV2 | null;
+  selectedEventId?: string | null;
   draftKeyframes: DraftKeyframes;
   onSyncFrames: (patch: KeyframeSyncPatch, sourceLabel: string) => void;
   layout?: "sidebar" | "wide";
 };
 
-export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSyncFrames, layout = "sidebar" }: KeyframeEvidencePanelProps) {
+export default function KeyframeEvidencePanel({ analysis, experience = null, selectedEventId = null, draftKeyframes, onSyncFrames, layout = "sidebar" }: KeyframeEvidencePanelProps) {
   const playerRef = useRef<IceMediaPlayerHandle | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<SourceId>("current");
   const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
+  const v2ExperienceUnavailable = analysis.facts_authority === "v2" && !experience;
 
   const sources = useMemo<KeyframeEvidenceSource[]>(() => {
+    if (experience) {
+      const current = buildExperienceKeyframeEvidenceItems(experience, selectedEventId);
+      const draft = buildExperienceDraftKeyframeEvidenceItems(experience, draftKeyframes, selectedEventId);
+      return [
+        { id: "current", label: "当前复盘证据", items: current },
+        { id: "draft", label: "家长复核草稿", items: draft },
+      ];
+    }
+    // A declared V2 analysis may not borrow the legacy bio/temporal payload
+    // just because its experience request failed.  Keep the player available,
+    // but render an explicit unavailable evidence source until the authority
+    // envelope can be read again.
+    if (analysis.facts_authority === "v2") {
+      return [{ id: "current", label: "当前证据暂不可用", items: [] }];
+    }
     const selected = analysis.video_temporal_diagnostics?.selected_semantic_frames ?? [];
     const partial = analysis.video_temporal_diagnostics?.partial_semantic_frames ?? [];
     return [
@@ -47,11 +70,17 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
       { id: "partial", label: "Partial 候选", items: buildSemanticKeyframeEvidenceItems(analysis, partial, "Partial 候选") },
       { id: "draft", label: "待确认草稿", items: buildDraftKeyframeEvidenceItems(analysis, draftKeyframes) },
     ];
-  }, [analysis, draftKeyframes]);
+  }, [analysis, draftKeyframes, experience, selectedEventId]);
 
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? sources[0];
-  const expectedKeys = keyframeOrderForAnalysis(analysis);
-  const canSyncToJumpForm = expectedKeys.every((key) => key === "T" || key === "A" || key === "L");
+  const expectedKeys = experience
+    ? orderedMoments(experience.events.find((item) => item.eventId === selectedEventId) ?? experience.events[0] ?? null).map((item) => item.semanticKey)
+    : v2ExperienceUnavailable
+      ? []
+    : keyframeOrderForAnalysis(analysis);
+  // V2 moments are source-PTS facts, not legacy T/A/L correction fields.
+  // Keep them reviewable but never silently copy them into the legacy form.
+  const canSyncToJumpForm = !v2ExperienceUnavailable && !experience && expectedKeys.every((key) => key === "T" || key === "A" || key === "L");
   const availableCount = activeSource.items.filter((item) => item.value).length;
   const sourceTabsClass = layout === "wide"
     ? "mt-4 grid grid-cols-2 gap-2 tablet:grid-cols-4"
@@ -92,7 +121,7 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
       <div className="flex flex-col gap-3 phone:flex-row phone:items-start phone:justify-between">
         <div>
           <h3 className="text-sm font-semibold text-slate-900">关键帧核对台</h3>
-          <p className="mt-1 text-xs text-slate-500">{activeSource.label} · {availableCount}/{expectedKeys.length}</p>
+        <p className="mt-1 text-xs text-slate-500">{activeSource.label} · {availableCount}/{expectedKeys.length}</p>
         </div>
         <button
           type="button"
@@ -100,13 +129,28 @@ export default function KeyframeEvidencePanel({ analysis, draftKeyframes, onSync
           disabled={!availableCount || !canSyncToJumpForm}
           className="min-h-[36px] rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs font-semibold text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {canSyncToJumpForm ? "同步三帧到 form" : "动作区间仅查看"}
+          {canSyncToJumpForm ? "同步三帧到复核表" : experience ? "当前时刻仅查看" : "动作区间仅查看"}
         </button>
       </div>
 
       <div className="mt-4 overflow-hidden rounded-[18px] bg-slate-950">
-        <IceMediaPlayer ref={playerRef} manifest={analysis.media_manifest} fallbackSrc={`/api/analysis/${encodeURIComponent(analysis.id)}/video`} markers={analysisMediaMarkers(analysis)} />
+        <IceMediaPlayer
+          ref={playerRef}
+          manifest={analysis.media_manifest}
+          fallbackSrc={`/api/analysis/${encodeURIComponent(analysis.id)}/video`}
+          markers={experience
+            ? momentMarkers((experience.events.find((item) => item.eventId === selectedEventId) ?? experience.events[0] ?? null)?.moments)
+            : v2ExperienceUnavailable
+              ? []
+              : analysisMediaMarkers(analysis)}
+        />
       </div>
+
+      {v2ExperienceUnavailable ? (
+        <p className="mt-4 rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700" role="status">
+          当前复盘证据暂不可用；不会使用旧关键帧或姿态数据补齐，请稍后重试。
+        </p>
+      ) : null}
 
       <div className={sourceTabsClass}>
         {sources.map((source) => {

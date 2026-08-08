@@ -47,6 +47,12 @@ function generationStatus(plan: TrainingPlanDetail | null) {
   };
 }
 
+function factAuthorityLabel(authority: TrainingPlanDetail["facts_authority"]) {
+  if (authority === "v2") return "当前复盘证据";
+  if (authority === "legacy") return "历史复盘快照";
+  return "来源待确认";
+}
+
 export default function PlanPage() {
   const { plan_id } = useParams<{ plan_id: string }>();
   const location = useLocation();
@@ -339,6 +345,22 @@ export default function PlanPage() {
                   <p className="mt-1">{statusMeta.note}</p>
                 </div>
               ) : null}
+              {plan.source_updated ? (
+                <div className="rounded-[24px] border border-sky-200 bg-sky-50 px-5 py-4 text-sm leading-7 text-sky-800" role="status">
+                  <p className="font-semibold text-sky-900">分析来源已更新</p>
+                  <p className="mt-1">训练计划仍保留原来的历史快照；如需使用最新复盘事实，请点击“重新生成”。</p>
+                </div>
+              ) : null}
+
+              <div className="rounded-[24px] border border-slate-200 bg-white/80 px-5 py-4 text-sm leading-7 text-slate-600" role="status">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-semibold text-slate-800">计划依据：{factAuthorityLabel(plan.facts_authority)}</p>
+                  {plan.facts_authority === "v2" ? <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">已关联确认事实</span> : null}
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  {plan.source_fact_hash ? `来源版本 ${plan.source_fact_hash.slice(0, 12)}…` : "此计划没有可显示的来源版本。"}
+                </p>
+              </div>
 
               <header className="app-card overflow-hidden p-6 tablet:p-8">
                 <div className="grid gap-6 web:grid-cols-[1.1fr_0.9fr] web:items-end">

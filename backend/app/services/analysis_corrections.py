@@ -10,6 +10,16 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis_v2.fact_consumers import (
+    apply_artifact_metadata,
+    artifact_reference,
+    consumer_for_analysis,
+    family_safe_fact_payload,
+    generation_fingerprint,
+    facts_for_analysis,
+    persist_analysis_facts,
+)
+from app.analysis_v2.facts import AnalysisFactsV2
 from app.models import Analysis, AnalysisCorrection
 from app.services.report import ensure_report_subscores
 
@@ -22,6 +32,114 @@ KEYFRAME_KEYS = ("T", "A", "L")
 
 class AnalysisCorrectionError(ValueError):
     pass
+
+
+_V2_INVALIDATED_ARTIFACTS = [
+    "analysis_experience",
+    "report",
+    "training_plan",
+    "comparison",
+    "growth_summary",
+    "skill_progress",
+    "memory_suggestion",
+    "monthly_chapter",
+    "annual_collection",
+    "shares_exports",
+]
+
+
+def _is_v2_authority(analysis: Analysis) -> bool:
+    return str(getattr(analysis, "facts_authority", "") or "").strip().lower() == "v2" and isinstance(
+        getattr(analysis, "analysis_facts", None), dict
+    )
+
+
+def _revise_v2_facts_for_correction(analysis: Analysis, correction: AnalysisCorrection) -> None:
+    """Create a new fact revision while retaining the immutable legacy columns."""
+    if not _is_v2_authority(analysis):
+        return
+    facts = facts_for_analysis(analysis)
+    previous_hash = facts.source_fact_hash
+    if correction.source_fact_hash and correction.source_fact_hash != previous_hash:
+        # A correction already applied against an older revision is idempotent.
+        return
+    next_revision = max((fact.source_fact_revision for fact in facts.facts), default=1) + 1
+    payload = correction.payload if isinstance(correction.payload, dict) else {}
+    confirmation = payload.get("action_confirmation") if isinstance(payload.get("action_confirmation"), dict) else {}
+    requested_family = str(
+        payload.get("analysis_profile")
+        or payload.get("action_family")
+        or confirmation.get("action_family")
+        or ""
+    ).strip().lower()
+    requested_label = str(
+        payload.get("action_subtype")
+        or confirmation.get("confirmed_action")
+        or confirmation.get("jump_type")
+        or ""
+    ).strip()
+    keyframes = payload.get("key_frames") if isinstance(payload.get("key_frames"), dict) else {}
+
+    def revised_fact(fact: Any) -> Any:
+        updates: dict[str, Any] = {
+            "source_fact_revision": next_revision,
+            "provenance": tuple(dict.fromkeys((*fact.provenance, "human_correction"))),
+        }
+        if correction.kind == "action_label":
+            if requested_family and fact.claim_type in {"action_profile", "action_family", "action_family_support"}:
+                updates.update({
+                    "value": requested_family if requested_family in {"jump", "spin", "step", "spiral"} else None,
+                    "status": "confirmed" if requested_family in {"jump", "spin", "step", "spiral"} else "unobservable",
+                    "observability": "observable" if requested_family in {"jump", "spin", "step", "spiral"} else "unobservable",
+                    "confidence": 1.0 if requested_family in {"jump", "spin", "step", "spiral"} else 0.0,
+                    "conflicts": (),
+                })
+            elif requested_label and fact.claim_type in {"action_label", "action_confirmation"}:
+                updates.update({
+                    "value": requested_label if fact.claim_type == "action_label" else {"confirmed_action": requested_label, "confidence": 1.0},
+                    "status": "confirmed",
+                    "observability": "observable",
+                    "confidence": 1.0,
+                    "conflicts": (),
+                })
+        elif correction.kind == "keyframes" and fact.claim_type in {"key_moment", "key_moment_candidate"} and keyframes:
+            current = fact.value if isinstance(fact.value, dict) else {}
+            phase = str(current.get("phase") or current.get("phase_code") or "").strip().upper()
+            replacement = keyframes.get(phase) or keyframes.get({"TAKEOFF": "T", "AIR": "A", "LANDING": "L"}.get(phase, phase))
+            if replacement is not None:
+                if isinstance(replacement, dict):
+                    updates["value"] = {**current, **replacement}
+                else:
+                    updates["value"] = {**current, "frame": replacement}
+                updates.update({"status": "confirmed", "observability": "observable", "confidence": 1.0, "conflicts": ()})
+        elif correction.kind == "target_lock":
+            # A target change invalidates identity-dependent technical evidence
+            # until the pipeline is rerun.  Preserve the fact record and make
+            # the downstream refusal explicit rather than mutating raw fields.
+            if fact.claim_type not in {"identity_state", "target_observability"}:
+                updates.update({
+                    "value": None,
+                    "status": "unobservable",
+                    "observability": "unobservable",
+                    "confidence": 0.0,
+                    "provenance": tuple(dict.fromkeys((*fact.provenance, "identity-blocked"))),
+                    "conflicts": tuple(dict.fromkeys((*fact.conflicts, "target_lock_changed"))),
+                    "permissions": fact.permissions.model_copy(update={"aggregation": False, "comparison": False, "coaching": False, "automation": False}),
+                })
+        return fact.model_copy(update=updates)
+
+    revised = tuple(revised_fact(fact) for fact in facts.facts)
+    next_facts = AnalysisFactsV2(analysis_id=facts.analysis_id, authority=facts.authority, facts=revised)
+    correction.source_fact_hash = previous_hash
+    correction.source_fact_revision = next_revision
+    correction.facts_authority = next_facts.authority
+    correction.facts_schema_version = "analysis-facts.v2"
+    correction.source_pipeline_fingerprint = next(
+        (fact.source_pipeline_fingerprint for fact in next_facts.facts),
+        "v2:empty",
+    )
+    correction.invalidated_artifacts = list(_V2_INVALIDATED_ARTIFACTS)
+    persist_analysis_facts(analysis, next_facts)
 
 
 def _clean_text(value: Any) -> str | None:
@@ -190,6 +308,15 @@ def normalize_correction_payload(kind: str, payload: dict[str, Any]) -> dict[str
 
 
 def _snapshot_for_kind(analysis: Analysis, kind: str) -> dict[str, Any]:
+    if _is_v2_authority(analysis):
+        consumer = consumer_for_analysis(analysis, "correction")
+        return {
+            "authority": consumer.authority,
+            "facts_schema_version": "analysis-facts.v2",
+            "source_fact_hash": consumer.source_fact_hash,
+            "source_fact_revision": consumer.source_fact_revision,
+            "facts": family_safe_fact_payload(consumer),
+        }
     report = analysis.report if isinstance(analysis.report, dict) else {}
     bio_data = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
     motion = analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else {}
@@ -385,6 +512,37 @@ def build_effective_analysis_payload(
     analysis: Analysis,
     corrections: list[AnalysisCorrection] | None = None,
 ) -> dict[str, Any]:
+    if _is_v2_authority(analysis):
+        consumer = consumer_for_analysis(analysis, "correction")
+        items: list[dict[str, Any]] = []
+        for correction in corrections or []:
+            items.append(
+                {
+                    "id": correction.id,
+                    "kind": correction.kind,
+                    "source": correction.source,
+                    "status": correction.status,
+                    "rationale": correction.rationale,
+                    "payload": correction.payload,
+                    "event_id": correction.event_id,
+                    "source_fact_hash": correction.source_fact_hash,
+                    "source_fact_revision": correction.source_fact_revision,
+                    "invalidated_artifacts": correction.invalidated_artifacts or [],
+                    "created_at": correction.created_at.isoformat() if correction.created_at else None,
+                    "applied_at": correction.applied_at.isoformat() if correction.applied_at else None,
+                }
+            )
+        return {
+            "authority": consumer.authority,
+            "facts_schema_version": "analysis-facts.v2",
+            "source_fact_hash": consumer.source_fact_hash,
+            "source_fact_revision": consumer.source_fact_revision,
+            "source_pipeline_fingerprint": consumer.source_pipeline_fingerprint,
+            "facts": family_safe_fact_payload(consumer),
+            "corrections": items,
+            "has_applied_corrections": any(item["status"] == "applied" for item in items),
+            "invalidated_artifacts": sorted({name for item in items for name in item["invalidated_artifacts"]}),
+        }
     report = _deepcopy_dict(analysis.report)
     bio_data = _deepcopy_dict(analysis.bio_data)
     frame_motion_scores = _deepcopy_dict(analysis.frame_motion_scores)
@@ -473,6 +631,17 @@ async def list_analysis_corrections(session: AsyncSession, analysis_id: str) -> 
 
 async def _persist_applied_corrections(session: AsyncSession, analysis: Analysis) -> None:
     corrections = await list_analysis_corrections(session, analysis.id)
+    if _is_v2_authority(analysis):
+        semantic_kinds = {"action_label", "keyframes", "target_lock"}
+        for correction in corrections:
+            # Artifact metadata records the source revision before the
+            # correction is applied, so it is populated for both proposed and
+            # applied rows.  The invalidation list is the durable post-apply
+            # marker and keeps startup backfills/retries idempotent.
+            if correction.status == "applied" and correction.kind in semantic_kinds and not correction.invalidated_artifacts:
+                _revise_v2_facts_for_correction(analysis, correction)
+        analysis.updated_at = datetime.now(timezone.utc)
+        return
     effective = build_effective_analysis_payload(analysis, corrections)
     apply_effective_payload_to_analysis(analysis, effective)
     analysis.updated_at = datetime.now(timezone.utc)
@@ -502,6 +671,7 @@ async def create_analysis_correction(
     rationale: str | None = None,
     source: str | None = None,
     status: str | None = None,
+    event_id: str | None = None,
 ) -> AnalysisCorrection:
     normalized_kind = normalize_correction_kind(kind)
     normalized_payload = normalize_correction_payload(normalized_kind, payload)
@@ -516,9 +686,21 @@ async def create_analysis_correction(
         source=normalized_source,
         status=normalized_status,
         original_snapshot=_snapshot_for_kind(analysis, normalized_kind),
+        event_id=_clean_text(event_id),
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         applied_at=datetime.now(timezone.utc) if normalized_status == "applied" else None,
+    )
+    consumer = consumer_for_analysis(analysis, "correction")
+    generation = generation_fingerprint(
+        artifact_type="analysis_correction",
+        source_fact_hash=consumer.source_fact_hash,
+        prompt_version="analysis-correction.v2",
+        extra={"kind": normalized_kind, "source": normalized_source, "event_id": event_id or "whole_analysis"},
+    )
+    apply_artifact_metadata(
+        correction,
+        artifact_reference(consumer, artifact_type="analysis_correction", generation=generation),
     )
     session.add(correction)
     if normalized_status == "applied":
@@ -574,6 +756,50 @@ async def effective_analysis_for_read(session: AsyncSession, analysis: Analysis)
     return apply_effective_payload_to_analysis(clone, effective)
 
 
+def _share_fact(consumer: Any, claim_types: set[str]) -> Any | None:
+    """Return the first same-authority, share-eligible fact of a type."""
+    for fact in getattr(consumer, "facts", ()):
+        if fact.claim_type in claim_types and fact.value not in (None, "", [], {}):
+            return fact
+    return None
+
+
+def _share_projection(analysis: Analysis) -> dict[str, Any]:
+    """Build a share-safe projection from the record's single authority."""
+    try:
+        consumer = consumer_for_analysis(analysis, "share")
+    except (TypeError, ValueError):
+        consumer = None
+    profile = _share_fact(consumer, {"action_label", "action_confirmation", "action_profile", "action_family"})
+    title_value: str | None = None
+    if profile is not None:
+        value = profile.value
+        if isinstance(value, dict):
+            value = value.get("confirmed_action") or value.get("action_label") or value.get("action_family")
+        if value not in (None, ""):
+            title_value = str(value).strip()
+    summary_fact = _share_fact(consumer, {"report_summary", "analysis_summary", "summary"})
+    score_fact = _share_fact(consumer, {"force_score", "quality_score", "score"})
+    score = score_fact.value if score_fact is not None and isinstance(score_fact.value, (int, float)) and not isinstance(score_fact.value, bool) else None
+    return {
+        "consumer": consumer,
+        "title": title_value or "本次复盘",
+        "summary": str(summary_fact.value).strip() if summary_fact is not None else "当前复盘摘要暂不可用，未使用旧报告回填。",
+        "score": score,
+        "facts_authority": getattr(consumer, "authority", None),
+        "facts_schema_version": "analysis-facts.v2" if consumer is not None else None,
+        "source_fact_hash": getattr(consumer, "source_fact_hash", None),
+        "source_fact_revision": getattr(consumer, "source_fact_revision", None),
+        "source_pipeline_fingerprint": getattr(consumer, "source_pipeline_fingerprint", None),
+    }
+
+
+def build_chat_share_title(analysis: Analysis, *, skater_name: str | None = None) -> str:
+    projection = _share_projection(analysis)
+    prefix = f"{skater_name} · " if skater_name else ""
+    return f"{prefix}{projection['title']}"
+
+
 def build_chat_share_text(
     analysis: Analysis,
     messages: list[Any],
@@ -582,13 +808,12 @@ def build_chat_share_text(
     skater_name: str | None = None,
     include_pending_corrections: bool = True,
 ) -> str:
-    title = f"{skater_name + ' · ' if skater_name else ''}{analysis.action_subtype or analysis.action_type}"
-    report = analysis.report if isinstance(analysis.report, dict) else {}
-    summary = str(report.get("summary") or "").strip()
+    projection = _share_projection(analysis)
+    title = build_chat_share_title(analysis, skater_name=skater_name)
+    summary = projection["summary"]
     selected_messages = [message for message in messages if getattr(message, "role", "") in {"user", "assistant"}]
     applied = [item for item in corrections if item.status == "applied"]
     pending = [item for item in corrections if item.status == "proposed"]
-
     lines = [f"[IceBuddy AI追问] {title}"]
     if analysis.created_at:
         lines.append(f"分析时间：{analysis.created_at.date().isoformat()}")
@@ -727,15 +952,20 @@ def build_chat_share_image_payload(
     *,
     skater_name: str | None = None,
 ) -> dict[str, Any]:
-    report = analysis.report if isinstance(analysis.report, dict) else {}
+    projection = _share_projection(analysis)
     latest_question = next((message for message in reversed(messages) if getattr(message, "role", "") == "user"), None)
     latest_answer = next((message for message in reversed(messages) if getattr(message, "role", "") == "assistant"), None)
     timeline_items = _build_chat_timeline_items(messages, corrections)
     return {
         "analysis_id": analysis.id,
-        "title": f"{skater_name + ' · ' if skater_name else ''}{analysis.action_subtype or analysis.action_type}",
-        "score": analysis.force_score,
-        "summary": str(report.get("summary") or ""),
+        "title": build_chat_share_title(analysis, skater_name=skater_name),
+        "score": projection["score"],
+        "summary": projection["summary"],
+        "facts_authority": projection["facts_authority"],
+        "facts_schema_version": projection["facts_schema_version"],
+        "source_fact_hash": projection["source_fact_hash"],
+        "source_fact_revision": projection["source_fact_revision"],
+        "source_pipeline_fingerprint": projection["source_pipeline_fingerprint"],
         "question": str(getattr(latest_question, "content", "") or ""),
         "answer": str(getattr(latest_answer, "content", "") or ""),
         "timeline_items": timeline_items,

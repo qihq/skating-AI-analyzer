@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,14 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_session
 from app.models import AIProvider, Analysis
 from app.schemas import ProviderCreate, ProviderMetricPublic, ProviderPublic, ProviderTestResponse, ProviderUpdate, VisionVoteConfig
-from app.services.providers import activate_provider, encrypt_api_key, mask_api_key, test_provider_connectivity
-from app.services.provider_metrics import summarize_provider_metrics
+from app.services.providers import (
+    activate_provider,
+    encrypt_api_key,
+    mask_api_key,
+    provider_fingerprint,
+    provider_v2_role,
+    test_provider_connectivity,
+)
+from app.services.provider_metrics import summarize_provider_metrics_for_analyses
 from app.services.vision_vote_config import load_vision_vote_config, save_vision_vote_config
+from app.services.parent_access import require_parent_pin
 
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
 VALID_SLOTS = {"vision", "vision_path_a", "vision_path_b", "report"}
+ParentPinHeader = Annotated[str | None, Header(alias="X-Parent-Pin")]
 
 
 def serialize_provider(provider: AIProvider) -> ProviderPublic:
@@ -34,11 +44,23 @@ def serialize_provider(provider: AIProvider) -> ProviderPublic:
         notes=provider.notes,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
+        v2_role=provider_v2_role(provider.slot),
+        fingerprint=provider_fingerprint(
+            provider_id=provider.id,
+            slot=provider.slot,
+            provider=provider.provider,
+            model_id=provider.model_id,
+            vision_model=provider.vision_model,
+        ),
     )
 
 
 @router.get("/", response_model=list[ProviderPublic])
-async def list_providers(session: AsyncSession = Depends(get_session)) -> list[ProviderPublic]:
+async def list_providers(
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[ProviderPublic]:
+    await require_parent_pin(session, x_parent_pin)
     result = await session.execute(
         select(AIProvider).order_by(AIProvider.slot.asc(), AIProvider.is_active.desc(), AIProvider.created_at.asc())
     )
@@ -49,8 +71,10 @@ async def list_providers(session: AsyncSession = Depends(get_session)) -> list[P
 async def get_provider_metrics(
     days: int = Query(default=30, ge=1, le=3650),
     analysis_profile: str | None = Query(default=None),
+    x_parent_pin: ParentPinHeader = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[ProviderMetricPublic]:
+    await require_parent_pin(session, x_parent_pin)
     day_value = days if isinstance(days, int) else 30
     profile_value = analysis_profile if isinstance(analysis_profile, str) and analysis_profile.strip() else None
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, day_value))
@@ -67,9 +91,18 @@ async def get_provider_metrics(
     if not analyses:
         return []
 
-    vision_structured_items = [analysis.vision_structured if isinstance(analysis.vision_structured, dict) else None for analysis in analyses]
-    cross_validation_items = [analysis.cross_validation if isinstance(analysis.cross_validation, dict) else None for analysis in analyses]
-    metrics_report = summarize_provider_metrics(vision_structured_items, cross_validation_items)
+    provider_rows = await session.execute(select(AIProvider))
+    provider_labels = {
+        provider_fingerprint(
+            provider_id=provider.id,
+            slot=provider.slot,
+            provider=provider.provider,
+            model_id=provider.model_id,
+            vision_model=provider.vision_model,
+        ): f"{provider.provider}/{provider.model_id or provider.vision_model or 'unknown'}"
+        for provider in provider_rows.scalars().all()
+    }
+    metrics_report = summarize_provider_metrics_for_analyses(analyses, provider_labels=provider_labels)
     providers = metrics_report.get("providers", {}) if isinstance(metrics_report, dict) else {}
 
     if not isinstance(providers, dict):
@@ -98,15 +131,21 @@ async def get_provider_metrics(
 
 
 @router.get("/vision-vote/config", response_model=VisionVoteConfig)
-async def get_vision_vote_config() -> VisionVoteConfig:
-    return VisionVoteConfig(**load_vision_vote_config())
+async def get_vision_vote_config(
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> VisionVoteConfig:
+    await require_parent_pin(session, x_parent_pin)
+    return VisionVoteConfig(**load_vision_vote_config(), scope="legacy_vision_only", applies_to_v2_fusion=False)
 
 
 @router.put("/vision-vote/config", response_model=VisionVoteConfig)
 async def update_vision_vote_config(
     payload: VisionVoteConfig,
+    x_parent_pin: ParentPinHeader = None,
     session: AsyncSession = Depends(get_session),
 ) -> VisionVoteConfig:
+    await require_parent_pin(session, x_parent_pin)
     provider_ids = [payload.primary_provider_id, payload.secondary_provider_id]
     unique_ids = {provider_id for provider_id in provider_ids if provider_id}
     if unique_ids:
@@ -119,11 +158,16 @@ async def update_vision_vote_config(
             raise HTTPException(status_code=400, detail="vision vote provider must belong to slot=vision.")
 
     saved = save_vision_vote_config(payload.model_dump())
-    return VisionVoteConfig(**saved)
+    return VisionVoteConfig(**saved, scope="legacy_vision_only", applies_to_v2_fusion=False)
 
 
 @router.get("/{slot}/active", response_model=ProviderPublic)
-async def get_active_provider(slot: str, session: AsyncSession = Depends(get_session)) -> ProviderPublic:
+async def get_active_provider(
+    slot: str,
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> ProviderPublic:
+    await require_parent_pin(session, x_parent_pin)
     if slot not in VALID_SLOTS:
         raise HTTPException(status_code=400, detail="slot 必须是 vision 或 report。")
 
@@ -137,7 +181,12 @@ async def get_active_provider(slot: str, session: AsyncSession = Depends(get_ses
 
 
 @router.post("/", response_model=ProviderPublic, status_code=status.HTTP_201_CREATED)
-async def create_provider(payload: ProviderCreate, session: AsyncSession = Depends(get_session)) -> ProviderPublic:
+async def create_provider(
+    payload: ProviderCreate,
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> ProviderPublic:
+    await require_parent_pin(session, x_parent_pin)
     if payload.slot not in VALID_SLOTS:
         raise HTTPException(status_code=400, detail="slot 必须是 vision 或 report。")
 
@@ -168,8 +217,10 @@ async def create_provider(payload: ProviderCreate, session: AsyncSession = Depen
 async def update_provider(
     provider_id: str,
     payload: ProviderUpdate,
+    x_parent_pin: ParentPinHeader = None,
     session: AsyncSession = Depends(get_session),
 ) -> ProviderPublic:
+    await require_parent_pin(session, x_parent_pin)
     provider = await session.get(AIProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="供应商不存在。")
@@ -187,7 +238,12 @@ async def update_provider(
 
 
 @router.patch("/{provider_id}/activate", response_model=ProviderPublic)
-async def activate_provider_route(provider_id: str, session: AsyncSession = Depends(get_session)) -> ProviderPublic:
+async def activate_provider_route(
+    provider_id: str,
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> ProviderPublic:
+    await require_parent_pin(session, x_parent_pin)
     provider = await session.get(AIProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="供应商不存在。")
@@ -197,7 +253,12 @@ async def activate_provider_route(provider_id: str, session: AsyncSession = Depe
 
 
 @router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-async def delete_provider(provider_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_provider(
+    provider_id: str,
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+):
+    await require_parent_pin(session, x_parent_pin)
     provider = await session.get(AIProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="供应商不存在。")
@@ -222,7 +283,12 @@ async def delete_provider(provider_id: str, session: AsyncSession = Depends(get_
 
 
 @router.post("/{provider_id}/test", response_model=ProviderTestResponse)
-async def test_provider(provider_id: str, session: AsyncSession = Depends(get_session)) -> ProviderTestResponse:
+async def test_provider(
+    provider_id: str,
+    x_parent_pin: ParentPinHeader = None,
+    session: AsyncSession = Depends(get_session),
+) -> ProviderTestResponse:
+    await require_parent_pin(session, x_parent_pin)
     provider = await session.get(AIProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="供应商不存在。")

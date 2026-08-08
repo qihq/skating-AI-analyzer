@@ -3,12 +3,19 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from app.analysis_v2.fact_consumers import consumer_for_analysis
+
 
 def summarize_provider_metrics(
     vision_structured_items: list[dict[str, Any]] | None,
     cross_validation_items: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     samples = _collect_provider_samples(vision_structured_items, cross_validation_items)
+    return _summarize_samples(samples)
+
+
+def _summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate normalized diagnostic samples shared by legacy and V2 paths."""
     if not samples:
         return {
             "providers": {},
@@ -59,6 +66,115 @@ def summarize_provider_metrics(
         "summary": summary,
         "recommendations": _build_recommendations(providers, summary),
     }
+
+
+def summarize_v2_fact_metrics(
+    consumers: list[Any] | tuple[Any, ...],
+    *,
+    provider_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Summarize V2 provider-role evidence without reading compatibility slots.
+
+    V2 analyses persist claim-level source fingerprints, not the raw Path A/B
+    payloads.  This diagnostic projection deliberately treats each supported
+    source claim as a bounded sample and keeps conflicts/refusals visible.  A
+    provider fingerprint is resolved to a human label when the active/provider
+    inventory has one; otherwise the role and a short fingerprint are used.
+    """
+
+    labels = provider_labels or {}
+    samples: list[dict[str, Any]] = []
+    for consumer in consumers:
+        facts = getattr(consumer, "all_facts", ()) or getattr(consumer, "facts", ())
+        for fact in facts:
+            sources = tuple(getattr(fact, "sources", ()) or ())
+            fingerprints = dict(getattr(fact, "source_fingerprints", {}) or {})
+            # Fusion adds its own fingerprint; it is not a provider sample.
+            source_names = [source for source in sources if source in {"path_a", "path_b", "deterministic", "deterministic_measurement", "rotation_estimator", "key_moment", "action_classifier"}]
+            if not source_names:
+                continue
+            for source in source_names:
+                fingerprint = str(fingerprints.get(source) or "").strip()
+                if source in {"path_a", "path_b"}:
+                    label = labels.get(fingerprint) or f"{source}:{fingerprint[:12] or 'unknown'}"
+                elif source == "deterministic_measurement":
+                    label = labels.get(fingerprint) or "deterministic_measurement"
+                else:
+                    label = labels.get(fingerprint) or source
+                status = str(getattr(fact, "status", "unobservable") or "unobservable")
+                conflicts = tuple(getattr(fact, "conflicts", ()) or ())
+                confidence = getattr(fact, "confidence", None)
+                samples.append(
+                    {
+                        "provider": label,
+                        "json_validity_factor": 1.0 if status != "unobservable" else 0.0,
+                        "effective_weight": float(confidence) if isinstance(confidence, (int, float)) else 0.0,
+                        "conflict": bool(conflicts) or status == "uncertain",
+                        "failure": status == "unobservable",
+                    }
+                )
+    return _summarize_samples(samples)
+
+
+def merge_provider_metric_reports(*reports: dict[str, Any]) -> dict[str, Any]:
+    """Merge legacy and V2 diagnostic summaries without mixing source payloads."""
+
+    samples: list[dict[str, Any]] = []
+    for report in reports:
+        for provider, metrics in (report.get("providers", {}) if isinstance(report, dict) else {}).items():
+            if not isinstance(metrics, dict):
+                continue
+            count = int(metrics.get("sample_count", 0) or 0)
+            if count <= 0:
+                continue
+            # Expand aggregate values only for the diagnostic merge.  This is
+            # lossless for the displayed rates and avoids exposing raw inputs.
+            for index in range(count):
+                samples.append(
+                    {
+                        "provider": provider,
+                        "json_validity_factor": 1.0 if index < int(round(metrics.get("json_valid_rate", 0.0) * count)) else 0.0,
+                        "effective_weight": metrics.get("avg_effective_weight", 0.0),
+                        "conflict": index < int(round(metrics.get("conflict_rate", 0.0) * count)),
+                        "failure": index < int(round(metrics.get("failure_rate", 0.0) * count)),
+                    }
+                )
+    return _summarize_samples(samples)
+
+
+def summarize_provider_metrics_for_analyses(
+    analyses: list[Any] | tuple[Any, ...],
+    *,
+    provider_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build provider diagnostics from the analysis authority boundary.
+
+    V2 rows are read exclusively through ``AnalysisFactsV2``.  Legacy rows
+    retain the characterized compatibility projection so historical provider
+    metrics remain available without changing their semantics.
+    """
+
+    legacy_vision: list[dict[str, Any] | None] = []
+    legacy_cross: list[dict[str, Any] | None] = []
+    v2_consumers: list[Any] = []
+    for analysis in analyses:
+        if str(getattr(analysis, "facts_authority", "") or "").strip().lower() == "v2":
+            try:
+                v2_consumers.append(consumer_for_analysis(analysis, "family_display"))
+            except (TypeError, ValueError):
+                # Invalid envelopes are omitted from provider metrics rather
+                # than falling back to a different semantic source.
+                pass
+            continue
+        legacy_vision.append(getattr(analysis, "vision_structured", None) if isinstance(getattr(analysis, "vision_structured", None), dict) else None)
+        legacy_cross.append(getattr(analysis, "cross_validation", None) if isinstance(getattr(analysis, "cross_validation", None), dict) else None)
+
+    reports: list[dict[str, Any]] = []
+    if legacy_vision or legacy_cross:
+        reports.append(summarize_provider_metrics(legacy_vision, legacy_cross))
+    if v2_consumers:
+        reports.append(summarize_v2_fact_metrics(v2_consumers, provider_labels=provider_labels))
+    return merge_provider_metric_reports(*reports) if reports else _summarize_samples([])
 
 
 def _collect_provider_samples(

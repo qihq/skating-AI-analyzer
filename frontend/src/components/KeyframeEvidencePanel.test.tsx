@@ -17,4 +17,18 @@ describe("KeyframeEvidencePanel", () => {
     expect(screen.getByLabelText("分析视频")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "跳到T" })).toBeInTheDocument();
   });
+
+  it("does not borrow legacy keyframes while a V2 experience is unavailable", () => {
+    const v2Analysis = {
+      ...analysis,
+      facts_authority: "v2",
+      bio_data: { key_frames: { T: "legacy-frame", A: "", L: "" } },
+    } as unknown as AnalysisDetail;
+
+    render(<KeyframeEvidencePanel analysis={v2Analysis} draftKeyframes={{}} onSyncFrames={() => undefined} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("不会使用旧关键帧或姿态数据补齐");
+    expect(screen.queryByText("legacy-frame")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "同步 T" })).not.toBeInTheDocument();
+  });
 });

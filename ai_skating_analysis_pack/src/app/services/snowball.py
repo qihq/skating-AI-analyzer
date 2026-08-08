@@ -124,6 +124,12 @@ def serialize_memory(memory: SnowballMemory, now: datetime | None = None) -> Sno
         is_expired=expired and bool(memory.is_pinned),
         created_at=memory.created_at,
         updated_at=memory.updated_at,
+        facts_authority=memory.facts_authority,
+        facts_schema_version=memory.facts_schema_version,
+        source_fact_hash=memory.source_fact_hash,
+        source_fact_revision=memory.source_fact_revision,
+        source_pipeline_fingerprint=memory.source_pipeline_fingerprint,
+        generation_fingerprint=memory.generation_fingerprint,
     )
 
 

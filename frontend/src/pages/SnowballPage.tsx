@@ -175,7 +175,7 @@ function flattenSuggestions(items: MemorySuggestion[]): SuggestionCard[] {
 
 export default function SnowballPage() {
   const location = useLocation();
-  const { isParentMode, childView, setChildView, enterParentMode } = useAppMode();
+  const { isParentMode, parentPin, childView, setChildView, enterParentMode } = useAppMode();
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState("");
   const [messages, setMessages] = useState<SnowballChatMessage[]>([{ role: "assistant", content: WELCOME_MESSAGE }]);
@@ -387,6 +387,12 @@ export default function SnowballPage() {
       return;
     }
 
+    if (!parentPin) {
+      setMemoryError("Please re-verify the parent PIN before saving memory.");
+      void enterParentMode();
+      return;
+    }
+
     setIsSavingMemory(true);
     setMemoryError(null);
 
@@ -400,10 +406,10 @@ export default function SnowballPage() {
 
     try {
       if (editingMemoryId) {
-        await updateMemory(selectedSkaterId, editingMemoryId, payload);
+        await updateMemory(selectedSkaterId, editingMemoryId, payload, parentPin);
         showNotice("冰宝（IceBuddy）记忆已更新。");
       } else {
-        await createMemory(selectedSkaterId, payload);
+        await createMemory(selectedSkaterId, payload, parentPin);
         showNotice("已新增一条冰宝（IceBuddy）记忆。");
       }
       await refreshMemories();
@@ -423,6 +429,11 @@ export default function SnowballPage() {
     if (!selectedSkaterId) {
       return;
     }
+    if (!parentPin) {
+      setMemoryError("Please re-verify the parent PIN before deleting memory.");
+      void enterParentMode();
+      return;
+    }
     const confirmed = window.confirm(`要删除「${memory.title}」这条冰宝（IceBuddy）记忆吗？`);
     if (!confirmed) {
       return;
@@ -431,7 +442,7 @@ export default function SnowballPage() {
     setMutatingMemoryId(memory.id);
     setMemoryError(null);
     try {
-      await deleteMemory(selectedSkaterId, memory.id);
+      await deleteMemory(selectedSkaterId, memory.id, parentPin);
       setMemories((current) => current.filter((item) => item.id !== memory.id));
       showNotice("冰宝（IceBuddy）记忆已删除。");
     } catch {
@@ -445,11 +456,16 @@ export default function SnowballPage() {
     if (!selectedSkaterId) {
       return;
     }
+    if (!parentPin) {
+      setMemoryError("Please re-verify the parent PIN before changing a memory pin.");
+      void enterParentMode();
+      return;
+    }
 
     setMutatingMemoryId(memory.id);
     setMemoryError(null);
     try {
-      const updated = await toggleMemoryPin(selectedSkaterId, memory.id, !memory.is_pinned);
+      const updated = await toggleMemoryPin(selectedSkaterId, memory.id, !memory.is_pinned, parentPin);
       setMemories((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       showNotice(updated.is_pinned ? "这条记忆已固定给冰宝（IceBuddy）。" : "这条记忆已取消固定。");
     } catch {
@@ -463,9 +479,14 @@ export default function SnowballPage() {
     if (!selectedSkaterId) {
       return;
     }
+    if (!parentPin) {
+      setMemoryError("Please re-verify the parent PIN before applying a suggestion.");
+      void enterParentMode();
+      return;
+    }
     setIsMutatingSuggestion(`${card.suggestionId}:${card.index}`);
     try {
-      await applyMemorySuggestions(selectedSkaterId, card.suggestionId, [card.index]);
+      await applyMemorySuggestions(selectedSkaterId, card.suggestionId, [card.index], parentPin);
       await Promise.all([refreshMemories(), refreshSuggestions()]);
       showNotice("记忆建议已采纳。");
     } catch {
@@ -479,9 +500,14 @@ export default function SnowballPage() {
     if (!selectedSkaterId) {
       return;
     }
+    if (!parentPin) {
+      setMemoryError("Please re-verify the parent PIN before dismissing a suggestion.");
+      void enterParentMode();
+      return;
+    }
     setIsMutatingSuggestion(`${card.suggestionId}:${card.index}`);
     try {
-      await dismissMemorySuggestion(selectedSkaterId, card.suggestionId);
+      await dismissMemorySuggestion(selectedSkaterId, card.suggestionId, parentPin);
       await refreshSuggestions();
       showNotice("建议已忽略。");
     } catch {

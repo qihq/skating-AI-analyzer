@@ -2,17 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
-  AnalysisDetail,
-  fetchAnalysis,
   fetchGrowthSummary,
   fetchMonthlyChapters,
   fetchSkaters,
   GrowthSummary,
   Skater,
 } from "../api/client";
-import ActionPhaseStrip from "../components/ActionPhaseStrip";
 import GrowthKpiBar from "../components/GrowthKpiBar";
 import MilestoneTimeline from "../components/MilestoneTimeline";
+import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { presentAnalysisExperience } from "../analysis-v2/presenter";
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "暂时无法读取成长档案，请稍后重试。";
@@ -22,7 +22,7 @@ export default function GrowthHomePage() {
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedSkaterId, setSelectedSkaterId] = useState<string | null>(null);
   const [summary, setSummary] = useState<GrowthSummary | null>(null);
-  const [latestAnalysis, setLatestAnalysis] = useState<AnalysisDetail | null>(null);
+  const [latestExperience, setLatestExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [hasPublishedChapters, setHasPublishedChapters] = useState(false);
   const [loadingSkaters, setLoadingSkaters] = useState(true);
   const [loadingSummary, setLoadingSummary] = useState(false);
@@ -63,7 +63,7 @@ export default function GrowthHomePage() {
     setLoadingSummary(true);
     setError(null);
     setSummary(null);
-    setLatestAnalysis(null);
+    setLatestExperience(null);
     setHasPublishedChapters(false);
 
     void (async () => {
@@ -77,10 +77,8 @@ export default function GrowthHomePage() {
           .then((chapters) => !cancelled && setHasPublishedChapters(chapters.some((chapter) => chapter.status === "published")))
           .catch(() => !cancelled && setHasPublishedChapters(false));
         if (nextSummary.latest_analysis_id) {
-          const analysis = await fetchAnalysis(nextSummary.latest_analysis_id);
-          if (!cancelled) {
-            setLatestAnalysis(analysis);
-          }
+          const experience = await fetchAnalysisExperienceV2(nextSummary.latest_analysis_id);
+          if (!cancelled) setLatestExperience(experience);
         }
       } catch (requestError) {
         if (!cancelled) {
@@ -98,8 +96,8 @@ export default function GrowthHomePage() {
     };
   }, [selectedSkaterId]);
 
-  const report = latestAnalysis?.report;
-  const nextAction = report?.improvements[0]?.action ?? report?.training_focus ?? summary?.current_focus?.label;
+  const presented = latestExperience ? presentAnalysisExperience(latestExperience) : null;
+  const nextAction = presented?.nextAction?.state === "confirmed" ? presented.nextAction.text : summary?.current_focus?.label;
   const skaterName = useMemo(
     () => skaters.find((s) => s.id === selectedSkaterId)?.display_name ?? "小滑手",
     [skaters, selectedSkaterId],
@@ -144,11 +142,12 @@ export default function GrowthHomePage() {
           <section className="grid gap-4 tablet:grid-cols-3">
             <article className="app-card p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">这次练得怎么样</p>
-              <p className="mt-3 text-lg font-semibold text-slate-900">{report?.summary || "完成复盘后，这里会显示本次训练的结论。"}</p>
+                <p className="mt-3 text-lg font-semibold text-slate-900">{presented?.summary || "完成复盘后，这里会显示本次训练的结论。"}</p>
             </article>
             <article className="app-card p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">当前重点</p>
               <p className="mt-3 text-lg font-semibold text-slate-900">{summary.current_focus?.label || "完成第一次复盘后，系统会整理当前练习重点。"}</p>
+              {summary.current_focus?.excluded_reason ? <p className="mt-2 text-xs leading-6 text-amber-700" role="status">{summary.current_focus.excluded_reason}</p> : null}
             </article>
             <article className="app-card p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">下次具体练什么</p>
@@ -156,8 +155,12 @@ export default function GrowthHomePage() {
             </article>
           </section>
 
-          {latestAnalysis ? (
-            <ActionPhaseStrip analysis={latestAnalysis} pose={latestAnalysis.pose_data} showVideo />
+          {latestExperience ? (
+            <section className="app-card p-5" aria-label="最近复盘状态">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-500">最近复盘</p>
+              <p className="mt-3 text-sm leading-7 text-slate-600">{presented?.stateLabel} · {presented?.poseSummary}</p>
+              {presented?.observations.slice(0, 2).map((item) => <p key={`${item.claim.claimType}-${item.claim.eventId ?? "all"}`} className="mt-2 text-sm leading-7 text-slate-700"><span className="font-semibold">{item.title}：</span>{item.text}</p>)}
+            </section>
           ) : (
             <section className="app-card p-5 text-sm leading-7 text-slate-500">完成第一次复盘后，这里会出现关键动作阶段。</section>
           )}

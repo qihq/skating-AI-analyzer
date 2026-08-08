@@ -7,6 +7,7 @@ import {
   ProviderMetricPublic,
 } from "../api/client";
 import ReportCard from "./ReportCard";
+import { useAppMode } from "./AppModeContext";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
@@ -97,6 +98,7 @@ export default function ProviderMetricsPanel({
   analysisProfile?: string | null;
   actionType?: string | null;
 }) {
+  const { isParentMode, parentPin } = useAppMode();
   const [metrics, setMetrics] = useState<ProviderMetricPublic[]>([]);
   const [snapshots, setSnapshots] = useState<AutoEvalSnapshotSummary[]>([]);
   const [state, setState] = useState<LoadState>("idle");
@@ -107,10 +109,16 @@ export default function ProviderMetricsPanel({
     const load = async () => {
       setState("loading");
       setError(null);
+      if (!isParentMode || !parentPin) {
+        setMetrics([]);
+        setSnapshots([]);
+        setState("idle");
+        return;
+      }
       try {
         const [metricData, snapshotData] = await Promise.all([
-          fetchProviderMetrics({ analysis_profile: analysisProfile }),
-          fetchAutoEvalSnapshots({ analysis_profile: analysisProfile, action_type: actionType, limit: 12 }),
+          fetchProviderMetrics(parentPin, { analysis_profile: analysisProfile }),
+          fetchAutoEvalSnapshots(parentPin, { analysis_profile: analysisProfile, action_type: actionType, limit: 12 }),
         ]);
         if (cancelled) {
           return;
@@ -130,7 +138,7 @@ export default function ProviderMetricsPanel({
     return () => {
       cancelled = true;
     };
-  }, [analysisProfile, actionType]);
+  }, [analysisProfile, actionType, isParentMode, parentPin]);
 
   const hasContent = metrics.length > 0 || snapshots.length > 0;
   const sortedMetrics = useMemo(() => [...metrics].sort((a, b) => a.provider.localeCompare(b.provider)), [metrics]);

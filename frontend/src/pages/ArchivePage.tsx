@@ -12,6 +12,8 @@ import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { pickSkaterIdForChildView } from "../utils/childView";
 import { localDateKey, parseApiDate } from "../utils/datetime";
 import GrowthAdmissionCard from "../analysis-v2/components/GrowthAdmissionCard";
+import { useAnalysisExperiences } from "../analysis-v2/useAnalysisExperiences";
+import { presentAnalysisExperience } from "../analysis-v2/presenter";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 const RANGE_OPTIONS = [
@@ -534,6 +536,38 @@ export default function ArchivePage() {
     () => [...new Set(activeTimeline.map((entry) => entry.analysis_id).filter((value): value is string => Boolean(value)))],
     [activeTimeline],
   );
+  const { experiences: experienceById } = useAnalysisExperiences(growthAdmissionAnalysisIds);
+
+  const familyEntry = (entry: ArchiveTimelineEntry) => {
+    const experience = experienceById[entry.analysis_id];
+    if (!experience) return { label: "复盘摘要暂不可用", summary: "当前复盘没有足够的统一证据可供家庭页面展示。", state: "unobservable" as const, forceScore: null };
+    const view = presentAnalysisExperience(experience);
+    return {
+      label: view.selectedEvent?.label ?? "复盘记录",
+      summary: view.summary,
+      state: view.state,
+      forceScore: view.forceScore,
+    };
+  };
+
+  const renderCalendarEntry = (entry: ArchiveTimelineEntry, detail = false) => {
+    const family = familyEntry(entry);
+    return <Link
+      key={entry.id}
+      to={`/report/${entry.analysis_id}`}
+      onClick={detail ? () => setSelectedCalendarDayKey(null) : undefined}
+      className={detail ? "block rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/70" : "block rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/50"}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        {isParentMode && activeScope === ALL_SKATERS_VIEW ? <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-600">{entry.skater_name}</span> : null}
+        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600">{family.label}</span>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${family.state === "confirmed" ? "bg-emerald-50 text-emerald-700" : family.state === "needs_review" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{family.state === "confirmed" ? "已确认" : family.state === "needs_review" ? "需要确认" : "暂不判断"}</span>
+      </div>
+      <p className="mt-3 text-xs text-slate-400">{formatDate(entry.created_at)}</p>
+      <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-600">{family.summary}</p>
+      {detail ? <p className="mt-3 text-sm font-semibold text-blue-600">查看报告</p> : null}
+    </Link>;
+  };
 
   const skaterIdsNeedingMore = useMemo(() => {
     if (isParentMode && activeScope === ALL_SKATERS_VIEW) {
@@ -690,6 +724,7 @@ export default function ArchivePage() {
   const renderTimelineEntry = (entry: ArchiveTimelineEntry, index: number, groupLength: number) => {
     const isRetrying = retryingAnalysisId === entry.analysis_id;
     const hideRetry = missingVideoRetryIds.includes(entry.analysis_id);
+    const family = familyEntry(entry);
 
     return (
       <article key={entry.id} className="content-visibility-auto relative min-w-0 pl-7 phone:pl-8">
@@ -706,16 +741,14 @@ export default function ArchivePage() {
                   <span className="max-w-full break-words rounded-full bg-violet-50 px-3 py-1 text-sm text-violet-600">{entry.skater_name}</span>
                 ) : null}
                 <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.entry_type}</span>
-                <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{entry.action_type}</span>
-                {entry.skill_category ? (
-                  <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{entry.skill_category}</span>
-                ) : null}
-                <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${forceScoreTone(entry.force_score)}`}>
-                  {isParentMode ? `AI 评分 ${entry.force_score ?? "--"}` : `星级 ${scoreStars(entry.force_score)}`}
+                <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{family.label}</span>
+                <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${forceScoreTone(family.forceScore)}`}>
+                  {isParentMode ? `评分 ${family.forceScore ?? "--"}` : `星级 ${scoreStars(family.forceScore)}`}
                 </span>
               </div>
               <p className="mt-3 text-sm text-slate-400">{formatDate(entry.created_at)}</p>
-              <p className="mt-3 max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{entry.report_snippet}</p>
+              <p className="mt-3 max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{family.summary}</p>
+              <p className={`mt-2 text-xs ${family.state === "confirmed" ? "text-emerald-700" : family.state === "needs_review" ? "text-amber-700" : "text-slate-500"}`} role="status">{family.state === "confirmed" ? "已确认" : family.state === "needs_review" ? "需要确认" : "画面不足，暂不判断"}</p>
             </div>
 
             <div className="flex min-w-0 flex-col gap-3 tablet:items-end">
@@ -1087,7 +1120,7 @@ export default function ArchivePage() {
                         {day.entries.slice(0, 2).map((entry) => (
                           <span key={entry.id} className="block truncate rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
                             {isParentMode && activeScope === ALL_SKATERS_VIEW ? `${entry.skater_name} · ` : ""}
-                            {entry.action_type}
+                            {familyEntry(entry).label}
                           </span>
                         ))}
                       </div>
@@ -1107,22 +1140,7 @@ export default function ArchivePage() {
               </div>
               {calendarMonthEntries.length ? (
                 <div className="mt-4 space-y-3">
-                  {calendarMonthEntries.slice(0, 8).map((entry) => (
-                    <Link
-                      key={entry.id}
-                      to={`/report/${entry.analysis_id}`}
-                      className="block rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/50"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="truncate text-sm font-semibold text-slate-900">{entry.action_type}</p>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${forceScoreTone(entry.force_score)}`}>
-                          {entry.force_score ?? "--"}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-slate-400">{formatDate(entry.created_at)}</p>
-                      {isParentMode && activeScope === ALL_SKATERS_VIEW ? <p className="mt-1 text-xs text-blue-600">{entry.skater_name}</p> : null}
-                    </Link>
-                  ))}
+                  {calendarMonthEntries.slice(0, 8).map((entry) => renderCalendarEntry(entry))}
                   {calendarMonthEntries.length > 8 ? <p className="text-sm text-slate-500">还有 {calendarMonthEntries.length - 8} 条，请在列表页翻看。</p> : null}
                 </div>
               ) : (
@@ -1218,30 +1236,7 @@ export default function ArchivePage() {
             </div>
 
             <div className="max-h-[calc(86dvh-112px)] space-y-3 overflow-y-auto px-5 py-4 tablet:px-6">
-              {selectedCalendarDay.entries.map((entry) => (
-                <Link
-                  key={entry.id}
-                  to={`/report/${entry.analysis_id}`}
-                  onClick={() => setSelectedCalendarDayKey(null)}
-                  className="block rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-200 hover:bg-blue-50/70"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    {isParentMode && activeScope === ALL_SKATERS_VIEW ? (
-                      <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-600">{entry.skater_name}</span>
-                    ) : null}
-                    <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-600">{entry.action_type}</span>
-                    {entry.skill_category ? (
-                      <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600">{entry.skill_category}</span>
-                    ) : null}
-                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${forceScoreTone(entry.force_score)}`}>
-                      {entry.force_score ?? "--"} 分
-                    </span>
-                  </div>
-                  <p className="mt-3 text-xs text-slate-400">{formatDate(entry.created_at)}</p>
-                  <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-600">{entry.report_snippet}</p>
-                  <p className="mt-3 text-sm font-semibold text-blue-600">查看报告</p>
-                </Link>
-              ))}
+              {selectedCalendarDay.entries.map((entry) => renderCalendarEntry(entry, true))}
             </div>
           </div>
         </div>

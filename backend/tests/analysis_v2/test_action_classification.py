@@ -153,7 +153,32 @@ def test_facts_exclude_unknown_or_ambiguous_profiles_from_consumers() -> None:
     assert facts.profile_eligibility()["reason"] == "ambiguous_profile"
     assert profile_eligibility(facts, "comparison").eligible is False
     assert growth_admission([facts])["excluded_reasons"] == {"ambiguous_profile": 1}
-    assert profile_eligibility(facts, "automatic_skill_unlock").reason == "v2_automatic_unlock_disabled_until_iteration14"
+    automatic = profile_eligibility(facts, "automatic_skill_unlock")
+    assert automatic.eligible is False
+    assert automatic.reason == "ambiguous_profile"
+    assert automatic.automatic_skill_unlock is False
+
+
+def test_confirmed_versioned_profile_can_enter_automatic_unlock_evaluator() -> None:
+    confirmed = AnalysisFactV2(
+        analysis_id="a",
+        event_id="e",
+        claim_type="action_profile",
+        value="jump",
+        authority="v2",
+        source_pipeline_fingerprint="fp",
+        definition_version="profile.v2",
+        compatibility_group="action-profile/jump/v2",
+        permissions=FactPermission(automation=True),
+    )
+    decision = profile_eligibility(
+        AnalysisFactsV2(analysis_id="a", authority="v2", facts=[confirmed]),
+        "automatic_skill_unlock",
+    )
+    assert decision.eligible is True
+    assert decision.profile == "jump"
+    assert decision.reason is None
+    assert decision.automatic_skill_unlock is True
 
 
 def test_growth_requires_aggregation_permission_and_excludes_shadow() -> None:

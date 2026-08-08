@@ -13,6 +13,9 @@ import { poseFrameIndexAtTime } from "../media/poseTimeline";
 import AnalysisQualityPanel from "../components/AnalysisQualityPanel";
 import { getAnalysisStatusLabel } from "../constants/analysisStatus";
 import { parseApiDate, apiDateTimeFormatter } from "../utils/datetime";
+import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { presentAnalysisExperience } from "../analysis-v2/presenter";
 
 export type WorkspaceTab = "pose" | "evidence" | "diagnostics" | "followup";
 
@@ -32,8 +35,12 @@ function formatDate(value: string) {
   }).format(parseApiDate(value));
 }
 
-function buildTitle(analysis: AnalysisDetail) {
-  return [analysis.skater_name, analysis.action_type, analysis.action_subtype].filter(Boolean).join(" · ") || analysis.id;
+function buildTitle(analysis: AnalysisDetail, experience?: AnalysisExperienceV2 | null) {
+  if (experience) {
+    const event = presentAnalysisExperience(experience).selectedEvent;
+    return [analysis.skater_name, event?.label].filter(Boolean).join(" · ") || analysis.id;
+  }
+  return "复盘工作台";
 }
 
 function frameValue(value: unknown) {
@@ -45,6 +52,12 @@ function frameValue(value: unknown) {
 }
 
 function draftKeyframesFromAnalysis(analysis: AnalysisDetail | null) {
+  // The workspace may still expose legacy pose/biomechanics diagnostics to a
+  // parent, but a declared V2 record cannot seed a semantic correction draft
+  // from those compatibility fields while its authority envelope is missing.
+  if (analysis?.facts_authority === "v2") {
+    return { T: "", A: "", L: "" };
+  }
   const keyFrames = analysis?.bio_data?.key_frames ?? {};
   return {
     T: frameValue(keyFrames.T),
@@ -59,13 +72,15 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
   const { isParentMode, enterParentMode } = useAppMode();
   const [searchParams] = useSearchParams();
   const [analysis, setAnalysis] = useState<AnalysisDetail | null>(null);
+  const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [pose, setPose] = useState<PoseResponse | null>(null);
   const [selectedPoseFrame, setSelectedPoseFrame] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const activeTab = forcedTab ?? (searchParams.get("tab") as WorkspaceTab | null) ?? "pose";
-  const title = analysis ? buildTitle(analysis) : "报告工作台";
+  const selectedEventId = searchParams.get("event");
+  const title = analysis ? buildTitle(analysis, experience) : "报告工作台";
   const draftKeyframes = useMemo(() => draftKeyframesFromAnalysis(analysis), [analysis]);
 
   useEffect(() => {
@@ -82,6 +97,7 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
 
   useEffect(() => {
     setAnalysis(null);
+    setExperience(null);
     setPose(null);
     setSelectedPoseFrame(null);
     setNotice(null);
@@ -103,6 +119,11 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
           return;
         }
         setAnalysis(data);
+        try {
+          setExperience(await fetchAnalysisExperienceV2(id));
+        } catch {
+          setExperience(null);
+        }
       } catch (requestError) {
         if (!cancelled) {
           setError(
@@ -125,7 +146,10 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
       return;
     }
 
-    if (activeTab === "pose" || activeTab === "diagnostics" || activeTab === "evidence" || activeTab === "followup") {
+    // Pose payloads are loaded only for the explicit parent pose/diagnostic
+    // tabs.  Evidence and follow-up consume the authority experience and must
+    // never need a raw pose fallback.
+    if (activeTab === "pose" || activeTab === "diagnostics") {
       let cancelled = false;
       const loadPose = async () => {
         try {
@@ -164,6 +188,11 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
     }
     const next = await fetchAnalysis(analysis.id, { isParentRequest: true });
     setAnalysis(next);
+    try {
+      setExperience(await fetchAnalysisExperienceV2(analysis.id));
+    } catch {
+      setExperience(null);
+    }
   };
 
   if (!isParentMode) {
@@ -244,6 +273,8 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
             ) : (
               <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-8 text-sm text-slate-500">当前分析没有可展示的姿态帧。</div>
             )}
+            {/* Parent-only diagnostics: raw biomechanics is intentionally
+                excluded from the family evidence/follow-up surfaces. */}
             {analysis.bio_data ? <BiomechanicsPanel bioData={analysis.bio_data} mode="parent" onSelectFrame={setSelectedPoseFrame} /> : null}
             <TargetPoseDebugPanel analysisId={analysis.id} targetLock={analysis.target_lock} poseData={pose ?? analysis.pose_data} />
           </section>
@@ -253,12 +284,19 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
         </div>
       ) : activeTab === "evidence" ? (
         <section className="space-y-4">
-          <KeyframeEvidencePanel analysis={analysis} draftKeyframes={draftKeyframes} onSyncFrames={syncKeyframesToForm} />
+          <KeyframeEvidencePanel
+            analysis={analysis}
+            experience={experience}
+            selectedEventId={selectedEventId}
+            draftKeyframes={draftKeyframes}
+            onSyncFrames={syncKeyframesToForm}
+          />
           <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-500">这里展示关键帧、语义帧和候选证据的对应关系。</div>
         </section>
       ) : activeTab === "diagnostics" ? (
         <div ref={diagnosticsRef} tabIndex={-1} className="grid scroll-mt-28 gap-6 outline-none" aria-label="分析诊断">
           <AnalysisQualityPanel analysis={analysis} />
+          {/* Parent-only diagnostics; no family claim is derived here. */}
           <AnalysisDebugLogPanel
             logs={analysis.processing_logs ?? []}
             timings={analysis.processing_timings}
@@ -272,6 +310,8 @@ export default function ReportWorkspacePage({ forcedTab, hideHeader = false }: {
       ) : (
         <AnalysisFollowUpPanel
           analysis={analysis}
+          experience={experience}
+          selectedEventId={selectedEventId}
           compact
           variant="workspace"
           onAnalysisRefresh={refreshAnalysis}

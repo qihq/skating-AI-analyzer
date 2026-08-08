@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis_v2.fact_consumers import consumer_for_analysis, facts_for_analysis
 from app.models import Analysis, SkaterSkill, SkillNode, TrainingSession
 
 
@@ -63,12 +64,32 @@ def _normalize_category(raw: Any) -> str:
     return str(raw or "").strip().lower() or "其他"
 
 
-def _report(analysis: Analysis) -> dict[str, Any]:
-    report = analysis.report
-    return report if isinstance(report, dict) else {}
+def _analysis_consumer(analysis: Analysis):
+    try:
+        return consumer_for_analysis(analysis, "aggregation")
+    except (TypeError, ValueError):
+        return None
+
+
+def _claim_value_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("description") or value.get("text") or "").strip()
+    return str(value or "").strip()
+
+
+def _claim_data_quality(analysis: Analysis) -> str:
+    try:
+        facts = facts_for_analysis(analysis)
+    except (TypeError, ValueError):
+        return "unknown"
+    fact = next((item for item in facts.facts if item.claim_type == "data_quality"), None)
+    value = str(fact.value if fact is not None else "partial").strip().lower()
+    return value or "partial"
 
 
 def _data_quality(report: dict[str, Any]) -> str:
+    # Kept as a small compatibility helper for callers/tests; migrated code
+    # uses _claim_data_quality so it never reads report dictionaries.
     return str(report.get("data_quality") or "partial").strip().lower()
 
 
@@ -110,27 +131,53 @@ def _comparable_metrics(
     Emit a fact only when two or more records share subtype + metric + unit and
     acceptable data quality (data_quality != poor + jump_metrics_status ok).
     """
-    buckets: dict[tuple[str | None, str, str], list[tuple[str, float | int]]] = {}
+    buckets: dict[tuple[str | None, str, str, str, str, str], list[tuple[str, float | int]]] = {}
     for analysis in analyses:
-        report = _report(analysis)
-        if _data_quality(report) == "poor":
+        if _claim_data_quality(analysis) == "poor":
             continue
-        bio = analysis.bio_data if isinstance(analysis.bio_data, dict) else {}
-        metrics = bio.get("jump_metrics") if isinstance(bio, dict) else None
-        status = str(bio.get("jump_metrics_status") or "").strip().lower() if isinstance(bio, dict) else ""
-        if not isinstance(metrics, dict) or status not in {"ok", "valid", "good"}:
+        consumer = _analysis_consumer(analysis)
+        if consumer is None:
             continue
-        subtype = (analysis.action_subtype or "").strip() or None
-        for key, value in metrics.items():
-            if key not in _METRIC_UNITS:
+        for fact in consumer.facts:
+            if fact.claim_type not in {"metric", "jump_metric"}:
+                continue
+            metric = None
+            value = fact.value
+            subtype = None
+            if isinstance(value, dict):
+                metric = str(value.get("metric") or value.get("name") or "").strip()
+                raw_value = value.get("value")
+                value = raw_value if raw_value is not None else value.get("measurement")
+                subtype = str(value.get("action_subtype") or "").strip() if isinstance(value, dict) else None
+            if not metric:
+                refs = tuple(fact.source_references or ())
+                metric = next((ref.split(":", 1)[1] for ref in refs if ref.startswith("metric:")), None)
+            if not metric or metric not in _METRIC_UNITS:
                 continue
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
-            bucket_key = (subtype, key, _METRIC_UNITS[key])
+            if subtype is None:
+                refs = tuple(fact.source_references or ())
+                subtype = next((ref.split(":", 1)[1] for ref in refs if ref.startswith("action_subtype:")), None)
+            if subtype is None and fact.compatibility_group:
+                parts = fact.compatibility_group.split("/")
+                if len(parts) >= 4 and parts[0] == "metric":
+                    subtype = parts[1]
+            unit = fact.unit or _METRIC_UNITS[metric]
+            if unit != _METRIC_UNITS[metric]:
+                continue
+            bucket_key = (
+                subtype or None,
+                metric,
+                unit,
+                fact.definition_version,
+                fact.convention or "",
+                consumer.authority,
+            )
             buckets.setdefault(bucket_key, []).append((analysis.id, float(value)))
 
     facts: list[dict[str, Any]] = []
-    for (subtype, metric, unit), entries in sorted(
+    for (subtype, metric, unit, definition_version, convention, authority), entries in sorted(
         buckets.items(), key=lambda item: (item[0][1] or "", item[0][1] or "")
     ):
         if len(entries) < 2:
@@ -150,6 +197,9 @@ def _comparable_metrics(
                 "after": after,
                 "sample_count": len(entries_sorted),
                 "source_analysis_ids": [entry[0] for entry in entries_sorted],
+                "authority": authority,
+                "definition_version": definition_version,
+                "convention": convention or None,
             }
         )
     return facts
@@ -188,17 +238,20 @@ def _recurring_facts(
     category_counts: dict[str, list[tuple[str, datetime]]] = {}
     focus_counts: dict[str, list[tuple[str, datetime]]] = {}
     for analysis in sorted(analyses, key=lambda a: (_utc(a.created_at) or datetime.min.replace(tzinfo=timezone.utc), a.id)):
-        report = _report(analysis)
-        if _data_quality(report) == "poor":
+        if _claim_data_quality(analysis) == "poor":
             continue
-        for issue in report.get("issues", []) if isinstance(report.get("issues"), list) else []:
-            if not isinstance(issue, dict):
-                continue
-            category = _normalize_category(issue.get("category"))
-            category_counts.setdefault(category, []).append((analysis.id, _utc(analysis.created_at) or datetime.min.replace(tzinfo=timezone.utc)))
-        focus = str(report.get("training_focus") or "").strip()
-        if focus:
-            focus_counts.setdefault(focus, []).append((analysis.id, _utc(analysis.created_at) or datetime.min.replace(tzinfo=timezone.utc)))
+        consumer = _analysis_consumer(analysis)
+        if consumer is None:
+            continue
+        for fact in consumer.facts:
+            if fact.claim_type == "technical_issue":
+                value = fact.value if isinstance(fact.value, dict) else {}
+                category = _normalize_category(value.get("category"))
+                category_counts.setdefault(category, []).append((analysis.id, _utc(analysis.created_at) or datetime.min.replace(tzinfo=timezone.utc)))
+            elif fact.claim_type == "training_focus":
+                focus = _claim_value_text(fact.value)
+                if focus:
+                    focus_counts.setdefault(focus, []).append((analysis.id, _utc(analysis.created_at) or datetime.min.replace(tzinfo=timezone.utc)))
 
     observation_facts: list[dict[str, Any]] = []
     for category, entries in sorted(category_counts.items()):
@@ -239,10 +292,17 @@ def _recurring_facts(
 def _quote_facts(analyses: list[Analysis]) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for analysis in sorted(analyses, key=lambda a: (_utc(a.created_at) or datetime.min.replace(tzinfo=timezone.utc), a.id)):
-        quote = (analysis.highlight_quote or "").strip()
+        consumer = _analysis_consumer(analysis)
+        if consumer is None:
+            continue
+        quote_fact = next((fact for fact in consumer.facts if fact.claim_type == "quote"), None)
+        if quote_fact is None:
+            continue
+        value = quote_fact.value if isinstance(quote_fact.value, dict) else {"text": quote_fact.value}
+        quote = str(value.get("text") or "").strip()
         if not quote:
             continue
-        speaker = (analysis.quote_speaker or "").strip() or None
+        speaker = str(value.get("speaker") or "").strip() or None
         facts.append(
             {
                 "id": f"quote:{analysis.id}",
@@ -267,8 +327,7 @@ def _representative_frames(
     milestone_set = set(milestone_source_analysis_ids)
     candidates: list[tuple[int, Analysis, dict[str, Any]]] = []
     for analysis in analyses:
-        report = _report(analysis)
-        quality = _data_quality(report)
+        quality = _claim_data_quality(analysis)
         priority = 0
         if analysis.id in milestone_set:
             priority = 0
@@ -303,20 +362,23 @@ def _representative_frames(
             # A V2 analysis never falls back to legacy keyframes when its
             # profile moment set refuses representative media.
             continue
-        bio = analysis.bio_data if isinstance(analysis.bio_data, dict) else None
-        candidates_obj = bio.get("key_frame_candidates") if bio else None
-        timestamps = bio.get("key_frame_timestamps") if bio else None
-        if not isinstance(candidates_obj, dict):
+        consumer = _analysis_consumer(analysis)
+        if consumer is None:
             continue
-        # Prefer the landing phase when available, else first available.
-        for phase_code in ("L", "A", "T"):
-            candidate = candidates_obj.get(phase_code)
-            if not isinstance(candidate, dict):
-                continue
-            frame_id = str(candidate.get("frame_id") or "").strip()
+        key_claims = [fact for fact in consumer.facts if fact.claim_type == "key_moment"]
+        if not key_claims:
+            continue
+        # Prefer the landing phase when available, else first available.  The
+        # claim adapter has already applied one authority and excludes Shadow.
+        phase_order = {"L": 0, "A": 1, "T": 2}
+        key_claims.sort(key=lambda fact: phase_order.get(str((fact.value or {}).get("phase") if isinstance(fact.value, dict) else ""), 9))
+        for fact in key_claims:
+            value = fact.value if isinstance(fact.value, dict) else {}
+            phase_code = str(value.get("phase") or "").strip() or "L"
+            frame_id = str(value.get("frame") or value.get("frame_id") or "").strip()
             if not frame_id:
                 continue
-            ts = timestamps.get(phase_code) if isinstance(timestamps, dict) else None
+            ts = value.get("timestamp")
             ts_value = float(ts) if isinstance(ts, (int, float)) else 0.0
             source_frame_index = None
             source_pts = ts_value if isinstance(ts, (int, float)) else None

@@ -11,6 +11,7 @@ from app.services.providers import ActiveProviderConfig, request_text_completion
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
 from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
+from app.analysis_v2.path_review import build_path_b_v2_prompt, normalize_path_b_measurements
 
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,11 @@ async def analyze_path_b(
     video_context_by_frame: dict[str, dict[str, Any]] | None = None,
     evidence_context_by_frame: dict[str, str] | None = None,
     preserve_all_frames: bool = False,
+    v2_mode: bool = False,
+    structured_measurements: list[dict[str, Any]] | dict[str, Any] | None = None,
+    required_joints: tuple[str, ...] | list[str] = (),
+    identity_state: str = "unknown",
+    source_fingerprints: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Path B: annotated skeleton frames plus biomechanical numeric grounding.
@@ -328,27 +334,41 @@ async def analyze_path_b(
             PATH_B_MAX_TOKENS_BASE + n_frames * PATH_B_MAX_TOKENS_FRAME,
         )
 
-        system_prompt = PATH_B_SYSTEM if not memory_context else f"{PATH_B_SYSTEM}\n\n{memory_context}"
-        user_text = _build_user_prompt(
-            action_type,
-            action_subtype,
-            analysis_profile,
-            profile_evidence,
-            jump_metrics_text,
-            n_frames,
-            skill_category,
-            video_context_by_frame,
-            evidence_context_by_frame,
-        )
+        if v2_mode:
+            system_prompt, user_text = build_path_b_v2_prompt(
+                # Keep the metric key at the V2 boundary.  Passing ``dict.values``
+                # loses the source-linked claim name and turns scalar entries
+                # into untraceable generic measurements.
+                structured_measurements=structured_measurements,
+                required_joints=required_joints,
+                identity_state=identity_state,
+            )
+            if memory_context:
+                # Memory can contain family context, but must not become an
+                # additional technical source in the V2 reviewer prompt.
+                system_prompt = f"{system_prompt}\n\nFamily context (non-evidence): {memory_context}"
+        else:
+            system_prompt = PATH_B_SYSTEM if not memory_context else f"{PATH_B_SYSTEM}\n\n{memory_context}"
+            user_text = _build_user_prompt(
+                action_type,
+                action_subtype,
+                analysis_profile,
+                profile_evidence,
+                jump_metrics_text,
+                n_frames,
+                skill_category,
+                video_context_by_frame,
+                evidence_context_by_frame,
+            )
 
         bio_context = frame_bio_context or {}
         content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
         for frame in frames:
             label = f"帧编号：{frame.frame_id} | 时间：{frame.timestamp_sec:.2f}s"
-            bio_text = _build_bio_text(bio_context.get(frame.frame_id))
+            bio_text = "" if v2_mode else _build_bio_text(bio_context.get(frame.frame_id))
             if bio_text:
                 label += "\n" + bio_text
-            context_label = video_context_label(frame.frame_id, video_context_by_frame)
+            context_label = "" if v2_mode else video_context_label(frame.frame_id, video_context_by_frame)
             if context_label:
                 label += "\n" + context_label
             content.append({"type": "text", "text": label})
@@ -385,6 +405,37 @@ async def analyze_path_b(
         )
         parsed.setdefault("top_issues", [])
         parsed.setdefault("top_positives", [])
+        if v2_mode:
+            measurement_records: list[dict[str, Any]] = []
+            if isinstance(structured_measurements, dict):
+                for key, value in structured_measurements.items():
+                    if isinstance(value, dict):
+                        measurement_records.append({"claim_type": key, **value})
+                    else:
+                        measurement_records.append({"claim_type": key, "value": value, "provenance": "measured"})
+            elif isinstance(structured_measurements, list):
+                measurement_records.extend(item for item in structured_measurements if isinstance(item, dict))
+            # If no explicit source-linked measurements were supplied, model
+            # prose cannot promote a technical claim into V2 evidence.
+            claims = normalize_path_b_measurements(
+                measurement_records,
+                identity_state=identity_state,
+                required_joints=required_joints,
+                source_fingerprints=source_fingerprints,
+            )
+            parsed["v2_mode"] = True
+            parsed["evidence_claims"] = [claim.model_dump(mode="json") for claim in claims]
+            # This envelope marker is written after parsing the provider
+            # response, so provider JSON cannot self-attest deterministic
+            # provenance.  The fusion adapter uses it to retain the explicit
+            # deterministic_measurement source only for these local claims.
+            parsed["evidence_claims_origin"] = "structured_measurement_adapter.v1"
+            parsed["provenance_summary"] = {
+                "identity_state": identity_state,
+                "required_joints": list(required_joints),
+                "measurement_count": len(measurement_records),
+                "suppressed_claim_count": sum(1 for claim in claims if claim.status == "unobservable"),
+            }
         return parsed
 
     except Exception as exc:  # noqa: BLE001

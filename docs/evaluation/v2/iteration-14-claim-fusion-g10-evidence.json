@@ -1,0 +1,135 @@
+{
+  "schema_version": "iteration14-claim-fusion-g10-evidence.v1",
+  "iteration": 14,
+  "scope": "Path A, Path B, claim-level fusion, report authority, UX2, and FP2 downstream migration",
+  "verification_head_before_final_commit": "2d7389d9732878b6d1d765422e9bd4b40a9aef8f",
+  "ledger": {
+    "path": "docs/feature-preservation/ledger.json",
+    "schema_version": "feature-preservation.v1",
+    "entry_count": 680,
+    "inventory_fingerprint": "bc7c82a039c014f372a619439592c21020a572c542204ab17cfd27f723450271"
+  },
+  "verified_suites": [
+    {
+      "name": "Path A/B, fusion, report, and authority boundaries",
+      "command": "python -m pytest backend/tests/analysis_v2/test_dependency_boundary.py backend/tests/analysis_v2/test_frontend_import_boundary.py backend/tests/analysis_v2/test_claim_report_authority.py backend/tests/analysis_v2/test_event_fusion_inputs.py backend/tests/analysis_v2/test_persisted_experience_authority.py backend/tests/analysis_v2/test_comparison_facts.py backend/tests/analysis_v2/test_skaters_authority.py backend/tests/analysis_v2/test_v2_report_retry.py backend/tests/test_v2_path_a_target.py backend/tests/test_vision_dual.py backend/tests/test_vision_path_a_prompt.py backend/tests/test_vision_path_a.py backend/tests/test_vision_path_b.py backend/tests/test_prompt_policy.py backend/tests/test_provider_retry.py -q --disable-warnings",
+      "result": "77 passed"
+    },
+    {
+      "name": "Feature-preservation, fingerprints, runtime, and status gates",
+      "command": "python -m pytest backend/tests/analysis_v2/test_feature_preservation.py backend/tests/analysis_v2/test_fingerprints_manifest.py backend/tests/analysis_v2/test_runtime_foundation.py backend/tests/analysis_v2/test_status_contract.py -q --disable-warnings",
+      "result": "26 passed"
+    },
+    {
+      "name": "Frontend authority presenter and provider permission checks",
+      "command": "npx vitest run src/analysis-v2/presenter.test.ts src/api/providerAuth.test.ts src/pages/ApiSettingsPage.test.tsx src/pages/GrowthHomePage.test.tsx src/media/useSynchronizedMediaGroup.test.tsx --reporter=dot",
+      "result": "13 passed"
+    },
+    {
+      "name": "Frontend production build",
+      "command": "npm run build",
+      "result": "tsc and Vite build passed; 307 modules transformed"
+    },
+    {
+      "name": "Static hygiene",
+      "command": "git diff --check; python -m compileall -q backend/app/analysis_v2 backend/app/services/vision_path_a.py backend/app/services/vision_path_b.py backend/app/services/vision_dual.py backend/app/routers/analysis.py",
+      "result": "passed"
+    },
+    {
+      "name": "Standalone analysis-pack V2 adapter",
+      "command": "python ai_skating_analysis_pack/_rebuild.py; python -m pytest -q backend/tests/test_ai_pack_generation.py --disable-warnings; python -m compileall -q ai_skating_analysis_pack/src/app/analysis_v2",
+      "result": "56 files copied, 0 missing; 5 passed; complete top-level V2 parity, dependency audit, and clean-package import smoke passed"
+    },
+    {
+      "name": "Frontend V2 fail-closed workspace checks",
+      "command": "npm test -- --run src/components/KeyframeEvidencePanel.test.tsx src/analysis-v2/presenter.test.ts src/pages/ApiSettingsPage.test.tsx src/api/providerAuth.test.ts",
+      "result": "4 files, 10 tests passed"
+    },
+    {
+      "name": "Golden workspace isolated rerun",
+      "command": "npm test -- --run src/analysis-v2/components/GoldenAnnotationWorkspace.test.tsx",
+      "result": "14 tests passed in isolation"
+    }
+  ],
+  "ux2": {
+    "status": "implemented_with_targeted_evidence",
+    "evidence_scope": "targeted contract, presenter, route-boundary, and permission checks; not a complete visual/responsive/accessibility matrix",
+    "authority": "AnalysisExperienceV2",
+    "covered": [
+      "multi-event summary/timeline and event selection",
+      "key moments, pose/rotation observability, conflict and unobservable states",
+      "single concrete review action and family-safe wording",
+      "report route using the same authority-backed presenter",
+      "parent-only diagnostics and provider controls",
+      "V2 workspace unavailable states fail closed without legacy keyframe/pose fallback"
+    ],
+    "mixed_source_ordinary_ui": "not_found_by_frontend_import_boundary_suite"
+  },
+  "fp2": {
+    "status": "implemented_with_targeted_evidence",
+    "evidence_scope": "targeted same-authority consumer and artifact regression checks; the complete downstream matrix remains a release blocker",
+    "authority": "AnalysisFactsV2 from the same persisted authority as AnalysisExperienceV2",
+    "covered_consumers": [
+      "follow-up chat",
+      "corrections and report regeneration",
+      "training plans and immutable revisions",
+      "comparison",
+      "growth admission/summary",
+      "skills/progress",
+      "snowball memories and suggestions",
+      "monthly/annual facts and artifacts",
+      "shares/exports",
+      "provider/model/prompt fingerprints"
+    ],
+    "boundary_audit": "backend and ordinary frontend raw-field audits passed for the enumerated migrated modules/pages; parent diagnostics and bounded legacy adapters are excluded by design"
+  },
+  "g10": {
+    "status": "not_released",
+    "gate_passed": false,
+    "release_claim": false,
+    "evidence_supported": [
+      "technical report fields are constrained to fused EvidenceClaim records",
+      "unsupported action/timestamp/rotation/technique claims are refused",
+      "claim sources, conflicts, observability, status, and fingerprints are retained",
+      "identity conflicts block affected technical claims",
+      "Path A and Path B failures remain retryable while deterministic evidence is preserved",
+      "same-authority backend/frontend dependency boundaries pass"
+    ],
+    "remaining_release_blockers": [
+      "full Iteration 14 downstream regression matrix has not completed as one isolated, deterministic run",
+      "G9 frozen-candidate evidence is still blocked",
+      "full frontend run had one GoldenAnnotationWorkspace timing failure; the test passed when rerun in isolation"
+    ]
+  },
+  "g9_limitation": {
+    "status": "blocked_waiting_for_frozen_candidate",
+    "evidence_ref": "docs/evaluation/v2/iteration-13-multi-signal-rotation-evidence.json",
+    "release_claim": false,
+    "reason": "No frozen candidate/dataset and no confirmed rotation labels; metrics are diagnostic-only."
+  },
+  "raw_diagnostics_exception": {
+    "allowed": true,
+    "scope": "explicit parent-authorized diagnostics, legacy whole-record adapters, and compatibility readers only",
+    "ordinary_family_pages": "must use AnalysisExperienceV2 and do not use field-level legacy fallback",
+    "path_names_in_family_copy": "not exposed"
+  },
+  "known_test_limitations": [
+    {
+      "area": "frontend full vitest",
+      "result": "153 passed, 1 failed in the full run",
+      "failure": "GoldenAnnotationWorkspace source-frame control lookup timed out under the full concurrent run",
+      "isolated_rerun": "passed",
+      "interpretation": "test-run timing flake; no production build failure"
+    },
+    {
+      "area": "combined backend downstream run",
+      "interpretation": "two failures reproduced only when tests that reload app modules and temporary database settings are combined; each failed test passed in isolation"
+    },
+    {
+      "area": "full backend pytest",
+      "result": "the repository-wide run exceeded the 10-minute execution window and was not counted as passing",
+      "interpretation": "targeted Iteration 14 suites remain the reproducible evidence; no release claim is made from the timed-out full run"
+    }
+  ],
+  "private_data": "none"
+}

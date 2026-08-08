@@ -3,6 +3,7 @@ import type { CompareKeyframePair, CompareVideoSide } from "../api/client";
 import type { IceMediaPlayerHandle } from "./IceMediaPlayer";
 
 type Entry = { player: IceMediaPlayerHandle; side: CompareVideoSide };
+export type SynchronizedTimestampPair = { beforeTimestamp: number | null; afterTimestamp: number | null };
 
 function windowFor(side: CompareVideoSide) {
   const start = side.sync_start ?? side.action_window_start ?? 0;
@@ -46,16 +47,20 @@ export function useSynchronizedMediaGroup(
     activeRef.current = true;
   }, [entries]);
 
-  const seekKeyframe = useCallback((pair: CompareKeyframePair) => {
+  const seekTimestamps = useCallback(({ beforeTimestamp, afterTimestamp }: SynchronizedTimestampPair) => {
     const sides = [
-      { player: beforeRef.current, side: before, timestamp: pair.before.timestamp },
-      { player: afterRef.current, side: after, timestamp: pair.after.timestamp },
+      { player: beforeRef.current, side: before, timestamp: beforeTimestamp },
+      { player: afterRef.current, side: after, timestamp: afterTimestamp },
     ];
     sides.forEach(({ player, side, timestamp }) => {
       if (player && side.available && side.video_url) player.seek(timestamp ?? windowFor(side).start);
     });
     activeRef.current = true;
   }, [after, afterRef, before, beforeRef]);
+
+  const seekKeyframe = useCallback((pair: CompareKeyframePair) => {
+    seekTimestamps({ beforeTimestamp: pair.before.timestamp, afterTimestamp: pair.after.timestamp });
+  }, [seekTimestamps]);
 
   const togglePlayback = useCallback(async () => {
     const current = entries();
@@ -104,5 +109,5 @@ export function useSynchronizedMediaGroup(
     return () => window.clearInterval(timer);
   }, [entries, isPlaying]);
 
-  return { isPlaying, speed, setSpeed, togglePlayback, seekRelative, seekKeyframe };
+  return { isPlaying, speed, setSpeed, togglePlayback, seekRelative, seekKeyframe, seekTimestamps };
 }

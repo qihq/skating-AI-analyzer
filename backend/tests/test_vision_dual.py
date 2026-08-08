@@ -18,6 +18,8 @@ from app.services.analysis_errors import AnalysisErrorCode, AnalysisPipelineErro
 from app.services.llm_context import AnalysisPromptContext
 from app.services.video import FramePayload
 from app.services.vision_dual import analyze_frames_dual, dual_path_summary
+from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2
+from app.analysis_v2.presentation import present_analysis_experience
 
 
 def _payloads(count: int) -> list[FramePayload]:
@@ -76,6 +78,137 @@ def _write_frames(root: Path, count: int = 1) -> list[Path]:
 
 
 class VisionDualTests(unittest.IsolatedAsyncioTestCase):
+    async def test_v2_single_motion_proposal_uses_one_canonical_presenter_event(self) -> None:
+        """The ordinary one-event path must not render proposal + canonical duplicates."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths = _write_frames(root, 1)
+            provider = SimpleNamespace(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model_id="model",
+                fingerprint="provider:fixture",
+            )
+            motion = {
+                "window_end": 2.0,
+                "selected": [{"frame_id": "frame_0001", "source_thumb_index": 10, "timestamp": 1.0, "motion_score": 0.9}],
+            }
+            lock = {
+                "status": "auto_locked",
+                "selected_bbox": {"x": .25, "y": .2, "width": .25, "height": .6},
+            }
+            policy = {
+                "identity_state": "confirmed",
+                "crop_bbox": (.25, .2, .25, .6),
+                "context_before_sec": .5,
+                "context_after_sec": .5,
+                "includes_travel_context": True,
+                "includes_ice_contact_context": True,
+                "target_marking": "tracked_bbox_overlay",
+            }
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+            ):
+                result = await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(1),
+                    pose_data=None,
+                    bio_data=None,
+                    provider_path_a=provider,
+                    provider_path_b=provider,
+                    annotated_dir=root / "annotated",
+                    frame_motion_scores=motion,
+                    analysis_profile="jump",
+                    v2_mode=True,
+                    analysis_id="analysis-single",
+                    target_lock=lock,
+                    target_clip_policy=policy,
+                    identity_state="confirmed",
+                )
+
+        assert result.dual_path_meta["event_proposal_count"] == 1
+        assert result.dual_path_meta["event_ids"] == ["analysis-single:event:0"]
+        assert result.fused_claims
+        assert all(claim.event_id in {"analysis-single:event:0", None} for claim in result.fused_claims)
+        facts = AnalysisFactsV2(
+            analysis_id="analysis-single",
+            authority="v2",
+            facts=tuple(
+                AnalysisFactV2(
+                    analysis_id=claim.analysis_id or "analysis-single",
+                    event_id=claim.event_id,
+                    claim_type=claim.claim_type,
+                    value=claim.value,
+                    authority="v2",
+                    source_pipeline_fingerprint=str(claim.source_fingerprints.get("fusion") or "sha256:fixture"),
+                    definition_version=claim.definition_version,
+                    compatibility_group=claim.compatibility_group,
+                    unit=claim.unit,
+                    convention=claim.convention,
+                    status=claim.status,
+                    observability={"observed": "observable", "partial": "partially_observable", "unobservable": "unobservable"}[claim.observability],
+                    confidence=claim.confidence,
+                    sources=claim.sources,
+                    conflicts=claim.conflicts,
+                    source_fingerprints=claim.source_fingerprints,
+                    provenance=claim.provenance,
+                    source_references=claim.source_references,
+                )
+                for claim in result.fused_claims
+            ),
+        )
+        rendered = present_analysis_experience({
+            "id": "analysis-single",
+            "facts_authority": "v2",
+            "source_fact_hash": facts.source_fact_hash,
+            "analysis_facts": {"schema_version": "analysis-facts.v2", **facts.model_dump(mode="json")},
+        })
+        assert [event.event_id for event in rendered.events] == ["analysis-single:event:0"]
+
+    async def test_v2_multi_motion_proposals_keep_order_and_scope_exact_key_moments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_paths = _write_frames(root, 4)
+            payloads = _payloads(4)
+            provider = SimpleNamespace(
+                api_key="key", base_url="https://example.com/v1", model_id="model", fingerprint="provider:fixture"
+            )
+            motion = {
+                "window_end": 8.0,
+                "selected": [
+                    {"frame_id": "frame_0001", "source_thumb_index": 10, "timestamp": 1.0, "motion_score": .9},
+                    {"frame_id": "frame_0002", "source_thumb_index": 11, "timestamp": 1.2, "motion_score": .8},
+                    {"frame_id": "frame_0003", "source_thumb_index": 40, "timestamp": 4.0, "motion_score": .95},
+                    {"frame_id": "frame_0004", "source_thumb_index": 41, "timestamp": 4.2, "motion_score": .85},
+                ],
+            }
+            bio = {
+                "key_frames": {"T": "frame_0001", "A": "frame_0003"},
+                "key_frame_timestamps": {"T": 1.1, "A": 4.1},
+            }
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=AsyncMock(return_value=_path_a_result())),
+                patch("app.services.vision_dual.analyze_path_b", new=AsyncMock(return_value=_path_b_result())),
+            ):
+                result = await analyze_frames_dual(
+                    "jump", frame_paths, payloads, None, bio, provider, provider,
+                    annotated_dir=root / "annotated", frame_motion_scores=motion,
+                    analysis_profile="jump", v2_mode=True, analysis_id="analysis-multi",
+                )
+
+        assert result.dual_path_meta["event_proposal_count"] == 2
+        proposal_ids = result.dual_path_meta["event_ids"]
+        assert len(proposal_ids) == 2
+        assert result.fused_claims
+        moment_claims = [claim for claim in result.fused_claims if claim.claim_type == "key_moment"]
+        assert len(moment_claims) == 2
+        assert [claim.event_id for claim in moment_claims] == proposal_ids
+        action_claims = [claim for claim in result.fused_claims if claim.claim_type == "action_profile"]
+        assert len(action_claims) == 1
+        assert action_claims[0].event_id is None
+
     async def test_happy_path_and_summary_are_json_serializable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             frame_paths = _write_frames(Path(tmp), 1)
@@ -504,6 +637,66 @@ class VisionDualTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(mock_b.await_args.kwargs["skill_category"], "前进燕式")
 
+
+    async def test_v2_reviewers_do_not_receive_legacy_prompt_context(self) -> None:
+        """V2 Path A/B inputs stay inside their dedicated contracts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_paths = _write_frames(Path(tmp), 1)
+            provider = SimpleNamespace(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model_id="model",
+                fingerprint="provider:fixture",
+            )
+            context = AnalysisPromptContext(
+                action_type="jump",
+                action_subtype="Axel",
+                skill_category="jump",
+                analysis_profile="jump",
+                profile_evidence={"sentinel": "LEGACY_PROFILE_SENTINEL"},
+                motion_features={"sentinel": "LEGACY_MOTION_SENTINEL"},
+                bio_data={"sentinel": "LEGACY_BIO_SENTINEL"},
+                user_note="LEGACY_NOTE_SENTINEL",
+                memory_context="LEGACY_MEMORY_SENTINEL",
+            )
+            mock_a = AsyncMock(return_value=_path_a_result())
+            mock_b = AsyncMock(return_value=_path_b_result())
+            policy = {
+                "identity_state": "confirmed",
+                "crop_bbox": (.25, .2, .25, .6),
+                "context_before_sec": .5,
+                "context_after_sec": .5,
+                "includes_travel_context": True,
+                "includes_ice_contact_context": True,
+                "target_marking": "tracked_bbox_overlay",
+            }
+            with (
+                patch("app.services.vision_dual.analyze_path_a", new=mock_a),
+                patch("app.services.vision_dual.analyze_path_b", new=mock_b),
+            ):
+                await analyze_frames_dual(
+                    "jump",
+                    frame_paths,
+                    _payloads(1),
+                    pose_data=None,
+                    bio_data={"key_frame_candidates": {}},
+                    provider_path_a=provider,
+                    provider_path_b=provider,
+                    prompt_context=context,
+                    structured_measurements={
+                        "knee_angle": {"value": 42, "provenance": "measured", "joint": "knee"},
+                    },
+                    required_joints=("knee",),
+                    annotated_dir=Path(tmp) / "annotated",
+                    v2_mode=True,
+                    analysis_id="analysis-prompt-boundary",
+                    target_lock={"status": "confirmed", "selected_bbox": {"x": .25, "y": .2, "width": .25, "height": .6}},
+                    target_clip_policy=policy,
+                    identity_state="confirmed",
+                )
+
+        self.assertEqual(mock_a.await_args.kwargs["memory_context"], "")
+        self.assertEqual(mock_b.await_args.kwargs["memory_context"], "")
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,12 @@ from app.services.video import FramePayload
 from app.services.vision import normalize_vision_payload
 from app.services.vision_prompt_templates import build_specialized_vision_prompt
 from app.services.vision_video_context import format_video_context_prompt_block, video_context_label
+from app.analysis_v2.path_review import (
+    TargetClipPolicy,
+    build_path_a_v2_prompt,
+    normalize_path_a_review,
+    target_clip_policy_from,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -235,6 +241,9 @@ async def analyze_path_a(
     window_start_sec: float = 0.0,
     skill_category: str | None = None,
     video_context_by_frame: dict[str, dict[str, Any]] | None = None,
+    v2_mode: bool = False,
+    target_clip_policy: dict[str, Any] | TargetClipPolicy | None = None,
+    source_fingerprints: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Path A: pure vision analysis, called opt-in by the host.
@@ -251,19 +260,25 @@ async def analyze_path_a(
         PATH_A_MAX_TOKENS_BASE + n_frames * PATH_A_MAX_TOKENS_FRAME,
     )
 
-    system_prompt, user_text = _build_specialized_prompts(
+    if v2_mode:
+        system_prompt, user_text = build_path_a_v2_prompt(
+            action_family=analysis_profile or action_type,
+            target_policy=target_clip_policy,
+        )
+    else:
+        system_prompt, user_text = _build_specialized_prompts(
         action_type,
         action_subtype,
         analysis_profile,
         motion_features,
         skill_category=skill_category,
         output_mode="video" if mode == "video" and clip_path is not None else "frames",
-    )
+        )
     context_block = format_video_context_prompt_block(
         video_context_by_frame,
         include_skeleton_provenance=False,
         output_mode="video" if mode == "video" and clip_path is not None else "frames",
-    )
+    ) if not v2_mode else ""
     if context_block:
         user_text = f"{user_text}{context_block}"
     if memory_context:
@@ -306,17 +321,30 @@ async def analyze_path_a(
                 "path_desc": "纯视觉判断（Qwen-VL 视频模式）",
                 "vision_mode": "video",
             }
+            if v2_mode:
+                normalized["v2_mode"] = True
+                normalized["target_clip_policy"] = target_clip_policy_from(target_clip_policy).__dict__ if hasattr(target_clip_policy_from(target_clip_policy), "__dict__") else {
+                    "identity_state": target_clip_policy_from(target_clip_policy).identity_state,
+                    "target_marking": target_clip_policy_from(target_clip_policy).target_marking,
+                }
+                normalized["evidence_claims"] = [claim.model_dump(mode="json") for claim in normalize_path_a_review(parsed, source_fingerprints=source_fingerprints, target_policy=target_clip_policy)]
             return normalized
         except Exception as exc:  # noqa: BLE001
             logger.warning("Path A native video mode failed, falling back to frames: %s", exc)
-            system_prompt, user_text = _build_specialized_prompts(
-                action_type,
-                action_subtype,
-                analysis_profile,
-                motion_features,
-                skill_category=skill_category,
-                output_mode="frames",
-            )
+            if v2_mode:
+                system_prompt, user_text = build_path_a_v2_prompt(
+                    action_family=analysis_profile or action_type,
+                    target_policy=target_clip_policy,
+                )
+            else:
+                system_prompt, user_text = _build_specialized_prompts(
+                    action_type,
+                    action_subtype,
+                    analysis_profile,
+                    motion_features,
+                    skill_category=skill_category,
+                    output_mode="frames",
+                )
             context_block = format_video_context_prompt_block(
                 video_context_by_frame,
                 include_skeleton_provenance=False,
@@ -329,10 +357,16 @@ async def analyze_path_a(
 
     content: list[dict[str, object]] = [{"type": "text", "text": user_text}]
     for frame in frame_payloads:
-        content.append({"type": "text", "text": f"帧编号：{frame.frame_id} | 时间：{frame.timestamp_sec:.2f}s"})
-        context_label = video_context_label(frame.frame_id, video_context_by_frame)
-        if context_label:
-            content.append({"type": "text", "text": context_label})
+        # V2 Path A receives marked target imagery only.  Frame IDs, source
+        # timestamps, and temporal context are deterministic authority fields;
+        # exposing them here would let the reviewer become an accidental timing
+        # or key-moment authority.  Legacy frame mode keeps its compatibility
+        # labels unchanged.
+        if not v2_mode:
+            content.append({"type": "text", "text": f"帧编号：{frame.frame_id} | 时间：{frame.timestamp_sec:.2f}s"})
+            context_label = video_context_label(frame.frame_id, video_context_by_frame)
+            if context_label:
+                content.append({"type": "text", "text": context_label})
         content.append({"type": "image_url", "image_url": {"url": frame.data_url}})
 
     raw = await request_text_completion(
@@ -350,6 +384,20 @@ async def analyze_path_a(
     parsed = await _parse_or_repair_path_a_payload(provider, raw, max_tokens=max_tokens, output_mode="frames")
 
     normalized = _normalize_path_a_payload(parsed, frame_payloads)
+    if v2_mode:
+        policy = target_clip_policy_from(target_clip_policy)
+        normalized["v2_mode"] = True
+        normalized["target_clip_policy"] = {
+            "identity_state": policy.identity_state,
+            "target_id": policy.target_id,
+            "target_marking": policy.target_marking,
+            "context_before_sec": policy.context_before_sec,
+            "context_after_sec": policy.context_after_sec,
+            "includes_travel_context": policy.includes_travel_context,
+            "includes_ice_contact_context": policy.includes_ice_contact_context,
+            "policy_errors": list(policy.validate()),
+        }
+        normalized["evidence_claims"] = [claim.model_dump(mode="json") for claim in normalize_path_a_review(parsed, source_fingerprints=source_fingerprints, target_policy=target_clip_policy)]
     if mode == "video" and clip_path is not None:
         flags = normalized.get("quality_flags") if isinstance(normalized.get("quality_flags"), list) else []
         if "vision_fallback_to_frames" not in flags:

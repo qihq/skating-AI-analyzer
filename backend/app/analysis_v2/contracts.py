@@ -739,13 +739,35 @@ class RotationEstimate(ContractModel):
 
 class EvidenceClaim(ContractModel):
     schema_version: Literal["evidence-claim.v1"] = "evidence-claim.v1"
+    # Optional identity fields make the low-level claim contract usable by the
+    # claim-fusion/reporting layer while preserving the original diagnostics
+    # shape used by Iterations 0-13.
+    analysis_id: str | None = None
+    event_id: str | None = None
     claim_type: str = Field(min_length=1)
     value: Any
+    definition_version: str = "evidence-claim.v1"
+    unit: str | None = None
+    convention: str | None = None
+    compatibility_group: str | None = None
     sources: tuple[str, ...] = ()
+    source_references: tuple[str, ...] = ()
+    source_fingerprints: dict[str, str] = Field(default_factory=dict)
+    # Measurement/review provenance is intentionally lightweight here.  It is
+    # distinct from ``sources`` (which identifies semantic paths) and lets a
+    # fused claim retain measured/smoothed/interpolated/missing/refused state
+    # without exposing raw legacy payloads to downstream consumers.
+    provenance: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
+    alternatives: tuple[dict[str, Any], ...] = ()
+    selected_source: str | None = None
     confidence: float = Field(ge=0, le=1)
     observability: Literal["observed", "partial", "unobservable"]
     status: Literal["confirmed", "uncertain", "unobservable"]
+    authority: Literal["legacy", "v2"] | None = None
+    source_fact_hash: str | None = None
+    refusal_reason: str | None = None
+    review_task: str | None = None
     model_fingerprint: str | None = None
     configuration_fingerprint: str | None = None
     prompt_fingerprint: str | None = None
@@ -755,6 +777,21 @@ class EvidenceClaim(ContractModel):
     def valid_status(self) -> "EvidenceClaim":
         if self.status == "unobservable" and self.confidence != 0:
             raise ValueError("unobservable claim confidence must be zero")
+        if self.status == "unobservable" and self.value is not None:
+            raise ValueError("unobservable claim cannot carry a value")
+        if self.observability == "unobservable" and self.status != "unobservable":
+            raise ValueError("unobservable evidence must use unobservable status")
+        if self.observability == "partial" and self.status == "confirmed":
+            # A partially observable claim may still carry a useful candidate,
+            # but it must not be presented as confirmed evidence.
+            object.__setattr__(self, "status", "uncertain")
+        if self.status == "uncertain" and self.observability == "unobservable" and self.confidence != 0:
+            raise ValueError("unobservable uncertain claims must have zero confidence")
+        if self.authority == "v2" and not self.source_fingerprints and not self.source_fact_hash:
+            # A V2 claim must be traceable.  The fusion layer normally adds a
+            # source fingerprint; this guard prevents accidental anonymous V2
+            # claims from reaching downstream consumers.
+            raise ValueError("V2 evidence claims require source fingerprints")
         return self
 
 

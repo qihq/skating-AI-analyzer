@@ -29,6 +29,7 @@ const SkillTreePage = lazy(() => import("./pages/SkillTreePage"));
 const SnowballPage = lazy(() => import("./pages/SnowballPage"));
 const TargetSelectionPage = lazy(() => import("./pages/TargetSelectionPage"));
 const ModernAnalysisDetail = lazy(() => import("./modern/ModernAnalysisDetail"));
+const AnalysisExperienceReport = lazy(() => import("./analysis-v2/components/AnalysisExperienceReport"));
 const ModernTodayIsland = lazy(() => import("./modern/ModernTodayIsland"));
 
 function ScrollToTopOnRouteChange() {
@@ -148,7 +149,8 @@ export default function App() {
           <Route path="/compare/results/:comparison_id" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
           <Route path="/compare/:id_a/:id_b" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
           <Route path="/analysis/:id" element={<ModernAnalysisDetail />} />
-          <Route path="/report/:id" element={<ThemedPage classic={<ReportPage />} modern={<ModernAnalysisDetail initialView="summary" />} />} />
+          {/* Ordinary report/history links use one authority-backed presenter in both themes. */}
+          <Route path="/report/:id" element={<AnalysisExperienceReport />} />
           <Route path="/report/:id/workspace" element={<ThemedPage classic={<ReportWorkspacePage />} modern={<ModernAnalysisDetail />} />} />
           <Route path="/report/:id/pose-debug" element={<ThemedPage classic={<PoseDebugPage />} modern={<ModernAnalysisDetail initialView="more" />} />} />
           <Route path="/report/:id/target" element={<ThemedPage classic={<TargetSelectionPage />} modern={<ModernReviewSpace title="确认主滑行者" description="确认这次要分析的滑行者，然后继续生成同一份复盘。"><TargetSelectionPage hideHeader /></ModernReviewSpace>} />} />

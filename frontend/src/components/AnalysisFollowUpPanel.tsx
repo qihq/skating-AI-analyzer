@@ -25,6 +25,7 @@ import { exportShareDocument } from "../utils/shareExport";
 import IslandShareDialog from "../modern/IslandShareDialog";
 import {
   buildKeyframeEvidenceItems,
+  buildExperienceKeyframeEvidenceItems,
   buildSemanticKeyframeEvidenceItems,
   formatKeyframeTimestamp,
   keyframeConfidenceLabel,
@@ -34,6 +35,8 @@ import RetryAnalysisConfirmSheet from "./RetryAnalysisConfirmSheet";
 import CorrectionKeyframeReview from "./CorrectionKeyframeReview";
 import { Button, Loading } from "../modern/AnimalUi";
 import SubmitButton from "../modern/SubmitButton";
+import { useAppMode } from "./AppModeContext";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
 
 const QUICK_PROMPTS = [
   "我的 comments 有没有被考虑？",
@@ -59,6 +62,8 @@ type ToolTab = "keyframes" | "form" | "corrections";
 
 type AnalysisFollowUpPanelProps = {
   analysis: AnalysisDetail | null;
+  experience?: AnalysisExperienceV2 | null;
+  selectedEventId?: string | null;
   compact?: boolean;
   variant?: "card" | "workspace";
   onAnalysisRefresh?: () => void | Promise<void>;
@@ -66,15 +71,41 @@ type AnalysisFollowUpPanelProps = {
   onNotice?: (message: string) => void;
 };
 
-function createDefaultManualForm(analysis: AnalysisDetail | null): ManualFormState {
+function createDefaultManualForm(analysis: AnalysisDetail | null, experience?: AnalysisExperienceV2 | null): ManualFormState {
+  const actionLabel = experienceActionLabel(experience);
+  // A V2 record remains V2-authoritative while the experience envelope is
+  // loading or unavailable.  Legacy action fields are only a compatibility
+  // projection for wholly legacy records; using them here would let a V2
+  // correction form display a mixed-source identity.
+  const useLegacyFields = !experience && analysis?.facts_authority !== "v2";
   return {
-    actionType: analysis?.action_type ?? "",
-    actionSubtype: analysis?.action_subtype ?? "",
+    actionType: useLegacyFields ? (analysis?.action_type ?? "") : "",
+    actionSubtype: experience ? actionLabel : useLegacyFields ? (analysis?.action_subtype ?? "") : "",
     takeoffFrame: "",
     apexFrame: "",
     landingFrame: "",
     rationale: "",
   };
+}
+
+function experienceActionLabel(experience: AnalysisExperienceV2 | null | undefined): string {
+  const claim = experience?.claims.find((item) => ["action_label", "action_confirmation", "action_profile", "action_family"].includes(item.claimType) && item.status === "confirmed" && item.observability === "observable");
+  if (!claim) return "当前复盘";
+  if (claim.value && typeof claim.value === "object") {
+    const value = claim.value as Record<string, unknown>;
+    return String(value.confirmed_action ?? value.action_label ?? value.action_family ?? "当前复盘");
+  }
+  return String(claim.value ?? "当前复盘");
+}
+
+function experienceKeyFrames(experience: AnalysisExperienceV2 | null | undefined): Array<[string, unknown]> {
+  return experience?.claims
+    .filter((claim) => claim.claimType === "key_moment" && claim.status !== "unobservable")
+    .map((claim) => {
+      const value = claim.value && typeof claim.value === "object" ? claim.value as Record<string, unknown> : {};
+      return [String(value.phase ?? value.semantic_key ?? "moment"), value.frame ?? value.timestamp ?? claim.value] as [string, unknown];
+    })
+    .filter(([, value]) => value != null && value !== "") ?? [];
 }
 
 function correctionTitle(correction: AnalysisCorrection) {
@@ -133,7 +164,15 @@ function statusClass(status: string) {
   return "bg-amber-50 text-amber-600";
 }
 
-function currentKeyFrames(analysis: AnalysisDetail | null) {
+function currentKeyFrames(analysis: AnalysisDetail | null, experience?: AnalysisExperienceV2 | null) {
+  if (experience) return experienceKeyFrames(experience);
+  // A V2 record remains V2-authoritative even while its experience request is
+  // loading or unavailable.  Do not repopulate the correction UI from the
+  // legacy biomechanics dictionary, which would create a field-level mixed
+  // source view.  The caller renders an empty/unavailable state instead.
+  if (analysis?.facts_authority === "v2") {
+    return [];
+  }
   const keyFrames = analysis?.bio_data?.key_frames;
   if (!keyFrames) {
     return [];
@@ -149,12 +188,12 @@ function frameValue(value: unknown) {
   return value == null ? "" : String(value);
 }
 
-function extractSuggestionForm(correction: AnalysisCorrection, analysis: AnalysisDetail | null): SuggestedFormState | null {
+function extractSuggestionForm(correction: AnalysisCorrection, analysis: AnalysisDetail | null, experience?: AnalysisExperienceV2 | null): SuggestedFormState | null {
   if (correction.status !== "proposed" || correction.source !== "chat_suggestion") {
     return null;
   }
   const payload = correction.payload;
-  const base = createDefaultManualForm(analysis);
+  const base = createDefaultManualForm(analysis, experience);
   if (correction.kind === "action_label") {
     const confirmation = payload.action_confirmation && typeof payload.action_confirmation === "object" ? payload.action_confirmation as Record<string, unknown> : {};
     const actionSubtype = String(payload.action_subtype ?? confirmation.confirmed_action ?? confirmation.jump_type ?? base.actionSubtype ?? "");
@@ -201,16 +240,16 @@ function mergeSuggestionForm(current: ManualFormState, suggestion: SuggestedForm
   };
 }
 
-function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: AnalysisDetail | null): SuggestedFormState | null {
+function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: AnalysisDetail | null, experience?: AnalysisExperienceV2 | null): SuggestedFormState | null {
   const suggestions = corrections
-    .map((correction) => extractSuggestionForm(correction, analysis))
+    .map((correction) => extractSuggestionForm(correction, analysis, experience))
     .filter((suggestion): suggestion is SuggestedFormState => Boolean(suggestion));
   if (!suggestions.length) {
     return null;
   }
   const merged = suggestions.reduce<ManualFormState>(
     (current, suggestion) => mergeSuggestionForm(current, suggestion),
-    createDefaultManualForm(analysis),
+    createDefaultManualForm(analysis, experience),
   );
   return {
     ...merged,
@@ -218,9 +257,9 @@ function buildSuggestedForm(corrections: AnalysisCorrection[], analysis: Analysi
   };
 }
 
-function keyframePayload(correction: AnalysisCorrection) {
+function keyframePayload(correction: AnalysisCorrection): Record<string, unknown> {
   return correction.payload.key_frames && typeof correction.payload.key_frames === "object"
-    ? correction.payload.key_frames
+    ? correction.payload.key_frames as Record<string, unknown>
     : {};
 }
 
@@ -251,16 +290,43 @@ function keyframeCardSourceLabel(correction: AnalysisCorrection) {
 
 function CorrectionKeyframePreview({
   analysis,
+  experience,
+  selectedEventId,
   correction,
   layout = "workspace",
 }: {
   analysis: AnalysisDetail;
+  experience?: AnalysisExperienceV2 | null;
+  selectedEventId?: string | null;
   correction: AnalysisCorrection;
   layout?: "workspace" | "sidebar";
 }) {
   const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
   const sourceLabel = keyframeCardSourceLabel(correction);
   const items = useMemo(() => {
+    if (experience) {
+      const base = buildExperienceKeyframeEvidenceItems(experience, selectedEventId);
+      const payload = hasKeyframePayload(correction) ? keyframePayload(correction) : null;
+      if (!payload) return base;
+      return base.map((item) => {
+        const value = payload[item.key];
+        if (value == null || value === "") return item;
+        const record = value && typeof value === "object" ? value as Record<string, unknown> : null;
+        const frame = record?.frame_id ?? record?.frame ?? value;
+        const timestamp = typeof record?.timestamp === "number" ? record.timestamp : item.timestamp;
+        return {
+          ...item,
+          value: String(frame),
+          frameId: String(frame),
+          timestamp,
+          source: sourceLabel,
+          status: "confirmed",
+        };
+      });
+    }
+    // Do not rebuild a V2 correction preview from the legacy keyframe
+    // dictionaries when the same-authority experience is unavailable.
+    if (analysis.facts_authority === "v2") return [];
     if (hasKeyframePayload(correction)) {
       return buildKeyframeEvidenceItems(analysis, keyframePayload(correction), sourceLabel);
     }
@@ -268,7 +334,7 @@ function CorrectionKeyframePreview({
       ? correction.payload.selected_semantic_frames
       : [];
     return buildSemanticKeyframeEvidenceItems(analysis, selected, sourceLabel);
-  }, [analysis, correction, sourceLabel]);
+  }, [analysis, correction, experience, selectedEventId, sourceLabel]);
   const availableCount = items.filter((item) => item.value).length;
   const gridClass = layout === "workspace" ? "grid gap-2 tablet:grid-cols-3" : "grid gap-2";
 
@@ -390,13 +456,14 @@ function buildChatShareDocument(share: AnalysisChatShareResponse) {
     filename: `icebuddy-chat-${String(payload.analysis_id ?? "share").slice(0, 8)}.jpg`,
   };
 }
-export default function AnalysisFollowUpPanel({ analysis, compact = false, variant = "card", onAnalysisRefresh, onAnalysisRetryQueued, onNotice }: AnalysisFollowUpPanelProps) {
+export default function AnalysisFollowUpPanel({ analysis, experience = null, selectedEventId = null, compact = false, variant = "card", onAnalysisRefresh, onAnalysisRetryQueued, onNotice }: AnalysisFollowUpPanelProps) {
+  const { parentPin } = useAppMode();
   const [messages, setMessages] = useState<AnalysisChatMessage[]>([]);
   const [corrections, setCorrections] = useState<AnalysisCorrection[]>([]);
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [input, setInput] = useState("");
-  const [manualForm, setManualForm] = useState<ManualFormState>(() => createDefaultManualForm(analysis));
+  const [manualForm, setManualForm] = useState<ManualFormState>(() => createDefaultManualForm(analysis, experience));
   const [manualFormDirty, setManualFormDirty] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<SuggestedFormState | null>(null);
   const [syncedSuggestionId, setSyncedSuggestionId] = useState<string | null>(null);
@@ -431,18 +498,22 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
   );
 
   useEffect(() => {
-    setManualForm(createDefaultManualForm(analysis));
+    setManualForm(createDefaultManualForm(analysis, experience));
     setManualFormDirty(false);
     setPendingSuggestion(null);
     setSyncedSuggestionId(null);
     setActiveToolTab("keyframes");
-  }, [analysis?.id, analysis?.action_type, analysis?.action_subtype]);
+  }, [analysis?.id, experience?.sourcePipelineFingerprint, experience?.analysisId]);
 
   useEffect(() => {
     let cancelled = false;
     const loadProviders = async () => {
+      if (!parentPin) {
+        setProviders([]);
+        return;
+      }
       try {
-        const data = await fetchProviders();
+        const data = await fetchProviders(parentPin);
         if (!cancelled) {
           setProviders(data);
         }
@@ -456,7 +527,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [parentPin]);
 
   useEffect(() => {
     if (!selectedProviderId || reportProviders.some((provider) => provider.id === selectedProviderId)) {
@@ -537,7 +608,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
   };
 
   useEffect(() => {
-    const latestSuggestion = buildSuggestedForm(corrections, analysis);
+    const latestSuggestion = buildSuggestedForm(corrections, analysis, experience);
     if (!latestSuggestion || latestSuggestion.sourceCorrectionId === syncedSuggestionId) {
       return;
     }
@@ -552,7 +623,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     setManualFormDirty(false);
     setSyncedSuggestionId(latestSuggestion.sourceCorrectionId);
     setActiveToolTab("form");
-  }, [analysis, corrections, manualFormDirty, syncedSuggestionId]);
+  }, [analysis, corrections, experience, manualFormDirty, syncedSuggestionId]);
 
   const submitMessage = async (rawMessage: string) => {
     const message = rawMessage.trim();
@@ -574,7 +645,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
     setError(null);
     setIsSending(true);
     try {
-      const response = await sendAnalysisChatMessage(analysisId, message, selectedProviderId || null);
+      const response = await sendAnalysisChatMessage(analysisId, message, selectedProviderId || null, selectedEventId);
       setMessages(response.messages);
       setInput("");
       if (response.suggested_action?.kind === "full_video_reanalysis") {
@@ -977,7 +1048,7 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
                   理由：{correction.rationale}
                 </p>
               ) : null}
-              {correction.kind === "keyframes" ? <CorrectionKeyframePreview analysis={analysis} correction={correction} layout={isWorkspace ? "workspace" : "sidebar"} /> : null}
+              {correction.kind === "keyframes" ? <CorrectionKeyframePreview analysis={analysis} experience={experience} selectedEventId={selectedEventId} correction={correction} layout={isWorkspace ? "workspace" : "sidebar"} /> : null}
               {correction.status === "proposed" ? (
                 <div className="mt-2 flex gap-2 border-t border-slate-200 pt-2">
                   <SubmitButton
@@ -1013,6 +1084,8 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
       {activeToolTab === "keyframes" ? (
         <KeyframeEvidencePanel
           analysis={analysis}
+          experience={experience}
+          selectedEventId={selectedEventId}
           draftKeyframes={draftKeyframes}
           onSyncFrames={syncKeyframesToForm}
           layout={isWorkspace ? "wide" : "sidebar"}
@@ -1183,9 +1256,9 @@ export default function AnalysisFollowUpPanel({ analysis, compact = false, varia
                 <h3 className="text-sm font-semibold text-slate-900">有效识别</h3>
                 {appliedCorrections.length ? <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-600">已人工修正</span> : null}
               </div>
-              <p className="mt-3 text-sm leading-6 text-slate-600">{analysis.action_subtype || analysis.action_type}</p>
+              <p className="mt-3 text-sm leading-6 text-slate-600">{experienceActionLabel(experience)}</p>
               <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                {currentKeyFrames(analysis).map(([key, value]) => (
+                {currentKeyFrames(analysis, experience).map(([key, value]) => (
                   <span key={key} className="rounded-full bg-slate-100 px-3 py-1">{key}: {String(value)}</span>
                 ))}
               </div>

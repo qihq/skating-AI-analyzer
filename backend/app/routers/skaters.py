@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Load
+from sqlalchemy.orm import load_only
 
 from app.database import DATA_DIR, UPLOADS_DIR, get_session, run_db_read_with_retry
 from app.models import Analysis, Skater, TrainingSession
@@ -38,6 +38,7 @@ from app.schemas import (
 from app.services.archive_policy import build_storage_stats, create_manual_backup, list_backups, restore_backup
 from app.services.growth_summary import build_growth_summary
 from app.services.skills import build_learning_path, get_skater_skill_payloads, lock_skill, unlock_skill
+from app.analysis_v2.fact_consumers import consumer_for_analysis
 
 
 router = APIRouter(prefix="/api/skaters", tags=["skaters"])
@@ -60,10 +61,30 @@ def directory_size_bytes(path: Path) -> int:
 
 
 def build_report_snippet(analysis: Analysis) -> str:
-    if analysis.report and isinstance(analysis.report, dict):
-        summary = str(analysis.report.get("summary", "")).strip()
-        if summary:
-            return summary[:120]
+    # Resolve one authority at the presentation boundary.  Ordinary archive
+    # cards must never select a V2 fact beside a legacy report dictionary.
+    try:
+        consumer = consumer_for_analysis(analysis, "family_display")
+    except (TypeError, ValueError):
+        consumer = None
+    if getattr(analysis, "facts_authority", None) == "v2" and (consumer is None or consumer.authority != "v2"):
+        # Explicit V2 metadata with a missing/malformed envelope means the
+        # family authority is unavailable; do not let the compatibility
+        # adapter silently project legacy report/note fields.
+        consumer = None
+    if consumer is not None:
+        summary_fact = next(
+            (fact for fact in consumer.facts if fact.claim_type == "report_summary" and fact.value),
+            None,
+        )
+        if summary_fact is not None:
+            summary = str(summary_fact.value).strip()
+            if summary:
+                return summary[:120]
+    if (consumer is not None and consumer.authority == "v2") or getattr(analysis, "facts_authority", None) == "v2":
+        # A V2 record with no eligible summary is explicitly unavailable;
+        # never fall through to a legacy note/report field.
+        return "暂无可用报告摘要。"
     if analysis.error_message:
         return f"分析失败：{analysis.error_message}"[:120]
     if analysis.note:
@@ -71,11 +92,108 @@ def build_report_snippet(analysis: Analysis) -> str:
     return "暂无报告摘要。"
 
 
+def _analysis_consumer(analysis: Analysis):
+    try:
+        consumer = consumer_for_analysis(analysis, "family_display")
+    except (TypeError, ValueError):
+        return None
+    if getattr(analysis, "facts_authority", None) == "v2" and consumer.authority != "v2":
+        return None
+    return consumer
+
+
+def _fact_value(analysis: Analysis, claim_types: set[str]) -> Any:
+    consumer = _analysis_consumer(analysis)
+    if consumer is None:
+        return None
+    for fact in consumer.facts:
+        if fact.claim_type in claim_types and fact.value is not None:
+            return fact.value
+    return None
+
+
+def _family_action_type(analysis: Analysis) -> str:
+    consumer = _analysis_consumer(analysis)
+    if consumer is None:
+        return "动作未确认" if getattr(analysis, "facts_authority", None) == "v2" else analysis.action_type
+    if consumer.authority == "legacy":
+        return analysis.action_type
+    value = _fact_value(analysis, {"action_profile", "action_family"})
+    return str(value).strip() if value is not None and str(value).strip() else "动作未确认"
+
+
+def _family_action_subtype(analysis: Analysis) -> str | None:
+    consumer = _analysis_consumer(analysis)
+    if consumer is None:
+        return None if getattr(analysis, "facts_authority", None) == "v2" else analysis.action_subtype
+    if consumer.authority == "legacy":
+        return analysis.action_subtype
+    value = _fact_value(analysis, {"action_label", "action_confirmation"})
+    if isinstance(value, dict):
+        value = value.get("confirmed_action") or value.get("action_label")
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _family_force_score(analysis: Analysis) -> int | None:
+    value = _fact_value(analysis, {"force_score", "quality_score", "score"})
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(round(float(value)))
+    return None
+
+
+def _archive_analysis_fields(analysis: Analysis) -> dict[str, Any]:
+    return {
+        "action_type": _family_action_type(analysis),
+        "action_subtype": _family_action_subtype(analysis),
+        "force_score": _family_force_score(analysis),
+        "report_snippet": build_report_snippet(analysis),
+    }
+
+
+ARCHIVE_ANALYSIS_COLUMNS = (
+    Analysis.id,
+    Analysis.skater_id,
+    Analysis.session_id,
+    Analysis.skill_category,
+    Analysis.action_type,
+    Analysis.action_subtype,
+    Analysis.status,
+    Analysis.pipeline_version,
+    Analysis.report,
+    Analysis.analysis_facts,
+    Analysis.facts_authority,
+    Analysis.facts_schema_version,
+    Analysis.source_fact_hash,
+    Analysis.source_fact_revision,
+    Analysis.source_pipeline_fingerprint,
+    Analysis.force_score,
+    Analysis.error_message,
+    Analysis.note,
+    Analysis.bio_data,
+    Analysis.frame_motion_scores,
+    Analysis.cross_validation,
+    Analysis.highlight_quote,
+    Analysis.quote_speaker,
+    Analysis.created_at,
+    Analysis.updated_at,
+)
+
+
+async def _archive_analysis_map(session: AsyncSession, analysis_ids: list[str]) -> dict[str, Analysis]:
+    if not analysis_ids:
+        return {}
+    result = await session.execute(
+        select(Analysis).options(load_only(*ARCHIVE_ANALYSIS_COLUMNS)).where(Analysis.id.in_(analysis_ids))
+    )
+    return {analysis.id: analysis for analysis in result.scalars().all()}
+
+
 def archive_timeline_entry(
     analysis: Analysis,
     training_session: TrainingSession | None = None,
     skater: Skater | None = None,
 ) -> ArchiveTimelineEntry:
+    semantic = _archive_analysis_fields(analysis)
     return ArchiveTimelineEntry(
         id=analysis.id,
         created_at=analysis.created_at,
@@ -86,11 +204,11 @@ def archive_timeline_entry(
         skater_avatar_type=skater.avatar_type if skater else None,
         skater_avatar_emoji=skater.avatar_emoji if skater else None,
         skill_category=analysis.skill_category or "未分类",
-        action_type=analysis.action_type,
-        action_subtype=analysis.action_subtype,
+        action_type=semantic["action_type"],
+        action_subtype=semantic["action_subtype"],
         skill_node_id=analysis.skill_node_id,
-        force_score=analysis.force_score,
-        report_snippet=build_report_snippet(analysis),
+        force_score=semantic["force_score"],
+        report_snippet=semantic["report_snippet"],
         analysis_id=analysis.id,
         session_id=analysis.session_id,
         session_date=training_session.session_date if training_session else None,
@@ -100,8 +218,21 @@ def archive_timeline_entry(
     )
 
 
-def archive_timeline_entry_from_row(row: Any) -> ArchiveTimelineEntry:
-    report_snippet = str(row.report_summary or row.note or "").strip()
+def archive_timeline_entry_from_row(row: Any, analysis: Analysis | None = None) -> ArchiveTimelineEntry:
+    if analysis is not None:
+        semantic = _archive_analysis_fields(analysis)
+        report_snippet = semantic["report_snippet"]
+        action_type = semantic["action_type"]
+        action_subtype = semantic["action_subtype"]
+        force_score = semantic["force_score"]
+    else:
+        # If the source record cannot be hydrated, the semantic authority is
+        # unavailable.  Never reconstruct a V2 card from compatibility-view
+        # columns; ordinary routes always pass the ORM record above.
+        report_snippet = ""
+        action_type = "动作未确认"
+        action_subtype = None
+        force_score = None
     if not report_snippet:
         report_snippet = "分析进行中，请稍后查看报告。" if row.status != "completed" else "暂无训练备注。"
     return ArchiveTimelineEntry(
@@ -114,10 +245,10 @@ def archive_timeline_entry_from_row(row: Any) -> ArchiveTimelineEntry:
         skater_avatar_type=row.skater_avatar_type,
         skater_avatar_emoji=row.skater_avatar_emoji,
         skill_category=row.skill_category or "未分类",
-        action_type=row.action_type,
-        action_subtype=row.action_subtype,
+        action_type=action_type,
+        action_subtype=action_subtype,
         skill_node_id=row.skill_node_id,
-        force_score=row.force_score,
+        force_score=force_score,
         report_snippet=report_snippet[:120],
         analysis_id=row.id,
         session_id=row.session_id,
@@ -239,27 +370,32 @@ def session_summary(training_session: TrainingSession) -> TrainingSessionPublic:
 
 async def build_session_detail(session: AsyncSession, training_session: TrainingSession) -> TrainingSessionDetail:
     result = await session.execute(
-        select(Analysis).where(Analysis.session_id == training_session.id).order_by(Analysis.created_at.desc())
+        select(Analysis)
+        .options(load_only(*ARCHIVE_ANALYSIS_COLUMNS))
+        .where(Analysis.session_id == training_session.id)
+        .order_by(Analysis.created_at.desc())
     )
     analyses = result.scalars().all()
+    def session_analysis_item(analysis: Analysis) -> dict[str, Any]:
+        semantic = _archive_analysis_fields(analysis)
+        return {
+            "id": analysis.id,
+            "skater_id": analysis.skater_id,
+            "session_id": analysis.session_id,
+            "skater_name": None,
+            "skill_category": analysis.skill_category,
+            "action_type": semantic["action_type"],
+            "action_subtype": semantic["action_subtype"],
+            "status": analysis.status,
+            "force_score": semantic["force_score"],
+            "note": analysis.note if getattr(analysis, "facts_authority", None) != "v2" else None,
+            "created_at": analysis.created_at,
+            "updated_at": analysis.updated_at,
+        }
+
     return TrainingSessionDetail(
         **session_summary(training_session).model_dump(),
-        analyses=[
-            {
-                "id": analysis.id,
-                "skater_id": analysis.skater_id,
-                "session_id": analysis.session_id,
-                "skater_name": None,
-                "skill_category": analysis.skill_category,
-                "action_type": analysis.action_type,
-                "status": analysis.status,
-                "force_score": analysis.force_score,
-                "note": analysis.note,
-                "created_at": analysis.created_at,
-                "updated_at": analysis.updated_at,
-            }
-            for analysis in analyses
-        ],
+        analyses=[session_analysis_item(analysis) for analysis in analyses],
     )
 
 
@@ -463,6 +599,7 @@ async def get_archive(
         context="archive:list",
     )
     rows = list(result.all())
+    analyses_by_id = await _archive_analysis_map(session, [str(row.id) for row in rows])
     total_result = await run_db_read_with_retry(
         lambda: session.execute(count_query, {key: value for key, value in params.items() if key == "skater_id"}),
         context="archive:count",
@@ -472,7 +609,7 @@ async def get_archive(
 
     return ArchiveResponse(
         stats=stats,
-        timeline=[archive_timeline_entry_from_row(row) for row in rows],
+        timeline=[archive_timeline_entry_from_row(row, analyses_by_id.get(str(row.id))) for row in rows],
         limit=limit,
         offset=offset,
         has_more=offset + len(rows) < total_records,
@@ -541,6 +678,7 @@ async def get_skater_archive(
         context="skater_archive:list",
     )
     rows = list(result.all())
+    analyses_by_id = await _archive_analysis_map(session, [str(row.id) for row in rows])
     count_result = await run_db_read_with_retry(
         lambda: session.execute(text("SELECT COUNT(*) FROM analysis_list_items WHERE skater_id = :skater_id"), {"skater_id": skater_id}),
         context="skater_archive:count",
@@ -548,7 +686,7 @@ async def get_skater_archive(
     total_records = int(count_result.scalar_one() or 0)
 
     stats = await build_archive_stats(session, skater_id)
-    timeline = [archive_timeline_entry_from_row(row) for row in rows]
+    timeline = [archive_timeline_entry_from_row(row, analyses_by_id.get(str(row.id))) for row in rows]
 
     return ArchiveResponse(
         stats=stats,

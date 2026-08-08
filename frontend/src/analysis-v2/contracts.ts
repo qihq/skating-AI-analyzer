@@ -110,6 +110,14 @@ export interface ExperienceClaim {
   status: ExperienceStatus;
   observability: "observable" | "partially_observable" | "unobservable";
   confidence: number | null;
+  /** Claim-level support/contradiction, kept distinct from pose provenance. */
+  sources?: string[];
+  conflicts?: string[];
+  sourceReferences?: string[];
+  sourceFingerprints?: Record<string, string>;
+  compatibilityGroup?: string | null;
+  sourceFactHash?: string | null;
+  permissions?: Partial<Record<"family_display" | "aggregation" | "comparison" | "coaching" | "correction" | "automation" | "share" | "export", boolean>>;
 }
 export type RotationRefusalReason = "identity_not_confirmed" | "timestamp_unavailable" | "insufficient_sampling" | "insufficient_independent_signals" | "occlusion" | "camera_roll_unresolved" | "changing_arm_position" | "left_right_assignment_uncertain" | "signal_aliasing" | "conflicting_turn_hypotheses" | "airborne_interval_unavailable" | "required_phase_unobservable";
 export type RotationValueConvention = "airborne_body_rotation" | "observed_spin_rotation";
@@ -294,7 +302,26 @@ export function decodeAnalysisExperienceV2(value: unknown): AnalysisExperienceV2
     if (event.rotation != null) decoded.rotation = decodeRotation(event.rotation);
     return decoded;
   });
-  const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => { const c = record(item); if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority"); return { analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null, authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""), unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null, status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null }; });
+  const claims = (Array.isArray(raw.claims) ? raw.claims : []).map((item) => {
+    const c = record(item);
+    if (c.authority !== raw.authority || c.analysis_id !== raw.analysis_id || c.source_pipeline_fingerprint !== raw.source_pipeline_fingerprint || typeof c.claim_type !== "string" || typeof c.source_pipeline_fingerprint !== "string" || (c.status !== undefined && !isExperienceStatus(c.status)) || (c.observability !== undefined && !isExperienceObservability(c.observability))) throw new Error("mixed or invalid claim authority");
+    const fingerprints = c.source_fingerprints == null ? {} : record(c.source_fingerprints);
+    return {
+      analysisId: String(c.analysis_id), eventId: (c.event_id as string | null) ?? null, claimType: String(c.claim_type), value: c.value ?? null,
+      authority: c.authority as ExperienceAuthority, sourcePipelineFingerprint: String(c.source_pipeline_fingerprint), definitionVersion: String(c.definition_version ?? ""),
+      unit: (c.unit as string | null) ?? null, convention: (c.convention as string | null) ?? null,
+      status: (c.status as ExperienceStatus) ?? "confirmed", observability: (c.observability as ExperienceClaim["observability"]) ?? "observable", confidence: (c.confidence as number | null) ?? null,
+      sources: Array.isArray(c.sources) ? c.sources.map(String) : Array.isArray(c.provenance) ? c.provenance.map(String) : [],
+      conflicts: Array.isArray(c.conflicts) ? c.conflicts.map(String) : [],
+      sourceReferences: Array.isArray(c.source_references) ? c.source_references.map(String) : [],
+      sourceFingerprints: Object.fromEntries(Object.entries(fingerprints).map(([key, value]) => [key, String(value)])),
+      compatibilityGroup: (c.compatibility_group as string | null) ?? null,
+      sourceFactHash: (c.source_fact_hash as string | null) ?? null,
+      permissions: c.permissions && typeof c.permissions === "object" && !Array.isArray(c.permissions)
+        ? Object.fromEntries(Object.entries(c.permissions as Record<string, unknown>).map(([key, value]) => [key, Boolean(value)]))
+        : undefined,
+    };
+  });
   const reviewTasks = (Array.isArray(raw.review_tasks) ? raw.review_tasks : []).map((item) => { const t = record(item); if (t.authority !== raw.authority || typeof t.task_id !== "string" || typeof t.kind !== "string") throw new Error("cross-authority or invalid review task"); return { taskId: t.task_id, authority: t.authority as ExperienceAuthority, kind: t.kind, eventId: (t.event_id as string | null) ?? null, startPts: nullableNumber(t.start_pts), endPts: nullableNumber(t.end_pts), definitionVersion: (t.definition_version as string | null) ?? null, convention: (t.convention as string | null) ?? null }; });
   const identity = raw.identity == null ? null : raw.identity as IdentityTimeline;
   if (identity && (identity.state !== "confirmed" && identity.state !== "uncertain" && identity.state !== "lost")) throw new Error("invalid identity state");

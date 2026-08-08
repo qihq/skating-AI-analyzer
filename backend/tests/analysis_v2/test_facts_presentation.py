@@ -164,11 +164,31 @@ def test_fact_carries_revision_compatibility_and_source_references() -> None:
         unit="turn",
         convention="non_axel_airborne",
         source_references=("event:e", "moment:takeoff"),
+        sources=("deterministic_rotation", "target_clip_review"),
+        source_fingerprints={"deterministic_rotation": "rotation:fp", "target_clip_review": "review:fp"},
     )
 
     assert fact.source_fact_revision == 3
     assert fact.compatibility_group == "rotation/non-axel/turns"
     assert fact.source_references == ("event:e", "moment:takeoff")
+    assert fact.sources == ("deterministic_rotation", "target_clip_review")
+    assert fact.source_fingerprints["target_clip_review"] == "review:fp"
+
+
+def test_conflicted_fact_cannot_remain_confirmed() -> None:
+    fact = AnalysisFactV2(
+        analysis_id="a",
+        event_id="e",
+        claim_type="rotation",
+        value={"range": [1.0, 1.5]},
+        authority="v2",
+        source_pipeline_fingerprint="fp",
+        definition_version="rotation.v2",
+        conflicts=("target clip and deterministic estimate disagree",),
+    )
+
+    assert fact.status == "uncertain"
+    assert fact.observability == "partially_observable"
 
 
 def test_generated_artifact_reference_binds_same_authority_fact_hash() -> None:

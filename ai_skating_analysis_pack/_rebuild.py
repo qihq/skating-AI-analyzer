@@ -58,6 +58,25 @@ V2_FILES = [
     "event_moment_facts.py",
     "rotation.py",
     "rotation_facts.py",
+    # Iteration 14 claim/facts boundary.  Keep the standalone snapshot's
+    # V2 modules generated from the backend source of truth; these modules
+    # are imported by the generated vision/report/memory services.
+    "capabilities.py",
+    "claim_fusion.py",
+    "claim_report.py",
+    "comparison.py",
+    "config.py",
+    "dependency_boundary.py",
+    "detection.py",
+    "fact_consumers.py",
+    "fingerprints.py",
+    "fusion_inputs.py",
+    "manifest.py",
+    "orchestration.py",
+    "path_review.py",
+    "pose_v2.py",
+    "presentation.py",
+    "status.py",
 ]
 
 def main():

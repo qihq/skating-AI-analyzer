@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
+from app.analysis_v2.fact_consumers import consumer_for_analysis
 from app.models import Analysis, Skater, SkaterSkill, SkillNode
 
 
@@ -294,21 +295,32 @@ async def get_latest_skill_scores(
         return {}
 
     result = await session.execute(
-        select(Analysis.skill_node_id, Analysis.force_score)
+        select(Analysis)
         .where(
             Analysis.skater_id == skater_id,
             Analysis.status == "completed",
             Analysis.skill_node_id.in_(skill_ids),
-            Analysis.force_score.is_not(None),
         )
         .order_by(Analysis.created_at.desc())
     )
 
     latest_scores: dict[str, int] = {}
-    for skill_node_id, force_score in result.all():
-        if skill_node_id is None or skill_node_id in latest_scores or force_score is None:
+    for analysis in result.scalars().all():
+        skill_node_id = analysis.skill_node_id
+        if skill_node_id is None or skill_node_id in latest_scores:
             continue
-        latest_scores[skill_node_id] = int(force_score)
+        try:
+            consumer = consumer_for_analysis(analysis, "automation")
+        except (TypeError, ValueError):
+            continue
+        score_fact = next(
+            (fact for fact in consumer.facts if fact.claim_type in {"force_score", "score"}),
+            None,
+        )
+        score_value = score_fact.value if score_fact is not None else None
+        if not isinstance(score_value, (int, float)) or isinstance(score_value, bool):
+            continue
+        latest_scores[skill_node_id] = int(score_value)
 
     return latest_scores
 

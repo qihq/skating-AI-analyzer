@@ -54,6 +54,13 @@ class AnalysisFactV2(BaseModel):
     status: FactStatus = "confirmed"
     observability: Observability = "observable"
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Claim-level provenance is intentionally separate from the legacy
+    # ``provenance`` field.  ``provenance`` describes how an observation was
+    # obtained (measured/smoothed/etc.); these fields describe which bounded
+    # evidence paths supported or contradicted the semantic claim.
+    sources: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+    source_fingerprints: dict[str, str] = Field(default_factory=dict)
     provenance: tuple[str, ...] = ()
     source_references: tuple[str, ...] = ()
     permissions: FactPermission = Field(default_factory=FactPermission)
@@ -72,6 +79,14 @@ class AnalysisFactV2(BaseModel):
                 raise ValueError("unobservable fact cannot carry a value")
             if self.permissions.aggregation or self.permissions.comparison or self.permissions.coaching:
                 raise ValueError("unobservable fact cannot be used downstream")
+        if self.conflicts and self.status == "confirmed":
+            # A conflict is evidence that the value needs review.  Keeping the
+            # conflict in the claim is safer than silently averaging it away.
+            object.__setattr__(self, "status", "uncertain")
+            if self.observability == "observable":
+                object.__setattr__(self, "observability", "partially_observable")
+        if self.source_fingerprints and any(not key or not value for key, value in self.source_fingerprints.items()):
+            raise ValueError("claim source fingerprints must have non-empty names and values")
         if self.authority == "v2" and self.source_pipeline_fingerprint == "":
             raise ValueError("V2 facts require a pipeline fingerprint")
         if self.source_fact_hash is None:

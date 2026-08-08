@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.providers import _active_provider_config_from_model, _env_report_provider_config, get_vision_providers
+from app.services.providers import (
+    _active_provider_config_from_model,
+    _env_report_provider_config,
+    get_vision_providers,
+    provider_fingerprint,
+    provider_v2_role,
+)
 
 
 class VisionVoteConfigTests(unittest.IsolatedAsyncioTestCase):
@@ -81,6 +87,20 @@ class VisionVoteConfigTests(unittest.IsolatedAsyncioTestCase):
             result = await get_vision_providers(session)
 
         self.assertEqual([provider.id for provider in result], ["primary", "primary"])
+
+    async def test_v2_roles_and_fingerprints_are_explicit_and_secret_free(self) -> None:
+        self.assertEqual(provider_v2_role("vision_path_a"), "v2_target_clip_reviewer")
+        self.assertEqual(provider_v2_role("vision_path_b"), "v2_structured_measurement_reviewer")
+        self.assertEqual(provider_v2_role("report"), "v2_claim_explainer")
+        fingerprint = provider_fingerprint(
+            provider_id="p1",
+            slot="vision_path_a",
+            provider="qwen",
+            model_id="model-a",
+            vision_model=None,
+        )
+        self.assertTrue(fingerprint.startswith("sha256:"))
+        self.assertNotIn("api", fingerprint)
 
 
 def _provider(

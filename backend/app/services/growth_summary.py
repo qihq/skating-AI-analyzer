@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Analysis, SkaterSkill, SkillNode, TrainingSession
 from app.schemas import GrowthFocus, GrowthMilestoneEvent, GrowthSummaryResponse
+from app.analysis_v2.fact_consumers import consumer_for_analysis
 
 
 VERIFICATION_BY_SOURCE = {
@@ -42,18 +43,12 @@ async def build_growth_summary(
     )
     latest_analysis = (
         await session.execute(
-            select(
-                Analysis.id,
-                Analysis.action_type,
-                Analysis.action_subtype,
-                Analysis.skill_category,
-                Analysis.report,
-            )
+            select(Analysis)
             .where(*completed_filter)
             .order_by(Analysis.created_at.desc(), Analysis.id.desc())
             .limit(1)
         )
-    ).first()
+    ).scalar_one_or_none()
 
     unlocked_rows = list(
         (
@@ -102,16 +97,33 @@ async def build_growth_summary(
         if progress.unlocked_at is not None
     ]
 
-    report = latest_analysis.report if latest_analysis and isinstance(latest_analysis.report, dict) else {}
-    focus_label = str(report.get("training_focus") or "").strip()
-    if not focus_label and latest_analysis is not None:
-        focus_label = latest_analysis.action_subtype or latest_analysis.skill_category or latest_analysis.action_type
     focus = None
-    if latest_analysis is not None and focus_label:
+    if latest_analysis is not None:
+        # Growth is a semantic consumer: it receives only the one persisted
+        # authority envelope (or its wholesale legacy adapter), never raw
+        # report/action dictionaries.  Only confirmed, observable coaching
+        # facts may become a public focus.
+        consumer = consumer_for_analysis(latest_analysis, "coaching")
+        focus_fact = next(
+            (
+                fact
+                for fact in consumer.facts
+                if fact.claim_type in {"training_focus", "next_action", "review_action"}
+                and isinstance(fact.value, str)
+                and fact.value.strip()
+            ),
+            None,
+        )
+        quality_fact = next((fact for fact in consumer.all_facts if fact.claim_type == "data_quality"), None)
+        quality = str(quality_fact.value) if quality_fact and quality_fact.value is not None else "partial"
+        excluded_reason = None
+        if focus_fact is None:
+            excluded_reason = "没有已确认且可用于成长建议的事实；不使用旧报告回填。"
         focus = GrowthFocus(
-            label=focus_label,
+            label=str(focus_fact.value).strip() if focus_fact is not None else "当前没有可确认的训练重点",
             source_analysis_id=latest_analysis.id,
-            quality=str(report.get("data_quality") or "partial"),
+            quality=quality,
+            excluded_reason=excluded_reason,
         )
 
     return GrowthSummaryResponse(

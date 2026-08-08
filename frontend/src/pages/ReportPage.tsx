@@ -218,7 +218,10 @@ function formatActionConfirmation(report: AnalysisDetail["report"] | null | unde
 function buildReportShareDocument(analysis: AnalysisDetail) {
   const report = analysis.report;
   const score = analysis.force_score ?? 0;
-  const subscores = normalizeSubscores(report?.subscores) ?? normalizeSubscores(analysis.bio_data?.bio_subscores);
+  // This legacy page is retained only for compatibility/parent tooling.  A
+  // V2 record must not use its legacy biomechanics dictionary to complete a
+  // share artifact when the V2 report projection is missing a subscore.
+  const subscores = normalizeSubscores(report?.subscores) ?? (analysis.facts_authority === "v2" ? null : normalizeSubscores(analysis.bio_data?.bio_subscores));
   return {
     eyebrow: "Animal Island · 复盘报告",
     title: analysis.action_type || "滑冰复盘",
@@ -530,7 +533,7 @@ function CompactForceScoreSummary({ score }: { score: number }) {
 export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { isParentMode, enterParentMode, pinLength } = useAppMode();
+  const { isParentMode, parentPin, enterParentMode, pinLength } = useAppMode();
   const [analysis, setAnalysis] = useState<AnalysisDetail | null>(null);
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [skills, setSkills] = useState<SkillNode[]>([]);
@@ -557,7 +560,7 @@ export default function ReportPage() {
   const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview[]>([]);
   const deferredAnalysis = useDeferredValue(analysis);
   const rawReportSubscores = normalizeSubscores(deferredAnalysis?.report?.subscores);
-  const rawBioSubscores = normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
+  const rawBioSubscores = deferredAnalysis?.facts_authority === "v2" ? null : normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
   const subscores = rawReportSubscores ?? rawBioSubscores;
   const subscoreSource =
     deferredAnalysis?.report?.subscores_source ??
@@ -830,7 +833,11 @@ export default function ReportPage() {
       if (!skaterId) {
         return;
       }
-      await Promise.all(memorySuggestions.map((item) => dismissMemorySuggestion(skaterId, item.id)));
+      if (!parentPin) {
+        await enterParentMode();
+        return;
+      }
+      await Promise.all(memorySuggestions.map((item) => dismissMemorySuggestion(skaterId, item.id, parentPin)));
       setMemorySuggestions([]);
       showNotice("这批记忆建议已忽略。");
     } catch {
@@ -980,7 +987,7 @@ export default function ReportPage() {
             videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
             analysisId={deferredAnalysis.id}
             targetLock={deferredAnalysis.target_lock}
-            poseData={deferredAnalysis.pose_data}
+            poseData={deferredAnalysis.facts_authority === "v2" ? null : deferredAnalysis.pose_data}
           />
         </>
       ) : deferredAnalysis.status !== "completed" ? (
@@ -994,7 +1001,7 @@ export default function ReportPage() {
             videoTemporalDiagnostics={deferredAnalysis.video_temporal_diagnostics}
             analysisId={deferredAnalysis.id}
             targetLock={deferredAnalysis.target_lock}
-            poseData={deferredAnalysis.pose_data}
+            poseData={deferredAnalysis.facts_authority === "v2" ? null : deferredAnalysis.pose_data}
           />
         </>
       ) : (
@@ -1119,7 +1126,7 @@ export default function ReportPage() {
             </div>
           </section>
 
-          <ActionPhaseStrip analysis={deferredAnalysis} pose={deferredAnalysis.pose_data} showVideo />
+          <ActionPhaseStrip analysis={deferredAnalysis} pose={deferredAnalysis.facts_authority === "v2" ? null : deferredAnalysis.pose_data} showVideo />
 
           <div className="grid min-w-0 gap-6 web:grid-cols-[minmax(0,1fr)_360px]">
             <main className="min-w-0 space-y-6">

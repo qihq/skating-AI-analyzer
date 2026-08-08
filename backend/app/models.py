@@ -56,6 +56,15 @@ class Analysis(Base):
     vision_path_b: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     cross_validation: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Backend-owned semantic projection.  Legacy raw fields remain for bounded
+    # compatibility, while migrated consumers read this single-authority
+    # envelope instead of selecting individual legacy/V2 fields themselves.
+    analysis_facts: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     pose_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     bio_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     frame_motion_scores: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -98,6 +107,12 @@ class AnalysisComparison(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     video_ai_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -115,6 +130,13 @@ class AnalysisChatMessage(Base):
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     context_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    selected_event_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -129,6 +151,14 @@ class AnalysisCorrection(Base):
     source: Mapped[str] = mapped_column(String(24), default="manual", index=True)
     status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)
     original_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    event_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    invalidated_artifacts: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -212,6 +242,36 @@ class TrainingPlan(Base):
     analysis_id: Mapped[str] = mapped_column(String(36), index=True, unique=True)
     skater_id: Mapped[str] = mapped_column(String(36), index=True)
     plan_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_updated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingPlanRevision(Base):
+    """Immutable snapshot captured before an explicit plan mutation."""
+
+    __tablename__ = "training_plan_revisions"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "revision", name="uq_training_plan_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    plan_id: Mapped[str] = mapped_column(String(36), ForeignKey("training_plans.id", ondelete="CASCADE"), index=True)
+    analysis_id: Mapped[str] = mapped_column(String(36), index=True)
+    skater_id: Mapped[str] = mapped_column(String(36), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -263,6 +323,12 @@ class SkaterSkill(Base):
     unlocked_by: Mapped[str | None] = mapped_column(String(24), nullable=True)
     unlock_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -280,6 +346,12 @@ class SnowballMemory(Base):
     category: Mapped[str] = mapped_column(String(32), default="其他")
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -296,6 +368,12 @@ class MemorySuggestion(Base):
     skater_id: Mapped[str] = mapped_column(String(36), ForeignKey("skaters.id"), index=True)
     suggestions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     is_reviewed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -314,6 +392,12 @@ class MonthlyChapter(Base):
     status: Mapped[str] = mapped_column(String(24), default="facts_ready", index=True)
     fact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     source_hash: Mapped[str] = mapped_column(String(64))
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     provider_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     provider_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -350,6 +434,12 @@ class AnnualCollection(Base):
     selected_milestone_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -364,6 +454,12 @@ class AnnualExport(Base):
     collection_id: Mapped[str] = mapped_column(String(36), ForeignKey("annual_collections.id"), index=True)
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     renderer_version: Mapped[str] = mapped_column(String(40))
+    facts_authority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    facts_schema_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_fact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_pipeline_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    generation_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     asset_relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

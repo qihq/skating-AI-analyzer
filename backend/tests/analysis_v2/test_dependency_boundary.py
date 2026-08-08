@@ -49,3 +49,18 @@ def test_analysis_v2_boundary_has_no_unallowlisted_raw_reads() -> None:
 
     assert FORBIDDEN_LEGACY_FIELDS
     assert audit_migrated_modules(modules, exceptions=exceptions) == ()
+
+
+def test_iteration_14_downstream_services_have_no_unallowlisted_raw_reads() -> None:
+    services = Path(__file__).resolve().parents[2] / "app" / "services"
+    modules = tuple(services.glob("*.py"))
+    # The correction service adapts historical records as a whole and the
+    # prompt-context renderer remains a bounded legacy pipeline utility.  V2
+    # callers branch before either raw adapter is used; every other semantic
+    # service must consume AnalysisFactsV2/family-safe projections only.
+    exceptions = (
+        services / "analysis_corrections.py",
+        services / "llm_context.py",
+    )
+
+    assert audit_migrated_modules(modules, exceptions=exceptions) == ()

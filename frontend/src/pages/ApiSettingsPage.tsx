@@ -5,6 +5,7 @@ import { Link, useLocation } from "react-router-dom";
 import {
   activateProvider,
   createProvider,
+  deleteProvider,
   fetchProviders,
   fetchVisionVoteConfig,
   ProviderPublic,
@@ -274,7 +275,7 @@ function isSlot(value: string): value is ProviderSlot {
 }
 
 export default function ApiSettingsPage() {
-  const { isParentMode, enterParentMode } = useAppMode();
+  const { isParentMode, parentPin, enterParentMode } = useAppMode();
   const location = useLocation();
   const [providers, setProviders] = useState<ProviderPublic[]>([]);
   const [forms, setForms] = useState<Record<string, ProviderFormState>>({});
@@ -291,21 +292,25 @@ export default function ApiSettingsPage() {
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [testingKey, setTestingKey] = useState<string | null>(null);
   const [activatingKey, setActivatingKey] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<ProviderPublic | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [visionVoteConfig, setVisionVoteConfig] = useState<VisionVoteConfig>({
     primary_provider_id: null,
     secondary_provider_id: null,
+    scope: "legacy_vision_only",
+    applies_to_v2_fusion: false,
   });
   const [savingVisionVote, setSavingVisionVote] = useState(false);
 
   useEffect(() => {
-    if (!isParentMode) {
+    if (!isParentMode || !parentPin) {
       return;
     }
 
     let cancelled = false;
     const load = async () => {
       try {
-        const [data, voteConfig] = await Promise.all([fetchProviders(), fetchVisionVoteConfig()]);
+        const [data, voteConfig] = await Promise.all([fetchProviders(parentPin), fetchVisionVoteConfig(parentPin)]);
         if (cancelled) {
           return;
         }
@@ -324,7 +329,7 @@ export default function ApiSettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [isParentMode]);
+  }, [isParentMode, parentPin]);
 
   useEffect(() => {
     if (!isParentMode || !location.hash) {
@@ -401,6 +406,10 @@ export default function ApiSettingsPage() {
   };
 
   const handleCreateProvider = async (slot: ProviderSlot) => {
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
     const key = draftKey(slot);
     const form = forms[key] ?? defaultDraftForm(slot);
     const selectedProvider = providerOption(form.provider);
@@ -425,7 +434,7 @@ export default function ApiSettingsPage() {
         vision_model: slot !== "report" && selectedProvider.supportsVision ? form.vision_model.trim() || null : null,
         api_key: form.api_key.trim(),
         notes: `模型实例：${slotTitle(slot)}`,
-      });
+      }, parentPin);
       refreshProviders([...providers, created]);
       setForms((current) => ({ ...current, [key]: defaultDraftForm(slot) }));
       setDraftOpen((current) => ({ ...current, [slot]: false }));
@@ -443,6 +452,10 @@ export default function ApiSettingsPage() {
   };
 
   const handleSave = async (provider: ProviderPublic) => {
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
     const slot = isSlot(provider.slot) ? provider.slot : "vision";
     const key = formKey(provider);
     const form = forms[key] ?? normalizeProvider(provider);
@@ -466,7 +479,7 @@ export default function ApiSettingsPage() {
         model_id: form.model_id.trim(),
         vision_model: slot !== "report" && selectedProvider.supportsVision ? form.vision_model.trim() || null : null,
         base_url: form.base_url.trim() || selectedProvider.baseUrl,
-      });
+      }, parentPin);
       refreshProviders(providers.map((item) => (item.id === updated.id ? updated : item)));
       showNotice(`${providerLabel(updated.provider)} / ${updated.model_id} 已保存。`);
     } catch (requestError) {
@@ -481,11 +494,15 @@ export default function ApiSettingsPage() {
   };
 
   const handleTest = async (provider: ProviderPublic) => {
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
     const key = formKey(provider);
     setTestingKey(key);
     setError(null);
     try {
-      const result = await testProvider(provider.id);
+      const result = await testProvider(provider.id, parentPin);
       setTestResults((current) => ({ ...current, [key]: result }));
       showNotice(result.success ? `${providerLabel(provider.provider)} / ${provider.model_id} 连接成功。` : result.detail);
       if (!result.success) {
@@ -503,11 +520,15 @@ export default function ApiSettingsPage() {
   };
 
   const handleActivate = async (provider: ProviderPublic) => {
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
     const key = formKey(provider);
     setActivatingKey(key);
     setError(null);
     try {
-      const updated = await activateProvider(provider.id);
+      const updated = await activateProvider(provider.id, parentPin);
       refreshProviders(
         providers.map((item) => (item.slot === updated.slot ? { ...item, is_active: item.id === updated.id } : item)),
       );
@@ -523,7 +544,50 @@ export default function ApiSettingsPage() {
     }
   };
 
+  const handleDeleteProvider = async () => {
+    const candidate = deleteCandidate;
+    if (!candidate) {
+      return;
+    }
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
+
+    const key = formKey(candidate);
+    setDeletingKey(key);
+    setError(null);
+    try {
+      await deleteProvider(candidate.id, parentPin);
+      const [nextProviders, nextVoteConfig] = await Promise.all([
+        fetchProviders(parentPin),
+        fetchVisionVoteConfig(parentPin),
+      ]);
+      refreshProviders(nextProviders);
+      setVisionVoteConfig(nextVoteConfig);
+      setExpandedProviderKey((current) => (current === key ? null : current));
+      setTestResults((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setDeleteCandidate(null);
+      showNotice(`${providerLabel(candidate.provider)} / ${candidate.model_id} 已删除。`);
+    } catch (requestError) {
+      const detail = axios.isAxiosError(requestError)
+        ? String(requestError.response?.data?.detail ?? "删除模型实例失败，请稍后再试。")
+        : "删除模型实例失败，请稍后再试。";
+      setError(detail);
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+
   const handleVisionVoteSave = async () => {
+    if (!parentPin) {
+      await enterParentMode();
+      return;
+    }
     if (!visionVoteConfig.primary_provider_id) {
       setError("请先选择主视觉投票模型。");
       return;
@@ -536,7 +600,7 @@ export default function ApiSettingsPage() {
     setSavingVisionVote(true);
     setError(null);
     try {
-      const updated = await updateVisionVoteConfig(visionVoteConfig);
+      const updated = await updateVisionVoteConfig(visionVoteConfig, parentPin);
       setVisionVoteConfig(updated);
       showNotice("主视觉投票配置已保存。");
     } catch (requestError) {
@@ -625,6 +689,18 @@ export default function ApiSettingsPage() {
                 {activatingKey === key ? "切换中..." : "设为当前"}
               </button>
             ) : null}
+            <button
+              type="button"
+              onClick={() => {
+                setError(null);
+                setDeleteCandidate(provider);
+              }}
+              disabled={deletingKey === key}
+              aria-label={`删除 ${providerLabel(provider.provider)} ${provider.model_id}`}
+              className="app-pill min-h-[44px] px-4 text-sm font-semibold text-rose-600"
+            >
+              删除
+            </button>
           </div>
         </div>
 
@@ -808,6 +884,42 @@ export default function ApiSettingsPage() {
       {notice ? <div className="rounded-[24px] border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-700">{notice}</div> : null}
       {error ? <div className="rounded-[24px] border border-rose-100 bg-rose-50 px-5 py-4 text-sm text-rose-600">{error}</div> : null}
 
+      {deleteCandidate ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4" role="presentation">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-provider-title"
+            className="w-full max-w-lg rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-rose-500">Provider deletion</p>
+            <h2 id="delete-provider-title" className="mt-2 text-2xl font-semibold text-slate-900">删除模型实例？</h2>
+            <p className="mt-3 text-sm leading-7 text-slate-600">
+              确定删除 {providerLabel(deleteCandidate.provider)} / {deleteCandidate.model_id} 吗？此操作会移除已保存的连接配置。
+              如果它是当前 slot 的唯一激活供应商，后端会拒绝删除；请先添加或激活其他实例。
+            </p>
+            <div className="mt-6 flex flex-col-reverse gap-3 tablet:flex-row tablet:justify-end">
+              <button
+                type="button"
+                onClick={() => setDeleteCandidate(null)}
+                disabled={deletingKey !== null}
+                className="app-pill min-h-[48px] px-5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteProvider()}
+                disabled={deletingKey !== null}
+                className="min-h-[48px] rounded-full bg-rose-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingKey !== null ? "删除中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <section className="app-card p-6 tablet:p-8">
         <div className="flex flex-col gap-5 tablet:flex-row tablet:items-start tablet:justify-between">
           <div className="max-w-4xl">
@@ -959,6 +1071,9 @@ export default function ApiSettingsPage() {
               {secondaryVoteProvider ? `${providerLabel(secondaryVoteProvider.provider)} / ${secondaryVoteProvider.model_id}` : "尚未选择"}
             </p>
           </div>
+        </div>
+        <div className="mt-5 rounded-[22px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-7 text-amber-800">
+          此投票配置仅用于旧版主视觉兼容流程，不参与 V2 的逐条证据融合。V2 会分别记录视频观察、结构化测量解释与报告解释模型的指纹。
         </div>
 
         {!visionVoteProviders.length ? (

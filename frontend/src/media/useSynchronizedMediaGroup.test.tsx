@@ -13,4 +13,13 @@ describe("useSynchronizedMediaGroup", () => {
     expect(left.seek).toHaveBeenCalledWith(4);
     expect(right.seek).toHaveBeenCalledWith(14);
   });
+
+  it("seeks authority-projected before and after moment timestamps", () => {
+    const left = { seek: vi.fn(), pause: vi.fn(), video: () => null };
+    const right = { seek: vi.fn(), pause: vi.fn(), video: () => null };
+    const { result } = renderHook(() => useSynchronizedMediaGroup({ current: left }, { current: right }, side, { ...side, analysis_id: "b" }));
+    result.current.seekTimestamps({ beforeTimestamp: 1.25, afterTimestamp: 3.75 });
+    expect(left.seek).toHaveBeenCalledWith(1.25);
+    expect(right.seek).toHaveBeenCalledWith(3.75);
+  });
 });

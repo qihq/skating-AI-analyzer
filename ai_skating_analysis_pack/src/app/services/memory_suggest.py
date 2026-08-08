@@ -8,6 +8,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Analysis, MemorySuggestion, SnowballMemory
+from app.analysis_v2.fact_consumers import (
+    FACTS_SCHEMA_VERSION,
+    consumer_for_analysis,
+    generation_fingerprint,
+)
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.report import clean_json_text
 from app.services.snowball import is_memory_expired, utcnow
@@ -34,20 +39,26 @@ def _memory_text(memories: list[SnowballMemory]) -> str:
     return "\n".join(lines)
 
 
-def _issues_text(analysis: Analysis) -> str:
-    report = analysis.report if isinstance(analysis.report, dict) else {}
-    issues = report.get("issues", [])
-    if not isinstance(issues, list) or not issues:
-        return "无明显问题。"
+def _fact_text(consumer) -> str:
+    """Render only family-safe claims for the suggestion model.
 
+    The model must not receive raw report/bio_data, Path A/B diagnostics, or
+    unobservable/conflicting claims.  ``consumer_for_analysis`` has already
+    applied the coaching permission and confirmed/observable gates.
+    """
+    if not consumer.facts:
+        return "无可用于长期记忆的已确认事实。"
     lines: list[str] = []
-    for item in issues[:5]:
-        if not isinstance(item, dict):
+    for fact in consumer.facts[:24]:
+        value = fact.value
+        if isinstance(value, dict):
+            text = str(value.get("description") or value.get("text") or value).strip()
+        else:
+            text = str(value or "").strip()
+        if not text:
             continue
-        category = str(item.get("category", "")).strip() or "未分类问题"
-        description = str(item.get("description", "")).strip() or "无描述"
-        lines.append(f"- {category}: {description}")
-    return "\n".join(lines) or "无明显问题。"
+        lines.append(f"- claim={fact.claim_type} event={fact.event_id or 'whole'} value={text}")
+    return "\n".join(lines) or "无可用于长期记忆的已确认事实。"
 
 
 def _normalize_suggestion(item: Any) -> dict[str, Any] | None:
@@ -99,7 +110,18 @@ async def suggest_memory_updates(
     db: AsyncSession,
 ) -> list[dict[str, Any]]:
     analysis = await db.get(Analysis, analysis_id)
-    if analysis is None or analysis.skater_id != skater_id or not isinstance(analysis.report, dict):
+    if analysis is None or analysis.skater_id != skater_id:
+        return []
+
+    # A suggestion is a semantic artifact.  Resolve one authority once and
+    # refuse Shadow/uncertain/unobservable evidence before contacting a model.
+    try:
+        consumer = consumer_for_analysis(analysis, "coaching")
+    except (ValueError, TypeError):
+        return []
+    if consumer.authority != "legacy" and consumer.authority != "v2":
+        return []
+    if not consumer.facts:
         return []
 
     memories_result = await db.execute(
@@ -121,11 +143,8 @@ async def suggest_memory_updates(
                 "content": (
                     "当前长期记忆：\n"
                     f"{_memory_text(memories)}\n\n"
-                    "本次训练报告：\n"
-                    f"- 动作类型：{analysis.action_type}\n"
-                    f"- 总体评价：{analysis.report.get('summary', '')}\n"
-                    f"- 主要问题：{_issues_text(analysis)}\n"
-                    f"- 训练重点：{analysis.report.get('training_focus', '')}\n\n"
+                    "本次训练的已确认事实（同一 authority）：\n"
+                    f"{_fact_text(consumer)}\n\n"
                     "请对比分析，输出建议数组，每条建议格式如下：\n"
                     "[\n"
                     '  {"action": "add", "title": "...", "content": "...", "category": "卡点|目标|总结|偏好|其他"},\n'
@@ -158,6 +177,19 @@ async def suggest_memory_updates(
         skater_id=skater_id,
         suggestions=normalized,
         is_reviewed=False,
+        facts_authority=consumer.authority,
+        facts_schema_version=FACTS_SCHEMA_VERSION,
+        source_fact_hash=consumer.source_fact_hash,
+        source_fact_revision=consumer.source_fact_revision,
+        source_pipeline_fingerprint=consumer.source_pipeline_fingerprint,
+        generation_fingerprint=generation_fingerprint(
+            artifact_type="memory-suggestion",
+            source_fact_hash=consumer.source_fact_hash,
+            provider=provider.provider,
+            model=provider.model_id,
+            prompt_version="memory-suggestion.v2",
+            extra={"analysis_id": consumer.analysis_id},
+        ),
     )
     db.add(suggestion)
     await db.commit()

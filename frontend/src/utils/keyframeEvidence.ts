@@ -1,6 +1,17 @@
 import type { AnalysisDetail, SelectedSemanticFrame } from "../api/client";
+import type { AnalysisExperienceV2, ExperienceEvent, KeyMomentV2, ProfileMomentKey } from "../analysis-v2/contracts";
+import { MOMENT_LABELS, orderedMoments } from "../analysis-v2/momentSelectors";
 
-export type KeyframeKey = "T" | "A" | "L" | "spin_entry" | "spin_main" | "spin_exit" | "spiral_hold" | "step_sequence";
+export type KeyframeKey =
+  | "T"
+  | "A"
+  | "L"
+  | "spin_entry"
+  | "spin_main"
+  | "spin_exit"
+  | "spiral_hold"
+  | "step_sequence"
+  | ProfileMomentKey;
 export type KeyframeSyncPatch = Partial<Record<KeyframeKey, string>>;
 
 type FrameRef = {
@@ -44,7 +55,69 @@ Object.assign(KEYFRAME_LABELS, {
   spin_exit: "出转",
   spiral_hold: "姿态保持",
   step_sequence: "步法区间",
+  takeoff: "起跳",
+  apex: "最高点",
+  landing: "落冰",
+  spiral_entry: "进入",
+  spiral_exit: "退出",
+  step_sequence_interval: "步法区间",
+  step_representative_1: "代表时刻 1",
+  step_representative_2: "代表时刻 2",
+  step_representative_3: "代表时刻 3",
 });
+
+/**
+ * Build a keyframe projection directly from the V2 authority envelope.
+ *
+ * This is deliberately separate from the legacy evidence builders below:
+ * ordinary V2 pages must never inspect bio_data or temporal diagnostics to
+ * render moments.  The projection carries source PTS/frame identity only;
+ * image resolution remains a parent-only concern and is therefore omitted.
+ */
+export function buildExperienceKeyframeEvidenceItems(
+  experience: AnalysisExperienceV2,
+  selectedEventId?: string | null,
+): KeyframeEvidenceItem[] {
+  const event = experience.events.find((item) => item.eventId === selectedEventId) ?? experience.events[0] ?? null;
+  if (!event) return [];
+  return orderedMoments(event).map((moment) => experienceMomentItem(moment));
+}
+
+/** Parent-review draft projection paired with a V2 event. */
+export function buildExperienceDraftKeyframeEvidenceItems(
+  experience: AnalysisExperienceV2,
+  draftKeyframes: Partial<Record<KeyframeKey, string>>,
+  selectedEventId?: string | null,
+): KeyframeEvidenceItem[] {
+  const event = experience.events.find((item) => item.eventId === selectedEventId) ?? experience.events[0] ?? null;
+  if (!event) return [];
+  return orderedMoments(event).map((moment) => {
+    const item = experienceMomentItem(moment);
+    const draft = cleanString(draftKeyframes[moment.semanticKey]);
+    return draft ? { ...item, value: draft, frameId: draft, source: "parent review draft", status: "confirmed" } : item;
+  });
+}
+
+function experienceMomentItem(moment: KeyMomentV2): KeyframeEvidenceItem {
+  const value = moment.sourceFrameIndex != null
+    ? `source frame ${moment.sourceFrameIndex}`
+    : moment.ptsSec != null
+      ? formatKeyframeTimestamp(moment.ptsSec)
+      : "";
+  const unavailable = moment.status === "unavailable" || moment.ptsSec == null;
+  return {
+    key: moment.semanticKey,
+    label: MOMENT_LABELS[moment.semanticKey],
+    value,
+    frameId: moment.sourceFrameIndex == null ? null : String(moment.sourceFrameIndex),
+    imageUrl: null,
+    timestamp: moment.ptsSec,
+    source: "原视频时间戳",
+    status: unavailable ? "unavailable" : moment.status,
+    confidence: unavailable ? null : moment.confidence,
+    reason: unavailable ? moment.warnings[0] ?? "evidence unavailable" : moment.warnings[0] ?? null,
+  };
+}
 
 export function keyframeOrderForAnalysis(analysis: AnalysisDetail): KeyframeKey[] {
   const profile = String(analysis.analysis_profile ?? "").trim().toLowerCase();

@@ -30,6 +30,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
             import app.database as database
             import app.models as models
             import app.routers.providers as providers_router
+            from app.services.auth import hash_pin
             from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
             database.ensure_storage_dirs()
@@ -37,6 +38,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
             async def _prepare() -> list[dict[str, object]]:
                 await database.init_db()
                 async with database.AsyncSessionLocal() as session:
+                    session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
                     analysis = models.Analysis(
                         id=str(uuid4()),
                         action_type="跳跃",
@@ -51,7 +53,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
                     await session.commit()
 
                 async with database.AsyncSessionLocal() as session:
-                    return await providers_router.get_provider_metrics(session=session)
+                    return await providers_router.get_provider_metrics(x_parent_pin="1234", session=session)
 
             payload = asyncio.run(_prepare())
             self.assertEqual(payload, [])
@@ -73,6 +75,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
             import app.database as database
             import app.models as models
             import app.routers.providers as providers_router
+            from app.services.auth import hash_pin
             from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
             database.ensure_storage_dirs()
@@ -81,6 +84,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
                 await database.init_db()
                 now = datetime.now(timezone.utc)
                 async with database.AsyncSessionLocal() as session:
+                    session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
                     records = [
                         models.Analysis(
                             id=str(uuid4()),
@@ -167,7 +171,7 @@ class ProviderMetricsApiTests(unittest.TestCase):
                     await session.commit()
 
                 async with database.AsyncSessionLocal() as session:
-                    return await providers_router.get_provider_metrics(days=7, analysis_profile="jump", session=session)
+                    return await providers_router.get_provider_metrics(days=7, analysis_profile="jump", x_parent_pin="1234", session=session)
 
             payload = asyncio.run(_prepare())
 

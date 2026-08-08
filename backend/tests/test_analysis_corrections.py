@@ -11,11 +11,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import text
 
 from app.models import Analysis, AnalysisCorrection
-from app.routers.analysis import _auto_apply_video_ai_action_if_confident, _video_ai_auto_action_payload
+from app.routers.analysis import (
+    _auto_apply_video_ai_action_if_confident,
+    _build_export_text,
+    _video_ai_auto_action_payload,
+    regenerate_report_from_corrections,
+)
 from app.services import analysis_corrections as corrections_service
 from app.services.analysis_corrections import (
     apply_analysis_correction,
     build_chat_share_image_payload,
+    build_chat_share_title,
     build_chat_share_text,
     create_analysis_correction,
     dismiss_analysis_correction,
@@ -89,6 +95,210 @@ class AnalysisCorrectionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(effective["has_applied_corrections"])
             self.assertEqual(effective["analysis"]["action_subtype"], "Salchow")
             self.assertEqual(effective["report"]["action_confirmation"]["confirmed_action"], "Salchow")
+
+    async def test_v2_applied_correction_revises_facts_without_mutating_legacy_columns(self) -> None:
+        from app.analysis_v2.fact_consumers import persist_analysis_facts
+        from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2
+
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.flush()
+            fact = AnalysisFactV2(
+                analysis_id=analysis.id,
+                event_id=f"{analysis.id}:event:0",
+                claim_type="action_profile",
+                value="jump",
+                authority="v2",
+                source_pipeline_fingerprint="v2:test",
+                definition_version="profile.v2",
+                permissions={"family_display": True, "correction": True},
+            )
+            facts = AnalysisFactsV2(analysis_id=analysis.id, authority="v2", facts=(fact,))
+            persist_analysis_facts(analysis, facts)
+            await session.commit()
+            original_hash = analysis.source_fact_hash
+            original_legacy_subtype = analysis.action_subtype
+            original_legacy_frames = analysis.bio_data
+
+            correction = await create_analysis_correction(
+                session,
+                analysis,
+                kind="action_label",
+                payload={"action_subtype": "Salchow"},
+                status="applied",
+            )
+            await session.refresh(analysis)
+            self.assertEqual(analysis.facts_authority, "v2")
+            self.assertEqual(analysis.source_fact_revision, 2)
+            self.assertNotEqual(analysis.source_fact_hash, original_hash)
+            self.assertEqual(analysis.action_subtype, original_legacy_subtype)
+            self.assertEqual(analysis.bio_data, original_legacy_frames)
+            self.assertTrue(correction.invalidated_artifacts)
+
+    async def test_v2_report_regeneration_uses_persisted_claims_only(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from app.analysis_v2.fact_consumers import persist_analysis_facts
+        from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2
+
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.flush()
+            profile = AnalysisFactV2(
+                analysis_id=analysis.id,
+                event_id=f"{analysis.id}:event:0",
+                claim_type="action_profile",
+                value="jump",
+                authority="v2",
+                source_pipeline_fingerprint="v2:test",
+                definition_version="profile.v2",
+                sources=("deterministic",),
+                source_fingerprints={"deterministic": "fp"},
+                permissions={"family_display": True, "correction": True},
+            )
+            unsupported = AnalysisFactV2(
+                analysis_id=analysis.id,
+                event_id=f"{analysis.id}:event:0",
+                claim_type="rotation",
+                value=None,
+                authority="v2",
+                source_pipeline_fingerprint="v2:test",
+                definition_version="rotation.v2",
+                status="unobservable",
+                observability="unobservable",
+                sources=("deterministic",),
+                source_fingerprints={"deterministic": "fp"},
+            )
+            facts = AnalysisFactsV2(analysis_id=analysis.id, authority="v2", facts=(profile, unsupported))
+            persist_analysis_facts(analysis, facts)
+            await session.commit()
+
+            generated = {
+                "summary": "Claim-only regenerated report",
+                "issues": [],
+                "improvements": [],
+                "training_focus": "review landing",
+                "subscores": {},
+                "data_quality": "partial",
+            }
+            with patch("app.routers.analysis.generate_report", new=AsyncMock(return_value=generated)) as generate:
+                response = await regenerate_report_from_corrections(analysis.id, session)
+
+            kwargs = generate.await_args.kwargs
+            claims = kwargs["fused_claims"]
+            self.assertEqual(len(claims), 2)
+            self.assertEqual(generate.await_args.args[1], {})
+            self.assertEqual(generate.await_args.args[2], {})
+            self.assertEqual(response.effective["authority"], "v2")
+            self.assertEqual(response.correction.kind, "report_regeneration")
+            self.assertEqual(response.correction.facts_authority, "v2")
+            self.assertEqual(response.effective["source_fact_hash"], analysis.source_fact_hash)
+
+    async def test_v2_share_and_export_use_same_authority_facts(self) -> None:
+        from app.analysis_v2.fact_consumers import persist_analysis_facts
+        from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, FactPermission
+
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.flush()
+            permissions = FactPermission(
+                family_display=True,
+                share=True,
+                export=True,
+                coaching=True,
+            )
+            facts = AnalysisFactsV2(
+                analysis_id=analysis.id,
+                authority="v2",
+                facts=(
+                    AnalysisFactV2(
+                        analysis_id=analysis.id,
+                        event_id=f"{analysis.id}:event:0",
+                        claim_type="action_label",
+                        value="V2 Spin",
+                        authority="v2",
+                        source_pipeline_fingerprint="v2:share-test",
+                        definition_version="action-label.v2",
+                        permissions=permissions,
+                    ),
+                    AnalysisFactV2(
+                        analysis_id=analysis.id,
+                        event_id=f"{analysis.id}:event:0",
+                        claim_type="report_summary",
+                        value="V2 summary only",
+                        authority="v2",
+                        source_pipeline_fingerprint="v2:share-test",
+                        definition_version="report-summary.v2",
+                        permissions=permissions,
+                    ),
+                    AnalysisFactV2(
+                        analysis_id=analysis.id,
+                        event_id=f"{analysis.id}:event:0",
+                        claim_type="force_score",
+                        value=91,
+                        authority="v2",
+                        source_pipeline_fingerprint="v2:share-test",
+                        definition_version="force-score.v2",
+                        permissions=permissions,
+                    ),
+                ),
+            )
+            persist_analysis_facts(analysis, facts)
+            await session.commit()
+
+            title = build_chat_share_title(analysis, skater_name="Mia")
+            text = build_chat_share_text(analysis, [], [], skater_name="Mia")
+            image = build_chat_share_image_payload(analysis, [], [], skater_name="Mia")
+            export = _build_export_text(analysis, "Mia", "2026-08-08")
+
+            self.assertEqual(title, "Mia · V2 Spin")
+            self.assertIn("V2 summary only", text)
+            self.assertNotIn("Original report", text)
+            self.assertEqual(image["score"], 91)
+            self.assertEqual(image["facts_authority"], "v2")
+            self.assertEqual(image["source_pipeline_fingerprint"], "v2:share-test")
+            self.assertIn("Mia · V2 Spin · 2026-08-08", export)
+            self.assertIn("91分", export)
+            self.assertNotIn("Toe Loop", export)
+
+    async def test_v2_share_and_export_do_not_backfill_missing_facts_from_legacy(self) -> None:
+        from app.analysis_v2.fact_consumers import persist_analysis_facts
+        from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2, FactPermission
+
+        async with self.Session() as session:
+            analysis = _analysis()
+            session.add(analysis)
+            await session.flush()
+            facts = AnalysisFactsV2(
+                analysis_id=analysis.id,
+                authority="v2",
+                facts=(AnalysisFactV2(
+                    analysis_id=analysis.id,
+                    event_id=f"{analysis.id}:event:0",
+                    claim_type="action_profile",
+                    value="jump",
+                    authority="v2",
+                    source_pipeline_fingerprint="v2:missing-test",
+                    definition_version="profile.v2",
+                    permissions=FactPermission(family_display=True, share=True, export=True),
+                ),),
+            )
+            persist_analysis_facts(analysis, facts)
+            await session.commit()
+
+            text = build_chat_share_text(analysis, [], [], skater_name="Mia")
+            image = build_chat_share_image_payload(analysis, [], [], skater_name="Mia")
+            export = _build_export_text(analysis, "Mia", "2026-08-08")
+
+            self.assertNotIn("Original report", text)
+            self.assertIn("摘要暂不可用", text)
+            self.assertIsNone(image["score"])
+            self.assertIn("综合评分：--分", export)
+            self.assertNotIn("74分", export)
+
 
     async def test_apply_action_correction_persists_analysis_and_list_cache(self) -> None:
         from app.database import _apply_patch_i

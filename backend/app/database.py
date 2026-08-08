@@ -397,6 +397,7 @@ async def _run_migrations(conn) -> None:
     await run_migrations_growth_story(conn)
     await run_migrations_monthly_chapters(conn)
     await run_migrations_annual_collections(conn)
+    await run_migrations_analysis_facts_v2(conn)
 
 
 async def run_migrations_patch_a(engine) -> None:
@@ -1070,6 +1071,96 @@ async def _create_annual_collection_tables(conn) -> None:
     if "deleted_at" not in annual_columns:
         await conn.execute(text("ALTER TABLE annual_collections ADD COLUMN deleted_at TIMESTAMP"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_annual_collections_deleted_at ON annual_collections(deleted_at)"))
+
+
+_FACT_ARTIFACT_COLUMNS = (
+    ("facts_authority", "VARCHAR(16)"),
+    ("facts_schema_version", "VARCHAR(40)"),
+    ("source_fact_hash", "VARCHAR(64)"),
+    ("source_fact_revision", "INTEGER"),
+    ("source_pipeline_fingerprint", "VARCHAR(128)"),
+    ("generation_fingerprint", "VARCHAR(128)"),
+)
+
+
+async def _add_columns_if_missing(conn, table: str, columns: tuple[tuple[str, str], ...]) -> None:
+    result = await conn.execute(text(f"PRAGMA table_info({table})"))
+    existing = {row[1] for row in result.fetchall()}
+    for name, definition in columns:
+        if name not in existing:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+
+
+async def run_migrations_analysis_facts_v2(engine) -> None:
+    if hasattr(engine, "execute"):
+        async with _noop_context(engine) as conn:
+            await _apply_analysis_facts_v2(conn)
+        return
+    async with engine.begin() as conn:
+        await _apply_analysis_facts_v2(conn)
+
+
+async def _apply_analysis_facts_v2(conn) -> None:
+    await _add_columns_if_missing(
+        conn,
+        "analyses",
+        (
+            ("analysis_facts", "JSON"),
+            ("facts_authority", "VARCHAR(16)"),
+            ("facts_schema_version", "VARCHAR(40)"),
+            ("source_fact_hash", "VARCHAR(64)"),
+            ("source_fact_revision", "INTEGER"),
+            ("source_pipeline_fingerprint", "VARCHAR(128)"),
+        ),
+    )
+    await _add_columns_if_missing(
+        conn,
+        "analysis_chat_messages",
+        (("selected_event_id", "VARCHAR(80)"),) + _FACT_ARTIFACT_COLUMNS,
+    )
+    await _add_columns_if_missing(
+        conn,
+        "analysis_corrections",
+        (("event_id", "VARCHAR(80)"),) + _FACT_ARTIFACT_COLUMNS + (("invalidated_artifacts", "JSON NOT NULL DEFAULT '[]'"),),
+    )
+    await _add_columns_if_missing(
+        conn,
+        "training_plans",
+        _FACT_ARTIFACT_COLUMNS + (("source_updated", "BOOLEAN NOT NULL DEFAULT 0"),),
+    )
+    # ``TrainingPlan`` keeps one current row for API compatibility; explicit
+    # regeneration/extension snapshots the previous payload here so history is
+    # immutable and reproducible without changing the current-plan lookup.
+    await conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS training_plan_revisions (
+            id VARCHAR(36) PRIMARY KEY,
+            plan_id VARCHAR(36) NOT NULL REFERENCES training_plans(id) ON DELETE CASCADE,
+            analysis_id VARCHAR(36) NOT NULL,
+            skater_id VARCHAR(36) NOT NULL,
+            revision INTEGER NOT NULL,
+            plan_json JSON NOT NULL,
+            facts_authority VARCHAR(16),
+            facts_schema_version VARCHAR(40),
+            source_fact_hash VARCHAR(64),
+            source_fact_revision INTEGER,
+            source_pipeline_fingerprint VARCHAR(128),
+            generation_fingerprint VARCHAR(128),
+            created_at DATETIME,
+            CONSTRAINT uq_training_plan_revision UNIQUE (plan_id, revision)
+        )
+        """
+    ))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_training_plan_revisions_plan_id ON training_plan_revisions(plan_id)"))
+    await _add_columns_if_missing(conn, "analysis_comparisons", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "skater_skills", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "snowball_memories", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "memory_suggestions", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "monthly_chapters", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "annual_collections", _FACT_ARTIFACT_COLUMNS)
+    await _add_columns_if_missing(conn, "annual_exports", _FACT_ARTIFACT_COLUMNS)
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_facts_authority ON analyses(facts_authority)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_analyses_source_fact_hash ON analyses(source_fact_hash)"))
 
 
 class _noop_context:

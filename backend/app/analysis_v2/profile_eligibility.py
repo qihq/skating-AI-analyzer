@@ -44,9 +44,6 @@ def profile_eligibility(
     compatible_profiles: Iterable[ActionProfile] | None = None,
     diagnostic_only: bool = False,
 ) -> ProfileEligibilityDecision:
-    # V2 automatic unlock remains explicitly disabled through Iteration 14.
-    if consumer == "automatic_skill_unlock":
-        return ProfileEligibilityDecision(consumer, False, None, "v2_automatic_unlock_disabled_until_iteration14", False)
     if diagnostic_only:
         return ProfileEligibilityDecision(consumer, False, None, "shadow_diagnostic", False)
     base = facts.profile_eligibility(permission=CONSUMER_PERMISSION[consumer])
@@ -56,7 +53,18 @@ def profile_eligibility(
     compatible = set(compatible_profiles or ())
     if compatible and profile not in compatible:
         return ProfileEligibilityDecision(consumer, False, None, "incompatible_profile", False)
-    return ProfileEligibilityDecision(consumer, True, profile, None, False)
+    # Iteration 14 enables automatic unlock only after the same confirmed,
+    # observable, permission-gated profile boundary succeeds.  The concrete
+    # score/rule definition compatibility remains the responsibility of the
+    # versioned skill rule evaluator; this selector only certifies that the
+    # event profile may enter that evaluator at all.
+    return ProfileEligibilityDecision(
+        consumer,
+        True,
+        profile,
+        None,
+        consumer == "automatic_skill_unlock",
+    )
 
 
 def growth_admission(

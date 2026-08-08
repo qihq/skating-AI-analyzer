@@ -22,6 +22,8 @@ import ZodiacAvatar from "../components/ZodiacAvatar";
 import { isAnalysisInProgress } from "../constants/analysisStatus";
 import { childViewAvatarType, childViewLabel, findSkaterForChildView, pickSkaterIdForChildView } from "../utils/childView";
 import { parseApiDate } from "../utils/datetime";
+import { useAnalysisExperiences } from "../analysis-v2/useAnalysisExperiences";
+import { presentAnalysisExperience, presentComparison } from "../analysis-v2/presenter";
 
 const FILTER_OPTIONS = ["全部", "跳跃", "旋转", "步法", "自由滑"] as const;
 const HISTORY_PAGE_SIZE = 24;
@@ -264,6 +266,15 @@ export default function HistoryPage() {
     () => records.filter((record) => selectedIds.includes(record.id)),
     [records, selectedIds],
   );
+  const experienceIds = useMemo(() => [...records.map((record) => record.id), ...comparisons.flatMap((item) => [item.analysis_a_id, item.analysis_b_id])], [comparisons, records]);
+  const { experiences: experienceById } = useAnalysisExperiences(experienceIds);
+
+  const familyRecord = (record: AnalysisListItem) => {
+    const experience = experienceById[record.id];
+    if (!experience) return { label: "复盘记录", summary: "当前复盘摘要暂不可用。", state: "unobservable" as const, forceScore: null };
+    const view = presentAnalysisExperience(experience);
+    return { label: view.selectedEvent?.label ?? "复盘记录", summary: view.summary, state: view.state, forceScore: view.forceScore };
+  };
 
   const confirmRetryRecord = records.find((record) => record.id === confirmRetryRecordId) ?? null;
   const pinRetryRecord = records.find((record) => record.id === pinRetryRecordId) ?? null;
@@ -526,6 +537,13 @@ export default function HistoryPage() {
           ) : comparisons.length ? (
             <div className="mt-6 space-y-4">
               {comparisons.map((comparison) => (
+                (() => {
+                  const left = experienceById[comparison.analysis_a_id];
+                  const right = experienceById[comparison.analysis_b_id];
+                  const family = left && right ? presentComparison(left, right) : null;
+                  const leftLabel = left ? presentAnalysisExperience(left).selectedEvent?.label : null;
+                  const rightLabel = right ? presentAnalysisExperience(right).selectedEvent?.label : null;
+                  return (
                 <article
                   key={comparison.id}
                   className="list-row min-w-0 max-w-full rounded-[24px] border border-slate-200 bg-white p-3 transition hover:bg-slate-50 phone:rounded-[28px] phone:p-5"
@@ -533,19 +551,17 @@ export default function HistoryPage() {
                   <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
                     <div className="min-w-0 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{comparison.action_type}</span>
+                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{leftLabel && rightLabel ? `${leftLabel} → ${rightLabel}` : "对比记录"}</span>
                         <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${comparisonStatusTone(comparison.status)}`}>
                           {comparisonStatusLabel(comparison.status)}
                         </span>
-                        {comparison.score_delta != null ? (
-                          <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${comparison.score_delta >= 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
-                            评分 {comparison.score_delta >= 0 ? "+" : ""}
-                            {comparison.score_delta}
+                        {family?.scoreDelta != null ? (
+                          <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${family.scoreDelta >= 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
+                            评分 {family.scoreDelta >= 0 ? "+" : ""}
+                            {family.scoreDelta}
                           </span>
                         ) : null}
-                        {comparison.video_ai_status ? (
-                          <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">Video AI {comparison.video_ai_status}</span>
-                        ) : null}
+                        {family && !family.compatible ? <span className="max-w-full break-words rounded-full bg-amber-50 px-3 py-1 text-sm text-amber-700">暂不可比较</span> : null}
                       </div>
 
                       <div className="text-sm text-slate-400">
@@ -554,7 +570,7 @@ export default function HistoryPage() {
                       </div>
 
                       <p className="max-w-3xl whitespace-normal break-words leading-7 text-slate-600">
-                        {comparison.ai_narrative || comparison.error_message || "对比任务已保存，结果生成后会显示完整复盘。"}
+                        {family?.reason || comparison.error_message || "对比任务已保存，结果生成后会显示同源证据。"}
                       </p>
                     </div>
 
@@ -568,6 +584,8 @@ export default function HistoryPage() {
                     </div>
                   </div>
                 </article>
+                  );
+                })()
               ))}
             </div>
           ) : (
@@ -583,6 +601,7 @@ export default function HistoryPage() {
               const isSelected = selectedIds.includes(record.id);
               const isRetrying = retryingRecordId === record.id;
               const hideRetry = missingVideoRetryIds.includes(record.id);
+              const family = familyRecord(record);
 
               return (
                 <article
@@ -592,16 +611,11 @@ export default function HistoryPage() {
                   <div className="flex flex-col gap-4 tablet:flex-row tablet:items-start tablet:justify-between">
                     <div className="min-w-0 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{record.action_type}</span>
-                        <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${scoreColor(record.force_score)}`}>
-                          评分 {record.force_score ?? "--"}
-                        </span>
+                        <span className="max-w-full break-words rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{family.label}</span>
+                        <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${family.state === "confirmed" ? "bg-emerald-50 text-emerald-700" : family.state === "needs_review" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{family.state === "confirmed" ? "已确认" : family.state === "needs_review" ? "需要确认" : "暂不判断"}</span>
                         <span className={`max-w-full break-words rounded-full px-3 py-1 text-sm ${statusTone(record.status)}`}>
                           {statusLabel(record.status)}
                         </span>
-                        {record.skill_category ? (
-                          <span className="max-w-full break-words rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-600">{record.skill_category}</span>
-                        ) : null}
                       </div>
 
                       <div className="text-sm text-slate-400">
@@ -609,7 +623,7 @@ export default function HistoryPage() {
                         {record.skater_name ? <span className="ml-3">练习档案：{record.skater_name}</span> : null}
                       </div>
 
-                      <p className="max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{record.note || "本次记录未填写训练备注。"}</p>
+                      <p className="max-w-3xl whitespace-normal break-words leading-7 text-slate-600">{family.summary}</p>
                     </div>
 
                     <div className="flex min-w-0 flex-col gap-3 tablet:items-end">

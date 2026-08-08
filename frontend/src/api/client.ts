@@ -274,6 +274,11 @@ export interface AnalysisDetail extends AnalysisListItem {
   error_code: AnalysisErrorCode | null;
   error_detail: string | null;
   error_message: string | null;
+  facts_authority?: "legacy" | "v2" | string | null;
+  facts_schema_version?: string | null;
+  source_fact_hash?: string | null;
+  source_fact_revision?: number | null;
+  source_pipeline_fingerprint?: string | null;
 }
 
 export interface AnalysisChatMessage {
@@ -285,6 +290,9 @@ export interface AnalysisChatMessage {
   provider_id?: string | null;
   provider_name?: string | null;
   model_id?: string | null;
+  selected_event_id?: string | null;
+  facts_authority?: "legacy" | "v2" | string | null;
+  source_fact_hash?: string | null;
 }
 
 export interface AnalysisChatResponse {
@@ -549,6 +557,8 @@ export interface ProviderPublic {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  v2_role: string;
+  fingerprint: string;
 }
 
 export interface ProviderUpdatePayload {
@@ -575,6 +585,8 @@ export interface ProviderCreatePayload {
 export interface VisionVoteConfig {
   primary_provider_id: string | null;
   secondary_provider_id: string | null;
+  scope: "legacy_vision_only";
+  applies_to_v2_fusion: false;
 }
 
 export interface ProviderMetricPublic {
@@ -803,10 +815,27 @@ export interface CompareQualityPayload {
   skill_mismatch?: boolean;
 }
 
+export interface CompareFactEvidence {
+  schema_version: string;
+  left_authority: string | null;
+  right_authority: string | null;
+  left_source_fact_hash: string | null;
+  right_source_fact_hash: string | null;
+  left_source_fact_revision?: number | null;
+  right_source_fact_revision?: number | null;
+  left_source_pipeline_fingerprint?: string | null;
+  right_source_pipeline_fingerprint?: string | null;
+  event_pairs: Array<{ left_event_id: string | null; right_event_id: string | null }>;
+  deltas: Array<Record<string, unknown>>;
+  excluded: Array<Record<string, unknown>>;
+  authority_mismatch?: boolean;
+  profile_mismatch?: boolean;
+}
+
 export interface AnalysisCompareResponse {
   analysis_a: AnalysisDetail;
   analysis_b: AnalysisDetail;
-  score_delta: number;
+  score_delta: number | null;
   summary: {
     improved: ComparisonChange[];
     added: ComparisonChange[];
@@ -819,6 +848,7 @@ export interface AnalysisCompareResponse {
   quality: CompareQualityPayload | null;
   ai_narrative: string | null;
   video_ai_report: CompareVideoAiReport | null;
+  fact_comparison?: CompareFactEvidence | null;
 }
 
 export interface AnalysisComparisonSummary {
@@ -839,6 +869,12 @@ export interface AnalysisComparisonSummary {
   after_score: number | null;
   created_at: string;
   updated_at: string;
+  facts_authority?: string | null;
+  facts_schema_version?: string | null;
+  source_fact_hash?: string | null;
+  source_fact_revision?: number | null;
+  source_pipeline_fingerprint?: string | null;
+  generation_fingerprint?: string | null;
 }
 
 export interface AnalysisComparisonDetail extends AnalysisComparisonSummary {
@@ -900,6 +936,13 @@ export interface TrainingPlanDetail {
   skater_id: string;
   plan_json: TrainingPlanPayload;
   created_at: string;
+  facts_authority?: "legacy" | "v2" | null;
+  facts_schema_version?: string | null;
+  source_fact_hash?: string | null;
+  source_fact_revision?: number | null;
+  source_pipeline_fingerprint?: string | null;
+  generation_fingerprint?: string | null;
+  source_updated?: boolean;
 }
 
 export interface ArchiveResponse {
@@ -942,6 +985,7 @@ export interface GrowthFocus {
   label: string;
   source_analysis_id: string;
   quality: string;
+  excluded_reason?: string | null;
 }
 
 export interface GrowthMilestone {
@@ -1238,10 +1282,11 @@ export async function fetchAnalysisChatMessages(id: string) {
   return response.data;
 }
 
-export async function sendAnalysisChatMessage(id: string, message: string, providerId?: string | null) {
+export async function sendAnalysisChatMessage(id: string, message: string, providerId?: string | null, selectedEventId?: string | null) {
   const response = await apiClient.post<AnalysisChatResponse>(`/analysis/${id}/chat`, {
     message,
     provider_id: providerId || null,
+    selected_event_id: selectedEventId || null,
   });
   return response.data;
 }
@@ -1480,18 +1525,21 @@ export async function updateSkater(
   return response.data;
 }
 
-export async function fetchProviders() {
-  const response = await apiClient.get<ProviderPublic[]>("/providers/");
+function parentHeaders(parentPin: string) { return { headers: { "X-Parent-Pin": parentPin } }; }
+
+export async function fetchProviders(parentPin: string) {
+  const response = await apiClient.get<ProviderPublic[]>("/providers/", parentHeaders(parentPin));
   return response.data;
 }
 
-export async function fetchVisionVoteConfig() {
-  const response = await apiClient.get<VisionVoteConfig>("/providers/vision-vote/config");
+export async function fetchVisionVoteConfig(parentPin: string) {
+  const response = await apiClient.get<VisionVoteConfig>("/providers/vision-vote/config", parentHeaders(parentPin));
   return response.data;
 }
 
-export async function fetchProviderMetrics(params?: { days?: number; analysis_profile?: string | null }) {
+export async function fetchProviderMetrics(parentPin: string, params?: { days?: number; analysis_profile?: string | null }) {
   const response = await apiClient.get<ProviderMetricPublic[]>("/providers/metrics", {
+    ...parentHeaders(parentPin),
     params: {
       days: params?.days ?? 30,
       analysis_profile: params?.analysis_profile ?? undefined,
@@ -1500,12 +1548,13 @@ export async function fetchProviderMetrics(params?: { days?: number; analysis_pr
   return response.data;
 }
 
-export async function fetchAutoEvalSnapshots(params?: {
+export async function fetchAutoEvalSnapshots(parentPin: string, params?: {
   limit?: number;
   analysis_profile?: string | null;
   action_type?: string | null;
 }) {
   const response = await apiClient.get<AutoEvalSnapshotSummary[]>("/analysis/auto-eval/snapshots", {
+    ...parentHeaders(parentPin),
     params: {
       limit: params?.limit ?? 50,
       analysis_profile: params?.analysis_profile ?? undefined,
@@ -1625,29 +1674,33 @@ export async function confirmDebugTargetLock(
   return response.data;
 }
 
-export async function updateVisionVoteConfig(payload: VisionVoteConfig) {
-  const response = await apiClient.put<VisionVoteConfig>("/providers/vision-vote/config", payload);
+export async function updateVisionVoteConfig(payload: VisionVoteConfig, parentPin: string) {
+  const response = await apiClient.put<VisionVoteConfig>("/providers/vision-vote/config", payload, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function createProvider(payload: ProviderCreatePayload) {
-  const response = await apiClient.post<ProviderPublic>("/providers/", payload);
+export async function createProvider(payload: ProviderCreatePayload, parentPin: string) {
+  const response = await apiClient.post<ProviderPublic>("/providers/", payload, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function activateProvider(providerId: string) {
-  const response = await apiClient.patch<ProviderPublic>(`/providers/${providerId}/activate`);
+export async function activateProvider(providerId: string, parentPin: string) {
+  const response = await apiClient.patch<ProviderPublic>(`/providers/${providerId}/activate`, undefined, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function updateProvider(providerId: string, payload: ProviderUpdatePayload) {
-  const response = await apiClient.patch<ProviderPublic>(`/providers/${providerId}`, payload);
+export async function updateProvider(providerId: string, payload: ProviderUpdatePayload, parentPin: string) {
+  const response = await apiClient.patch<ProviderPublic>(`/providers/${providerId}`, payload, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function testProvider(providerId: string) {
-  const response = await apiClient.post<{ success: boolean; detail: string }>(`/providers/${providerId}/test`);
+export async function testProvider(providerId: string, parentPin: string) {
+  const response = await apiClient.post<{ success: boolean; detail: string }>(`/providers/${providerId}/test`, undefined, parentHeaders(parentPin));
   return response.data;
+}
+
+export async function deleteProvider(providerId: string, parentPin: string) {
+  await apiClient.delete(`/providers/${providerId}`, parentHeaders(parentPin));
 }
 
 export async function fetchMemories(skaterId: string) {
@@ -1655,24 +1708,24 @@ export async function fetchMemories(skaterId: string) {
   return response.data;
 }
 
-export async function createMemory(skaterId: string, payload: SnowballMemoryPayload) {
-  const response = await apiClient.post<SnowballMemory>(`/skaters/${skaterId}/memories`, payload);
+export async function createMemory(skaterId: string, payload: SnowballMemoryPayload, parentPin: string) {
+  const response = await apiClient.post<SnowballMemory>(`/skaters/${skaterId}/memories`, payload, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function updateMemory(skaterId: string, memoryId: string, payload: Partial<SnowballMemoryPayload>) {
-  const response = await apiClient.patch<SnowballMemory>(`/skaters/${skaterId}/memories/${memoryId}`, payload);
+export async function updateMemory(skaterId: string, memoryId: string, payload: Partial<SnowballMemoryPayload>, parentPin: string) {
+  const response = await apiClient.patch<SnowballMemory>(`/skaters/${skaterId}/memories/${memoryId}`, payload, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function deleteMemory(skaterId: string, memoryId: string) {
-  await apiClient.delete(`/skaters/${skaterId}/memories/${memoryId}`);
+export async function deleteMemory(skaterId: string, memoryId: string, parentPin: string) {
+  await apiClient.delete(`/skaters/${skaterId}/memories/${memoryId}`, parentHeaders(parentPin));
 }
 
-export async function toggleMemoryPin(skaterId: string, memoryId: string, isPinned?: boolean) {
+export async function toggleMemoryPin(skaterId: string, memoryId: string, isPinned: boolean | undefined, parentPin: string) {
   const response = await apiClient.patch<SnowballMemory>(`/skaters/${skaterId}/memories/${memoryId}/pin`, {
     is_pinned: isPinned,
-  });
+  }, parentHeaders(parentPin));
   return response.data;
 }
 
@@ -1681,16 +1734,16 @@ export async function fetchMemorySuggestions(skaterId: string) {
   return response.data;
 }
 
-export async function applyMemorySuggestions(skaterId: string, suggestionId: string, acceptedIndices: number[]) {
+export async function applyMemorySuggestions(skaterId: string, suggestionId: string, acceptedIndices: number[], parentPin: string) {
   const response = await apiClient.post<SnowballMemory[]>(`/skaters/${skaterId}/memory-suggestions/apply`, {
     suggestion_id: suggestionId,
     accepted_indices: acceptedIndices,
-  });
+  }, parentHeaders(parentPin));
   return response.data;
 }
 
-export async function dismissMemorySuggestion(skaterId: string, suggestionId: string) {
-  const response = await apiClient.patch<MemorySuggestion>(`/skaters/${skaterId}/memory-suggestions/${suggestionId}/dismiss`);
+export async function dismissMemorySuggestion(skaterId: string, suggestionId: string, parentPin: string) {
+  const response = await apiClient.patch<MemorySuggestion>(`/skaters/${skaterId}/memory-suggestions/${suggestionId}/dismiss`, undefined, parentHeaders(parentPin));
   return response.data;
 }
 
@@ -1806,8 +1859,6 @@ export interface MonthlyChapter {
   published_at: string | null;
   deleted_at?: string | null;
 }
-
-function parentHeaders(parentPin: string) { return { headers: { "X-Parent-Pin": parentPin } }; }
 
 export async function createMonthlyChapterFacts(skaterId: string, yearMonth: string, parentPin: string): Promise<MonthlyChapter> {
   const response = await apiClient.post<MonthlyChapter>(`/growth/skaters/${skaterId}/chapters/${yearMonth}/facts`, null, parentHeaders(parentPin));

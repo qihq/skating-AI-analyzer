@@ -59,11 +59,15 @@ class AnalysisChatMessagePublic(BaseModel):
     provider_id: str | None = None
     provider_name: str | None = None
     model_id: str | None = None
+    selected_event_id: str | None = None
+    facts_authority: str | None = None
+    source_fact_hash: str | None = None
 
 
 class AnalysisChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     provider_id: str | None = None
+    selected_event_id: str | None = Field(default=None, max_length=80)
 
 
 class AnalysisChatResponse(BaseModel):
@@ -86,6 +90,14 @@ class AnalysisCorrectionPublic(BaseModel):
     created_at: datetime
     updated_at: datetime
     applied_at: datetime | None = None
+    event_id: str | None = None
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
+    invalidated_artifacts: list[str] = Field(default_factory=list)
 
 
 class AnalysisCorrectionCreateRequest(BaseModel):
@@ -217,6 +229,11 @@ class AnalysisDetail(BaseModel):
     error_detail: str | None = None
     error_message: str | None = None
     note: str | None = None
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -398,6 +415,31 @@ class CompareQualityPayload(BaseModel):
     skill_mismatch: bool = False
 
 
+class CompareFactEvidence(BaseModel):
+    """Definition-safe provenance for an analysis comparison.
+
+    The ordinary comparison response may still carry legacy-compatible
+    presentation fields, but a V2 result is interpreted exclusively from this
+    envelope.  Excluded entries are retained so an unavailable/conflicting or
+    cross-definition claim is never mistaken for a zero delta.
+    """
+
+    schema_version: str = "analysis-fact-comparison.v2"
+    left_authority: str | None = None
+    right_authority: str | None = None
+    left_source_fact_hash: str | None = None
+    right_source_fact_hash: str | None = None
+    left_source_fact_revision: int | None = None
+    right_source_fact_revision: int | None = None
+    left_source_pipeline_fingerprint: str | None = None
+    right_source_pipeline_fingerprint: str | None = None
+    event_pairs: list[dict[str, Any]] = Field(default_factory=list)
+    deltas: list[dict[str, Any]] = Field(default_factory=list)
+    excluded: list[dict[str, Any]] = Field(default_factory=list)
+    authority_mismatch: bool = False
+    profile_mismatch: bool = False
+
+
 class CompareVideoAiObservation(BaseModel):
     key: str
     label: str
@@ -431,7 +473,7 @@ class CompareVideoAiReport(BaseModel):
 class AnalysisCompareResponse(BaseModel):
     analysis_a: AnalysisDetail
     analysis_b: AnalysisDetail
-    score_delta: int
+    score_delta: int | None = None
     summary: CompareSummary
     subscore_deltas: list[CompareDelta] = Field(default_factory=list)
     metric_deltas: list[CompareDelta] = Field(default_factory=list)
@@ -440,6 +482,7 @@ class AnalysisCompareResponse(BaseModel):
     quality: CompareQualityPayload | None = None
     ai_narrative: str | None = None
     video_ai_report: CompareVideoAiReport | None = None
+    fact_comparison: CompareFactEvidence | None = None
 
 
 class AnalysisComparisonCreateRequest(BaseModel):
@@ -508,6 +551,31 @@ class TrainingPlanDetail(BaseModel):
     skater_id: str
     plan_json: TrainingPlanPayload
     created_at: datetime
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
+    source_updated: bool = False
+
+
+class TrainingPlanRevisionPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    plan_id: str
+    analysis_id: str
+    skater_id: str
+    revision: int
+    plan_json: TrainingPlanPayload
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
+    created_at: datetime
 
 
 class UpdatePlanSessionRequest(BaseModel):
@@ -560,6 +628,10 @@ class GrowthFocus(BaseModel):
     label: str
     source_analysis_id: str
     quality: str
+    # Populated when no confirmed, aggregation-eligible fact could support
+    # the focus.  The public growth surface uses this to explain exclusion
+    # without exposing raw legacy/V2 payloads.
+    excluded_reason: str | None = None
 
 
 class GrowthMilestoneEvent(BaseModel):
@@ -809,6 +881,8 @@ class ProviderPublic(BaseModel):
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
+    v2_role: str
+    fingerprint: str
 
 
 class ProviderMetricPublic(BaseModel):
@@ -829,6 +903,8 @@ class ProviderTestResponse(BaseModel):
 class VisionVoteConfig(BaseModel):
     primary_provider_id: str | None = None
     secondary_provider_id: str | None = None
+    scope: str = "legacy_vision_only"
+    applies_to_v2_fusion: bool = False
 
 
 class ApiConnectionTestResponse(BaseModel):
@@ -1037,6 +1113,18 @@ class SnowballMemoryPublic(BaseModel):
     is_expired: bool = False
     created_at: datetime
     updated_at: datetime
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
 
 
 class MemorySuggestionPublic(BaseModel):
@@ -1048,6 +1136,12 @@ class MemorySuggestionPublic(BaseModel):
     suggestions: list[dict[str, Any]] = Field(default_factory=list)
     is_reviewed: bool
     created_at: datetime
+    facts_authority: str | None = None
+    facts_schema_version: str | None = None
+    source_fact_hash: str | None = None
+    source_fact_revision: int | None = None
+    source_pipeline_fingerprint: str | None = None
+    generation_fingerprint: str | None = None
 
 
 class MemorySuggestionApplyRequest(BaseModel):

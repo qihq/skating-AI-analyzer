@@ -143,6 +143,52 @@ class GrowthSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.recent_milestones[0].note, "Three in a row")
         self.assertEqual(result.recent_milestones[1].source_analysis_ids, ["analysis-auto-unlock"])
 
+    async def test_v2_growth_focus_excludes_legacy_report_when_no_coaching_fact(self) -> None:
+        from app.analysis_v2.facts import AnalysisFactV2, AnalysisFactsV2
+        from app.services.growth_summary import build_growth_summary
+
+        models = self.models
+        fact_set = AnalysisFactsV2(
+            analysis_id="analysis-v2",
+            authority="v2",
+            facts=(
+                AnalysisFactV2(
+                    analysis_id="analysis-v2",
+                    claim_type="action_profile",
+                    value="jump",
+                    authority="v2",
+                    source_pipeline_fingerprint="v2:test",
+                    definition_version="action-profile.v2",
+                ),
+            ),
+        )
+        async with self.database.AsyncSessionLocal() as session:
+            session.add(models.Skater(id="skater-1", name="tantan"))
+            session.add(
+                models.Analysis(
+                    id="analysis-v2",
+                    skater_id="skater-1",
+                    action_type="jump",
+                    video_path="v2.mp4",
+                    status="completed",
+                    report={"training_focus": "legacy-only focus"},
+                    analysis_facts={"schema_version": "analysis-facts.v2", **fact_set.model_dump(mode="json")},
+                    facts_authority="v2",
+                    facts_schema_version="analysis-facts.v2",
+                    source_fact_hash=fact_set.source_fact_hash,
+                    source_fact_revision=1,
+                    source_pipeline_fingerprint="v2:test",
+                )
+            )
+            await session.commit()
+
+        async with self.database.AsyncSessionLocal() as session:
+            result = await build_growth_summary(session, "skater-1")
+
+        assert result.current_focus is not None
+        self.assertEqual(result.current_focus.label, "当前没有可确认的训练重点")
+        self.assertIn("不使用旧报告回填", result.current_focus.excluded_reason or "")
+
     async def test_route_rejects_unknown_skater(self) -> None:
         import app.routers.skaters as skaters_router
         from fastapi import HTTPException

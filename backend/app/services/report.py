@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from app.schemas import Severity
+from app.analysis_v2.claim_report import build_claim_explainer_prompt, constrain_report_payload
+from app.analysis_v2.contracts import EvidenceClaim
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
@@ -1298,6 +1301,7 @@ async def generate_report(
     *,
     dual_path_meta: dict[str, Any] | None = None,
     prompt_context: AnalysisPromptContext | None = None,
+    fused_claims: Sequence[EvidenceClaim] | None = None,
 ) -> dict[str, Any]:
     """
     Generate a structured training report.
@@ -1315,13 +1319,27 @@ async def generate_report(
     Raises:
         No AI provider exception is intentionally propagated; failures become fallback reports.
     """
+    # V2 report generation receives only the bounded, fused claim envelope.
+    # Legacy callers continue to use the historical vision/bio payloads.
+    # ``None`` means legacy mode; an empty tuple is an explicit V2 envelope
+    # with no eligible claims and must remain claim-only/fail-closed.
+    claim_only = fused_claims is not None
+    claim_tuple = tuple(fused_claims or ())
+
+    def _claim_safe(report: dict[str, Any]) -> dict[str, Any]:
+        return constrain_report_payload(report, claim_tuple) if claim_only else report
+
     try:
         provider = await get_active_provider("report")
-        memory_context = "" if prompt_context is not None else await build_memory_context(skater_id)
+        # A V2 report prompt is claim-only.  Snowball memory and the legacy
+        # AnalysisPromptContext are not evidence authorities and therefore
+        # must not be resolved or rendered for this path.  Legacy callers keep
+        # the historical prompt/memory behavior below.
+        memory_context = "" if claim_only or prompt_context is not None else await build_memory_context(skater_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
         failure = classify_ai_failure(exc)
-        return _fallback_report_after_ai_failure(
+        return _claim_safe(_fallback_report_after_ai_failure(
             action_type,
             bio_data,
             failure.detail,
@@ -1329,19 +1347,49 @@ async def generate_report(
             vision_structured=vision_structured,
             dual_path_meta=dual_path_meta,
             prompt_context=prompt_context,
-        )
+        ))
 
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
-    context_block = (
-        "\n\n=== 统一分析上下文 ===\n" + render_prompt_context(prompt_context, include_bio=False)
-        if prompt_context is not None
-        else ""
-    )
-    vision_summary = summarize_vision_for_report(vision_structured)
-    dual_block = _build_dual_path_report_context(dual_path_meta)
-    video_temporal_block = _build_video_temporal_report_context(vision_structured, dual_path_meta)
+    if claim_only:
+        # Do not include raw Path A/B, pose, biomechanics, keyframe arrays, or
+        # temporal/legacy prompt payloads in the model context.  The explainer
+        # receives only claim-level values plus their provenance/conflict/
+        # refusal metadata and the two bounded family-facing fields below.
+        vision_summary = {"fused_evidence": build_claim_explainer_prompt(
+            claim_tuple,
+            action_family=action_type,
+            user_question=prompt_context.user_note if prompt_context is not None else None,
+        )}
+        dual_block = ""
+        video_temporal_block = ""
+        prompt_bio_data: dict[str, Any] = {}
+    else:
+        vision_summary = summarize_vision_for_report(vision_structured)
+        dual_block = _build_dual_path_report_context(dual_path_meta)
+        video_temporal_block = _build_video_temporal_report_context(vision_structured, dual_path_meta)
+        prompt_bio_data = bio_data or {}
+        context_block = (
+            "\n\n=== 统一分析上下文 ===\n" + render_prompt_context(prompt_context, include_bio=False)
+            if prompt_context is not None
+            else ""
+        )
 
-    user_prompt = (
+    if claim_only:
+        user_prompt = (
+            "请仅解释下面的已融合 EvidenceClaim，生成结构化训练报告。"
+            "每条技术陈述必须能追溯到 claim_keys；保留 uncertain/conflict/unobservable，"
+            "不得发明动作名称、精确时刻、圈数或技术缺陷。\n\n"
+            "返回 JSON 必须包含 summary、issues、improvements、training_focus、subscores、data_quality；"
+            "action_confirmation 仅在 action_profile/action_family claim 明确支持时输出。\n\n"
+            f"{vision_summary['fused_evidence']}"
+        )
+        user_prompt += (
+            "\n\nOutput constraints: return exactly one valid JSON object. "
+            "The first character must be { and the last character must be }. "
+            "Do not output reasoning, Markdown, code fences, or any text outside the JSON object."
+        )
+    else:
+        user_prompt = (
         f"请根据花样滑冰【{action_type}】结构化帧分析和骨骼几何指标，生成结构化训练报告。\n\n"
         "返回 JSON 必须包含：\n"
         "{\n"
@@ -1385,16 +1433,16 @@ async def generate_report(
         "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段、次数和儿童安全边界。"
         "所有训练建议必须低冲击、短时长、可由家长或教练安全监督；不要安排负重、Bosu、旋转椅或痛苦拉伸。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
-        f"骨骼几何指标：\n{json.dumps(bio_data or {}, ensure_ascii=False)}"
+        f"骨骼几何指标：\n{json.dumps(prompt_bio_data, ensure_ascii=False)}"
         + context_block
         + dual_block
         + video_temporal_block
-    )
-    user_prompt += (
-        "\n\nOutput constraints: return exactly one valid JSON object. "
-        "The first character must be { and the last character must be }. "
-        "Do not output reasoning, Markdown, code fences, or any text outside the JSON object."
-    )
+        )
+        user_prompt += (
+            "\n\nOutput constraints: return exactly one valid JSON object. "
+            "The first character must be { and the last character must be }. "
+            "Do not output reasoning, Markdown, code fences, or any text outside the JSON object."
+        )
 
     response_format = _report_response_format(provider)
     temperature = 0.15 if _is_deepseek_v4_provider(provider) else 0.25
@@ -1416,7 +1464,7 @@ async def generate_report(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Report AI request failed after retries, using biomechanics fallback: %s", exc)
             failure = classify_ai_failure(exc)
-            return _fallback_report_after_ai_failure(
+            return _claim_safe(_fallback_report_after_ai_failure(
                 action_type,
                 bio_data,
                 failure.detail,
@@ -1424,7 +1472,7 @@ async def generate_report(
                 vision_structured=vision_structured,
                 dual_path_meta=dual_path_meta,
                 prompt_context=prompt_context,
-            )
+            ))
 
         cleaned = clean_json_text(raw_content)
         try:
@@ -1441,14 +1489,28 @@ async def generate_report(
         if prompt_context is not None and prompt_context.user_note:
             parsed["user_note"] = prompt_context.user_note
 
+        claim_boundary: dict[str, Any] | None = None
+        if claim_only:
+            # Capture unsupported markers before normalization drops unknown
+            # technical keys such as timestamp/turns.
+            claim_boundary = constrain_report_payload(parsed, claim_tuple)
+            parsed = claim_boundary
         report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
-        report = _refine_report_with_structured_evidence(
-            report,
-            action_type=action_type,
-            vision_summary=vision_summary,
-            dual_path_meta=dual_path_meta,
-            prompt_context=prompt_context,
-        )
+        if not claim_only:
+            report = _refine_report_with_structured_evidence(
+                report,
+                action_type=action_type,
+                vision_summary=vision_summary,
+                dual_path_meta=dual_path_meta,
+                prompt_context=prompt_context,
+            )
+        report = _claim_safe(report)
+        if claim_boundary is not None:
+            report["unsupported_claims"] = list(claim_boundary.get("unsupported_claims") or ())
+            report["evidence_claims"] = claim_boundary.get("evidence_claims")
+            report["report_source_fact_hash"] = claim_boundary.get("report_source_fact_hash")
+            if report.get("action_confirmation") is None:
+                report.pop("action_confirmation", None)
         if report["summary"] and report["training_focus"]:
             if attempt > 1:
                 report["report_retry_count"] = attempt - 1
@@ -1458,11 +1520,11 @@ async def generate_report(
             f"Report payload missing required fields on attempt {attempt}/{REPORT_JSON_MAX_ATTEMPTS}: {cleaned[:500]}"
         )
 
-    return _fallback_report_after_parse_failure(
+    return _claim_safe(_fallback_report_after_parse_failure(
         action_type,
         vision_structured,
         bio_data,
         last_failure_detail,
         dual_path_meta=dual_path_meta,
         prompt_context=prompt_context,
-    )
+    ))

@@ -16,6 +16,21 @@ from test_analysis_keyframe_candidates import _motion_scores, _pose_data
 
 
 class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_eval_snapshot_export_requires_parent_pin(self) -> None:
+        from fastapi import HTTPException
+
+        session = AsyncMock()
+        import app.routers.analysis as analysis_router
+
+        async def reject_parent(*_args: object, **_kwargs: object) -> None:
+            raise HTTPException(status_code=403, detail="parent required")
+
+        with patch.object(analysis_router, "require_parent_pin", new=reject_parent):
+            for pin in (None, "9999"):
+                with self.assertRaises(HTTPException) as raised:
+                    await analysis_router.list_auto_eval_snapshots(x_parent_pin=pin, session=session)
+                self.assertEqual(raised.exception.status_code, 403)
+
     async def test_auto_eval_snapshot_export_filters_and_sorts_completed_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.environ["DATA_DIR"] = tmpdir
@@ -32,6 +47,7 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
             import app.database as database
             import app.models as models
             import app.routers.analysis as analysis_router
+            from app.services.auth import hash_pin
             from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
             database.ensure_storage_dirs()
@@ -75,6 +91,7 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
             ]
 
             async with database.AsyncSessionLocal() as session:
+                session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
                 for payload in records:
                     analysis = models.Analysis(
                         id=payload["id"],
@@ -106,7 +123,7 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.routers.analysis._provider_for_slot", AsyncMock(return_value=SimpleNamespace())),
             ):
                 async with database.AsyncSessionLocal() as session:
-                    snapshots = await analysis_router.list_auto_eval_snapshots(session=session)
+                    snapshots = await analysis_router.list_auto_eval_snapshots(x_parent_pin="1234", session=session)
                     self.assertEqual([item.analysis_id for item in snapshots], [records[1]["id"], records[0]["id"]])
                     self.assertEqual(snapshots[0].analysis_profile, "spin")
                     self.assertEqual(snapshots[0].action_type, "旋转")
@@ -116,12 +133,14 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
                     filtered = await analysis_router.list_auto_eval_snapshots(
                         analysis_profile="jump",
                         action_type="跳跃",
+                        x_parent_pin="1234",
                         session=session,
                     )
                     self.assertEqual([item.analysis_id for item in filtered], [records[0]["id"]])
 
                     empty = await analysis_router.list_auto_eval_snapshots(
                         analysis_profile="spiral",
+                        x_parent_pin="1234",
                         session=session,
                     )
                     self.assertEqual(empty, [])
@@ -142,12 +161,14 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
             import app.database as database
             import app.models as models
             import app.routers.analysis as analysis_router
+            from app.services.auth import hash_pin
             from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 
             database.ensure_storage_dirs()
             await database.init_db()
 
             async with database.AsyncSessionLocal() as session:
+                session.add(models.ParentAuth(pin_hash=hash_pin("1234"), pin_length=4))
                 analysis = models.Analysis(
                     id=str(uuid4()),
                     action_type="跳跃",
@@ -162,7 +183,7 @@ class AutoEvalExportApiTests(unittest.IsolatedAsyncioTestCase):
                 await session.commit()
 
             async with database.AsyncSessionLocal() as session:
-                snapshots = await analysis_router.list_auto_eval_snapshots(session=session)
+                snapshots = await analysis_router.list_auto_eval_snapshots(x_parent_pin="1234", session=session)
                 self.assertEqual(snapshots, [])
 
 

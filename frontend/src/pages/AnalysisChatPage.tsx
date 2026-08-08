@@ -3,6 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { AnalysisDetail, AnalysisListItem, fetchAnalyses, fetchAnalysis } from "../api/client";
+import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import { presentAnalysisExperience } from "../analysis-v2/presenter";
+import { useAnalysisExperiences } from "../analysis-v2/useAnalysisExperiences";
 import AnalysisFollowUpPanel from "../components/AnalysisFollowUpPanel";
 import { useAppMode } from "../components/AppModeContext";
 import { apiDateTimeFormatter, parseApiDate } from "../utils/datetime";
@@ -16,14 +20,34 @@ function formatDate(value: string) {
   }).format(parseApiDate(value));
 }
 
-function recordLabel(record: AnalysisListItem) {
-  const skater = record.skater_name ? `${record.skater_name} · ` : "";
-  const subtype = record.action_subtype ? ` · ${record.action_subtype}` : "";
-  return `${skater}${record.action_type}${subtype}`;
+function authorityRecordLabel(record: AnalysisListItem | null | undefined, experience: AnalysisExperienceV2 | null | undefined, selectedEventId?: string | null) {
+  const skater = record?.skater_name ? `${record.skater_name} · ` : "";
+  if (!experience) return `${skater}复盘摘要加载中`;
+  const view = presentAnalysisExperience(experience, selectedEventId);
+  const event = view.selectedEvent;
+  return `${skater}${event?.label || "本次复盘"}`;
 }
 
-function keyFrameChips(analysis: AnalysisDetail) {
-  return analysis.bio_data?.key_frames ? Object.entries(analysis.bio_data.key_frames).filter(([, value]) => value) : [];
+function authorityRecordScore(experience: AnalysisExperienceV2 | null | undefined): number | null {
+  if (!experience) return null;
+  return presentAnalysisExperience(experience).forceScore;
+}
+
+function authorityRecordSearchText(record: AnalysisListItem, experience: AnalysisExperienceV2 | null | undefined): string {
+  if (!experience) return `${record.id} ${record.created_at}`;
+  const view = presentAnalysisExperience(experience);
+  const notes = experience.claims
+    .filter((claim) => claim.claimType === "user_note" && claim.status === "confirmed" && claim.value != null)
+    .map((claim) => String(claim.value));
+  return [authorityRecordLabel(record, experience), view.summary, ...notes, record.id, record.created_at].join(" ");
+}
+
+function keyFrameChips(experience: AnalysisExperienceV2 | null) {
+  const claims = experience?.claims.filter((claim) => claim.claimType === "key_moment" && claim.status !== "unobservable") ?? [];
+  return claims.map((claim) => {
+    const value = claim.value && typeof claim.value === "object" ? claim.value as Record<string, unknown> : {};
+    return [String(value.phase ?? value.semantic_key ?? "moment"), value.frame ?? value.timestamp ?? claim.value] as [string, unknown];
+  }).filter(([, value]) => value != null && value !== "");
 }
 
 export default function AnalysisChatPage({
@@ -37,6 +61,7 @@ export default function AnalysisChatPage({
   const [searchParams, setSearchParams] = useSearchParams();
   const [records, setRecords] = useState<AnalysisListItem[]>([]);
   const [selectedAnalysis, setSelectedAnalysis] = useState<AnalysisDetail | null>(null);
+  const [selectedExperience, setSelectedExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [query, setQuery] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,26 +70,23 @@ export default function AnalysisChatPage({
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
 
   const selectedId = searchParams.get("analysis") || "";
+  const selectedEventId = searchParams.get("event");
 
   const completedRecords = useMemo(() => records.filter((record) => record.status === "completed"), [records]);
+  const experienceIds = useMemo(() => completedRecords.map((record) => record.id), [completedRecords]);
+  const { experiences } = useAnalysisExperiences(experienceIds);
   const filteredRecords = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) {
       return completedRecords;
     }
-    return completedRecords.filter((record) =>
-      [
-        recordLabel(record),
-        record.id,
-        record.note ?? "",
-        record.skill_category ?? "",
-        record.created_at,
-      ]
+      return completedRecords.filter((record) =>
+      [authorityRecordSearchText(record, experiences[record.id]), record.skill_category ?? ""]
         .join(" ")
         .toLowerCase()
         .includes(keyword),
     );
-  }, [completedRecords, query]);
+  }, [completedRecords, experiences, query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,11 +123,22 @@ export default function AnalysisChatPage({
   const loadSelectedAnalysis = async (id: string) => {
     if (!id) {
       setSelectedAnalysis(null);
+      setSelectedExperience(null);
       return null;
     }
     setIsAnalysisLoading(true);
     setError(null);
     try {
+      // The family-facing chat is anchored to the same authority contract as
+      // report/history. Legacy detail is retained only for parent correction
+      // tooling and is never used for the ordinary header or chat context.
+      const experience = await fetchAnalysisExperienceV2(id);
+      setSelectedExperience(experience);
+      if (!selectedEventId && experience.events[0]?.eventId) {
+        const next = new URLSearchParams(searchParams);
+        next.set("event", experience.events[0].eventId);
+        setSearchParams(next, { replace: true });
+      }
       const data = await fetchAnalysis(id, { isParentRequest: true });
       setSelectedAnalysis(data);
       return data;
@@ -116,6 +149,7 @@ export default function AnalysisChatPage({
         setError("分析详情加载失败。");
       }
       setSelectedAnalysis(null);
+      setSelectedExperience(null);
       return null;
     } finally {
       setIsAnalysisLoading(false);
@@ -148,10 +182,6 @@ export default function AnalysisChatPage({
         record.id === id
           ? {
               ...record,
-              action_type: next.action_type,
-              action_subtype: next.action_subtype,
-              analysis_profile: next.analysis_profile,
-              force_score: next.force_score,
               updated_at: next.updated_at,
             }
           : record,
@@ -159,7 +189,8 @@ export default function AnalysisChatPage({
     );
   };
 
-  const selectedKeyFrames = selectedAnalysis ? keyFrameChips(selectedAnalysis) : [];
+  const selectedKeyFrames = keyFrameChips(selectedExperience);
+  const presented = selectedExperience ? presentAnalysisExperience(selectedExperience, selectedEventId) : null;
 
   const selectorContent = (
     <>
@@ -181,7 +212,7 @@ export default function AnalysisChatPage({
         <option value="">{isListLoading ? "正在加载..." : "请选择一条已完成分析"}</option>
         {completedRecords.map((record) => (
           <option key={record.id} value={record.id}>
-            {recordLabel(record)} · {formatDate(record.created_at)}
+            {authorityRecordLabel(record, experiences[record.id])} · {formatDate(record.created_at)}
           </option>
         ))}
       </select>
@@ -203,12 +234,11 @@ export default function AnalysisChatPage({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-slate-900">{recordLabel(record)}</p>
+                    <p className="truncate text-sm font-semibold text-slate-900">{authorityRecordLabel(record, experiences[record.id])}</p>
                     <p className="mt-1 text-xs text-slate-500">{formatDate(record.created_at)}</p>
                   </div>
-                  <span className="shrink-0 rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-500">{record.force_score ?? "--"}</span>
+                  <span className="shrink-0 rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-500">{authorityRecordScore(experiences[record.id]) ?? "--"}</span>
                 </div>
-                {record.note ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">{record.note}</p> : null}
               </button>
             );
           })
@@ -220,7 +250,11 @@ export default function AnalysisChatPage({
   );
 
   const selectedRecord = completedRecords.find((record) => record.id === selectedId);
-  const selectedSummary = selectedAnalysis ? recordLabel(selectedAnalysis) : selectedRecord ? recordLabel(selectedRecord) : "请选择一条分析";
+  const selectedSummary = selectedExperience
+    ? authorityRecordLabel(selectedAnalysis ?? selectedRecord, selectedExperience, selectedEventId)
+    : selectedRecord
+      ? authorityRecordLabel(selectedRecord, experiences[selectedRecord.id])
+      : "请选择一条分析";
 
   return (
     <div className="min-w-0 space-y-4">
@@ -250,13 +284,11 @@ export default function AnalysisChatPage({
                 <div className="grid gap-3 tablet:grid-cols-[minmax(0,1fr)_auto] tablet:items-center">
                   <div className="min-w-0">
                     <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-600">AI 追问</p>
-                    <h1 className="mt-1 truncate text-lg font-semibold text-slate-900 tablet:text-xl">{recordLabel(selectedAnalysis)}</h1>
+                    <h1 className="mt-1 truncate text-lg font-semibold text-slate-900 tablet:text-xl">{authorityRecordLabel(selectedAnalysis, selectedExperience, selectedEventId)}</h1>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                       <span>{formatDate(selectedAnalysis.created_at)}</span>
-                      <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold">Force {selectedAnalysis.force_score ?? "--"}</span>
-                      {selectedAnalysis.report?.action_confirmation?.confirmed_action ? (
-                        <span className="rounded-full bg-blue-50 px-2 py-1 font-semibold text-blue-600">{String(selectedAnalysis.report.action_confirmation.confirmed_action)}</span>
-                      ) : null}
+                      <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold">{presented?.stateLabel ?? "当前证据状态未知"}</span>
+                      {presented?.selectedEvent?.label ? <span className="rounded-full bg-blue-50 px-2 py-1 font-semibold text-blue-600">{presented.selectedEvent.label}</span> : null}
                       {selectedKeyFrames.map(([key, value]) => (
                         <span key={key} className="rounded-full bg-slate-100 px-2 py-1">{key}: {String(value)}</span>
                       ))}
@@ -278,6 +310,8 @@ export default function AnalysisChatPage({
               </section>
               <AnalysisFollowUpPanel
                 analysis={selectedAnalysis}
+                experience={selectedExperience}
+                selectedEventId={selectedEventId}
                 variant="workspace"
                 onAnalysisRefresh={() => refreshSelectedAnalysis(selectedAnalysis.id)}
                 onAnalysisRetryQueued={() => void loadSelectedAnalysis(selectedAnalysis.id)}

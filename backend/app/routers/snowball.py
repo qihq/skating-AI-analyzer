@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
@@ -26,6 +26,7 @@ from app.services.snowball import (
     serialize_memory,
     utcnow,
 )
+from app.services.parent_access import require_parent_pin
 
 
 router = APIRouter(prefix="/api", tags=["snowball"])
@@ -67,8 +68,10 @@ async def get_snowball_memories(
 async def create_snowball_memory(
     skater_id: str,
     payload: SnowballMemoryCreate,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> SnowballMemoryPublic:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     try:
         memory = await create_memory(
@@ -90,8 +93,10 @@ async def update_snowball_memory(
     skater_id: str,
     memory_id: str,
     payload: SnowballMemoryUpdate,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> SnowballMemoryPublic:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     memory = await _require_memory(session, skater_id, memory_id)
 
@@ -119,8 +124,10 @@ async def update_snowball_memory(
 async def delete_snowball_memory(
     skater_id: str,
     memory_id: str,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     memory = await _require_memory(session, skater_id, memory_id)
     await session.delete(memory)
@@ -133,8 +140,10 @@ async def pin_snowball_memory(
     skater_id: str,
     memory_id: str,
     payload: SnowballMemoryPinUpdate,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> SnowballMemoryPublic:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     memory = await _require_memory(session, skater_id, memory_id)
     memory.is_pinned = (not memory.is_pinned) if payload.is_pinned is None else bool(payload.is_pinned)
@@ -156,13 +165,24 @@ async def get_memory_suggestions(
 async def apply_memory_suggestions(
     skater_id: str,
     payload: MemorySuggestionApplyRequest,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> list[SnowballMemoryPublic]:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     suggestion = await _require_suggestion(session, skater_id, payload.suggestion_id)
     now = utcnow()
     accepted_indices = sorted({index for index in payload.accepted_indices if index >= 0})
     applied_memories: list[SnowballMemory] = []
+
+    provenance = {
+        "facts_authority": suggestion.facts_authority,
+        "facts_schema_version": suggestion.facts_schema_version,
+        "source_fact_hash": suggestion.source_fact_hash,
+        "source_fact_revision": suggestion.source_fact_revision,
+        "source_pipeline_fingerprint": suggestion.source_pipeline_fingerprint,
+        "generation_fingerprint": suggestion.generation_fingerprint,
+    }
 
     for index in accepted_indices:
         if index >= len(suggestion.suggestions):
@@ -179,6 +199,7 @@ async def apply_memory_suggestions(
                 content=normalize_memory_text(str(item.get("content", "")), "") or "",
                 category=normalize_memory_category(str(item.get("category", "其他"))),
                 is_pinned=True,
+                **provenance,
             )
             session.add(memory)
             applied_memories.append(memory)
@@ -196,9 +217,13 @@ async def apply_memory_suggestions(
             memory.title = title or memory.title
             memory.category = category
             memory.content = new_content
+            for key, value in provenance.items():
+                setattr(memory, key, value)
             applied_memories.append(memory)
         elif action == "expire":
             memory.expires_at = now
+            for key, value in provenance.items():
+                setattr(memory, key, value)
             applied_memories.append(memory)
 
     suggestion.is_reviewed = True
@@ -215,8 +240,10 @@ async def apply_memory_suggestions(
 async def dismiss_memory_suggestion(
     skater_id: str,
     suggestion_id: str,
+    x_parent_pin: str | None = Header(default=None, alias="X-Parent-Pin"),
     session: AsyncSession = Depends(get_session),
 ) -> MemorySuggestionPublic:
+    await require_parent_pin(session, x_parent_pin)
     await _require_skater(session, skater_id)
     suggestion = await _require_suggestion(session, skater_id, suggestion_id)
     suggestion.is_reviewed = True

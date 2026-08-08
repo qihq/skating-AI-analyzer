@@ -49,7 +49,7 @@ function v2Item(moment: KeyMomentV2): PhaseItem {
     imageUrl: null,
     timestamp: moment.ptsSec,
     endTimestamp: moment.endPtsSec,
-    source: moment.provenance.includes("source_pts") ? "原视频精确帧" : "V2 技术证据",
+    source: moment.provenance.includes("source_pts") ? "原视频精确帧" : "当前复盘证据",
     status: moment.status,
     confidence: moment.status === "unavailable" ? null : moment.confidence,
     reason: moment.status === "unavailable" ? moment.warnings[0] ?? "证据不足" : null,
@@ -85,8 +85,8 @@ export default function ActionPhaseStrip({ analysis, analysisId, pose, event, sh
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-blue-500">Key Moments</p>
         <h2 id="action-phase-title" className="mt-2 text-2xl font-semibold text-slate-900">关键技术时刻</h2>
-        <p className="mt-2 text-sm leading-6 text-slate-500">{isV2 ? "所有标记都来自原视频 source PTS；语义关键帧只用于复核，不会直接成为时间真值。" : "历史分析按原有 T/A/L 快照显示，不改写旧定义。"}</p>
-        {event?.moments ? <p className="mt-2 text-xs text-slate-500" role="status">完整性：{event.moments.completeness} · 定义 {event.moments.definitionVersion}</p> : event ? <p className="mt-2 text-sm text-amber-700" role="status">此事件尚无可用的 V2 技术时刻，不使用历史关键帧补齐。</p> : null}
+        <p className="mt-2 text-sm leading-6 text-slate-500">{isV2 ? "所有标记都来自原视频时间戳；候选画面只用于复核，不会直接成为准确时刻。" : "历史分析按原有起跳、腾空与落冰快照显示，不改写旧定义。"}</p>
+        {event?.moments ? <p className="mt-2 text-xs text-slate-500" role="status">证据覆盖：{event.moments.completeness} · 口径 {event.moments.definitionVersion}</p> : event ? <p className="mt-2 text-sm text-amber-700" role="status">这段动作尚无可用的技术时刻，也不会用历史关键帧补齐。</p> : null}
       </div>
       {event?.rotation ? <div className="mt-4"><RotationEstimateCard rotation={event.rotation} /></div> : null}
       {showVideo && resolvedAnalysisId ? (

@@ -3,9 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { fetchAnalysisExperienceV2 } from "../analysis-v2/api";
-import { AnalysisExperienceV2 } from "../analysis-v2/contracts";
+import type { AnalysisExperienceV2 } from "../analysis-v2/contracts";
 import { actionEventLabel } from "../analysis-v2/profilePresentation";
-import { AnalysisDetail, fetchAnalysis, fetchGrowthSummary, fetchSkaters, GrowthSummary, Skater } from "../api/client";
+import { fetchGrowthSummary, fetchSkaters, GrowthSummary, Skater } from "../api/client";
+import { presentAnalysisExperience } from "../analysis-v2/presenter";
 import { useAppMode } from "../components/AppModeContext";
 import IslandIcon from "./IslandIcon";
 import { IslandCard, IslandPageHeader, IslandTitle } from "./IslandSurface";
@@ -17,17 +18,11 @@ function message(error: unknown) {
   return "岛上信号有点弱，部分成长信息暂时没有更新，请稍后再试。";
 }
 
-function claimValue(experience: AnalysisExperienceV2 | null, type: string): string | null {
-  const claim = experience?.claims.find((item) => item.claimType === type);
-  return claim?.status === "unobservable" ? null : claim?.value == null ? null : String(claim.value);
-}
-
 export default function ModernTodayIsland() {
   const { isParentMode } = useAppMode();
   const [skaters, setSkaters] = useState<Skater[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [summary, setSummary] = useState<GrowthSummary | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisDetail | null>(null);
   const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +43,6 @@ export default function ModernTodayIsland() {
     setLoading(true);
     setError(null);
     setSummary(null);
-    setAnalysis(null);
     setExperience(null);
     const loadSummary = async () => {
       try {
@@ -60,8 +54,7 @@ export default function ModernTodayIsland() {
             const nextExperience = await fetchAnalysisExperienceV2(nextSummary.latest_analysis_id);
             if (!cancelled) setExperience(nextExperience);
           } catch {
-            const nextAnalysis = await fetchAnalysis(nextSummary.latest_analysis_id);
-            if (!cancelled) setAnalysis(nextAnalysis);
+            if (!cancelled) setError("最近一次复盘暂时无法安全显示，请稍后重试。");
           }
         }
       } catch (reason) {
@@ -75,10 +68,11 @@ export default function ModernTodayIsland() {
   }, [selectedId]);
 
   const selected = useMemo(() => skaters.find((item) => item.id === selectedId), [selectedId, skaters]);
-  const nextAction = claimValue(experience, "next_action") ?? analysis?.report?.improvements?.[0]?.action ?? analysis?.report?.training_focus ?? summary?.current_focus?.label;
-  const latestSummary = claimValue(experience, "report_summary") ?? analysis?.report?.summary;
+  const presented = experience ? presentAnalysisExperience(experience) : null;
+  const nextAction = presented?.nextAction?.state === "confirmed" ? presented.nextAction.text : summary?.current_focus?.label;
+  const latestSummary = presented?.summary;
   const latestEvent = experience?.events[0];
-  const latestProfile = latestEvent ? actionEventLabel(latestEvent) : analysis?.action_type ?? summary?.current_focus?.label;
+  const latestProfile = latestEvent ? actionEventLabel(latestEvent) : summary?.current_focus?.label;
 
   return (
     <div className="today-island">

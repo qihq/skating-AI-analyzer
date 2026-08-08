@@ -85,6 +85,55 @@ class ActiveProviderConfig:
     api_key: str
     notes: str | None
 
+    @property
+    def v2_role(self) -> str:
+        return provider_v2_role(self.slot)
+
+    @property
+    def fingerprint(self) -> str:
+        return provider_fingerprint(
+            provider_id=self.id,
+            slot=self.slot,
+            provider=self.provider,
+            model_id=self.model_id,
+            vision_model=self.vision_model,
+        )
+
+
+def provider_v2_role(slot: str) -> str:
+    """Map compatibility slots to explicit V2 review/report roles."""
+
+    return {
+        "vision_path_a": "v2_target_clip_reviewer",
+        "vision_path_b": "v2_structured_measurement_reviewer",
+        "report": "v2_claim_explainer",
+        "vision": "legacy_primary_vision",
+    }.get(slot, "legacy_compatibility")
+
+
+def provider_fingerprint(
+    *,
+    provider_id: str,
+    slot: str,
+    provider: str,
+    model_id: str,
+    vision_model: str | None,
+) -> str:
+    """Stable, secret-free provider/model role fingerprint for V2 artifacts."""
+
+    payload = "|".join(
+        (
+            "provider-role.v2",
+            provider_id,
+            slot,
+            provider,
+            model_id,
+            vision_model or "",
+            provider_v2_role(slot),
+        )
+    )
+    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
 
 def _require_secret_key() -> bytes:
     secret = os.getenv("SECRET_KEY", "").strip()
