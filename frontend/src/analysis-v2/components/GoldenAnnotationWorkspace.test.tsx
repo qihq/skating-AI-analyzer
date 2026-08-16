@@ -16,6 +16,19 @@ const workspace = vi.mocked(fetchGoldenWorkspace);
 const review = vi.mocked(fetchGoldenReviewQueue);
 const frame = vi.mocked(fetchGoldenSourceFrame);
 const save = vi.mocked(saveGoldenAnnotations);
+const gateTemplate = {
+  gate: "G1" as const,
+  status: "not-run" as const,
+  gate_policy_version: "golden-gate-policy.v2" as const,
+  evidence_scope: "limited_sample" as const,
+  required_source_videos: 18,
+  required_valid_events: 18,
+  profile_minimums: { jump: 10, spin: 4, step: 2, spiral: 2 },
+  required_new_events: 18,
+  pose_frame_range: [24, 40] as [number, number],
+  g2_event_range: [24, 30] as [number, number],
+  g2_profile_ranges: { jump: [10, 14], spin: [6, 8], step: [4, 5], spiral: [4, 5] } as Record<string, [number, number]>,
+};
 
 function mockData() {
   vi.clearAllMocks();
@@ -26,7 +39,7 @@ function mockData() {
 
 describe("GoldenAnnotationWorkspace", () => {
   it("adds an unsaved event and keeps a source-frame PTS control available", async () => {
-    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText(/source-001/)).toBeInTheDocument());
     const nextFrame = await screen.findByRole("button", { name: "Next source frame" });
     fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
@@ -40,7 +53,7 @@ describe("GoldenAnnotationWorkspace", () => {
     const originalCrypto = globalThis.crypto;
     Object.defineProperty(globalThis, "crypto", { configurable: true, value: { getRandomValues: (bytes: Uint8Array) => bytes.fill(7) } });
     try {
-      render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+      render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
       fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
       expect(screen.getByLabelText("Profile")).toBeInTheDocument();
       expect(screen.getByRole("alert")).toHaveTextContent(/动作草稿已创建/);
@@ -50,7 +63,7 @@ describe("GoldenAnnotationWorkspace", () => {
   });
 
   it("locks the nearest source frame before enabling box drawing", async () => {
-    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
     await waitFor(() => expect(frame).toHaveBeenCalledWith("1234", "d".repeat(64), 0));
@@ -60,7 +73,7 @@ describe("GoldenAnnotationWorkspace", () => {
 
   it("keeps a returned exact frame when the player reports its stale pre-seek time", async () => {
     mockData(); frame.mockResolvedValue({ sourceFrameIndex: 48, pts: 1.6, duration: .033 });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Next source frame" }));
     await waitFor(() => expect(screen.getByText(/当前时间 1\.600000 秒；源帧 48/)).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Report stale player time" }));
@@ -69,7 +82,7 @@ describe("GoldenAnnotationWorkspace", () => {
   });
 
   it("does not claim confirmation after a failed save", async () => {
-    mockData(); save.mockRejectedValue(new Error("offline")); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    mockData(); save.mockRejectedValue(new Error("offline")); render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByRole("button", { name: /新建动作/i })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
@@ -78,7 +91,7 @@ describe("GoldenAnnotationWorkspace", () => {
 
   it("captures a jump moment from the exact returned source frame and sends it as Ground Truth", async () => {
     mockData(); save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByRole("button", { name: /新建动作/i })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
     fireEvent.change(screen.getByLabelText("Profile"), { target: { value: "jump" } });
@@ -97,7 +110,7 @@ describe("GoldenAnnotationWorkspace", () => {
 
   it("stores a clear rotation as an exact convention-specific source-PTS label", async () => {
     mockData(); save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.change(screen.getByLabelText("Profile"), { target: { value: "jump" } });
     fireEvent.change(await screen.findByLabelText("jump rotation definition"), { target: { value: "competition_naming" } });
@@ -123,7 +136,7 @@ describe("GoldenAnnotationWorkspace", () => {
 
   it("stores a partial rotation only as an interval", async () => {
     mockData(); save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.change(screen.getByLabelText("Profile"), { target: { value: "jump" } });
     fireEvent.change(await screen.findByLabelText("jump minimum turns"), { target: { value: "1.5" } });
@@ -149,15 +162,16 @@ describe("GoldenAnnotationWorkspace", () => {
   it("explains the required workflow and deletes a source only after confirmation", async () => {
     mockData(); vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(deleteGoldenSource).mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText("上传以后做什么？")).toBeInTheDocument());
     expect(screen.getByText(/普通事件最少要标/)).toBeInTheDocument();
+    expect(screen.getByTestId("golden-gate-guidance")).toHaveTextContent("G1 18/18; G2 24-30; Pose 24-40");
     fireEvent.click(screen.getByRole("button", { name: /删除此视频和标签/ }));
     await waitFor(() => expect(deleteGoldenSource).toHaveBeenCalledWith("1234", "d".repeat(64), expect.objectContaining({ confirmation: "delete_source_and_labels" })));
   });
 
   it("supports pointer drawing for a main-skater box", async () => {
-    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: "Next source frame" }));
     await waitFor(() => expect(frame).toHaveBeenCalled());
@@ -175,7 +189,7 @@ describe("GoldenAnnotationWorkspace", () => {
   it("maps pointer boxes from a rotated display back to source-frame coordinates", async () => {
     mockData();
     workspace.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 2, sources: [{ source_sha256: "d".repeat(64), duration_pts: 8, width: 1280, height: 720, source_frame_count: 240, display_rotation_degrees: 90, redacted_alias: "source-001", recording_session_id: "session-01", grouping_id: "group-01" }], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: "Next source frame" }));
     await waitFor(() => expect(frame).toHaveBeenCalled());
@@ -196,7 +210,7 @@ describe("GoldenAnnotationWorkspace", () => {
   it("uses a compact portrait player while preserving the source aspect ratio", async () => {
     mockData();
     workspace.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 2, sources: [{ source_sha256: "d".repeat(64), duration_pts: 8, width: 720, height: 1280, source_frame_count: 240, display_rotation_degrees: 0, redacted_alias: "source-001", recording_session_id: "session-01", grouping_id: "group-01" }], events: [], tracks: [], poses: [] });
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByTestId("golden-player")).toHaveClass("is-portrait"));
     expect(Number(screen.getByTestId("media-aspect-ratio").textContent)).toBeCloseTo(720 / 1280);
   });
@@ -209,7 +223,7 @@ describe("GoldenAnnotationWorkspace", () => {
     workspace
       .mockResolvedValueOnce(initial)
       .mockImplementationOnce(() => new Promise((resolve) => { releaseDuplicate = resolve; }));
-    render(<StrictMode><MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter></StrictMode>);
+    render(<StrictMode><MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter></StrictMode>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     expect(screen.getByLabelText("Profile")).toBeInTheDocument();
     releaseDuplicate?.(initial);
@@ -222,7 +236,7 @@ describe("GoldenAnnotationWorkspace", () => {
     mockData();
     let releaseSave!: (value: GoldenWorkspace) => void;
     save.mockImplementationOnce(() => new Promise((resolve) => { releaseSave = resolve; }));
-    render(<MemoryRouter><GoldenAnnotationWorkspace /></MemoryRouter>);
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
     fireEvent.change(screen.getByLabelText("动作细分（可选）"), { target: { value: "late-edit" } });
@@ -232,3 +246,4 @@ describe("GoldenAnnotationWorkspace", () => {
     expect(screen.getByText(/有未保存修改/)).toBeInTheDocument();
   });
 });
+

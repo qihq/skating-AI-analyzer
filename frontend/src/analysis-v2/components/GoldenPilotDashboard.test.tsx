@@ -15,7 +15,7 @@ const result = vi.mocked(fetchPilotEvaluatorResult);
 const diagnostic = vi.mocked(fetchPilotEventDiagnostic);
 
 function waitingProgress(): PilotProgress {
-  return { gate: "G1", status: "waiting_for_owner_labels", diagnostic_only: true, release_claim: false, profiles: [{ key: "jump", count: 0, target: 14, missing: 14 }, { key: "spin", count: 0, target: 10, missing: 10 }, { key: "step", count: 0, target: 6, missing: 6 }, { key: "spiral", count: 0, target: 6, missing: 6 }], scenes: [{ key: "crossing/occlusion", count: 0, target: 1, missing: 1 }], requirements: { event_count: { count: 0, target: 36, passed: false }, recording_sessions: { count: 0, target: 5, passed: false }, schema_valid: { count: 0, target: 36, passed: false }, delayed_review: { count: 0, target: 4, passed: false } }, next_best_videos: ["crossing/occlusion", "jump"] };
+  return { gate: "G1", gate_policy_version: "golden-gate-policy.v2", evidence_scope: "limited_sample", status: "waiting_for_owner_labels", diagnostic_only: true, release_claim: false, profiles: [{ key: "jump", count: 10, target: 10, missing: 0 }, { key: "spin", count: 4, target: 4, missing: 0 }, { key: "step", count: 2, target: 2, missing: 0 }, { key: "spiral", count: 2, target: 2, missing: 0 }], scenes: [{ key: "crossing/occlusion", count: 7, target: 1, missing: 0 }], requirements: { source_video_count: { count: 18, target: 18, passed: true }, event_count: { count: 18, target: 18, passed: true }, recording_sessions: { count: 17, target: 5, passed: true }, schema_valid: { count: 18, target: 18, passed: true }, split_grouping: { issues: ["session:split-inconsistent"], passed: false }, delayed_review: { count: 0, target: 2, passed: false }, ambiguous_rotation_double_review: { count: 0, target: 5, passed: false } }, next_actions: ["assign_consistent_splits", "complete_delayed_reviews", "complete_ambiguous_rotation_reviews"], next_best_videos: [] };
 }
 
 describe("GoldenPilotDashboard", () => {
@@ -30,9 +30,11 @@ describe("GoldenPilotDashboard", () => {
   it("shows profile/scene gaps and diagnostic-only waiting state", async () => {
     render(<GoldenPilotDashboard/>);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Waiting for owner labels" })).toBeInTheDocument());
-    expect(screen.getAllByText(/0\/36/)).toHaveLength(2);
-    expect(screen.getByText(/missing 14/)).toBeInTheDocument();
-    expect(screen.getByText(/crossing\/occlusion, jump/)).toBeInTheDocument();
+    expect(screen.getAllByText(/18\/18/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/0\/2/)).toBeInTheDocument();
+    expect(screen.getByText(/limited_sample/)).toBeInTheDocument();
+    expect(screen.getByText(/assign_consistent_splits/)).toBeInTheDocument();
+    expect(screen.queryByText(/jump \+/i)).not.toBeInTheDocument();
     expect(screen.getByText(/diagnostic only/i)).toBeInTheDocument();
   });
 
@@ -40,6 +42,7 @@ describe("GoldenPilotDashboard", () => {
     result.mockResolvedValue({ schema_version: "golden-pilot-sanitized-report.v1", evaluator_version: "v1", dataset_id: "pilot", dataset_fingerprint: "a", pipeline_fingerprint: "b", evaluation_masks: ["tracking", "action"], diagnostic_only: true, release_claim: false, deterministic_fingerprint: "c", repeatability: { deterministic: true, fingerprint: "c" }, aggregate: { tracking: { confirmed_coverage: { numerator: 8, denominator: 10, rate: .8, confidence_interval_95: [.49, .94] } }, action: { confusion_matrix: { jump: { spin: 1 } } }, strata: { crossing: { event_count: 2 } } }, failed_events: [{ alias: "event-001", profile: "jump", strata: ["crossing"], failure_codes: ["tracking_wrong_person"] }] });
     render(<GoldenPilotDashboard/>);
     await waitFor(() => expect(screen.getByText(/8\/10/)).toBeInTheDocument());
+    expect(screen.getByText(/golden-gate-policy\.v1 \(legacy evidence\)/)).toBeInTheDocument();
     expect(screen.getByText(/95% CI 49.0-94.0%/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Sanitized strata and confusion/)).toHaveTextContent("spin");
     fireEvent.click(screen.getByRole("button", { name: /event-001/ }));

@@ -9,6 +9,7 @@ vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
 vi.mock("../api", () => ({ fetchGoldenCatalog: vi.fn(), fetchGoldenSchema: vi.fn(), fetchGoldenSanitizedExport: vi.fn() }));
 vi.mock("./GoldenPilotDashboard", () => ({ default: () => <div>Golden pilot dashboard</div> }));
 vi.mock("./GoldenG2StatusCard", () => ({ default: () => <div>Golden G2 status</div> }));
+vi.mock("./GoldenAnnotationWorkspace", () => ({ default: (props: { gateTemplate: { pose_frame_range: [number, number] } }) => <div>Golden annotation workspace {props.gateTemplate.pose_frame_range.join("-")}</div> }));
 
 const mode = vi.mocked(useAppMode);
 const catalog = vi.mocked(fetchGoldenCatalog);
@@ -23,7 +24,7 @@ function mockCatalog(status: "empty" | "ready" | "invalid-source" | "schema-inco
   mode.mockReturnValue(appMode(true));
   catalog.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", schema_version: "golden-dataset.v2", revision: 1, status, source_count: 0, event_count: 0, profile_counts: [], observability_counts: [], strata_counts: [], duplicate_sources: duplicates });
   schema.mockResolvedValue({ schema_version: "golden-dataset.v2", supported_schema_versions: ["golden-dataset.v2"], migration_policy: "future-v2-only", historical_debug_pool: "not-imported" });
-  exportData.mockResolvedValue({ schema_version: "golden-sanitized-summary.v1", dataset_id: "golden-v2-private-catalog", golden_schema_version: "golden-dataset.v2", revision: 1, aggregate: { source_count: 0, event_count: 0, profile_counts: [], observability_counts: [], strata_counts: [] }, redacted_aliases: [], gate_template: { gate: "G1", status: "not-run", required_new_events: 36 } });
+  exportData.mockResolvedValue({ schema_version: "golden-sanitized-summary.v1", dataset_id: "golden-v2-private-catalog", golden_schema_version: "golden-dataset.v2", revision: 1, aggregate: { source_count: 0, event_count: 0, profile_counts: [], observability_counts: [], strata_counts: [] }, redacted_aliases: [], gate_template: { gate: "G1", status: "not-run", gate_policy_version: "golden-gate-policy.v2", evidence_scope: "limited_sample", required_source_videos: 18, required_valid_events: 18, profile_minimums: { jump: 10, spin: 4, step: 2, spiral: 2 }, required_new_events: 18, pose_frame_range: [24, 40], g2_event_range: [24, 30], g2_profile_ranges: { jump: [10, 14], spin: [6, 8], step: [4, 5], spiral: [4, 5] } } });
 }
 
 describe("GoldenCatalogShell", () => {
@@ -39,6 +40,7 @@ describe("GoldenCatalogShell", () => {
     render(<GoldenCatalogShell />);
     await waitFor(() => expect(screen.getByRole("heading", { name: "等待新的评测事件" })).toBeInTheDocument());
     expect(screen.getByText(/尚未导入视频、人工标注或运行 G1/)).toBeInTheDocument();
+    expect(screen.getByText(/Golden annotation workspace 24-40/)).toBeInTheDocument();
   });
 
   it("renders a parent diagnostic for duplicate sources", async () => {
