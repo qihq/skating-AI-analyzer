@@ -7,14 +7,12 @@ from typing import Any
 
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY, LEGACY_GATE_POLICY_VERSION, artifact_gate_policy_version
 
 
-PROFILE_RANGES = {
-    "jump": (24, 32),
-    "spin": (16, 20),
-    "step": (12, 16),
-    "spiral": (8, 12),
-}
+PROFILE_RANGES = {p: (r.minimum, r.maximum) for p, r in GOLDEN_GATE_POLICY.g2_profile_ranges.items()}
+LEGACY_PROFILE_RANGES = {"jump": (24, 32), "spin": (16, 20), "step": (12, 16), "spiral": (8, 12)}
+LEGACY_EVENT_RANGE = [60, 80]
 
 
 class G2FreezeError(ValueError):
@@ -72,18 +70,23 @@ def g2_collection_progress(dataset: GoldenDatasetV2) -> dict[str, Any]:
     split_issues = _split_issues(dataset)
     split_counts = distribution["splits"]
     required_splits_present = all(split_counts.get(name, 0) > 0 for name in ("development", "validation", "frozen_test"))
+    event_minimum = GOLDEN_GATE_POLICY.g2_event_range.minimum
+    event_maximum = GOLDEN_GATE_POLICY.g2_event_range.maximum
     ready = (
-        60 <= event_count <= 80
+        event_minimum <= event_count <= event_maximum
         and all(item["passed"] for item in profile_checks.values())
-        and distribution["recording_session_count"] >= 5
+        and distribution["recording_session_count"] >= GOLDEN_GATE_POLICY.g1_recording_session_minimum
         and not split_issues
         and required_splits_present
     )
     return {
         "gate": "G2",
+        "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
+        "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
         "status": "ready_to_freeze" if ready else "collecting",
         "event_count": event_count,
-        "required_event_range": [60, 80],
+        "required_event_range": [event_minimum, event_maximum],
+        "profile_ranges": {p: [a, b] for p, (a, b) in PROFILE_RANGES.items()},
         "distribution": distribution,
         "profiles": profile_checks,
         "split_issues": split_issues,
@@ -116,9 +119,15 @@ class G2BaselineStore:
         self.baseline_path = self.root / "legacy-baseline.json"
 
     def freeze(self, dataset: GoldenDatasetV2, *, legacy_pipeline_fingerprint: str) -> dict[str, Any]:
+        fingerprint = _dataset_fingerprint(dataset)
+        if self.freeze_path.exists():
+            existing = self._read(self.freeze_path)
+            if existing.get("dataset_fingerprint") != fingerprint:
+                raise G2FreezeError("a different dataset version is already frozen")
+            return existing
         progress = g2_collection_progress(dataset)
         if not progress["ready_to_freeze"]:
-            raise G2FreezeError("G2 freeze requires 60-80 valid, grouped, split-assigned events with profile coverage")
+            raise G2FreezeError("G2 freeze requires 24-30 valid, grouped, split-assigned events within every profile range")
         if not legacy_pipeline_fingerprint.strip():
             raise G2FreezeError("legacy pipeline fingerprint is required")
         payload = {
@@ -126,18 +135,14 @@ class G2BaselineStore:
             "status": "frozen_waiting_for_baseline",
             "dataset_id": dataset.dataset_id,
             "dataset_revision": dataset.revision.revision,
-            "dataset_fingerprint": _dataset_fingerprint(dataset),
+            "dataset_fingerprint": fingerprint,
+            "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
             "legacy_pipeline_fingerprint": legacy_pipeline_fingerprint,
             "distribution": progress["distribution"],
             "membership": _frozen_membership(dataset),
             "membership_fingerprint": _canonical_hash(_frozen_membership(dataset)),
             "release_claim": False,
         }
-        if self.freeze_path.exists():
-            existing = self._read(self.freeze_path)
-            if existing.get("dataset_fingerprint") != payload["dataset_fingerprint"]:
-                raise G2FreezeError("a different dataset version is already frozen")
-            return existing
         GoldenCatalogStore._atomic_write_json(self.freeze_path, payload)
         return payload
 
@@ -170,6 +175,7 @@ class G2BaselineStore:
             "status": "baseline_recorded",
             "dataset_id": dataset.dataset_id,
             "dataset_fingerprint": dataset_fingerprint,
+            "gate_policy_version": artifact_gate_policy_version(frozen),
             "legacy_pipeline_fingerprint": frozen["legacy_pipeline_fingerprint"],
             "result_fingerprint": result_fingerprint,
             "aggregate": aggregate,
@@ -189,12 +195,18 @@ class G2BaselineStore:
         self.assert_compatible(dataset)
         frozen = self._read(self.freeze_path)
         baseline = self._read(self.baseline_path) if self.baseline_path.exists() else None
+        frozen_policy_version = artifact_gate_policy_version(frozen)
+        required_event_range = LEGACY_EVENT_RANGE if frozen_policy_version == LEGACY_GATE_POLICY_VERSION else [GOLDEN_GATE_POLICY.g2_event_range.minimum, GOLDEN_GATE_POLICY.g2_event_range.maximum]
+        profile_ranges = LEGACY_PROFILE_RANGES if frozen_policy_version == LEGACY_GATE_POLICY_VERSION else PROFILE_RANGES
         return {
             "schema_version": "golden-g2-status.v1",
             "gate": "G2",
+            "gate_policy_version": frozen_policy_version,
+            "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
             "status": "baseline_recorded" if baseline else "frozen_waiting_for_baseline",
             "event_count": progress["event_count"],
-            "required_event_range": progress["required_event_range"],
+            "required_event_range": list(required_event_range),
+            "profile_ranges": {p: [a, b] for p, (a, b) in profile_ranges.items()},
             "distribution": frozen["distribution"],
             "dataset_revision": frozen["dataset_revision"],
             "dataset_fingerprint": frozen["dataset_fingerprint"],

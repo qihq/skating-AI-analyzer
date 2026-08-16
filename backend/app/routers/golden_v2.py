@@ -183,9 +183,12 @@ class G2FreezeRequest(_StrictResponse):
 class G2StatusResponse(_StrictResponse):
     schema_version: Literal["golden-g2-status.v1"] = "golden-g2-status.v1"
     gate: Literal["G2"] = "G2"
+    gate_policy_version: Literal["golden-gate-policy.v1", "golden-gate-policy.v2"]
+    evidence_scope: Literal["limited_sample"]
     status: Literal["collecting", "ready_to_freeze", "frozen_waiting_for_baseline", "baseline_recorded"]
     event_count: int
     required_event_range: list[int]
+    profile_ranges: dict[str, list[int]]
     distribution: dict[str, Any]
     dataset_revision: int | None = None
     dataset_fingerprint: str | None = None

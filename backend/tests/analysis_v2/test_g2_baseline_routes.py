@@ -20,9 +20,12 @@ class G2Store:
         return {
             "schema_version": "golden-g2-status.v1",
             "gate": "G2",
+            "gate_policy_version": "golden-gate-policy.v2",
+            "evidence_scope": "limited_sample",
             "status": "collecting",
             "event_count": 12,
-            "required_event_range": [60, 80],
+            "required_event_range": [24, 30],
+            "profile_ranges": {"jump": [10, 14], "spin": [6, 8], "step": [4, 5], "spiral": [4, 5]},
             "distribution": {"profiles": {"jump": 6}, "splits": {"unassigned": 12}, "strata": {}, "recording_session_count": 4},
             "release_claim": False,
         }
