@@ -33,7 +33,19 @@ export interface GoldenSanitizedExport {
     strata_counts: GoldenCount[];
   };
   redacted_aliases: string[];
-  gate_template: { gate: "G1"; status: "not-run"; required_new_events: number };
+  gate_template: {
+    gate: "G1";
+    status: "not-run";
+    gate_policy_version: "golden-gate-policy.v2";
+    evidence_scope: "limited_sample";
+    required_source_videos: number;
+    required_valid_events: number;
+    profile_minimums: Record<string, number>;
+    required_new_events: number;
+    pose_frame_range: [number, number];
+    g2_event_range: [number, number];
+    g2_profile_ranges: Record<string, [number, number]>;
+  };
 }
 
 export interface GoldenCount { key: string; count: number; }
@@ -79,12 +91,15 @@ export type PilotEvaluatorState = "not_run" | "running" | "waiting_for_owner_lab
 export type PilotGap = { key: string; count: number; target: number; missing: number };
 export type PilotProgress = {
   gate: "G1";
+  gate_policy_version: "golden-gate-policy.v2";
+  evidence_scope: "limited_sample";
   status: "waiting_for_owner_labels" | "ready_for_evaluator";
   diagnostic_only: true;
   release_claim: false;
   profiles: PilotGap[];
   scenes: PilotGap[];
   requirements: Record<string, { count?: number; target?: number; issues?: string[]; passed: boolean }>;
+  next_actions: string[];
   next_best_videos: string[];
 };
 export type PilotEvaluatorStatus = { status: PilotEvaluatorState; evaluator_version: string; diagnostic_only: true; message: string | null; result_fingerprint?: string | null; leakage_fields?: string[]; progress?: PilotProgress | null };
@@ -92,6 +107,8 @@ export type MetricRate = { numerator: number; denominator: number; rate: number 
 export type PilotSanitizedResult = {
   schema_version: "golden-pilot-sanitized-report.v1";
   evaluator_version: string;
+  gate_policy_version?: "golden-gate-policy.v1" | "golden-gate-policy.v2";
+  evidence_scope?: "limited_sample";
   dataset_id: string;
   dataset_fingerprint: string;
   pipeline_fingerprint: string;
@@ -108,9 +125,12 @@ export type PilotSanitizedResult = {
 export type GoldenG2Status = {
   schema_version: "golden-g2-status.v1";
   gate: "G2";
+  gate_policy_version: "golden-gate-policy.v1" | "golden-gate-policy.v2";
+  evidence_scope: "limited_sample";
   status: "collecting" | "ready_to_freeze" | "frozen_waiting_for_baseline" | "baseline_recorded";
   event_count: number;
-  required_event_range: number[];
+  required_event_range: [number, number];
+  profile_ranges: Record<string, [number, number]>;
   distribution: {
     profiles: Record<string, number>;
     splits: Record<string, number>;
