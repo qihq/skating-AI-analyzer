@@ -82,6 +82,10 @@ def collection_progress(dataset: GoldenDatasetV2, store: GoldenCatalogStore | No
     next_actions = []
     if not requirements["split_grouping"]["passed"]: next_actions.append("assign_consistent_splits")
     if not requirements["delayed_review"]["passed"]: next_actions.append("complete_delayed_reviews")
+    if not requirements["ambiguous_rotation_double_review"]["passed"]: next_actions.append("complete_ambiguous_rotation_reviews")
+    if not requirements["frozen_crossing_double_review"]["passed"]: next_actions.append("complete_frozen_crossing_reviews")
+    if not requirements["duplicates"]["passed"]: next_actions.append("resolve_duplicates")
+    if not requirements["source_frame_identity"]["passed"]: next_actions.append("repair_source_frame_labels")
     return {
         "gate": "G1",
         **POLICY_METADATA,

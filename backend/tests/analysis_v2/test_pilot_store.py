@@ -155,6 +155,22 @@ def test_g1_rejects_17_sources_or_a_missing_profile_minimum(tmp_path: Path) -> N
     assert spiral == {"key": "spiral", "count": 1, "target": 2, "missing": 1}
 
 
+def test_next_actions_surface_all_governance_remediation_categories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    payload = _policy_dataset().model_dump(mode="json")
+    payload["events"][0]["challenge_intervals"] = [{"start_pts": 1.2, "end_pts": 1.8, "category": "crossing", "observability": "uncertain"}]
+    payload["events"][0]["split"] = "frozen_test"
+    _save_policy_dataset(store, GoldenDatasetV2.model_validate(payload))
+    import app.analysis_v2.evaluation.pilot_store as pilot_store
+
+    monkeypatch.setattr(pilot_store, "_rotation_ambiguous", lambda _event: True)
+    monkeypatch.setattr(pilot_store, "_review_counts", lambda _dataset, _store: (0, {"ambiguous": 0, "frozen_crossing": 0}))
+    monkeypatch.setattr(pilot_store.GoldenCatalogStore, "_duplicate_flags", staticmethod(lambda _dataset: ["near-duplicate:event-001"]))
+    monkeypatch.setattr(pilot_store, "_frame_identity_issues", lambda _dataset: ["event-001:moment-frame-missing"])
+    progress = collection_progress(store.read(), store)
+    assert {"complete_ambiguous_rotation_reviews", "complete_frozen_crossing_reviews", "resolve_duplicates", "repair_source_frame_labels"}.issubset(set(progress["next_actions"]))
+
+
 def test_new_diagnostic_artifacts_are_stamped_with_policy_v2(tmp_path: Path) -> None:
     store = GoldenCatalogStore(tmp_path / "golden")
     evaluator = PilotEvaluationStore(store)
