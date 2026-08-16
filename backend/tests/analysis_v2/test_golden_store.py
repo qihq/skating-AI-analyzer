@@ -76,3 +76,17 @@ def test_sanitized_export_has_no_private_source_reference_or_path(tmp_path: Path
     encoded = json.dumps(store.sanitized_export())
     assert "private-reference-never-exported" not in encoded
     assert str(tmp_path) not in encoded
+
+
+def test_sanitized_export_carries_policy_v2_without_private_data(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    payload = store.sanitized_export()
+    template = payload["gate_template"]
+    assert template["gate_policy_version"] == "golden-gate-policy.v2"
+    assert template["required_source_videos"] == 18
+    assert template["required_valid_events"] == 18
+    assert template["profile_minimums"] == {"jump": 10, "spin": 4, "step": 2, "spiral": 2}
+    assert template["required_new_events"] == 18
+    assert template["pose_frame_range"] == [24, 40]
+    assert template["g2_event_range"] == [24, 30]
+    assert template["g2_profile_ranges"] == {"jump": [10, 14], "spin": [6, 8], "step": [4, 5], "spiral": [4, 5]}

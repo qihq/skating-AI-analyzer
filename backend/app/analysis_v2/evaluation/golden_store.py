@@ -139,6 +139,8 @@ class GoldenCatalogStore:
         }
 
     def sanitized_export(self) -> dict[str, Any]:
+        from app.analysis_v2.evaluation.gate_policy import gate_policy_summary
+        policy = gate_policy_summary()
         summary = self.catalog_summary()
         # This intentionally returns no source references, filenames, frame data, identities, or labels.
         return {
@@ -154,7 +156,7 @@ class GoldenCatalogStore:
                 "strata_counts": summary["strata_counts"],
             },
             "redacted_aliases": ["source-001" for _ in range(summary["source_count"])],
-            "gate_template": {"gate": "G1", "status": "not-run", "required_new_events": 36},
+            "gate_template": {"gate": "G1", "status": "not-run", "gate_policy_version": policy["schema_version"], "evidence_scope": policy["evidence_scope"], "required_source_videos": policy["g1_source_video_minimum"], "required_valid_events": policy["g1_valid_event_minimum"], "profile_minimums": policy["g1_profile_minimums"], "required_new_events": policy["g1_valid_event_minimum"], "pose_frame_range": [policy["pose_frame_range"]["minimum"], policy["pose_frame_range"]["maximum"]], "g2_event_range": [policy["g2_event_range"]["minimum"], policy["g2_event_range"]["maximum"]], "g2_profile_ranges": {name: [limits["minimum"], limits["maximum"]] for name, limits in policy["g2_profile_ranges"].items()}},
         }
 
     def source_media_path(self, source_sha256: str) -> Path:

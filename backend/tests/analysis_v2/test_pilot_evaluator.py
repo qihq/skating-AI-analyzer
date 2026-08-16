@@ -9,7 +9,9 @@ from app.analysis_v2.evaluation.pilot_evaluator import (
     EvaluationLeakageError,
     PilotPredictionBundle,
     evaluate_pilot,
+    canonical_fingerprint,
 )
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY
 from app.analysis_v2.evaluation.legacy_prediction_adapter import build_pilot_prediction_bundle
 
 
@@ -230,3 +232,13 @@ def test_sanitized_result_maps_free_text_strata_and_rejects_path_fingerprints() 
     assert "other" in result["aggregate"]["strata"]
     with pytest.raises(ValueError):
         PilotPredictionBundle.model_validate({"pipeline_fingerprint": "C:/private/path", "evaluation_masks": ["action"], "predictions": []})
+
+
+def test_policy_v2_is_stamped_and_part_of_the_result_fingerprint() -> None:
+    private, sanitized = evaluate_pilot(_dataset(), _bundle([_identity()], ["tracking"]))
+    assert private["gate_policy_version"] == "golden-gate-policy.v2"
+    assert private["evidence_scope"] == "limited_sample"
+    assert sanitized["gate_policy_version"] == "golden-gate-policy.v2"
+    expected = canonical_fingerprint({"gate_policy_version": GOLDEN_GATE_POLICY.schema_version, "evaluator_version": private["evaluator_version"], "dataset_fingerprint": private["dataset_fingerprint"], "pipeline_fingerprint": private["pipeline_fingerprint"], "evaluation_masks": private["evaluation_masks"], "aggregate": private["aggregate"], "diagnostics": private["events"]})
+    assert private["deterministic_fingerprint"] == expected
+    assert sanitized["deterministic_fingerprint"] == expected

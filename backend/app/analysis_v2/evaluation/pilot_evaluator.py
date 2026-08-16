@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2, NormalizedBBox
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY
 
 
 EVALUATOR_VERSION = "golden-pilot-evaluator.v1"
@@ -188,6 +189,7 @@ def evaluate_pilot(dataset: GoldenDatasetV2, bundle: PilotPredictionBundle) -> t
     dataset_fingerprint = canonical_fingerprint(_canonical_dataset(dataset))
     result_fingerprint = canonical_fingerprint(
         {
+            "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
             "evaluator_version": EVALUATOR_VERSION,
             "dataset_fingerprint": dataset_fingerprint,
             "pipeline_fingerprint": bundle.pipeline_fingerprint,
@@ -198,6 +200,8 @@ def evaluate_pilot(dataset: GoldenDatasetV2, bundle: PilotPredictionBundle) -> t
     )
     private = {
         "schema_version": "golden-pilot-private-report.v1",
+        "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
+        "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
         "evaluator_version": EVALUATOR_VERSION,
         "dataset_fingerprint": dataset_fingerprint,
         "pipeline_fingerprint": bundle.pipeline_fingerprint,
@@ -215,6 +219,8 @@ def evaluate_pilot(dataset: GoldenDatasetV2, bundle: PilotPredictionBundle) -> t
     sanitized_aggregate = _aggregate(public_diagnostics, masks)
     sanitized = {
         "schema_version": "golden-pilot-sanitized-report.v1",
+        "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
+        "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
         "evaluator_version": EVALUATOR_VERSION,
         "dataset_id": dataset.dataset_id,
         "dataset_fingerprint": dataset_fingerprint,

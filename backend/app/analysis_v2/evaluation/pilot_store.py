@@ -8,6 +8,7 @@ from typing import Any
 
 from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
 from app.analysis_v2.evaluation.golden_store import GoldenCatalogStore
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY, artifact_uses_current_policy
 from app.analysis_v2.evaluation.pilot_evaluator import (
     EVALUATOR_VERSION,
     EvaluationLeakageError,
@@ -17,15 +18,12 @@ from app.analysis_v2.evaluation.pilot_evaluator import (
 )
 
 
-PROFILE_TARGETS = {"jump": 14, "spin": 10, "step": 6, "spiral": 6}
-SCENE_TARGETS = {
-    "normal": 1,
-    "multi-skater": 1,
-    "crossing/occlusion": 1,
-    "small/distant target": 1,
-    "pan/zoom": 1,
-    "blur/compression": 1,
-}
+PROFILE_TARGETS = GOLDEN_GATE_POLICY.g1_profile_minimums
+SCENE_TARGETS = GOLDEN_GATE_POLICY.g1_scene_minimums
+POLICY_METADATA = {"gate_policy_version": GOLDEN_GATE_POLICY.schema_version, "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope}
+
+def _policy_status(**fields: Any) -> dict[str, Any]:
+    return {**POLICY_METADATA, **fields}
 SCENE_ALIASES = {
     "normal": {"normal", "single", "single-skater", "clear"},
     "multi-skater": {"multi-skater", "multi_skater", "crowd"},
@@ -60,7 +58,7 @@ def collection_progress(dataset: GoldenDatasetV2, store: GoldenCatalogStore | No
     )
     session_count = len({source.recording_session_id for source in dataset.sources if any(event.source_sha256 == source.source_sha256 for event in dataset.events)})
     delayed, double_reviewed = _review_counts(dataset, store)
-    required_delayed = max(4, (len(dataset.events) + 9) // 10) if dataset.events else 4
+    required_delayed = GOLDEN_GATE_POLICY.g1_delayed_review_minimum
     ambiguous_required = sum(bool(_rotation_ambiguous(event)) for event in dataset.events)
     crossing_required = sum(
         event.split == "frozen_test" and any(item.category == "crossing" for item in event.challenge_intervals)
@@ -69,9 +67,10 @@ def collection_progress(dataset: GoldenDatasetV2, store: GoldenCatalogStore | No
     frame_identity_issues = _frame_identity_issues(dataset)
     valid_events = len(dataset.events) - len({item.split(":", 1)[0] for item in frame_identity_issues})
     requirements = {
-        "event_count": {"count": len(dataset.events), "target": 36, "passed": len(dataset.events) == 36},
-        "recording_sessions": {"count": session_count, "target": 5, "passed": session_count >= 5},
-        "schema_valid": {"count": valid_events, "target": 36, "passed": valid_events == 36},
+        "source_video_count": {"count": len(dataset.sources), "target": GOLDEN_GATE_POLICY.g1_source_video_minimum, "passed": len(dataset.sources) >= GOLDEN_GATE_POLICY.g1_source_video_minimum},
+        "event_count": {"count": len(dataset.events), "target": GOLDEN_GATE_POLICY.g1_valid_event_minimum, "passed": len(dataset.events) >= GOLDEN_GATE_POLICY.g1_valid_event_minimum},
+        "recording_sessions": {"count": session_count, "target": GOLDEN_GATE_POLICY.g1_recording_session_minimum, "passed": session_count >= GOLDEN_GATE_POLICY.g1_recording_session_minimum},
+        "schema_valid": {"count": valid_events, "target": GOLDEN_GATE_POLICY.g1_valid_event_minimum, "passed": valid_events >= GOLDEN_GATE_POLICY.g1_valid_event_minimum},
         "split_grouping": {"issues": split_issues, "passed": not split_issues},
         "duplicates": {"issues": duplicate_issues, "passed": not duplicate_issues},
         "delayed_review": {"count": delayed, "target": required_delayed, "passed": delayed >= required_delayed},
@@ -80,17 +79,20 @@ def collection_progress(dataset: GoldenDatasetV2, store: GoldenCatalogStore | No
         "source_frame_identity": {"issues": frame_identity_issues, "passed": not frame_identity_issues},
     }
     ready = all(item.get("passed", False) for item in requirements.values()) and all(item["missing"] == 0 for item in profile_progress + scene_progress)
+    next_actions = []
+    if not requirements["split_grouping"]["passed"]: next_actions.append("assign_consistent_splits")
+    if not requirements["delayed_review"]["passed"]: next_actions.append("complete_delayed_reviews")
     return {
         "gate": "G1",
+        **POLICY_METADATA,
         "status": "ready_for_evaluator" if ready else "waiting_for_owner_labels",
         "diagnostic_only": True,
         "release_claim": False,
         "profiles": profile_progress,
         "scenes": scene_progress,
         "requirements": requirements,
-        "next_best_videos": [
-            item["key"] for item in scene_progress if item["missing"]
-        ] + [item["key"] for item in profile_progress if item["missing"]],
+        "next_actions": next_actions,
+        "next_best_videos": [item["key"] for item in scene_progress + profile_progress if item["missing"]],
     }
 
 
@@ -106,8 +108,11 @@ class PilotEvaluationStore:
 
     def status(self) -> dict[str, Any]:
         if not self.status_path.exists():
-            return {"status": "not_run", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": None}
-        return self._read(self.status_path)
+            return _policy_status(status="not_run", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message=None)
+        persisted = self._read(self.status_path)
+        if not artifact_uses_current_policy(persisted):
+            return _policy_status(status="not_run", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="Legacy evaluator evidence remains readable; rerun under golden-gate-policy.v2.")
+        return persisted
 
     def invalidate(self, reason: str) -> None:
         """Discard derived results when their Golden input revision changes."""
@@ -120,12 +125,7 @@ class PilotEvaluationStore:
             path.unlink(missing_ok=True)
         self._write(
             self.status_path,
-            {
-                "status": "not_run",
-                "evaluator_version": EVALUATOR_VERSION,
-                "diagnostic_only": True,
-                "message": reason,
-            },
+            _policy_status(status="not_run", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message=reason),
         )
 
     def run(self, bundle: PilotPredictionBundle, *, diagnostic_snapshot: bool = False) -> dict[str, Any]:
@@ -133,22 +133,22 @@ class PilotEvaluationStore:
             dataset = self.golden_store.ensure_initialized()
             progress = collection_progress(dataset, self.golden_store)
         except Exception:
-            status = {"status": "invalid_labels", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "Golden labels could not be validated."}
+            status = _policy_status(status="invalid_labels", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="Golden labels could not be validated.")
             self._write(self.status_path, status)
             return status
         if progress["status"] != "ready_for_evaluator" and not diagnostic_snapshot:
-            status = {"status": "waiting_for_owner_labels", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "G1 needs owner-confirmed real labels before evaluation.", "progress": progress}
+            status = _policy_status(status="waiting_for_owner_labels", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="G1 needs owner-confirmed real labels before evaluation.", progress=progress)
             self._write(self.status_path, status)
             return status
-        self._write(self.status_path, {"status": "running", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": None})
+        self._write(self.status_path, _policy_status(status="running", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message=None))
         try:
             private, sanitized = evaluate_pilot(dataset, bundle)
         except EvaluationLeakageError as exc:
-            status = {"status": "failed", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "Evaluation leakage detected.", "leakage_fields": exc.fields}
+            status = _policy_status(status="failed", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="Evaluation leakage detected.", leakage_fields=exc.fields)
             self._write(self.status_path, status)
             return status
         except Exception:
-            status = {"status": "invalid_labels", "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "Golden labels or predictions could not be evaluated."}
+            status = _policy_status(status="invalid_labels", evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="Golden labels or predictions could not be evaluated.")
             self._write(self.status_path, status)
             return status
 
@@ -156,12 +156,15 @@ class PilotEvaluationStore:
         private["run_scope"] = run_scope
         sanitized["run_scope"] = run_scope
         previous = self._read(self.sanitized_report_path) if self.sanitized_report_path.exists() else None
+        if previous is not None and not artifact_uses_current_policy(previous):
+            previous = None
         diff = _sanitized_diff(previous, sanitized)
         has_failures = bool(sanitized["failed_events"])
         status_value = "failed" if has_failures else "passed_for_pilot_only"
         gate = {
             "schema_version": "golden-pilot-gate.v1",
             "gate": "G1",
+            **POLICY_METADATA,
             "status": status_value,
             "diagnostic_only": True,
             "release_claim": False,
@@ -174,7 +177,7 @@ class PilotEvaluationStore:
         self._write(self.sanitized_report_path, sanitized)
         self._write(self.diff_path, diff)
         self._write(self.gate_path, gate)
-        status = {"status": status_value, "evaluator_version": EVALUATOR_VERSION, "diagnostic_only": True, "message": "Pilot diagnostic complete.", "result_fingerprint": sanitized["deterministic_fingerprint"]}
+        status = _policy_status(status=status_value, evaluator_version=EVALUATOR_VERSION, diagnostic_only=True, message="Pilot diagnostic complete.", result_fingerprint=sanitized["deterministic_fingerprint"])
         self._write(self.status_path, status)
         return status
 

@@ -63,7 +63,15 @@ class GoldenCount(_StrictResponse):
 class GoldenGateTemplate(_StrictResponse):
     gate: Literal["G1"]
     status: Literal["not-run"]
+    gate_policy_version: Literal["golden-gate-policy.v2"]
+    evidence_scope: Literal["limited_sample"]
+    required_source_videos: int
+    required_valid_events: int
+    profile_minimums: dict[str, int]
     required_new_events: int
+    pose_frame_range: list[int]
+    g2_event_range: list[int]
+    g2_profile_ranges: dict[str, list[int]]
 
 
 class GoldenSanitizedExport(_StrictResponse):
@@ -144,6 +152,8 @@ class PilotEvaluationStatus(_StrictResponse):
     result_fingerprint: str | None = None
     leakage_fields: list[str] = Field(default_factory=list)
     progress: dict[str, Any] | None = None
+    gate_policy_version: Literal["golden-gate-policy.v1", "golden-gate-policy.v2"] | None = None
+    evidence_scope: Literal["limited_sample"] | None = None
 
 
 class GoldenReviewAttestationRequest(_StrictResponse):
