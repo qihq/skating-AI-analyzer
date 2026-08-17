@@ -249,7 +249,6 @@ describe("GoldenAnnotationWorkspace", () => {
   it("renders policy guidance defaults for a legacy gate template", async () => {
     mockData();
     render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={{ gate: "G1", status: "not-run", required_new_events: 36 } as never} /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByTestId("golden-gate-guidance")).toHaveTextContent("G1 18/18; G2 24-30; Pose 24-40"));
+    await waitFor(() => expect(screen.getByTestId("golden-gate-guidance")).toHaveTextContent("golden-gate-policy.v1 (legacy evidence); G1 36/36; G2 60-80; Pose not versioned in legacy evidence"));
   });
 });
-

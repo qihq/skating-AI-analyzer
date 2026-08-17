@@ -27,7 +27,7 @@ export type GateRequirement = { count?: number; target?: number; issues?: string
 export type GoldenGateTemplate = {
   gate: "G1";
   status: "not-run";
-  gate_policy_version?: GoldenGatePolicyVersion;
+  gate_policy_version?: HistoricalGoldenGatePolicyVersion;
   evidence_scope?: LimitedSampleEvidenceScope;
   required_source_videos?: number;
   required_valid_events?: number;
@@ -38,7 +38,9 @@ export type GoldenGateTemplate = {
   g2_profile_ranges?: Record<string, [number, number]>;
 };
 
-export type ResolvedGoldenGateTemplate = Required<GoldenGateTemplate>;
+export type ResolvedGoldenGateTemplate = Omit<Required<GoldenGateTemplate>, "pose_frame_range"> & {
+  pose_frame_range: [number, number] | null;
+};
 
 export const GOLDEN_GATE_POLICY_V2_DEFAULTS: ResolvedGoldenGateTemplate = {
   gate: "G1",
@@ -54,18 +56,35 @@ export const GOLDEN_GATE_POLICY_V2_DEFAULTS: ResolvedGoldenGateTemplate = {
   g2_profile_ranges: { jump: [10, 14], spin: [6, 8], step: [4, 5], spiral: [4, 5] },
 };
 
+export const GOLDEN_GATE_POLICY_V1_DEFAULTS: ResolvedGoldenGateTemplate = {
+  gate: "G1",
+  status: "not-run",
+  gate_policy_version: "golden-gate-policy.v1",
+  evidence_scope: "limited_sample",
+  required_source_videos: 36,
+  required_valid_events: 36,
+  profile_minimums: { jump: 14, spin: 10, step: 6, spiral: 6 },
+  required_new_events: 36,
+  pose_frame_range: null,
+  g2_event_range: [60, 80],
+  g2_profile_ranges: { jump: [24, 32], spin: [16, 20], step: [12, 16], spiral: [8, 12] },
+};
+
 export const LEGACY_G2_PROFILE_RANGES: Record<string, [number, number]> = {
   jump: [24, 32], spin: [16, 20], step: [12, 16], spiral: [8, 12],
 };
 
 export function resolveGoldenGateTemplate(template: GoldenGateTemplate): ResolvedGoldenGateTemplate {
+  const defaults = template.gate_policy_version === "golden-gate-policy.v2"
+    ? GOLDEN_GATE_POLICY_V2_DEFAULTS
+    : GOLDEN_GATE_POLICY_V1_DEFAULTS;
   return {
-    ...GOLDEN_GATE_POLICY_V2_DEFAULTS,
+    ...defaults,
     ...template,
-    profile_minimums: template.profile_minimums ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.profile_minimums,
-    pose_frame_range: template.pose_frame_range ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.pose_frame_range,
-    g2_event_range: template.g2_event_range ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.g2_event_range,
-    g2_profile_ranges: template.g2_profile_ranges ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.g2_profile_ranges,
+    profile_minimums: template.profile_minimums ?? defaults.profile_minimums,
+    pose_frame_range: template.pose_frame_range ?? defaults.pose_frame_range,
+    g2_event_range: template.g2_event_range ?? defaults.g2_event_range,
+    g2_profile_ranges: template.g2_profile_ranges ?? defaults.g2_profile_ranges,
   };
 }
 

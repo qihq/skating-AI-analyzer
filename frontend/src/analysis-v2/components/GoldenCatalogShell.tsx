@@ -17,7 +17,6 @@ function requestError(error: unknown) {
   const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null;
   return typeof detail === "string" ? detail : "The private Golden catalog is temporarily unavailable. Please retry.";
 }
-
 export default function GoldenCatalogShell() {
   const { isParentMode, parentPin, enterParentMode } = useAppMode();
   const [state, setState] = useState<LoadState>("loading");

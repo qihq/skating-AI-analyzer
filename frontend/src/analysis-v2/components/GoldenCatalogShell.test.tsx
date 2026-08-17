@@ -9,7 +9,7 @@ vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
 vi.mock("../api", () => ({ fetchGoldenCatalog: vi.fn(), fetchGoldenSchema: vi.fn(), fetchGoldenSanitizedExport: vi.fn() }));
 vi.mock("./GoldenPilotDashboard", () => ({ default: () => <div>Golden pilot dashboard</div> }));
 vi.mock("./GoldenG2StatusCard", () => ({ default: () => <div>Golden G2 status</div> }));
-vi.mock("./GoldenAnnotationWorkspace", () => ({ default: (props: { gateTemplate: { pose_frame_range: [number, number] } }) => <div>Golden annotation workspace {props.gateTemplate.pose_frame_range.join("-")}</div> }));
+vi.mock("./GoldenAnnotationWorkspace", () => ({ default: (props: { gateTemplate: { gate_policy_version: string; pose_frame_range: [number, number] | null } }) => <div>Golden annotation workspace {props.gateTemplate.gate_policy_version} {props.gateTemplate.pose_frame_range?.join("-") ?? "pose-unversioned"}</div> }));
 
 const mode = vi.mocked(useAppMode);
 const catalog = vi.mocked(fetchGoldenCatalog);
@@ -40,7 +40,7 @@ describe("GoldenCatalogShell", () => {
     render(<GoldenCatalogShell />);
     await waitFor(() => expect(screen.getByRole("heading", { name: "等待新的评测事件" })).toBeInTheDocument());
     expect(screen.getByText(/尚未导入视频、人工标注或运行 G1/)).toBeInTheDocument();
-    expect(screen.getByText(/Golden annotation workspace 24-40/)).toBeInTheDocument();
+    expect(screen.getByText(/Golden annotation workspace golden-gate-policy.v2 24-40/)).toBeInTheDocument();
   });
 
   it("renders a parent diagnostic for duplicate sources", async () => {
@@ -73,6 +73,6 @@ describe("GoldenCatalogShell", () => {
       gate_template: { gate: "G1", status: "not-run", required_new_events: 36 },
     } as never);
     render(<GoldenCatalogShell />);
-    await waitFor(() => expect(screen.getByText(/Golden annotation workspace 24-40/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Golden annotation workspace golden-gate-policy.v1 pose-unversioned/)).toBeInTheDocument());
   });
 });
