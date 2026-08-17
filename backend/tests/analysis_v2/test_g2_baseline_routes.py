@@ -50,6 +50,24 @@ def test_g2_status_is_parent_authorized_and_sanitized() -> None:
     assert "membership" not in result.model_dump_json()
 
 
+def test_g2_status_accepts_unfrozen_collection_diagnostics() -> None:
+    class CollectingG2Store(G2Store):
+        def public_status(self, dataset):
+            payload = super().public_status(dataset)
+            return {
+                **payload,
+                "profiles": {"jump": {"count": 6, "minimum": 10, "maximum": 14, "passed": False}},
+                "split_issues": ["session:split-inconsistent"],
+                "required_splits_present": False,
+                "ready_to_freeze": False,
+            }
+
+    result = asyncio.run(golden_v2.get_g2_status(None, Store(), CollectingG2Store()))
+
+    assert result.ready_to_freeze is False
+    assert result.split_issues == ["session:split-inconsistent"]
+
+
 def test_g2_freeze_requires_explicit_confirmation() -> None:
     payload = golden_v2.G2FreezeRequest(
         confirmation="review_only",

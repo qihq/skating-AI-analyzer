@@ -190,6 +190,10 @@ class G2StatusResponse(_StrictResponse):
     required_event_range: list[int]
     profile_ranges: dict[str, list[int]]
     distribution: dict[str, Any]
+    profiles: dict[str, Any] | None = None
+    split_issues: list[str] = Field(default_factory=list)
+    required_splits_present: bool | None = None
+    ready_to_freeze: bool | None = None
     dataset_revision: int | None = None
     dataset_fingerprint: str | None = None
     legacy_pipeline_fingerprint: str | None = None
