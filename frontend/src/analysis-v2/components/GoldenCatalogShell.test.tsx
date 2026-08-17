@@ -64,4 +64,15 @@ describe("GoldenCatalogShell", () => {
     render(<GoldenCatalogShell />);
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
   });
+
+  it("passes policy defaults when a legacy export omits gate fields", async () => {
+    mockCatalog();
+    exportData.mockResolvedValue({
+      schema_version: "golden-sanitized-summary.v1", dataset_id: "golden-v2-private-catalog", golden_schema_version: "golden-dataset.v2", revision: 1,
+      aggregate: { source_count: 0, event_count: 0, profile_counts: [], observability_counts: [], strata_counts: [] }, redacted_aliases: [],
+      gate_template: { gate: "G1", status: "not-run", required_new_events: 36 },
+    } as never);
+    render(<GoldenCatalogShell />);
+    await waitFor(() => expect(screen.getByText(/Golden annotation workspace 24-40/)).toBeInTheDocument());
+  });
 });

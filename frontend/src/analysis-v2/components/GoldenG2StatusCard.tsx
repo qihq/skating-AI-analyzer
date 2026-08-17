@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { IslandCard, IslandTitle } from "../../modern/IslandSurface";
 import { fetchGoldenG2Status } from "../api";
+import { LEGACY_G2_PROFILE_RANGES } from "../golden-contracts";
 import type { GoldenG2Status } from "../golden-contracts";
 
 export default function GoldenG2StatusCard({ parentPin }: { parentPin: string }) {
@@ -20,15 +21,21 @@ export default function GoldenG2StatusCard({ parentPin }: { parentPin: string })
   if (!status) return <IslandCard className="modern-me-panel" aria-live="polite"><p>正在读取 G2 数据集状态...</p></IslandCard>;
 
   const [minimum, maximum] = status.required_event_range;
-  const additions = Object.entries(status.profile_ranges).map(([profile, [min]]) => ({ profile, missing: Math.max(0, min - (status.distribution.profiles[profile] ?? 0)) })).filter((item) => item.missing > 0);
+  const policyVersion = status.gate_policy_version ?? "golden-gate-policy.v1";
+  const policyLabel = policyVersion === "golden-gate-policy.v1" ? "golden-gate-policy.v1 (legacy evidence)" : policyVersion;
+  const profileRanges = status.profile_ranges ?? LEGACY_G2_PROFILE_RANGES;
+  const additions = Object.entries(profileRanges).map(([profile, [min]]) => ({ profile, missing: Math.max(0, min - (status.distribution.profiles[profile] ?? 0)) })).filter((item) => item.missing > 0);
+  const rangeSummary = Object.entries(profileRanges).map(([profile, [min, max]]) => `${profile} ${min}-${max}`).join(", ");
   const collecting = status.status === "collecting" || status.status === "ready_to_freeze";
   return <IslandCard className="modern-me-panel" tone={collecting ? "sun" : "mint"}>
     <IslandTitle>G2 冻结与 Legacy baseline</IslandTitle>
+    <p>{policyLabel}</p>
     <dl className="modern-runtime-status">
       <div><dt>事件</dt><dd>{status.event_count}/{minimum}-{maximum}</dd></div>
       <div><dt>录制场次</dt><dd>{status.distribution.recording_session_count}/5+</dd></div>
       <div><dt>状态</dt><dd>{status.status}</dd></div>
     </dl>
+    <p>Profile ranges: {rangeSummary}.</p>
     {collecting ? <p>G2 总量要求为 {minimum}-{maximum} 个有效事件，并且每个 profile 都必须落在策略范围内。</p> : <p>冻结版本已绑定 fingerprint；任何成员变化都必须创建新的明确 revision。</p>}
     {additions.length ? <p>最小补标建议：{additions.map((item) => `${item.profile} +${item.missing}`).join("，")}。</p> : null}
     {status.legacy_pipeline_fingerprint ? <p>Legacy fingerprint: {status.legacy_pipeline_fingerprint}</p> : null}

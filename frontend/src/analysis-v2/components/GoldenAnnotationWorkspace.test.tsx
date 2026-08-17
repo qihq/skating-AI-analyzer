@@ -245,5 +245,11 @@ describe("GoldenAnnotationWorkspace", () => {
     expect(screen.getByLabelText("动作细分（可选）")).toHaveValue("late-edit");
     expect(screen.getByText(/有未保存修改/)).toBeInTheDocument();
   });
+
+  it("renders policy guidance defaults for a legacy gate template", async () => {
+    mockData();
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={{ gate: "G1", status: "not-run", required_new_events: 36 } as never} /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId("golden-gate-guidance")).toHaveTextContent("G1 18/18; G2 24-30; Pose 24-40"));
+  });
 });
 

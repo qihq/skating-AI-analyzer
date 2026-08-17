@@ -20,6 +20,55 @@ export interface GoldenSchemaInfo {
   historical_debug_pool: "not-imported";
 }
 
+export type GoldenGatePolicyVersion = "golden-gate-policy.v2";
+export type HistoricalGoldenGatePolicyVersion = "golden-gate-policy.v1" | GoldenGatePolicyVersion;
+export type LimitedSampleEvidenceScope = "limited_sample";
+export type GateRequirement = { count?: number; target?: number; issues?: string[]; passed: boolean };
+export type GoldenGateTemplate = {
+  gate: "G1";
+  status: "not-run";
+  gate_policy_version?: GoldenGatePolicyVersion;
+  evidence_scope?: LimitedSampleEvidenceScope;
+  required_source_videos?: number;
+  required_valid_events?: number;
+  profile_minimums?: Record<string, number>;
+  required_new_events: number;
+  pose_frame_range?: [number, number];
+  g2_event_range?: [number, number];
+  g2_profile_ranges?: Record<string, [number, number]>;
+};
+
+export type ResolvedGoldenGateTemplate = Required<GoldenGateTemplate>;
+
+export const GOLDEN_GATE_POLICY_V2_DEFAULTS: ResolvedGoldenGateTemplate = {
+  gate: "G1",
+  status: "not-run",
+  gate_policy_version: "golden-gate-policy.v2",
+  evidence_scope: "limited_sample",
+  required_source_videos: 18,
+  required_valid_events: 18,
+  profile_minimums: { jump: 10, spin: 4, step: 2, spiral: 2 },
+  required_new_events: 18,
+  pose_frame_range: [24, 40],
+  g2_event_range: [24, 30],
+  g2_profile_ranges: { jump: [10, 14], spin: [6, 8], step: [4, 5], spiral: [4, 5] },
+};
+
+export const LEGACY_G2_PROFILE_RANGES: Record<string, [number, number]> = {
+  jump: [24, 32], spin: [16, 20], step: [12, 16], spiral: [8, 12],
+};
+
+export function resolveGoldenGateTemplate(template: GoldenGateTemplate): ResolvedGoldenGateTemplate {
+  return {
+    ...GOLDEN_GATE_POLICY_V2_DEFAULTS,
+    ...template,
+    profile_minimums: template.profile_minimums ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.profile_minimums,
+    pose_frame_range: template.pose_frame_range ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.pose_frame_range,
+    g2_event_range: template.g2_event_range ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.g2_event_range,
+    g2_profile_ranges: template.g2_profile_ranges ?? GOLDEN_GATE_POLICY_V2_DEFAULTS.g2_profile_ranges,
+  };
+}
+
 export interface GoldenSanitizedExport {
   schema_version: "golden-sanitized-summary.v1";
   dataset_id: string;
@@ -33,19 +82,7 @@ export interface GoldenSanitizedExport {
     strata_counts: GoldenCount[];
   };
   redacted_aliases: string[];
-  gate_template: {
-    gate: "G1";
-    status: "not-run";
-    gate_policy_version: "golden-gate-policy.v2";
-    evidence_scope: "limited_sample";
-    required_source_videos: number;
-    required_valid_events: number;
-    profile_minimums: Record<string, number>;
-    required_new_events: number;
-    pose_frame_range: [number, number];
-    g2_event_range: [number, number];
-    g2_profile_ranges: Record<string, [number, number]>;
-  };
+  gate_template: GoldenGateTemplate;
 }
 
 export interface GoldenCount { key: string; count: number; }
@@ -91,15 +128,15 @@ export type PilotEvaluatorState = "not_run" | "running" | "waiting_for_owner_lab
 export type PilotGap = { key: string; count: number; target: number; missing: number };
 export type PilotProgress = {
   gate: "G1";
-  gate_policy_version: "golden-gate-policy.v2";
-  evidence_scope: "limited_sample";
+  gate_policy_version?: GoldenGatePolicyVersion;
+  evidence_scope?: LimitedSampleEvidenceScope;
   status: "waiting_for_owner_labels" | "ready_for_evaluator";
   diagnostic_only: true;
   release_claim: false;
   profiles: PilotGap[];
   scenes: PilotGap[];
-  requirements: Record<string, { count?: number; target?: number; issues?: string[]; passed: boolean }>;
-  next_actions: string[];
+  requirements: Record<string, GateRequirement>;
+  next_actions?: string[];
   next_best_videos: string[];
 };
 export type PilotEvaluatorStatus = { status: PilotEvaluatorState; evaluator_version: string; diagnostic_only: true; message: string | null; result_fingerprint?: string | null; leakage_fields?: string[]; progress?: PilotProgress | null };
@@ -107,8 +144,8 @@ export type MetricRate = { numerator: number; denominator: number; rate: number 
 export type PilotSanitizedResult = {
   schema_version: "golden-pilot-sanitized-report.v1";
   evaluator_version: string;
-  gate_policy_version?: "golden-gate-policy.v1" | "golden-gate-policy.v2";
-  evidence_scope?: "limited_sample";
+  gate_policy_version?: HistoricalGoldenGatePolicyVersion;
+  evidence_scope?: LimitedSampleEvidenceScope;
   dataset_id: string;
   dataset_fingerprint: string;
   pipeline_fingerprint: string;
@@ -125,12 +162,12 @@ export type PilotSanitizedResult = {
 export type GoldenG2Status = {
   schema_version: "golden-g2-status.v1";
   gate: "G2";
-  gate_policy_version: "golden-gate-policy.v1" | "golden-gate-policy.v2";
-  evidence_scope: "limited_sample";
+  gate_policy_version?: HistoricalGoldenGatePolicyVersion;
+  evidence_scope?: LimitedSampleEvidenceScope;
   status: "collecting" | "ready_to_freeze" | "frozen_waiting_for_baseline" | "baseline_recorded";
   event_count: number;
   required_event_range: [number, number];
-  profile_ranges: Record<string, [number, number]>;
+  profile_ranges?: Record<string, [number, number]>;
   distribution: {
     profiles: Record<string, number>;
     splits: Record<string, number>;

@@ -66,4 +66,14 @@ describe("GoldenPilotDashboard", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/is unavailable. Retry the event link/));
     expect(screen.getByRole("status")).toHaveTextContent(/never mutates Ground Truth/);
   });
+
+  it("renders a legacy progress payload without next_actions or policy metadata", async () => {
+    progress.mockResolvedValue({
+      gate: "G1", status: "waiting_for_owner_labels", diagnostic_only: true, release_claim: false,
+      profiles: [], scenes: [], requirements: { event_count: { count: 0, target: 36, passed: false } }, next_best_videos: [],
+    } as never);
+    render(<GoldenPilotDashboard />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Waiting for owner labels" })).toBeInTheDocument());
+    expect(screen.queryByRole("list")).not.toBeInTheDocument();
+  });
 });

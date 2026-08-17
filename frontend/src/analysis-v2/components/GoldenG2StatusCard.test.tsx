@@ -27,6 +27,10 @@ describe("GoldenG2StatusCard", () => {
     expect(screen.getByText(/step \+2/)).toBeInTheDocument();
     expect(screen.getByText(/spiral \+2/)).toBeInTheDocument();
     expect(screen.queryByText(/jump \+/)).not.toBeInTheDocument();
+    expect(screen.getByText(/jump 10-14/)).toBeInTheDocument();
+    expect(screen.getByText(/spin 6-8/)).toBeInTheDocument();
+    expect(screen.getByText(/step 4-5/)).toBeInTheDocument();
+    expect(screen.getByText(/spiral 4-5/)).toBeInTheDocument();
     expect(screen.getByText(/总量要求为 24-30/)).toBeInTheDocument();
   });
 
@@ -49,5 +53,20 @@ describe("GoldenG2StatusCard", () => {
 
     await waitFor(() => expect(screen.getByText(/legacy:v5.2.307/)).toBeInTheDocument());
     expect(screen.getByText(/不代表发布通过/)).toBeInTheDocument();
+  });
+
+  it("keeps legacy v1 status readable with policy labels and range fallbacks", async () => {
+    fetchStatus.mockResolvedValue({
+      schema_version: "golden-g2-status.v1", gate: "G2", status: "collecting", event_count: 12,
+      required_event_range: [60, 80],
+      distribution: { profiles: { jump: 6, spin: 3, step: 2, spiral: 1 }, splits: { unassigned: 12 }, strata: {}, recording_session_count: 4 },
+      release_claim: false,
+    } as never);
+    render(<GoldenG2StatusCard parentPin="1234" />);
+    await waitFor(() => expect(screen.getByText(/golden-gate-policy\.v1 \(legacy evidence\)/)).toBeInTheDocument());
+    expect(screen.getByText(/jump 24-32/)).toBeInTheDocument();
+    expect(screen.getByText(/spin 16-20/)).toBeInTheDocument();
+    expect(screen.getByText(/step 12-16/)).toBeInTheDocument();
+    expect(screen.getByText(/spiral 8-12/)).toBeInTheDocument();
   });
 });
