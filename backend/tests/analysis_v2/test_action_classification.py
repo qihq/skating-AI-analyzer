@@ -74,20 +74,20 @@ def test_sparse_whole_video_envelope_cannot_be_high_confidence_identity() -> Non
     assert result.evidence_summary["localization_is_broad"] is True
 
 
-def test_subtype_is_underpowered_with_small_sample() -> None:
+def test_subtype_with_three_samples_is_underpowered() -> None:
     result = classify_action(jump_evidence(
         subtype_candidates={"jump": (("toe_loop", .95),)},
-        subtype_validation_n={"jump": {"toe_loop": 0}},
+        subtype_validation_n={"jump": {"toe_loop": 3}},
     ))
     assert result.subtype.underpowered is True
     assert result.subtype.state == "unknown"
-    assert "validation N=0" in result.subtype.reason
+    assert "required N=4" in result.subtype.reason
 
 
-def test_subtype_requires_declared_validation_n_before_confirmation() -> None:
+def test_subtype_with_four_samples_can_be_confirmed_as_limited_sample() -> None:
     result = classify_action(jump_evidence(
         subtype_candidates={"jump": (("toe_loop", .95),)},
-        subtype_validation_n={"jump": {"toe_loop": 20}},
+        subtype_validation_n={"jump": {"toe_loop": 4}},
     ))
     assert result.subtype.subtype == "toe_loop"
     assert result.subtype.state == "confirmed"

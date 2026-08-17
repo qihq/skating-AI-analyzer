@@ -84,3 +84,15 @@ def test_pilot12_reports_recall_ci_strata_and_no_label_leakage() -> None:
     assert result["proposal_recall"]["wilson_95_ci"]
     assert result["strata"]
     assert result["false_proposals_per_minute_upper_bound"] is not None
+
+
+def test_g6_pilot_payload_is_policy_scoped(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot.json"
+    labels = tmp_path / "labels.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    labels.write_text('{"events": []}', encoding="utf-8")
+    result = evaluate_pilot12_event_proposals(snapshot, labels)
+    assert result["gate"] == "G6"
+    assert result["gate_policy_version"] == "golden-gate-policy.v2"
+    assert result["evidence_scope"] == "limited_sample"
+    assert result["release_claim"] is False

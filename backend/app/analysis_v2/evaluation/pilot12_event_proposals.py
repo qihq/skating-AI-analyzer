@@ -16,6 +16,7 @@ from app.analysis_v2.event_proposals import (
     interval_union_coverage,
 )
 from app.analysis_v2.action_classification import classify_proposal
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY
 from app.analysis_v2.evaluation.legacy_event_proposal_adapter import evidence_from_legacy_analysis as _legacy_evidence
 
 
@@ -80,6 +81,8 @@ def evaluate_pilot12_event_proposals(snapshot_path: Path, labels_path: Path) -> 
     result = {
         "schema_version": "iteration10-pilot12-event-proposals.v1",
         "gate": "G6",
+        "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
+        "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
         "status": "passed_for_pilot_only" if observable and hits / len(observable) >= 0.98 else "failed_for_pilot_only",
         "diagnostic_only": True,
         "release_claim": False,
@@ -170,6 +173,8 @@ def evaluate_pilot14_action_classification(
     result = {
         "schema_version": "iteration11-pilot14-profile-classification.v1",
         "gate": "G7",
+        "gate_policy_version": GOLDEN_GATE_POLICY.schema_version,
+        "evidence_scope": GOLDEN_GATE_POLICY.evidence_scope,
         "status": "diagnostic_complete",
         "gate_passed": False,
         "thresholds": {"macro_f1_minimum": .90, "macro_f1_target": .95, "high_confidence_error_maximum": .02},

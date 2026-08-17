@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.analysis_v2.contracts import RotationEstimate
+from app.analysis_v2.evaluation.gate_policy import limited_sample_gate_metadata
 
 
 LABEL_CONVENTIONS = {
@@ -173,6 +174,11 @@ def evaluate_g9_rotation(
         and coverage_protocol_met
     )
     formal_protocol_met = dataset_frozen and validation_calibrated
+    gate_metadata = limited_sample_gate_metadata(
+        applicable_n=clear_exact_label_n,
+        thresholds_met=thresholds_met,
+        protocol_met=formal_protocol_met,
+    )
 
     def summarize_stratum(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         observed = sum(1 for item in items if item["label_observability"] != "unobservable" and (item["label_value_turns"] is not None or item["label_range_turns"] is not None))
@@ -195,9 +201,7 @@ def evaluate_g9_rotation(
     result = {
         "schema_version": "g9-multi-signal-rotation-evidence.v1",
         "gate": "G9",
-        "status": "passed" if thresholds_met and formal_protocol_met else "blocked_waiting_for_frozen_candidate" if not formal_protocol_met else "diagnostic_failed_or_insufficient",
-        "gate_passed": bool(thresholds_met and formal_protocol_met),
-        "release_claim": bool(thresholds_met and formal_protocol_met),
+        **gate_metadata,
         "diagnostic_only": not formal_protocol_met,
         "candidate_fingerprint": candidate_fingerprint,
         "dataset_frozen": dataset_frozen,

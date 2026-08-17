@@ -20,6 +20,7 @@ from pydantic import Field
 
 from app.analysis_v2.contracts import ContractModel
 from app.analysis_v2.event_proposals import EventProposal, ProposalEvidenceSample, PROFILE_KEYS
+from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY
 
 
 Profile = Literal["jump", "spin", "step", "spiral"]
@@ -39,7 +40,7 @@ class ProfileClassifierConfig:
     confirmation_threshold: float = 0.50
     margin_threshold: float = 0.12
     minimum_evidence: int = 2
-    subtype_minimum_evidence: int = 20
+    subtype_minimum_evidence: int = GOLDEN_GATE_POLICY.subtype_reporting_minimum
 
     @property
     def fingerprint(self) -> str:

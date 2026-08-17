@@ -32,8 +32,19 @@ def test_g8_reports_each_moment_completeness_refusal_ci_strata_and_tracking() ->
 
 def test_formal_pass_requires_frozen_and_validation_calibrated_once() -> None:
     result = evaluate_g8_moments(labels=labels(), predictions={"jump-1": prediction()}, candidate_fingerprint="candidate-v1", dataset_frozen=True, validation_calibrated=True)
+    assert result["status"] == "limited_sample_candidate_pass"
     assert result["gate_passed"] is True
+    assert result["release_claim"] is False
+    assert result["gate_policy_version"] == "golden-gate-policy.v2"
+    assert result["evidence_scope"] == "limited_sample"
     assert result["frozen_candidate_runs"] == 1
+
+
+def test_empty_g8_dataset_is_insufficient_sample() -> None:
+    result = evaluate_g8_moments(labels=[], predictions={}, candidate_fingerprint="candidate-v1", dataset_frozen=True, validation_calibrated=True)
+    assert result["status"] == "insufficient_sample"
+    assert result["gate_passed"] is False
+    assert result["release_claim"] is False
 
 
 def test_evaluator_rejects_resolved_semantic_or_golden_prediction_payload() -> None:

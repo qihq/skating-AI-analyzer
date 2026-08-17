@@ -58,13 +58,17 @@ def test_g9_does_not_hide_refusals_or_round_ranges_into_classes() -> None:
 def test_g9_never_mixes_airborne_and_competition_conventions() -> None:
     axel = prediction("axel", 1.5).model_copy(update={"competition_convention": "axel", "competition_naming_turns": 1.5, "competition_naming_class": "single_axel"})
     result = evaluate_g9_rotation(labels=[{"event_id": "axel", "convention": "axel_includes_forward_takeoff", "observability": "observable", "reported_turns": 1.5, "is_axel": True}], predictions={"axel": axel}, candidate_fingerprint="candidate", dataset_frozen=True, validation_calibrated=True)
+    assert result["status"] == "limited_sample_candidate_pass"
     assert result["gate_passed"] is True
+    assert result["release_claim"] is False
+    assert result["gate_policy_version"] == "golden-gate-policy.v2"
+    assert result["evidence_scope"] == "limited_sample"
     assert result["strata"]["axel"]["mae_turns"] == 0
     with pytest.raises(ValueError, match="convention"):
         evaluate_g9_rotation(labels=[{"event_id": "x", "observability": "observable", "reported_turns": 1}], predictions={}, candidate_fingerprint="candidate", dataset_frozen=False, validation_calibrated=False)
 
 
-def test_empty_diagnostic_is_blocked_and_cannot_satisfy_coverage_protocol() -> None:
+def test_empty_diagnostic_is_insufficient_sample_and_cannot_satisfy_coverage_protocol() -> None:
     result = evaluate_g9_rotation(
         labels=[],
         predictions={},
@@ -72,7 +76,7 @@ def test_empty_diagnostic_is_blocked_and_cannot_satisfy_coverage_protocol() -> N
         dataset_frozen=False,
         validation_calibrated=False,
     )
-    assert result["status"] == "blocked_waiting_for_frozen_candidate"
+    assert result["status"] == "insufficient_sample"
     assert result["coverage_protocol_met"] is False
     assert result["thresholds_met"] is False
     assert result["gate_passed"] is False

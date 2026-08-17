@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.analysis_v2.contracts import EventMomentSet
+from app.analysis_v2.evaluation.gate_policy import limited_sample_gate_metadata
 from app.analysis_v2.profile_moments import reject_evaluation_leakage
 
 
@@ -114,12 +115,15 @@ def evaluate_g8_moments(
     p95 = _percentile(all_errors, .95)
     jump_thresholds_met = median is not None and p95 is not None and median <= .10 and p95 <= .25
     formal_protocol_met = dataset_frozen and validation_calibrated
+    gate_metadata = limited_sample_gate_metadata(
+        applicable_n=expected,
+        thresholds_met=jump_thresholds_met,
+        protocol_met=formal_protocol_met,
+    )
     result = {
         "schema_version": "g8-profile-moments-evidence.v1",
         "gate": "G8",
-        "status": "passed" if jump_thresholds_met and formal_protocol_met else "blocked_waiting_for_frozen_candidate" if jump_thresholds_met else "diagnostic_failed_or_insufficient",
-        "gate_passed": bool(jump_thresholds_met and formal_protocol_met),
-        "release_claim": bool(jump_thresholds_met and formal_protocol_met),
+        **gate_metadata,
         "diagnostic_only": not formal_protocol_met,
         "candidate_fingerprint": candidate_fingerprint,
         "dataset_frozen": dataset_frozen,
