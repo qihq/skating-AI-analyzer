@@ -13,9 +13,15 @@
   "redacted_aliases": [],
   "gate_template": {
     "gate": "G1",
-    "status": "waiting_for_owner_labels",
-    "required_new_events": 36,
-    "diagnostic_only": true,
-    "release_claim": false
+    "status": "not-run",
+    "gate_policy_version": "golden-gate-policy.v2",
+    "evidence_scope": "limited_sample",
+    "required_source_videos": 18,
+    "required_valid_events": 18,
+    "profile_minimums": {"jump": 10, "spin": 4, "step": 2, "spiral": 2},
+    "required_new_events": 18,
+    "pose_frame_range": [24, 40],
+    "g2_event_range": [24, 30],
+    "g2_profile_ranges": {"jump": [10, 14], "spin": [6, 8], "step": [4, 5], "spiral": [4, 5]}
   }
 }

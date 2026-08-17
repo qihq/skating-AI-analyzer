@@ -13,7 +13,7 @@ def test_committed_sanitized_template_contains_no_private_source_material() -> N
     template = ROOT / "docs" / "evaluation" / "v2" / "golden-v2-sanitized-summary-template.json"
     payload = json.loads(template.read_text(encoding="utf-8"))
     encoded = json.dumps(payload)
-    for forbidden in ("path", "reference", "filename", "frame", "face", "embedding", "secret"):
+    for forbidden in ("path", "reference", "filename", "source_frame", "face", "embedding", "secret"):
         assert forbidden not in encoded.lower()
 
 
@@ -61,3 +61,26 @@ def test_sanitized_store_export_has_no_source_reference_or_runtime_path(tmp_path
     encoded = json.dumps(store.sanitized_export())
     assert "runtime" not in encoded
     assert "reference" not in encoded.lower()
+
+
+def test_policy_v2_transition_artifact_is_aggregate_only() -> None:
+    evidence = ROOT / "docs" / "evaluation" / "v2" / "golden-gate-policy-v2-transition.json"
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    encoded = json.dumps(payload).lower()
+    assert payload["gate_policy_version"] == "golden-gate-policy.v2"
+    assert payload["verified_catalog"]["source_video_count"] == 18
+    assert payload["release_claim"] is False
+    for forbidden in ("c:\\users", "source_sha256", "event_id", "annotator_alias", "reviewer_alias", "filename", "embedding"):
+        assert forbidden not in encoded
+
+
+def test_sanitized_template_uses_policy_v2_counts() -> None:
+    template = ROOT / "docs" / "evaluation" / "v2" / "golden-v2-sanitized-summary-template.json"
+    payload = json.loads(template.read_text(encoding="utf-8"))
+    gate = payload["gate_template"]
+    assert gate["gate_policy_version"] == "golden-gate-policy.v2"
+    assert gate["required_source_videos"] == 18
+    assert gate["required_valid_events"] == 18
+    assert gate["pose_frame_range"] == [24, 40]
+    assert gate["g2_event_range"] == [24, 30]
+    assert gate["g2_profile_ranges"] == {"jump": [10, 14], "spin": [6, 8], "step": [4, 5], "spiral": [4, 5]}

@@ -507,18 +507,22 @@ An iteration is incomplete if a new backend state has no intentional frontend re
 
 ### New-video-only policy
 
+#### Policy-v2 amendment (2026-08-15)
+
+`golden-gate-policy.v2` sets G1 at 18 source videos and 18 valid events, using the verified limited-sample catalog. G1 remains pending until grouped development/validation/frozen-test splits, two delayed relabel reviews, and all applicable independent second reviews are complete. G2 is 24-30 events with profile ranges of jump 10-14, spin 6-8, step 4-5, and spiral 4-5. Pose uses 24-40 representative frames. A separately reported subtype needs at least 4 events and targets 6; these limited-sample thresholds do not support a release claim.
+
 The formal Golden dataset uses only videos newly selected by the owner for this V2 evaluation. The 21 unique historical debug videos and their repeated runs are not imported, do not prefill labels, and do not contribute to any metric. They remain ordinary historical debug artifacts outside the Golden dataset.
 
-The recommended first useful dataset contains 60-80 independently labeled action events:
+The active recommended G2 dataset contains 24-30 independently labeled action events:
 
-- 24-32 jump events;
-- 16-20 spin events;
-- 12-16 step events;
-- 8-12 spiral events.
+- 10-14 jump events;
+- 6-8 spin events;
+- 4-5 step events;
+- 4-5 spiral events.
 
-This distribution is intentionally uneven because jump and spin require stronger temporal and rotation coverage. If collection cost is temporarily limiting, a 36-event pilot may start with 14 jumps, 10 spins, 6 steps, and 6 spirals, but pilot percentages are diagnostic only and cannot serve as final release claims.
+This distribution is intentionally uneven because jump and spin require stronger temporal and rotation coverage. G1 is separately fixed at 18 source videos and 18 valid events; its limited-sample results are diagnostic only and cannot serve as final release claims.
 
-For any jump or spin subtype that receives its own classifier or reported accuracy, collect at least 6-8 events before measuring it separately and target 10-15 events across multiple recording sessions. Otherwise it remains grouped under the broader action family.
+For any jump or spin subtype that receives its own classifier or reported accuracy, collect at least 4 events before measuring it separately and target 6 events across multiple recording sessions. Otherwise it remains grouped under the broader action family.
 
 ### Deduplication unit
 
@@ -556,7 +560,7 @@ Tracking labels are sparse in easy regions and dense around crossings, occlusion
 - A human confirmation creates Ground Truth and records revision and annotator.
 - Ordinary samples need only several identity anchors and event moments.
 - Difficult tracking intervals receive denser boxes.
-- Pose annotation starts with 50-100 representative frames and grows only where metrics need it.
+- Pose annotation starts with 24-40 representative frames and grows only where metrics need it.
 
 ### Evaluation isolation
 

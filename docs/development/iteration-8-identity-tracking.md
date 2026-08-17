@@ -13,7 +13,7 @@ This worktree implements the identity-safe tracking contract in Shadow mode. The
 
 ## Pilot status
 
-`docs/evaluation/v2/iteration-8-pilot12-identity-evidence.json` is diagnostic-only. It is not a G1, G2, frozen-test, or G4 acceptance claim. Formal G1 still requires 36 newly selected events, G2 requires 60-80 frozen events, and G4 requires a frozen candidate run.
+`docs/evaluation/v2/iteration-8-pilot12-identity-evidence.json` is diagnostic-only. It is not a G1, G2, frozen-test, or G4 acceptance claim. The 36-event G1 and 60-80-event G2 values in this original diagnostic statement were the legacy policy; they were superseded on 2026-08-15 by `golden-gate-policy.v2`. G4 still requires a frozen candidate run.
 
 ## Optional identity models
 

@@ -1,0 +1,33 @@
+{
+  "schema_version": "golden-gate-policy-transition.v1",
+  "gate_policy_version": "golden-gate-policy.v2",
+  "effective_date": "2026-08-15",
+  "verified_catalog": {
+    "revision": 70,
+    "source_video_count": 18,
+    "valid_event_count": 18,
+    "recording_session_count": 17,
+    "profile_counts": {"jump": 10, "spin": 4, "step": 2, "spiral": 2},
+    "duplicate_source_count": 0,
+    "scene_coverage_complete": true
+  },
+  "g1": {
+    "source_video_minimum": 18,
+    "valid_event_minimum": 18,
+    "remaining_governance": [
+      "assign grouped development/validation/frozen-test splits",
+      "complete two delayed relabel reviews",
+      "complete all applicable independent second reviews"
+    ]
+  },
+  "g2": {
+    "event_range": [24, 30],
+    "profile_ranges": {"jump": [10, 14], "spin": [6, 8], "step": [4, 5], "spiral": [4, 5]},
+    "minimum_targeted_additions_from_verified_catalog": {"spin": 2, "step": 2, "spiral": 2}
+  },
+  "pose_frame_range": [24, 40],
+  "subtype_reporting": {"minimum": 4, "target": 6},
+  "evidence_scope": "limited_sample",
+  "release_claim": false,
+  "private_data_included": false
+}
