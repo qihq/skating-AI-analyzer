@@ -101,17 +101,21 @@ class RotationLabel(_StrictModel):
     @model_serializer(mode="wrap")
     def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         serialized = handler(self)
-        explicit_v2_fields = {
-            "definition", "status", "value_turns", "range_turns", "review_start_pts", "review_end_pts",
-        }
-        if not self.model_fields_set.intersection(explicit_v2_fields):
+        if self._is_legacy():
+            legacy_fields = {
+                "observed_turns_min", "observed_turns_max", "reported_turns", "convention", "observability",
+            }
             return {
-                key: serialized[key]
-                for key in (
-                    "observed_turns_min", "observed_turns_max", "reported_turns", "convention", "observability",
-                )
+                key: value for key, value in serialized.items() if key in legacy_fields
             }
         return serialized
+
+    def _is_legacy(self) -> bool:
+        explicit_v2_fields = {
+            "schema_version", "definition", "status", "value_turns", "range_turns",
+            "review_start_pts", "review_end_pts", "review_method",
+        }
+        return not self.model_fields_set.intersection(explicit_v2_fields)
 
     @model_validator(mode="after")
     def rotation_range_is_consistent(self) -> "RotationLabel":
@@ -123,10 +127,7 @@ class RotationLabel(_StrictModel):
             raise ValueError("reported_turns must be inside the observed rotation range")
         if self.observability == "unobservable" and self.reported_turns is not None:
             raise ValueError("unobservable rotation cannot report an exact turn count")
-        explicit_v2_fields = {
-            "definition", "status", "value_turns", "range_turns", "review_start_pts", "review_end_pts",
-        }
-        if not self.model_fields_set.intersection(explicit_v2_fields):
+        if self._is_legacy():
             # Revisions created before rotation-label.v2 only carry the observed
             # range, optional reported value, convention, and observability.
             # Keep those labels readable without inventing a V2 status/value or

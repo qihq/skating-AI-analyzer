@@ -183,25 +183,58 @@ def test_legacy_rotation_without_explicit_v2_fields_remains_readable_without_fab
 
 
 @pytest.mark.parametrize(
-    ("status", "message"),
-    [("exact", "exact rotation labels"), ("range", "partial rotation labels")],
+    ("explicit_fields", "message"),
+    [
+        ({"status": "exact"}, "exact rotation labels"),
+        ({"status": "range"}, "partial rotation labels"),
+        ({"schema_version": "rotation-label.v2"}, "exact rotation labels"),
+        ({"review_method": "source_frame_step"}, "exact rotation labels"),
+    ],
 )
-def test_explicit_v2_rotation_status_remains_strict(status: str, message: str) -> None:
+def test_explicit_v2_rotation_fields_remain_strict(explicit_fields: dict[str, object], message: str) -> None:
     invalid = event()
     jump = invalid["jump"]
     assert isinstance(jump, dict)
     jump["rotation"] = {
         "observed_turns_min": 1,
         "observed_turns_max": 1,
-        "reported_turns": 1 if status == "exact" else None,
+        "reported_turns": 1,
         "convention": "non_axel_airborne",
         "observability": "uncertain",
-        "definition": "airborne_body_rotation",
-        "status": status,
+        **explicit_fields,
     }
 
     with pytest.raises(ValidationError, match=message):
         GoldenDatasetV2.model_validate(dataset(events=[invalid]))
+
+
+def test_legacy_rotation_serializer_respects_standard_dump_filters() -> None:
+    legacy = event()
+    jump = legacy["jump"]
+    assert isinstance(jump, dict)
+    jump["rotation"] = {
+        "observed_turns_min": 0.5,
+        "observed_turns_max": 0.5,
+        "reported_turns": None,
+        "convention": "unknown",
+        "observability": "observable",
+    }
+    rotation = GoldenDatasetV2.model_validate(dataset(events=[legacy])).events[0].jump.rotation
+
+    assert rotation is not None
+    assert rotation.model_dump(mode="json", exclude_none=True) == {
+        "observed_turns_min": 0.5,
+        "observed_turns_max": 0.5,
+        "convention": "unknown",
+        "observability": "observable",
+    }
+    assert rotation.model_dump(mode="json", exclude={"reported_turns"}) == {
+        "observed_turns_min": 0.5,
+        "observed_turns_max": 0.5,
+        "convention": "unknown",
+        "observability": "observable",
+    }
+    assert rotation.model_dump(mode="json", include={"status"}) == {}
 
 
 def test_out_of_window_challenge_interval_is_rejected() -> None:
