@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, StringConstraints, model_serializer, model_validator
 
 
 GOLDEN_DATASET_SCHEMA_VERSION = "golden-dataset.v2"
@@ -98,6 +98,21 @@ class RotationLabel(_StrictModel):
     review_end_pts: float | None = Field(default=None, ge=0)
     review_method: Literal["source_frame_step"] = "source_frame_step"
 
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        serialized = handler(self)
+        explicit_v2_fields = {
+            "definition", "status", "value_turns", "range_turns", "review_start_pts", "review_end_pts",
+        }
+        if not self.model_fields_set.intersection(explicit_v2_fields):
+            return {
+                key: serialized[key]
+                for key in (
+                    "observed_turns_min", "observed_turns_max", "reported_turns", "convention", "observability",
+                )
+            }
+        return serialized
+
     @model_validator(mode="after")
     def rotation_range_is_consistent(self) -> "RotationLabel":
         if self.observed_turns_max < self.observed_turns_min:
@@ -108,6 +123,16 @@ class RotationLabel(_StrictModel):
             raise ValueError("reported_turns must be inside the observed rotation range")
         if self.observability == "unobservable" and self.reported_turns is not None:
             raise ValueError("unobservable rotation cannot report an exact turn count")
+        explicit_v2_fields = {
+            "definition", "status", "value_turns", "range_turns", "review_start_pts", "review_end_pts",
+        }
+        if not self.model_fields_set.intersection(explicit_v2_fields):
+            # Revisions created before rotation-label.v2 only carry the observed
+            # range, optional reported value, convention, and observability.
+            # Keep those labels readable without inventing a V2 status/value or
+            # upgrading their observability. Newly authored V2 labels always
+            # include explicit fields and continue through the strict checks.
+            return self
         definition = self.definition
         if definition is None:
             definition = "competition_naming" if self.convention == "axel_includes_forward_takeoff" else "airborne_body_rotation"

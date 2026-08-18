@@ -39,7 +39,17 @@ def event(event_id: str = "event-001") -> dict[str, object]:
         "main_skater_confirmed": True,
         "jump": {
             "takeoff": {"pts": 1.5}, "apex": {"pts": 2.0}, "landing": {"pts": 3.0},
-            "rotation": {"observed_turns_min": 1.0, "observed_turns_max": 1.5, "reported_turns": 1.0, "convention": "non_axel_airborne", "observability": "observable"},
+            "rotation": {
+                "observed_turns_min": 1.0,
+                "observed_turns_max": 1.5,
+                "reported_turns": None,
+                "convention": "non_axel_airborne",
+                "observability": "uncertain",
+                "definition": "airborne_body_rotation",
+                "status": "range",
+                "value_turns": None,
+                "range_turns": [1.0, 1.5],
+            },
         },
         "revision": revision(),
     }
@@ -126,6 +136,71 @@ def test_unobservable_rotation_cannot_carry_a_value() -> None:
         "observability": "unobservable",
     }
     with pytest.raises(ValidationError, match="cannot carry values"):
+        GoldenDatasetV2.model_validate(dataset(events=[invalid]))
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        {
+            "observed_turns_min": 1,
+            "observed_turns_max": 1,
+            "reported_turns": 1,
+            "convention": "unknown",
+            "observability": "uncertain",
+        },
+        {
+            "observed_turns_min": 0.5,
+            "observed_turns_max": 0.5,
+            "reported_turns": None,
+            "convention": "unknown",
+            "observability": "observable",
+        },
+    ],
+)
+def test_legacy_rotation_without_explicit_v2_fields_remains_readable_without_fabricating_v2_status(
+    rotation: dict[str, object],
+) -> None:
+    legacy = event()
+    jump = legacy["jump"]
+    assert isinstance(jump, dict)
+    jump["rotation"] = rotation
+
+    parsed_dataset = GoldenDatasetV2.model_validate(dataset(events=[legacy]))
+    parsed = parsed_dataset.events[0].jump.rotation
+
+    assert parsed is not None
+    assert parsed.status is None
+    assert parsed.definition is None
+    assert parsed.value_turns is None
+    assert parsed.range_turns is None
+    assert parsed.observability == rotation["observability"]
+    assert parsed.reported_turns == rotation["reported_turns"]
+    serialized = parsed_dataset.model_dump(mode="json")
+    serialized_rotation = serialized["events"][0]["jump"]["rotation"]
+    assert serialized_rotation == rotation
+    assert GoldenDatasetV2.model_validate(serialized).events[0].jump.rotation.status is None
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [("exact", "exact rotation labels"), ("range", "partial rotation labels")],
+)
+def test_explicit_v2_rotation_status_remains_strict(status: str, message: str) -> None:
+    invalid = event()
+    jump = invalid["jump"]
+    assert isinstance(jump, dict)
+    jump["rotation"] = {
+        "observed_turns_min": 1,
+        "observed_turns_max": 1,
+        "reported_turns": 1 if status == "exact" else None,
+        "convention": "non_axel_airborne",
+        "observability": "uncertain",
+        "definition": "airborne_body_rotation",
+        "status": status,
+    }
+
+    with pytest.raises(ValidationError, match=message):
         GoldenDatasetV2.model_validate(dataset(events=[invalid]))
 
 

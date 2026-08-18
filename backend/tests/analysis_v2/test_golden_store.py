@@ -62,6 +62,42 @@ def test_incompatible_schema_fails_explicitly(tmp_path: Path) -> None:
     assert store.catalog_summary()["status"] == "schema-incompatible"
 
 
+def test_store_reads_legacy_rotation_labels_without_rewriting_manifest(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    store.ensure_initialized()
+    payload = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+    payload["sources"] = [_source()]
+    payload["events"] = [
+        {
+            "event_id": "event-legacy",
+            "source_sha256": HASH,
+            "start_pts": 1,
+            "end_pts": 4,
+            "profile": "jump",
+            "observability": "uncertain",
+            "annotator_confidence": 0.7,
+            "main_skater_confirmed": True,
+            "jump": {
+                "rotation": {
+                    "observed_turns_min": 1,
+                    "observed_turns_max": 1,
+                    "reported_turns": 1,
+                    "convention": "unknown",
+                    "observability": "uncertain",
+                },
+            },
+            "revision": {"revision": 1, "annotator_alias": "system", "provenance": "created"},
+        },
+    ]
+    original = json.dumps(payload, sort_keys=True)
+    store.manifest_path.write_text(original, encoding="utf-8")
+
+    loaded = store.read()
+
+    assert loaded.events[0].jump.rotation.status is None
+    assert store.manifest_path.read_text(encoding="utf-8") == original
+
+
 def test_atomic_save_rejects_stale_revision(tmp_path: Path) -> None:
     store = GoldenCatalogStore(tmp_path / "golden")
     store.ensure_initialized()
