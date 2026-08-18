@@ -17,7 +17,7 @@ from app.analysis_v2.evaluation.golden_schema import GoldenDatasetV2
 from app.analysis_v2.evaluation.g2_baseline import G2BaselineStore, G2FreezeError
 from app.analysis_v2.evaluation.pilot_evaluator import PilotPredictionBundle
 from app.analysis_v2.evaluation.pilot_store import PilotEvaluationStore, collection_progress
-from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, extract_source_frame_bytes, probe_source, source_frame_at, source_frame_index, source_frame_reference_at, source_frame_reference_at_pts
+from app.analysis_v2.evaluation.source_media import SourceMediaError, create_browser_playback, extract_source_frame_bytes, probe_source, source_frame_at, source_frame_reference_at, source_frame_reference_at_pts
 from app.database import get_session
 from app.routers.capabilities import get_runtime_config
 from app.services.parent_access import require_parent_pin
@@ -627,26 +627,12 @@ def _counts(value: object) -> list[GoldenCount]:
 
 
 def _source_view(source: Any, store: GoldenCatalogStore | None = None) -> GoldenSourceView:
-    timeline = None
-    try:
-        source_path = store.source_media_path(source.source_sha256) if store is not None else None
-        if source_path is None:
-            raise FileNotFoundError(source.source_sha256)
-        timeline = source_frame_index(source_path).to_timeline()
-    except Exception:  # source metadata remains readable if a rebuildable index cannot be created
-        timeline = {
-            "schema_version": "source-timeline.v1", "source_video_hash": source.source_sha256,
-            "duration_sec": source.duration_pts, "width": source.width, "height": source.height,
-            "rotation_degrees": source.display_rotation_degrees,
-            "timebase": source.timebase.model_dump(mode="json"), "timestamp_status": "unavailable",
-            "frames": [], "decode_gaps": [], "pts_discontinuities": [], "fingerprint": "unavailable",
-        }
     return GoldenSourceView(
         source_sha256=source.source_sha256, duration_pts=source.duration_pts, width=source.width, height=source.height,
         timebase=source.timebase.model_dump(), recording_session_id=source.recording_session_id, grouping_id=source.grouping_id,
         redacted_alias=source.redacted_alias, source_frame_count=source.source_frame_count, average_fps=source.average_fps,
         nominal_fps=source.nominal_fps, display_rotation_degrees=source.display_rotation_degrees,
-        source_timeline=timeline,
+        source_timeline=source.source_timeline,
     )
 
 

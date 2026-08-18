@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -106,6 +107,30 @@ def test_private_media_and_frame_identity_require_parent_and_never_return_paths(
             response = asyncio.run(golden_v2.get_golden_frame_identity(HASH, 4, None, store))
     assert response.source_frame_index == 4
     assert str(tmp_path) not in response.model_dump_json()
+
+
+def test_workspace_lists_catalog_metadata_without_scanning_private_media(tmp_path: Path) -> None:
+    store = GoldenCatalogStore(tmp_path / "golden")
+    initial = store.ensure_initialized()
+    persisted_timeline = {
+        "schema_version": "source-timeline.v1",
+        "source_video_hash": HASH,
+        "timestamp_status": "exact",
+        "frames": [{"source_frame_index": 0, "pts_sec": 0.0, "duration_sec": 1 / 30, "status": "exact", "gap_before_sec": 0.0}],
+    }
+    source = {**_source(), "source_frame_count": 360, "source_timeline": persisted_timeline}
+    seeded = golden_v2._next_dataset(initial, 1, "owner", "seed", sources=[source], events=[], tracks=[], poses=[])
+    store.save(seeded, expected_revision=1)
+    scanned_timeline = {**persisted_timeline, "fingerprint": "unexpected-media-scan"}
+
+    with patch.object(store, "source_media_path", return_value=tmp_path / "private.mp4") as media_path:
+        with patch.object(source_media, "source_frame_index", return_value=SimpleNamespace(to_timeline=lambda: scanned_timeline)) as frame_index:
+            workspace = golden_v2._workspace_response(store.read(), store)
+
+    media_path.assert_not_called()
+    frame_index.assert_not_called()
+    assert workspace.sources[0].source_frame_count == 360
+    assert workspace.sources[0].source_timeline == persisted_timeline
 
 
 def test_private_media_prefers_a_browser_playback_copy_without_changing_evidence_path(tmp_path: Path) -> None:
