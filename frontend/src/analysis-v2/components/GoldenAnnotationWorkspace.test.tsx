@@ -4,17 +4,18 @@ import { describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import { useAppMode } from "../../components/AppModeContext";
-import { deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, saveGoldenAnnotations } from "../api";
+import { deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceFrameByPts, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, saveGoldenAnnotations } from "../api";
 import type { GoldenEvent, GoldenWorkspace } from "../golden-contracts";
 import GoldenAnnotationWorkspace from "./GoldenAnnotationWorkspace";
 
 vi.mock("../../components/AppModeContext", () => ({ useAppMode: vi.fn() }));
-vi.mock("../api", () => ({ fetchGoldenWorkspace: vi.fn(), fetchGoldenReviewQueue: vi.fn(), fetchGoldenSourceFrame: vi.fn(), fetchGoldenSourceMediaUrl: vi.fn(), saveGoldenAnnotations: vi.fn(), importGoldenSource: vi.fn(), attestGoldenReview: vi.fn(), updateGoldenSource: vi.fn(), deleteGoldenSource: vi.fn() }));
-vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { className?: string; onStepSourceFrame: (direction: -1 | 1) => void; onTimeChange?: (value: number) => void; overlay?: unknown; aspectRatio?: number }) => <div data-testid="golden-player" className={props.className}><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><button onClick={() => props.onTimeChange?.(0)}>Report stale player time</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</div> }));
+vi.mock("../api", () => ({ fetchGoldenWorkspace: vi.fn(), fetchGoldenReviewQueue: vi.fn(), fetchGoldenSourceFrame: vi.fn(), fetchGoldenSourceFrameByPts: vi.fn(), fetchGoldenSourceMediaUrl: vi.fn(), saveGoldenAnnotations: vi.fn(), importGoldenSource: vi.fn(), attestGoldenReview: vi.fn(), updateGoldenSource: vi.fn(), deleteGoldenSource: vi.fn() }));
+vi.mock("../../media/IceMediaPlayer", () => ({ IceMediaPlayer: (props: { className?: string; onStepSourceFrame: (direction: -1 | 1) => void; onTimeChange?: (value: number) => void; overlay?: unknown; aspectRatio?: number }) => <div data-testid="golden-player" className={props.className}><button onClick={() => props.onStepSourceFrame(1)}>Next source frame</button><button onClick={() => props.onTimeChange?.(0)}>Report stale player time</button><button onClick={() => props.onTimeChange?.(4.2)}>Report current player time</button><output data-testid="media-aspect-ratio">{props.aspectRatio}</output>{props.overlay as never}</div> }));
 
 const workspace = vi.mocked(fetchGoldenWorkspace);
 const review = vi.mocked(fetchGoldenReviewQueue);
 const frame = vi.mocked(fetchGoldenSourceFrame);
+const frameByPts = vi.mocked(fetchGoldenSourceFrameByPts);
 const save = vi.mocked(saveGoldenAnnotations);
 const gateTemplate = {
   gate: "G1" as const,
@@ -34,7 +35,7 @@ function mockData() {
   vi.clearAllMocks();
   vi.mocked(useAppMode).mockReturnValue({ parentPin: "1234" } as never);
   workspace.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 2, sources: [{ source_sha256: "d".repeat(64), duration_pts: 8, width: 1280, height: 720, source_frame_count: 240, display_rotation_degrees: 0, redacted_alias: "source-001", recording_session_id: "session-01", grouping_id: "group-01" }], events: [], tracks: [], poses: [] });
-  review.mockResolvedValue([]); frame.mockResolvedValue({ sourceFrameIndex: 1, pts: .033, duration: .033 }); vi.mocked(fetchGoldenSourceMediaUrl).mockResolvedValue("blob:private-video");
+  review.mockResolvedValue([]); frame.mockResolvedValue({ sourceFrameIndex: 1, pts: .033, duration: .033 }); frameByPts.mockResolvedValue({ sourceFrameIndex: 0, pts: 0, duration: .033 }); vi.mocked(fetchGoldenSourceMediaUrl).mockResolvedValue("blob:private-video");
 }
 
 describe("GoldenAnnotationWorkspace", () => {
@@ -79,6 +80,18 @@ describe("GoldenAnnotationWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Report stale player time" }));
     expect(screen.getByText(/当前时间 1\.600000 秒；源帧 48/)).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(/已定位到第 48 帧/);
+  });
+
+  it("steps forward from the current playback PTS when no source frame is locked", async () => {
+    mockData();
+    frameByPts.mockResolvedValue({ sourceFrameIndex: 126, pts: 4.2, duration: .033 });
+    frame.mockResolvedValue({ sourceFrameIndex: 127, pts: 4.233, duration: .033 });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Report current player time" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next source frame" }));
+    await waitFor(() => expect(frameByPts).toHaveBeenCalledWith("1234", "d".repeat(64), 4.2));
+    expect(frame).toHaveBeenCalledWith("1234", "d".repeat(64), 127);
+    expect(await screen.findByText(/当前时间 4\.233000 秒；源帧 127/)).toBeInTheDocument();
   });
 
   it("does not claim confirmation after a failed save", async () => {

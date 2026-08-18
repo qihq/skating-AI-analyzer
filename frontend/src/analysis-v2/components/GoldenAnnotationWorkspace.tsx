@@ -4,7 +4,7 @@ import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, use
 import { useAppMode } from "../../components/AppModeContext";
 import { IceMediaPlayer } from "../../media/IceMediaPlayer";
 import { IslandButton, IslandCard, IslandTitle } from "../../modern/IslandSurface";
-import { attestGoldenReview, deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceFrameImageUrl, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations, updateGoldenSource } from "../api";
+import { attestGoldenReview, deleteGoldenSource, fetchGoldenReviewQueue, fetchGoldenSourceFrame, fetchGoldenSourceFrameByPts, fetchGoldenSourceFrameImageUrl, fetchGoldenSourceMediaUrl, fetchGoldenWorkspace, importGoldenSource, saveGoldenAnnotations, updateGoldenSource } from "../api";
 import { displayToSource, sourceBoxToDisplay, sourceToDisplay } from "../timebase";
 import { resolveGoldenGateTemplate } from "../golden-contracts";
 import type { ChallengeInterval, GoldenEvent, GoldenObservability, GoldenPose, GoldenProfile, GoldenReviewItem, GoldenSanitizedExport, GoldenTrack, GoldenWorkspace, IntervalDetails, JumpDetails, PhaseInterval, ResolvedGoldenGateTemplate, RotationLabel, SourceMoment, SpinDetails } from "../golden-contracts";
@@ -189,7 +189,9 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
   const step = async (direction: -1 | 1) => {
     if (!parentPin || !source) return;
     try {
-      const next = await fetchGoldenSourceFrame(parentPin, source.source_sha256, Math.max(0, frameIndex + direction));
+      const currentFrameIndex = frame?.sourceFrameIndex
+        ?? (await fetchGoldenSourceFrameByPts(parentPin, source.source_sha256, time)).sourceFrameIndex;
+      const next = await fetchGoldenSourceFrame(parentPin, source.source_sha256, Math.max(0, currentFrameIndex + direction));
       pendingFrameSeek.current = next.pts; setFrame(next); setTime(next.pts);
       try {
         const imageUrl = await fetchGoldenSourceFrameImageUrl(parentPin, source.source_sha256, next.sourceFrameIndex);

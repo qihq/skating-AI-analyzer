@@ -266,17 +266,6 @@ async def get_golden_source_media(
     return FileResponse(path, media_type="video/mp4", filename="private-golden-source.mp4")
 
 
-@router.get("/sources/{source_sha256}/frames/{frame_index}", response_model=GoldenFrameIdentity)
-async def get_golden_frame_identity(
-    source_sha256: str, frame_index: int, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
-) -> GoldenFrameIdentity:
-    try:
-        frame = source_frame_at(store.source_media_path(source_sha256), frame_index)
-    except SourceMediaError as exc:
-        raise HTTPException(status_code=404, detail="Requested source frame is unavailable.") from exc
-    return GoldenFrameIdentity(source_frame_index=frame.index, pts=frame.pts, duration=frame.duration)
-
-
 @router.get("/sources/{source_sha256}/frames/by-pts", response_model=GoldenFrameIdentity)
 async def get_golden_frame_identity_by_pts(
     source_sha256: str, pts: float = Query(..., ge=0), _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
@@ -288,6 +277,17 @@ async def get_golden_frame_identity_by_pts(
     except SourceMediaError as exc:
         raise HTTPException(status_code=404, detail="Requested source PTS is unavailable.") from exc
     return GoldenFrameIdentity(source_frame_index=reference.source_frame_index, pts=reference.pts_sec, duration=reference.duration_sec)
+
+
+@router.get("/sources/{source_sha256}/frames/{frame_index}", response_model=GoldenFrameIdentity)
+async def get_golden_frame_identity(
+    source_sha256: str, frame_index: int, _: None = Depends(require_golden_parent), store: GoldenCatalogStore = Depends(get_golden_store)
+) -> GoldenFrameIdentity:
+    try:
+        frame = source_frame_at(store.source_media_path(source_sha256), frame_index)
+    except SourceMediaError as exc:
+        raise HTTPException(status_code=404, detail="Requested source frame is unavailable.") from exc
+    return GoldenFrameIdentity(source_frame_index=frame.index, pts=frame.pts, duration=frame.duration)
 
 
 @router.get("/sources/{source_sha256}/frames/{frame_index}/image")

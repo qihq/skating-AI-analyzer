@@ -109,6 +109,23 @@ def test_private_media_and_frame_identity_require_parent_and_never_return_paths(
     assert str(tmp_path) not in response.model_dump_json()
 
 
+def test_frame_by_pts_uses_the_static_route_instead_of_the_numeric_frame_route(tmp_path: Path) -> None:
+    app = FastAPI()
+    app.include_router(golden_v2.router)
+    store = GoldenCatalogStore(tmp_path / "golden")
+    app.dependency_overrides[golden_v2.require_golden_parent] = lambda: None
+    app.dependency_overrides[golden_v2.get_golden_store] = lambda: store
+
+    reference = SimpleNamespace(source_frame_index=126, pts_sec=4.2, duration_sec=1 / 30)
+    with patch.object(store, "source_media_path", return_value=tmp_path / "private.mp4"):
+        with patch.object(golden_v2, "source_frame_reference_at_pts", return_value=reference):
+            with TestClient(app) as client:
+                response = client.get(f"/api/golden/v2/sources/{HASH}/frames/by-pts", params={"pts": 4.2})
+
+    assert response.status_code == 200
+    assert response.json() == {"source_frame_index": 126, "pts": 4.2, "duration": pytest.approx(1 / 30)}
+
+
 def test_workspace_lists_catalog_metadata_without_scanning_private_media(tmp_path: Path) -> None:
     store = GoldenCatalogStore(tmp_path / "golden")
     initial = store.ensure_initialized()
