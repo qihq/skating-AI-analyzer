@@ -38,6 +38,32 @@ function blankRotation(profile: "jump" | "spin" = "jump"): RotationLabel {
   return { observed_turns_min: 0, observed_turns_max: .5, reported_turns: null, convention: "unknown", observability: "uncertain", definition: profile === "jump" ? "airborne_body_rotation" : "observed_spin_rotation", status: "range", value_turns: null, range_turns: [0, .5], review_start_pts: null, review_end_pts: null, review_method: "source_frame_step" };
 }
 
+function editableRotation(profile: "jump" | "spin", value?: RotationLabel | null): RotationLabel {
+  const defaults = blankRotation(profile);
+  const legacy = value ?? defaults;
+  const observedTurnMinimum = legacy.observed_turns_min ?? defaults.observed_turns_min;
+  const observedTurnMaximum = legacy.observed_turns_max ?? defaults.observed_turns_max;
+  const definition = legacy.definition ?? (profile === "spin"
+    ? "observed_spin_rotation"
+    : legacy.convention === "axel_includes_forward_takeoff" ? "competition_naming" : "airborne_body_rotation");
+  const status = legacy.status ?? (legacy.observability === "unobservable"
+    ? "unobservable"
+    : observedTurnMinimum === observedTurnMaximum ? "exact" : "range");
+  const exactValue = legacy.value_turns ?? legacy.reported_turns ?? observedTurnMinimum;
+
+  return {
+    ...defaults,
+    ...legacy,
+    observed_turns_min: observedTurnMinimum,
+    observed_turns_max: observedTurnMaximum,
+    definition,
+    status,
+    value_turns: status === "exact" ? exactValue : null,
+    reported_turns: status === "exact" ? exactValue : null,
+    range_turns: status === "range" ? legacy.range_turns ?? [observedTurnMinimum, observedTurnMaximum] : null,
+  };
+}
+
 type GoldenAnnotationWorkspaceProps = { gateTemplate: GoldenSanitizedExport["gate_template"] | ResolvedGoldenGateTemplate };
 
 export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnotationWorkspaceProps) {
@@ -268,7 +294,7 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
     }
   };
   const setRotation = (profile: "jump" | "spin", change: Partial<RotationLabel>) => {
-    const current = { ...blankRotation(profile), ...((selected?.[profile] as JumpDetails | SpinDetails | null)?.rotation ?? {}), ...change };
+    const current = { ...editableRotation(profile, (selected?.[profile] as JumpDetails | SpinDetails | null)?.rotation), ...change };
     const normalized: RotationLabel = current.status === "exact"
       ? { ...current, observability: "observable", value_turns: current.reported_turns ?? current.observed_turns_min, reported_turns: current.reported_turns ?? current.observed_turns_min, observed_turns_max: current.reported_turns ?? current.observed_turns_min, observed_turns_min: current.reported_turns ?? current.observed_turns_min, range_turns: null }
       : current.status === "range"
@@ -349,7 +375,7 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
 
   const momentEditor = (label: string, key: "takeoff" | "apex" | "landing" | "representative_moment", value?: SourceMoment | null) => <div className="golden-annotation__capture"><span>{label}：{value ? `${value.pts.toFixed(6)} 秒 / 帧 ${value.source_frame_index ?? "未提供"}` : "未设置"}</span><IslandButton variant="secondary" onClick={() => setMoment(key)}>使用当前精确帧</IslandButton></div>;
   const phaseEditor = (label: string, key: "entry" | "main" | "exit" | "phase", value?: PhaseInterval | null) => <fieldset className="golden-annotation__phase"><legend>{label}</legend><label>开始（秒）<input aria-label={`${label} start PTS`} type="number" step="0.001" value={value?.start_pts ?? selected?.start_pts ?? 0} onChange={(event) => setPhase(key, "start_pts", numberValue(event.target.value))} /></label><label>结束（秒）<input aria-label={`${label} end PTS`} type="number" step="0.001" value={value?.end_pts ?? selected?.end_pts ?? 0} onChange={(event) => setPhase(key, "end_pts", numberValue(event.target.value))} /></label><IslandButton variant="secondary" onClick={() => capturePhaseStart(key)}>从当前时间开始</IslandButton></fieldset>;
-  const rotationEditor = (profile: "jump" | "spin", value?: RotationLabel | null) => { const rotation = { ...blankRotation(profile), ...(value ?? {}) }; return <fieldset className="golden-annotation__rotation"><legend>旋转圈数 · 源帧逐帧复核</legend><p>clear 存 exact，partial 存 interval，否则存 unobservable；不要混用空中身体转体与比赛命名。</p><label>标签定义<select aria-label={`${profile} rotation definition`} value={rotation.definition} onChange={(event) => { const definition = event.target.value as RotationLabel["definition"]; setRotation(profile, { definition, convention: definition === "competition_naming" ? "axel_includes_forward_takeoff" : definition === "airborne_body_rotation" ? "non_axel_airborne" : "unknown" }); }}><option value="airborne_body_rotation">空中身体转体</option><option value="competition_naming">比赛命名（Axel 约定）</option>{profile === "spin" ? <option value="observed_spin_rotation">旋转主体观察圈数</option> : null}</select></label><label>标签状态<select aria-label={`${profile} rotation status`} value={rotation.status} onChange={(event) => setRotation(profile, { status: event.target.value as RotationLabel["status"] })}><option value="exact">clear · 精确值</option><option value="range">partial · 区间</option><option value="unobservable">画面不足 · 不判断</option></select></label>{rotation.status !== "unobservable" ? <><label>最少圈数<input aria-label={`${profile} minimum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_min} onChange={(event) => setRotation(profile, { observed_turns_min: numberValue(event.target.value) })} /></label><label>最多圈数<input aria-label={`${profile} maximum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_max} onChange={(event) => setRotation(profile, { observed_turns_max: numberValue(event.target.value) })} /></label></> : null}{rotation.status === "exact" ? <label>明确圈数<input aria-label={`${profile} reported turns`} type="number" min="0" max="12" step="0.25" value={rotation.reported_turns ?? rotation.observed_turns_min} onChange={(event) => setRotation(profile, { reported_turns: numberValue(event.target.value) })} /></label> : null}<label>复核开始 PTS<input aria-label={`${profile} rotation review start PTS`} type="number" step="0.001" value={rotation.review_start_pts ?? selected?.start_pts ?? 0} onChange={(event) => setRotation(profile, { review_start_pts: numberValue(event.target.value) })} /></label><label>复核结束 PTS<input aria-label={`${profile} rotation review end PTS`} type="number" step="0.001" value={rotation.review_end_pts ?? selected?.end_pts ?? 0} onChange={(event) => setRotation(profile, { review_end_pts: numberValue(event.target.value) })} /></label></fieldset>; };
+  const rotationEditor = (profile: "jump" | "spin", value?: RotationLabel | null) => { const rotation = editableRotation(profile, value); return <fieldset className="golden-annotation__rotation"><legend>旋转圈数 · 源帧逐帧复核</legend><p>clear 存 exact，partial 存 interval，否则存 unobservable；不要混用空中身体转体与比赛命名。</p><label>标签定义<select aria-label={`${profile} rotation definition`} value={rotation.definition} onChange={(event) => { const definition = event.target.value as RotationLabel["definition"]; setRotation(profile, { definition, convention: definition === "competition_naming" ? "axel_includes_forward_takeoff" : definition === "airborne_body_rotation" ? "non_axel_airborne" : "unknown" }); }}><option value="airborne_body_rotation">空中身体转体</option><option value="competition_naming">比赛命名（Axel 约定）</option>{profile === "spin" ? <option value="observed_spin_rotation">旋转主体观察圈数</option> : null}</select></label><label>标签状态<select aria-label={`${profile} rotation status`} value={rotation.status} onChange={(event) => setRotation(profile, { status: event.target.value as RotationLabel["status"] })}><option value="exact">clear · 精确值</option><option value="range">partial · 区间</option><option value="unobservable">画面不足 · 不判断</option></select></label>{rotation.status !== "unobservable" ? <><label>最少圈数<input aria-label={`${profile} minimum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_min} onChange={(event) => setRotation(profile, { observed_turns_min: numberValue(event.target.value) })} /></label><label>最多圈数<input aria-label={`${profile} maximum turns`} type="number" min="0" max="12" step="0.25" value={rotation.observed_turns_max} onChange={(event) => setRotation(profile, { observed_turns_max: numberValue(event.target.value) })} /></label></> : null}{rotation.status === "exact" ? <label>明确圈数<input aria-label={`${profile} reported turns`} type="number" min="0" max="12" step="0.25" value={rotation.reported_turns ?? rotation.observed_turns_min} onChange={(event) => setRotation(profile, { reported_turns: numberValue(event.target.value) })} /></label> : null}<label>复核开始 PTS<input aria-label={`${profile} rotation review start PTS`} type="number" step="0.001" value={rotation.review_start_pts ?? selected?.start_pts ?? 0} onChange={(event) => setRotation(profile, { review_start_pts: numberValue(event.target.value) })} /></label><label>复核结束 PTS<input aria-label={`${profile} rotation review end PTS`} type="number" step="0.001" value={rotation.review_end_pts ?? selected?.end_pts ?? 0} onChange={(event) => setRotation(profile, { review_end_pts: numberValue(event.target.value) })} /></label></fieldset>; };
 
   const poseGuidance = resolvedGateTemplate.pose_frame_range
     ? `${resolvedGateTemplate.pose_frame_range[0]}-${resolvedGateTemplate.pose_frame_range[1]}`

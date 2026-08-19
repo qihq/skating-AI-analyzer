@@ -172,6 +172,28 @@ describe("GoldenAnnotationWorkspace", () => {
     });
   });
 
+  it("upgrades a legacy spin rotation before editing its turn count", async () => {
+    mockData();
+    const sourceHash = "d".repeat(64);
+    workspace.mockResolvedValue({
+      dataset_id: "golden-v2-private-catalog", revision: 92,
+      sources: [{ source_sha256: sourceHash, duration_pts: 10, width: 1280, height: 720, source_frame_count: 300, display_rotation_degrees: 0, redacted_alias: "spin01", recording_session_id: "spin01", grouping_id: "spin01" }],
+      events: [{
+        event_id: "legacy-spin", source_sha256: sourceHash, start_pts: 0, end_pts: 10, profile: "spin", subtype: null,
+        observability: "observable", strata: [], ambiguity_tags: [], failure_tags: [], annotator_confidence: .9,
+        main_skater_confirmed: true, split: "development", challenge_intervals: [],
+        spin: { entry: { start_pts: 1, end_pts: 2 }, main: { start_pts: 2, end_pts: 9 }, exit: { start_pts: 9, end_pts: 10 }, rotation: { observed_turns_min: 5, observed_turns_max: 6, reported_turns: 5, convention: "unknown", observability: "observable", definition: null, status: null, value_turns: null, range_turns: null, review_start_pts: null, review_end_pts: null, review_method: "source_frame_step" } as never },
+      }], tracks: [], poses: [],
+    });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /旋转 0\.00-10\.00 秒/ }));
+    expect(screen.getByLabelText("spin rotation definition")).toHaveValue("observed_spin_rotation");
+    expect(screen.getByLabelText("spin rotation status")).toHaveValue("range");
+    fireEvent.change(screen.getByLabelText("spin minimum turns"), { target: { value: "5.25" } });
+    expect(screen.getByLabelText("spin minimum turns")).toHaveValue(5.25);
+    expect(screen.getByLabelText("spin maximum turns")).toHaveValue(6);
+  });
+
   it("explains the required workflow and deletes a source only after confirmation", async () => {
     mockData(); vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(deleteGoldenSource).mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
