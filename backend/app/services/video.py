@@ -32,6 +32,9 @@ FRAME_RATE = 5
 MAX_SECONDS = 60
 NORMAL_PLAYBACK_FPS = 30.0
 MAX_SAMPLED_FRAMES = int(os.getenv("FRAME_SAMPLE_COUNT", "20"))
+SOURCE_SCAN_FRAME_RATE = int(os.getenv("SOURCE_SCAN_FRAME_RATE", "8"))
+SOURCE_SCAN_MAX_FRAMES = int(os.getenv("SOURCE_SCAN_MAX_FRAMES", "192"))
+SOURCE_SCAN_MAX_GAP_FRAMES = int(os.getenv("SOURCE_SCAN_MAX_GAP_FRAMES", "4"))
 FRAME_THUMB_SIZE = os.getenv("FRAME_THUMB_SIZE", "160x90")
 FRAME_FULL_SIZE = os.getenv("FRAME_FULL_SIZE", "854x480")
 ACTION_CLIP_SIZE = os.getenv("ACTION_CLIP_SIZE", "854x480")
@@ -709,6 +712,19 @@ def detect_video_duration(video_path: Path) -> float | None:
             return max(0.0, float(format_payload.get("duration")))
     except Exception:  # noqa: BLE001
         logger.warning("Unable to detect duration for %s", video_path, exc_info=True)
+
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        if not capture.isOpened():
+            return None
+        frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        if frame_count > 0.0 and fps > 0.0 and math.isfinite(frame_count) and math.isfinite(fps):
+            return frame_count / fps
+    except Exception:  # noqa: BLE001
+        logger.warning("Unable to detect duration with OpenCV for %s", video_path, exc_info=True)
+    finally:
+        capture.release()
     return None
 
 
@@ -1480,6 +1496,44 @@ def _select_motion_weighted_indices(scores: Sequence[float], sample_count: int, 
     return sorted(selected)[:sample_count]
 
 
+def _select_source_scan_indices(
+    scores: Sequence[float],
+    sample_count: int,
+    *,
+    max_gap_frames: int = SOURCE_SCAN_MAX_GAP_FRAMES,
+) -> list[int]:
+    """Preserve a bounded time grid before spending source-scan budget on peaks."""
+
+    total_frames = len(scores)
+    if total_frames <= sample_count:
+        return list(range(total_frames))
+    if sample_count <= 0:
+        return []
+
+    gap = max(1, int(max_gap_frames))
+    coverage_count = min(sample_count, math.ceil((total_frames - 1) / gap) + 1)
+    if coverage_count == 1:
+        selected = {0}
+    else:
+        selected = {
+            round(index * (total_frames - 1) / (coverage_count - 1))
+            for index in range(coverage_count)
+        }
+
+    smoothed = _smooth_motion_scores(scores, window=3)
+    peak_candidates = sorted(
+        range(total_frames),
+        key=lambda index: (smoothed[index], scores[index], -index),
+        reverse=True,
+    )
+    for index in peak_candidates:
+        if len(selected) >= sample_count:
+            break
+        selected.add(index)
+
+    return sorted(selected)
+
+
 async def _extract_full_frame_at(video_path: Path, timestamp: float, target_path: Path) -> None:
     width, height = _frame_dimensions()
     scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
@@ -1988,6 +2042,7 @@ async def extract_motion_sampled_frames(
     *,
     dense_peak_bursts: bool = False,
     full_video_window: bool = False,
+    profile_agnostic_scan: bool = False,
     input_window: VideoInputWindow | None = None,
 ) -> tuple[list[Path], dict[str, object], VideoSamplingMetadata]:
     for existing_frame in frames_dir.glob("frame_*.jpg"):
@@ -2000,6 +2055,11 @@ async def extract_motion_sampled_frames(
     is_slow_motion = source_fps >= SLOW_MOTION_THRESHOLD_FPS
     slow_motion_scale = get_slow_motion_scale(source_fps) if is_slow_motion else 1.0
     frame_rate, manual_window_dense, sampling_profile_source = _sampling_config_for_window(analysis_profile, input_window)
+    if profile_agnostic_scan:
+        if analysis_profile is not None:
+            raise ValueError("profile-agnostic source scan cannot receive an analysis profile hint")
+        frame_rate = max(frame_rate, SOURCE_SCAN_FRAME_RATE)
+        sampling_profile_source = "profile_agnostic_source_scan"
     if input_window is not None:
         start_sec = input_window.input_window_start_sec
         end_sec = input_window.input_window_end_sec
@@ -2012,12 +2072,12 @@ async def extract_motion_sampled_frames(
             "input_window_mode": input_window.input_window_mode,
             "input_window_truncated": input_window.input_window_truncated,
         }
-    elif full_video_window:
+    elif full_video_window or profile_agnostic_scan:
         duration = detect_video_duration(video_path)
         start_sec = 0.0
         end_sec = min(float(MAX_SECONDS), float(duration)) if duration and duration > 0 else float(MAX_SECONDS)
         window_diagnostics: dict[str, object] = {
-            "selection_reason": "full_video_debug",
+            "selection_reason": "profile_agnostic_source_scan" if profile_agnostic_scan else "full_video_debug",
             "candidate_windows": [],
             "late_window_override": False,
             "selected_start_sec": round(start_sec, 3),
@@ -2041,6 +2101,13 @@ async def extract_motion_sampled_frames(
         manual_window=manual_window_dense,
         action_type=action_type,
     )
+    if profile_agnostic_scan:
+        profile_cap = max(1, SOURCE_SCAN_MAX_FRAMES)
+        requested_sample_count = min(
+            profile_cap,
+            max(32, math.ceil(effective_duration * frame_rate) + 1),
+        )
+        sampling_density_policy = "profile_agnostic_source_scan"
     window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(start_sec, end_sec, requested_sample_count, slow_motion_scale)
     sampling_metadata = VideoSamplingMetadata(
         action_window_start=round(start_sec, 3),
@@ -2062,7 +2129,11 @@ async def extract_motion_sampled_frames(
         )
         if thumbs_dir.exists():
             shutil.rmtree(thumbs_dir, ignore_errors=True)
-        start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
+        if profile_agnostic_scan:
+            source_duration = detect_video_duration(video_path)
+            start_sec, end_sec = 0.0, min(float(MAX_SECONDS), float(source_duration or MAX_SECONDS))
+        else:
+            start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
         effective_duration = max((end_sec - start_sec) / max(slow_motion_scale, 1e-6), 1e-6)
         requested_sample_count, profile_cap, sampling_density_policy = get_sampling_density(
             analysis_profile,
@@ -2070,6 +2141,13 @@ async def extract_motion_sampled_frames(
             manual_window=manual_window_dense,
             action_type=action_type,
         )
+        if profile_agnostic_scan:
+            profile_cap = max(1, SOURCE_SCAN_MAX_FRAMES)
+            requested_sample_count = min(
+                profile_cap,
+                max(32, math.ceil(effective_duration * frame_rate) + 1),
+            )
+            sampling_density_policy = "profile_agnostic_source_scan"
         window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
             start_sec,
             end_sec,
@@ -2090,7 +2168,11 @@ async def extract_motion_sampled_frames(
         raise RuntimeError("视频缩略图抽取结果为空，请检查上传文件是否损坏。")
 
     scores = _motion_scores_from_thumbs(thumbs)
-    selected_indices = _select_motion_weighted_indices(scores, requested_sample_count, dense_peak_bursts=dense_peak_bursts)
+    selected_indices = (
+        _select_source_scan_indices(scores, requested_sample_count)
+        if profile_agnostic_scan
+        else _select_motion_weighted_indices(scores, requested_sample_count, dense_peak_bursts=dense_peak_bursts)
+    )
 
     output_paths: list[Path] = []
     selected_records: list[dict[str, object]] = []
@@ -2148,8 +2230,8 @@ async def extract_motion_sampled_frames(
         "max_frames_for_profile": requested_sample_count,
         "profile_frame_cap": profile_cap,
         "sampling_density_policy": sampling_density_policy,
-        "selection_strategy": "dense_peak_bursts" if dense_peak_bursts else "motion_weighted",
-        "window_strategy": input_window.input_window_mode if input_window is not None else ("full_video_debug" if full_video_window else "detected_action_window"),
+        "selection_strategy": "source_scan_coverage" if profile_agnostic_scan else ("dense_peak_bursts" if dense_peak_bursts else "motion_weighted"),
+        "window_strategy": input_window.input_window_mode if input_window is not None else ("profile_agnostic_scan" if profile_agnostic_scan else "full_video_debug" if full_video_window else "detected_action_window"),
         "sampling_profile_source": sampling_profile_source,
         "manual_window_dense_sampling": _manual_window_dense_sampling(input_window),
         "window_diagnostics": window_diagnostics,

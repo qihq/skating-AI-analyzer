@@ -58,6 +58,7 @@ def _entry(
 ) -> dict[str, Any]:
     entry_id = f"{kind}:{name}"
     owner = _owner(kind, name)
+    iteration_3_verified = owner == 3
     return {
         "id": entry_id,
         "kind": kind,
@@ -69,12 +70,17 @@ def _entry(
         "permissions": permissions,
         "data_and_artifacts": artifact,
         "legacy_fixture": _fixture(name, tests),
-        "v2_fixture": f"Iteration {owner} contract fixture; legacy behavior remains characterized until adapted",
+        "v2_fixture": (
+            "Verified by 82 backend Golden/evaluator/privacy fixtures, 13 frontend Golden dashboard/contract fixtures, "
+            "production build, and docs/evaluation/v2/iteration-03-g1-pilot-evidence.json"
+            if iteration_3_verified
+            else f"Iteration {owner} contract fixture; legacy behavior remains characterized until adapted"
+        ),
         "shadow_behavior": "must not create or mutate family rows or artifacts; diagnostic-only if applicable",
         "restart_behavior": "preserve current behavior and verify persistence or idempotence in owning iteration",
         "backup_restore_behavior": "durable state included; rebuildable data explicitly documented and safe to omit",
         "rollback_behavior": "complete legacy behavior and historical data remain readable after rollback",
-        "migration_status": "inventoried",
+        "migration_status": "verified" if iteration_3_verified else "inventoried",
         "detail": detail,
     }
 
@@ -246,6 +252,19 @@ def generate_ledger() -> dict[str, Any]:
         "baseline_commit": "c291324c62bcc930f96f3429dcdc9521e060b516",
         "allowed_statuses": ALLOWED_STATUSES,
         "retirement_policy": "retirement-approved requires explicit owner approval; no Iteration 0 entry may use it",
+        "iteration_3_golden_pilot": {
+            "status": "verified_limited_sample_formal_run_failed_metrics",
+            "evidence": "docs/evaluation/v2/iteration-03-g1-pilot-evidence.json",
+            "dataset_revision": 95,
+            "governance_status": "ready_for_evaluator",
+            "formal_evaluator_status": "failed",
+            "ordinary_family_authority": "legacy",
+            "release_claim": False,
+            "parent_authorization": "verified",
+            "privacy_boundary": "verified",
+            "api_ui_contracts": "verified",
+            "production_frontend_build": "passed",
+        },
         "iteration_8_identity_tracking": {
             "status": "implemented_shadow_only",
             "pilot_evidence": "docs/evaluation/v2/iteration-8-pilot12-identity-evidence.json",

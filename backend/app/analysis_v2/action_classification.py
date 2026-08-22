@@ -20,11 +20,11 @@ from pydantic import Field
 
 from app.analysis_v2.contracts import ContractModel
 from app.analysis_v2.event_proposals import EventProposal, ProposalEvidenceSample, PROFILE_KEYS
-from app.analysis_v2.evaluation.gate_policy import GOLDEN_GATE_POLICY
 
 
 Profile = Literal["jump", "spin", "step", "spiral"]
 ClassificationState = Literal["confirmed", "ambiguous", "unknown"]
+_SUBTYPE_REPORTING_MINIMUM = 4
 
 
 def _hash(value: Any) -> str:
@@ -40,7 +40,9 @@ class ProfileClassifierConfig:
     confirmation_threshold: float = 0.50
     margin_threshold: float = 0.12
     minimum_evidence: int = 2
-    subtype_minimum_evidence: int = GOLDEN_GATE_POLICY.subtype_reporting_minimum
+    # Mirrors golden-gate-policy.v2 without making the reusable classifier
+    # depend on the private evaluator package or its runtime artifacts.
+    subtype_minimum_evidence: int = _SUBTYPE_REPORTING_MINIMUM
 
     @property
     def fingerprint(self) -> str:
@@ -69,8 +71,9 @@ DEFAULT_CONFIGS: dict[Profile, ProfileClassifierConfig] = {
         (("contact_pattern", .27), ("horizontal_motion", .22), ("periodicity", .16), ("pose_dynamics", .13), ("motion", .12), ("semantic", .10)),
     ),
     "spiral": ProfileClassifierConfig(
-        "spiral", "profile-spiral-temporal.v1",
+        "spiral", "profile-spiral-temporal.v2",
         (("extension_proxy", .30), ("axis_stability", .18), ("pose_dynamics", .16), ("horizontal_motion", .14), ("motion", .10), ("semantic", .12)),
+        confirmation_threshold=.28,
     ),
 }
 
@@ -239,6 +242,12 @@ class _ConfiguredClassifier:
                 contribution *= .25
             if self.profile == "step" and feature == "contact_pattern" and temporal.get("horizontal_motion", 0) < .12:
                 contribution *= .55
+            if self.profile == "spiral" and feature != "extension_proxy" and temporal.get("extension_proxy", 0) < .42:
+                contribution *= .18
+            if self.profile == "jump" and feature not in {"airborne_proxy", "ice_contact_proxy"} and temporal.get("airborne_proxy", 0) < .55:
+                contribution *= .20
+            if self.profile == "step" and feature not in {"pose_dynamics", "motion", "semantic"} and temporal.get("step_complexity", 0) < .30:
+                contribution *= .35
             contributions.append(Contribution(feature=feature, value=value, weight=weight, contribution=contribution, source="temporal"))
             total += contribution
         coverage = min(1.0, evidence.tracking_coverage)

@@ -44,11 +44,18 @@ def _legacy() -> dict[str, object]:
     }
 
 
-def _run(tmp_path: Path, *, source_path: str | None = None):
+def _run(
+    tmp_path: Path,
+    *,
+    source_path: str | None = None,
+    target_lock: dict[str, object] | None = None,
+):
     async def scenario():
         config = _config(tmp_path)
         orchestrator = ShadowOrchestrator(config)
         legacy = _legacy()
+        if target_lock is not None:
+            legacy["target_lock"] = target_lock
         before = json.loads(json.dumps(legacy))
         source_identity = {"video_hash": "a" * 64}
         if source_path:
@@ -98,6 +105,58 @@ def test_fixed_fingerprint_repeatability(tmp_path: Path) -> None:
     assert first_orchestrator.store.root != second_orchestrator.store.root
     assert ShadowArtifactStore(first_orchestrator.store.runtime_root).has_run(first.run_id)
     assert ShadowArtifactStore(second_orchestrator.store.runtime_root).has_run(second.run_id)
+
+
+def test_confirmed_legacy_target_lock_is_authoritative_anchor(tmp_path: Path) -> None:
+    orchestrator, run = _run(tmp_path)
+
+    candidates = orchestrator.store.read_artifact(run.run_id, "candidates")["candidates"]
+    identity = orchestrator.store.read_artifact(run.run_id, "identity")["timeline"]
+
+    assert candidates
+    assert all(item["detector_score"] == 0.45 for item in candidates)
+    assert all(item["evidence_sources"] == ["legacy_target_lock"] for item in candidates)
+    assert identity["confirmed_coverage"] == 1.0
+    assert all(item["state"] == "confirmed" for item in identity["segments"])
+    assert all(item["track_state"]["bbox_source"] == "measured" for item in identity["segments"])
+
+
+def test_missing_or_unconfirmed_legacy_target_lock_stays_uncertain(tmp_path: Path) -> None:
+    locks = (
+        {"status": "auto_locked", "selected_candidate_id": "target-1"},
+        {
+            "status": "awaiting_manual",
+            "selected_candidate_id": "target-1",
+            "selected_bbox": {"x": 0.30, "y": 0.10, "width": 0.30, "height": 0.80},
+        },
+    )
+
+    for index, target_lock in enumerate(locks):
+        orchestrator, run = _run(tmp_path / str(index), target_lock=target_lock)
+        identity = orchestrator.store.read_artifact(run.run_id, "identity")["timeline"]
+        assert identity["confirmed_coverage"] == 0.0
+        assert all(item["state"] == "uncertain" for item in identity["segments"])
+        assert all(item["track_state"]["bbox"] is None for item in identity["segments"])
+
+
+def test_stale_or_display_hint_target_box_cannot_confirm(tmp_path: Path) -> None:
+    locks = (
+        {
+            "status": "stale",
+            "selected_bbox": {"x": 0.30, "y": 0.10, "width": 0.30, "height": 0.80},
+        },
+        {
+            "status": "auto_locked",
+            "bbox_is_display_hint": True,
+            "selected_bbox": {"x": 0.30, "y": 0.10, "width": 0.30, "height": 0.80},
+        },
+    )
+
+    for index, target_lock in enumerate(locks):
+        orchestrator, run = _run(tmp_path / str(index), target_lock=target_lock)
+        identity = orchestrator.store.read_artifact(run.run_id, "identity")["timeline"]
+        assert identity["confirmed_coverage"] == 0.0
+        assert all(item["state"] == "uncertain" for item in identity["segments"])
 
 
 def test_path_a_unobservable_payload_fails_soft_without_text_claims() -> None:

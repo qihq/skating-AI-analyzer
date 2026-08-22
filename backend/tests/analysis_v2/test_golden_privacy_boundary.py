@@ -37,6 +37,37 @@ def test_committed_pilot_snapshot_evidence_is_sanitized_and_non_releasing() -> N
         assert forbidden not in encoded
 
 
+def test_committed_iteration_3_g1_evidence_is_aggregate_only() -> None:
+    evidence = ROOT / "docs" / "evaluation" / "v2" / "iteration-03-g1-pilot-evidence.json"
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    encoded = json.dumps(payload).lower()
+
+    def keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return {str(key).lower() for key in value} | {
+                nested_key for nested in value.values() for nested_key in keys(nested)
+            }
+        if isinstance(value, list):
+            return {nested_key for nested in value for nested_key in keys(nested)}
+        return set()
+
+    assert payload["gate_policy_version"] == "golden-gate-policy.v2"
+    assert payload["evidence_scope"] == "limited_sample"
+    assert payload["release_claim"] is False
+    assert payload["formal_evaluator_status"] == "failed"
+    assert "c:\\users" not in encoded
+    for forbidden_key in (
+        "source_sha256",
+        "event_id",
+        "annotator_alias",
+        "reviewer_alias",
+        "filename",
+        "embedding",
+        "artifact_sha256",
+    ):
+        assert forbidden_key not in keys(payload)
+
+
 def test_committed_g2_waiting_evidence_is_sanitized_and_non_releasing() -> None:
     evidence = ROOT / "docs" / "evaluation" / "v2" / "g2-waiting-for-owner-labels.json"
     payload = json.loads(evidence.read_text(encoding="utf-8"))

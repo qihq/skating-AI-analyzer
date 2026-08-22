@@ -389,8 +389,15 @@ def _longest_gap(points: list[float]) -> float:
 def _action_metrics(event: Any, prediction: EventPrediction | None) -> dict[str, Any]:
     proposal = False
     if prediction and prediction.proposal_start_pts is not None:
-        intersection = max(0.0, min(event.end_pts, prediction.proposal_end_pts) - max(event.start_pts, prediction.proposal_start_pts))
-        proposal = intersection / max(event.end_pts - event.start_pts, 1e-9) >= 0.5
+        proposal_start = prediction.proposal_start_pts
+        proposal_end = prediction.proposal_end_pts
+        intersection = max(0.0, min(event.end_pts, proposal_end) - max(event.start_pts, proposal_start))
+        union = max(event.end_pts, proposal_end) - min(event.start_pts, proposal_start)
+        temporal_iou = intersection / max(union, 1e-9)
+        core_pts = _labelled_action_core_pts(event)
+        proposal = temporal_iou + 1e-9 >= 0.20 or bool(
+            intersection > 0 and core_pts is not None and proposal_start <= core_pts <= proposal_end
+        )
     predicted = prediction.predicted_profile if prediction and prediction.predicted_profile else "missing"
     correct = predicted == event.profile
     failures = []
@@ -406,6 +413,24 @@ def _action_metrics(event: Any, prediction: EventPrediction | None) -> dict[str,
         "rejected": predicted in {"unknown", "missing"},
         "failure_codes": failures,
     }
+
+
+def _labelled_action_core_pts(event: Any) -> float | None:
+    if event.jump:
+        if event.jump.apex:
+            return event.jump.apex.pts
+        points = [item.pts for item in (event.jump.takeoff, event.jump.landing) if item]
+        return statistics.fmean(points) if points else None
+    if event.spin:
+        phase = event.spin.main or event.spin.entry or event.spin.exit
+        return (phase.start_pts + phase.end_pts) / 2 if phase else None
+    detail = event.step or event.spiral
+    if detail:
+        if detail.representative_moment:
+            return detail.representative_moment.pts
+        if detail.phase:
+            return (detail.phase.start_pts + detail.phase.end_pts) / 2
+    return (event.start_pts + event.end_pts) / 2
 
 
 def _golden_moments(event: Any) -> list[tuple[str, Any]]:

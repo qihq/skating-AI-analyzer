@@ -270,12 +270,14 @@ def _phase_triplet(event_id: str, profile: Literal["spin", "spiral"], samples: S
     main = _from_candidates(event_id, definitions[1], main_candidates)
     if main.source_frame_index is None or main.end_source_frame_index is None:
         return [_unavailable(event_id, definitions[0], "main_phase_absent"), main, _unavailable(event_id, definitions[2], "main_phase_absent")]
-    before = [sample for sample in samples if sample.source_frame_index < main.source_frame_index]
-    after = [sample for sample in samples if sample.source_frame_index > main.end_source_frame_index]
+    main_start = next(index for index, sample in enumerate(samples) if sample.source_frame_index == main.source_frame_index)
+    main_end = next(index for index, sample in enumerate(samples) if sample.source_frame_index == main.end_source_frame_index)
+    before = list(samples[:main_start])
+    after = list(samples[main_end + 1:])
     entry_runs = _runs(before, entry_predicate)
     exit_runs = _runs(after, exit_predicate)
-    entry_candidates = [_candidate(run[0], _mean([(item.turning_motion if profile == "spin" else item.extension) for item in run]), ("profile_entry_transition",), end=run[-1]) for run in entry_runs if run and run[-1].source_frame_index == main.source_frame_index - 1]
-    exit_candidates = [_candidate(run[0], _mean([(item.turning_motion if profile == "spin" else item.extension) for item in run]), ("profile_exit_transition",), end=run[-1]) for run in exit_runs if run and run[0].source_frame_index == main.end_source_frame_index + 1]
+    entry_candidates = [_candidate(run[0], _mean([(item.turning_motion if profile == "spin" else item.extension) for item in run]), ("profile_entry_transition",), end=run[-1]) for run in entry_runs if run and before and run[-1] is before[-1]]
+    exit_candidates = [_candidate(run[0], _mean([(item.turning_motion if profile == "spin" else item.extension) for item in run]), ("profile_exit_transition",), end=run[-1]) for run in exit_runs if run and after and run[0] is after[0]]
     return [_from_candidates(event_id, definitions[0], entry_candidates), main, _from_candidates(event_id, definitions[2], exit_candidates)]
 
 

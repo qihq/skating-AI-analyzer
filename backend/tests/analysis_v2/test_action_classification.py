@@ -114,6 +114,27 @@ def test_custom_classifier_threshold_is_used_only_for_its_profile_decision() -> 
     assert selected.contributions[0].config_fingerprint != default.contributions[0].config_fingerprint
 
 
+def test_sustained_extension_with_stable_axis_can_confirm_spiral_without_semantic_labels() -> None:
+    result = classify_action(evidence(
+        temporal_features={
+            "motion": .14,
+            "pose_dynamics": .15,
+            "horizontal_motion": .13,
+            "extension_proxy": .52,
+            "axis_stability": .85,
+            "periodicity": 0,
+            "airborne_proxy": .05,
+            "ice_contact_proxy": .05,
+            "step_complexity": .13,
+        },
+        path_a_support={},
+        path_b_support={},
+    ))
+
+    assert result.profile == "spiral"
+    assert result.state == "confirmed"
+
+
 @pytest.mark.parametrize("consumer", ["training_plan", "filters", "progress_grouping", "comparison", "skill_matching", "monthly_facts", "memory_suggestions", "growth_admission"])
 def test_every_downstream_profile_boundary_rejects_ambiguous(consumer: str) -> None:
     ambiguous = AnalysisFactV2(analysis_id="a", event_id="e", claim_type="action_profile", value="jump", authority="v2", source_pipeline_fingerprint="fp", definition_version="profile.v1", status="uncertain", permissions=FactPermission(family_display=True, aggregation=True, comparison=True, coaching=True))

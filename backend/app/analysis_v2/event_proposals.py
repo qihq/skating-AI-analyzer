@@ -22,6 +22,8 @@ class ProposalEvidenceSample(ContractModel):
     pose_dynamics: float = Field(default=0, ge=0, le=1)
     ice_contact_proxy: float = Field(default=0, ge=0, le=1)
     periodicity: float = Field(default=0, ge=0, le=1)
+    extension_hold: float = Field(default=0, ge=0, le=1)
+    edge_complexity: float = Field(default=0, ge=0, le=1)
     semantic_hints: dict[str, float] = Field(default_factory=dict)
     tracking_observable: bool = True
     pose_observable: bool = False
@@ -100,17 +102,33 @@ def _activation(sample: ProposalEvidenceSample) -> float:
     # Semantic hints are deliberately capped: they can support a physical proposal,
     # but cannot create/localize an event on their own.
     semantic = min(max(sample.semantic_hints.values(), default=0.0), 0.35)
+    if "source_only_adapter" in sample.provenance:
+        motion = sample.camera_compensated_track_motion * sample.camera_reliability
+        strong_state = max(
+            sample.ice_contact_proxy if sample.ice_contact_proxy >= .55 else 0.0,
+            sample.periodicity if sample.periodicity >= .45 else 0.0,
+            sample.extension_hold if sample.extension_hold >= .42 else 0.0,
+            sample.edge_complexity if sample.edge_complexity >= .48 else 0.0,
+        )
+        multi_signal_change = 0.0
+        if sample.pose_dynamics >= .25 and motion >= .20 and sample.edge_complexity >= .30:
+            multi_signal_change = .45 * sample.pose_dynamics + .25 * motion + .30 * sample.edge_complexity
+        return max(.92 * strong_state, multi_signal_change, .10 * semantic)
     physical = max(
         sample.camera_compensated_track_motion * sample.camera_reliability,
         sample.pose_dynamics,
         sample.ice_contact_proxy,
         sample.periodicity,
+        sample.extension_hold,
+        sample.edge_complexity,
     )
     blended = (
         0.38 * sample.camera_compensated_track_motion * sample.camera_reliability
         + 0.30 * sample.pose_dynamics
         + 0.18 * sample.ice_contact_proxy
         + 0.14 * sample.periodicity
+        + 0.16 * sample.extension_hold
+        + 0.12 * sample.edge_complexity
         + 0.10 * semantic
     )
     return max(physical * 0.72, blended) if physical >= 0.12 else 0.0
@@ -124,12 +142,14 @@ def _candidate_scores(samples: Sequence[ProposalEvidenceSample]) -> dict[str, fl
     contact = mean([item.ice_contact_proxy for item in samples])
     periodic = mean([item.periodicity for item in samples])
     motion = mean([item.camera_compensated_track_motion * item.camera_reliability for item in samples])
+    extension = mean([item.extension_hold for item in samples])
+    edge = mean([item.edge_complexity for item in samples])
     semantic = {key: min(mean([item.semantic_hints.get(key, 0.0) for item in samples]), 0.20) for key in PROFILE_KEYS}
     raw = {
         "jump": 0.36 * pose + 0.34 * contact + 0.20 * motion + semantic["jump"],
         "spin": 0.42 * periodic + 0.26 * pose + 0.16 * motion + semantic["spin"],
-        "step": 0.34 * periodic + 0.24 * contact + 0.18 * pose + semantic["step"],
-        "spiral": 0.38 * pose + 0.18 * contact + 0.14 * motion + semantic["spiral"],
+        "step": 0.36 * edge + 0.20 * periodic + 0.16 * contact + 0.14 * pose + semantic["step"],
+        "spiral": 0.46 * extension + 0.20 * pose + 0.12 * motion + semantic["spiral"],
     }
     return {key: round(max(0.0, min(1.0, value)), 6) for key, value in raw.items()}
 
@@ -171,9 +191,9 @@ def generate_event_proposals(
     samples: Sequence[ProposalEvidenceSample],
     pipeline_fingerprint: str,
     activation_threshold: float = 0.16,
-    max_active_gap_sec: float = 0.70,
+    max_active_gap_sec: float = 0.32,
     distinct_valley_sec: float = 0.32,
-    padding_sec: float = 0.30,
+    padding_sec: float = 0.20,
 ) -> EventProposalCollection:
     ordered = sorted(samples, key=lambda item: (item.pts_sec, item.source_frame_index))
     active = [(item, _activation(item)) for item in ordered if _activation(item) >= activation_threshold]

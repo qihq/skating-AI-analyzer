@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
+import hashlib
 import inspect
 import json
 import math
@@ -15,7 +17,7 @@ from typing import Any
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-DEFAULT_VIDEO_DIR = Path(r"C:\Users\qihq\Pictures\skate testing video")
+DEFAULT_VIDEO_DIR = Path(os.getenv("SKATING_DIAGNOSTIC_VIDEO_DIR", str(Path.cwd() / "private-videos")))
 DEFAULT_OUTPUT_DIR = Path("tmp") / "skate-video-iteration"
 
 
@@ -28,6 +30,21 @@ def _install_backend(repo: Path, model_root: Path) -> None:
     backend = repo / "backend"
     if str(backend) not in sys.path:
         sys.path.insert(0, str(backend))
+
+    os.environ.setdefault("VIDEO_PROCESSING_ROOT", str(repo / "tmp" / "skating-diagnostics-processing"))
+    if shutil.which("ffmpeg") is None:
+        try:
+            import imageio_ffmpeg
+
+            source_ffmpeg = Path(imageio_ffmpeg.get_ffmpeg_exe())
+            local_bin = repo / "tmp" / "skating-diagnostics-bin"
+            local_ffmpeg = local_bin / "ffmpeg.exe"
+            local_bin.mkdir(parents=True, exist_ok=True)
+            if not local_ffmpeg.exists() or local_ffmpeg.stat().st_size != source_ffmpeg.stat().st_size:
+                shutil.copy2(source_ffmpeg, local_ffmpeg)
+            os.environ["PATH"] = f"{local_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+        except (ImportError, OSError):
+            pass
 
     yolo = model_root / "models" / "yolov8n.pt"
     pose = model_root / "models" / "pose_landmarker_heavy.task"
@@ -46,6 +63,40 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     if math.isnan(numeric) or math.isinf(numeric):
         return default
     return numeric
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert inference diagnostics to values accepted by ``json.dumps``."""
+
+    if dataclasses.is_dataclass(value):
+        return _json_safe(dataclasses.asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    item_fn = getattr(value, "item", None)
+    if callable(item_fn):
+        try:
+            return _json_safe(item_fn())
+        except (TypeError, ValueError):
+            pass
+    tolist_fn = getattr(value, "tolist", None)
+    if callable(tolist_fn):
+        try:
+            return _json_safe(tolist_fn())
+        except (TypeError, ValueError):
+            pass
+    return value
 
 
 def _bbox_area(bbox: dict[str, Any] | None) -> float:
@@ -91,7 +142,7 @@ def _target_candidates(
     target_lock: Any,
     frame_paths: list[Path],
     motion_scores: dict[str, Any],
-    analysis_profile: str,
+    analysis_profile: str | None,
 ) -> list[dict[str, Any]]:
     detect_person_candidates = getattr(person_tracker, "detect_person_candidates", None)
     if detect_person_candidates is None:
@@ -139,7 +190,7 @@ def _target_candidates(
     return candidates
 
 
-def _build_preview(target_lock: Any, *, video_name: str, frame_paths: list[Path], motion_scores: dict[str, Any], candidates: list[dict[str, Any]], analysis_profile: str) -> Any:
+def _build_preview(target_lock: Any, *, video_name: str, frame_paths: list[Path], motion_scores: dict[str, Any], candidates: list[dict[str, Any]], analysis_profile: str | None) -> Any:
     kwargs: dict[str, Any] = {
         "existing_target_lock": None,
         "motion_scores": motion_scores,
@@ -312,7 +363,7 @@ def _failure_notes(pose_data: dict[str, Any], tracker_diagnostics: list[dict[str
     return notes
 
 
-async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, Any], analysis_profile_hint: str) -> dict[str, Any]:
+async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, Any]) -> dict[str, Any]:
     video_id = video_path.stem
     work_dir = output_dir / "work" / video_id
     frames_dir = work_dir / "frames"
@@ -326,6 +377,10 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
     pose = modules["pose"]
     biomechanics = modules["biomechanics"]
     action_profiles = modules["action_profiles"]
+    action_classification = modules["action_classification"]
+    event_proposals = modules["event_proposals"]
+    profile_moments = modules["profile_moments"]
+    source_evidence_adapter = modules["source_evidence_adapter"]
 
     started = time.perf_counter()
     result: dict[str, Any] = {
@@ -337,16 +392,16 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
         frame_paths, motion_scores, sampling = await video.extract_motion_sampled_frames(
             video_path,
             frames_dir,
-            "jump",
-            analysis_profile_hint,
-            dense_peak_bursts=True,
+            "自由滑",
+            None,
+            profile_agnostic_scan=True,
         )
         candidates = _target_candidates(
             person_tracker=person_tracker,
             target_lock=target_lock,
             frame_paths=frame_paths,
             motion_scores=motion_scores,
-            analysis_profile=analysis_profile_hint,
+            analysis_profile=None,
         )
         preview = _build_preview(
             target_lock,
@@ -354,7 +409,7 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
             frame_paths=frame_paths,
             motion_scores=motion_scores,
             candidates=candidates,
-            analysis_profile=analysis_profile_hint,
+            analysis_profile=None,
         )
         target_payload = _build_target_lock_payload(target_lock, preview)
         bbox_per_frame, tracker_flags, tracker_diagnostics = _track_bboxes(
@@ -374,16 +429,62 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
             bbox_per_frame,
             sampling.effective_fps,
         )
-        inferred_profile, profile_evidence = action_profiles.infer_analysis_profile(
-            "jump",
-            None,
+        legacy_profile, profile_evidence = action_profiles.infer_analysis_profile(
+            "自由滑",
+            "节目片段",
             pose_data,
             motion_scores,
         )
+        source_hash = _sha256_file(video_path)
+        source_inputs = {
+            "frame_paths": frame_paths,
+            "sampling": sampling,
+            "motion_scores": motion_scores,
+            "bbox_per_frame": bbox_per_frame,
+            "tracker_diagnostics": tracker_diagnostics,
+            "pose_data": pose_data,
+        }
+        source_evidence = source_evidence_adapter.build_source_evidence(source_hash, _json_safe(source_inputs))
+        proposal_collection = event_proposals.generate_event_proposals(
+            source_video_hash=source_hash,
+            source_duration_sec=source_evidence.source_duration_sec,
+            samples=source_evidence.proposal_samples,
+            pipeline_fingerprint="diagnostic-source-only-evidence.v2",
+        )
+        proposal_rows: list[dict[str, Any]] = []
+        for proposal in proposal_collection.proposals:
+            classification_evidence = source_evidence_adapter.build_action_classification_evidence(source_evidence, proposal)
+            classification = action_classification.classify_action(classification_evidence)
+            moment_profile = classification.profile if classification.profile in {"jump", "spin", "step", "spiral"} else "step"
+            moments = profile_moments.localize_profile_moments(
+                event_id=proposal.event_id,
+                profile=moment_profile,
+                event_start_pts=proposal.start_pts,
+                event_end_pts=proposal.end_pts,
+                samples=source_evidence.moment_samples,
+                source_timeline_fingerprint=source_evidence.source_timeline_fingerprint,
+            )
+            proposal_rows.append({
+                "proposal": proposal.model_dump(mode="json"),
+                "classification_evidence": classification_evidence.model_dump(mode="json"),
+                "classification": classification.model_dump(mode="json"),
+                "moments": moments.model_dump(mode="json"),
+            })
+        confirmed_rows = [row for row in proposal_rows if row["classification"]["state"] == "confirmed"]
+        primary_row = max(
+            confirmed_rows,
+            key=lambda row: (
+                _safe_float(row["classification"].get("confidence")),
+                _safe_float(row["proposal"].get("end_pts")) - _safe_float(row["proposal"].get("start_pts")),
+            ),
+            default=None,
+        )
+        inferred_profile = str(primary_row["classification"]["profile"]) if primary_row else "unknown"
+        biomechanics_profile = inferred_profile if inferred_profile in {"jump", "spin", "step", "spiral"} else "step"
         bio_data = biomechanics.analyze_biomechanics(
             pose_data,
-            "jump",
-            inferred_profile,
+            "自由滑",
+            biomechanics_profile,
             effective_fps=sampling.effective_fps,
             source_fps=sampling.source_fps,
             window_seconds=sampling.window_end_sec - sampling.window_start_sec,
@@ -393,7 +494,7 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
                 bio_data,
                 pose_data,
                 motion_scores,
-                inferred_profile,
+                biomechanics_profile,
                 sampling.effective_fps,
             )
 
@@ -436,16 +537,59 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
                 "pose": _pose_summary(pose_data),
                 "action_recognition": {
                     "profile": inferred_profile,
+                    "state": primary_row["classification"]["state"] if primary_row else "unknown",
+                    "confidence": primary_row["classification"]["confidence"] if primary_row else 0.0,
+                    "proposal_count": len(proposal_rows),
+                    "legacy_profile_for_comparison": legacy_profile,
                     "jump_gate_passed": bool(profile_evidence.get("jump_gate_passed")) if isinstance(profile_evidence, dict) else False,
                     "airborne_frames_detected": profile_evidence.get("airborne_frames_detected") if isinstance(profile_evidence, dict) else None,
                     "hip_rotation_signal": profile_evidence.get("hip_rotation_signal") if isinstance(profile_evidence, dict) else None,
-                    "quality_flags": profile_evidence.get("quality_flags") if isinstance(profile_evidence, dict) else [],
+                    "quality_flags": list(dict.fromkeys([
+                        *(profile_evidence.get("quality_flags") if isinstance(profile_evidence, dict) else []),
+                        *source_evidence.warnings,
+                    ])),
                 },
                 "keyframes": _keyframe_summary(
                     bio_data.get("key_frame_candidates") if isinstance(bio_data, dict) else None
                 ),
                 "failure_notes": _failure_notes(pose_data, tracker_diagnostics, motion_scores),
                 "quality_flags": _quality_flags(target_payload, pose_data, bio_data),
+                "raw_diagnostics": _json_safe(
+                    {
+                        "frame_paths": frame_paths,
+                        "sampling": sampling,
+                        "motion_scores": motion_scores,
+                        "detected_candidates": candidates,
+                        "preview": {
+                            "preview_frame": getattr(preview, "preview_frame", None),
+                            "preview_frame_index": getattr(preview, "preview_frame_index", None),
+                            "auto_candidate_id": getattr(preview, "auto_candidate_id", None),
+                            "lock_confidence": getattr(preview, "lock_confidence", None),
+                            "target_lock_status": getattr(preview, "target_lock_status", None),
+                            "candidates": getattr(preview, "candidates", []),
+                        },
+                        "target_lock": target_payload,
+                        "bbox_per_frame": bbox_per_frame,
+                        "tracker_flags": tracker_flags,
+                        "tracker_diagnostics": tracker_diagnostics,
+                        "pose_data": pose_data,
+                        "profile_evidence": profile_evidence,
+                        "biomechanics": bio_data,
+                        "source_evidence": {
+                            "schema_version": "diagnostic-source-only-evidence.v2",
+                            "source_video_hash": source_hash,
+                            "source_duration_sec": source_evidence.source_duration_sec,
+                            "source_timeline_fingerprint": source_evidence.source_timeline_fingerprint,
+                            "warnings": source_evidence.warnings,
+                            "proposal_samples": [item.model_dump(mode="json") for item in source_evidence.proposal_samples],
+                            "moment_samples": [item.model_dump(mode="json") for item in source_evidence.moment_samples],
+                            "rotation_samples": [item.model_dump(mode="json") for item in source_evidence.rotation_samples],
+                            "rotation_diagnostics": source_evidence.rotation_diagnostics,
+                            "proposal_collection": proposal_collection.model_dump(mode="json"),
+                            "events": proposal_rows,
+                        },
+                    }
+                ),
             }
         )
     except Exception as exc:
@@ -577,6 +721,8 @@ async def _main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     _install_backend(repo, model_root)
 
+    from app.analysis_v2 import action_classification, event_proposals, profile_moments
+    from app.analysis_v2.evaluation import source_evidence_adapter
     from app.services import action_profiles, biomechanics, person_tracker, pose, target_lock, video
 
     modules = {
@@ -586,6 +732,10 @@ async def _main() -> int:
         "pose": pose,
         "target_lock": target_lock,
         "video": video,
+        "action_classification": action_classification,
+        "event_proposals": event_proposals,
+        "profile_moments": profile_moments,
+        "source_evidence_adapter": source_evidence_adapter,
     }
 
     only_names = {str(name).strip() for name in args.only if str(name).strip()}
@@ -600,7 +750,7 @@ async def _main() -> int:
     results: list[dict[str, Any]] = []
     for index, video_path in enumerate(video_paths, start=1):
         print(f"[{index}/{len(video_paths)}] {video_path.name}", flush=True)
-        results.append(await _analyze_one(video_path, output_dir / args.label, modules, "jump"))
+        results.append(await _analyze_one(video_path, output_dir / args.label, modules))
 
     payload = {
         "label": args.label,

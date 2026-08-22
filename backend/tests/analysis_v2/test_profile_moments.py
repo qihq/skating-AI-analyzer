@@ -101,6 +101,29 @@ def test_profile_phase_exhaustiveness(profile: str, expected: tuple[str, ...]) -
     assert tuple(item.semantic_key for item in result.moments) == expected
 
 
+def test_spiral_entry_and_exit_use_adjacent_sample_order_not_consecutive_source_frame_ids() -> None:
+    samples = [
+        MomentEvidenceSample(
+            source_frame_index=index * 4,
+            pts_sec=index * .125,
+            extension=.8 if 2 <= index <= 5 else .3,
+            axis_stability=.8,
+        )
+        for index in range(8)
+    ]
+
+    result = localize_profile_moments(
+        event_id="event-spiral-sparse-source-frames",
+        profile="spiral",
+        event_start_pts=0,
+        event_end_pts=1,
+        samples=samples,
+        source_timeline_fingerprint="fp",
+    )
+
+    assert [item.status for item in result.moments] == ["confirmed", "confirmed", "confirmed"]
+
+
 def test_order_validation_never_allows_synthetic_unavailable_marker() -> None:
     with pytest.raises(ValidationError):
         KeyMoment(event_id="e", semantic_key="landing", status="unavailable", source_frame_index=10, pts_sec=.3, definition_version="v", confidence=0, observability="unobservable")

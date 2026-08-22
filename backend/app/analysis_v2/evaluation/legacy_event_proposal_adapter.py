@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.analysis_v2.event_proposals import ProposalEvidenceSample
+from app.analysis_v2.evaluation.source_evidence_adapter import build_source_evidence
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -18,15 +19,14 @@ def _records(value: Any) -> list[Mapping[str, Any]]:
     return [item for item in value if isinstance(item, Mapping)] if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) else []
 
 
-def _periodicity(values: Sequence[float], index: int) -> float:
-    window = values[max(0, index - 3): index + 4]
-    if len(window) < 4:
-        return 0.0
-    changes = [window[pos + 1] - window[pos] for pos in range(len(window) - 1)]
-    return min(1.0, sum(changes[pos] * changes[pos + 1] < 0 for pos in range(len(changes) - 1)) / 3)
-
-
 def evidence_from_legacy_analysis(source_hash: str, analysis: Mapping[str, Any]) -> tuple[float, tuple[ProposalEvidenceSample, ...]]:
+    raw = analysis.get("raw_diagnostics") if isinstance(analysis.get("raw_diagnostics"), Mapping) else analysis
+    frame_paths = raw.get("frame_paths")
+    if isinstance(raw.get("pose_data"), Mapping) and isinstance(frame_paths, Sequence) and not isinstance(frame_paths, (str, bytes)) and frame_paths:
+        evidence = build_source_evidence(source_hash, raw)
+        if evidence.proposal_samples:
+            return evidence.source_duration_sec, evidence.proposal_samples
+
     motion = analysis.get("frame_motion_scores") if isinstance(analysis.get("frame_motion_scores"), Mapping) else {}
     selected = _records(motion.get("selected"))
     timestamps = {str(item.get("frame_id")): _number(item.get("timestamp")) for item in selected}
@@ -52,10 +52,10 @@ def evidence_from_legacy_analysis(source_hash: str, analysis: Mapping[str, Any])
     samples = tuple(ProposalEvidenceSample(
         source_frame_index=max(0, int(_number(item.get("source_thumb_index"), index))), pts_sec=_number(item.get("timestamp")),
         camera_compensated_track_motion=min(1.0, _number(item.get("motion_score")) / peak), pose_dynamics=pose.get(_number(item.get("timestamp")), (0, 0, False))[0],
-        ice_contact_proxy=pose.get(_number(item.get("timestamp")), (0, 0, False))[1], periodicity=_periodicity(values, index),
+        ice_contact_proxy=pose.get(_number(item.get("timestamp")), (0, 0, False))[1], periodicity=0,
         semantic_hints={key: semantic for key in ("jump", "spin", "step", "spiral")}, tracking_observable=True,
         pose_observable=pose.get(_number(item.get("timestamp")), (0, 0, False))[2], camera_reliability=0.45,
-        provenance=("legacy_motion_fixture", "legacy_pose_fixture", "bounded_untyped_semantic_hint"),
+        provenance=("legacy_motion_fixture", "legacy_pose_fixture", "rotation_consensus_absent", "bounded_untyped_semantic_hint"),
     ) for index, item in enumerate(selected))
     duration = _number(analysis.get("source_duration_sec"), _number(motion.get("source_duration_sec"), max((item.pts_sec for item in samples), default=0.0)))
     return max(duration, 0.001), samples

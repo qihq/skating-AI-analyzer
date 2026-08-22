@@ -1,0 +1,125 @@
+{
+  "schema_version": "golden-pilot-g1-evidence.v2",
+  "evidence_version": "g1-pilot-evidence.v1.1.0",
+  "gate": "G1",
+  "gate_policy_version": "golden-gate-policy.v2",
+  "evidence_scope": "limited_sample",
+  "release_claim": false,
+  "dataset_revision": 95,
+  "governance_status": "ready_for_evaluator",
+  "formal_evaluator_status": "failed",
+  "conclusion": "G1 governance and the formal evaluator loop are complete; limited-sample prediction metrics failed and do not authorize release or Iteration 4.",
+  "dataset": {
+    "source_count": 18,
+    "event_count": 18,
+    "recording_session_count": 17,
+    "profile_counts": {
+      "jump": 10,
+      "spin": 4,
+      "step": 2,
+      "spiral": 2
+    },
+    "required_scene_coverage_complete": true,
+    "split_grouping_passed": true,
+    "duplicate_check_passed": true,
+    "source_frame_identity_passed": true,
+    "schema_validation_passed": true,
+    "qualifying_delayed_reviews": 5,
+    "required_delayed_reviews": 2,
+    "applicable_ambiguous_rotation_reviews": 0,
+    "completed_ambiguous_rotation_reviews": 0,
+    "applicable_frozen_crossing_reviews": 0,
+    "completed_frozen_crossing_reviews": 0
+  },
+  "evaluator": {
+    "version": "golden-pilot-evaluator.v1",
+    "missing_predictions_enter_denominator": true,
+    "alignment_identity": [
+      "opaque source identity",
+      "opaque event identity"
+    ],
+    "proposal_matching": "temporal IoU >= 0.20 or nonzero overlap covering the labelled action core",
+    "evaluation_masks_explicit": true,
+    "golden_target_leakage_detection": true,
+    "multi_event_source_policy": "A source-only primary candidate is emitted only for a single-event source. A multi-event source is skipped as a whole so its events remain missing in the denominator without using Golden intervals or profiles for selection."
+  },
+  "formal_run": {
+    "run_scope": "formal_g1",
+    "pipeline_fingerprint": "source-only-g1-r95.diagnostic-v2",
+    "result_fingerprint": "554f387e42cbd1cc5d22f45eb23b9b5e2fbf77981efdb4178c2011dffb5ec2c4",
+    "evaluation_masks": [
+      "action",
+      "key_moments",
+      "rotation"
+    ],
+    "failed_event_count": 18,
+    "event_count": 18,
+    "metrics": {
+      "proposal_recall": {
+        "numerator": 0,
+        "denominator": 18
+      },
+      "action_class_accuracy": {
+        "numerator": 3,
+        "denominator": 18
+      },
+      "key_moment_timing_coverage": {
+        "numerator": 8,
+        "denominator": 43
+      },
+      "rotation_prediction_coverage": {
+        "numerator": 0,
+        "denominator": 13
+      }
+    }
+  },
+  "local_preflight": {
+    "prediction_count": 16,
+    "event_count": 18,
+    "result_fingerprint": "f336950254be6e6b3aee32d5decbbc746e08286f1249bf30b49cd9ed1132867d",
+    "proposal_recall": {
+      "numerator": 1,
+      "denominator": 18
+    },
+    "action_class_accuracy": {
+      "numerator": 3,
+      "denominator": 18
+    },
+    "key_moment_timing_coverage": {
+      "numerator": 8,
+      "denominator": 43
+    },
+    "rotation_prediction_coverage": {
+      "numerator": 0,
+      "denominator": 13
+    },
+    "online_difference": "The online service still uses the older proposal-recall matching behavior; the prediction payload was not widened to compensate."
+  },
+  "verification": {
+    "backend_analysis_v2_full_regression": "362 passed",
+    "backend_modified_legacy_service_regression": "33 passed",
+    "backend_repository_regression": {
+      "passed": 1664,
+      "shared_process_state_failures": 3,
+      "isolated_rechecks_passed": 3
+    },
+    "frontend_full_regression": "60 files, 166 tests passed",
+    "production_frontend_build": "passed; 310 modules transformed",
+    "isolated_ai_pack_generation": "62 files copied, 0 missing; 35 top-level V2 modules clean-imported",
+    "final_privacy_ledger_static_regression": "53 passed",
+    "json_and_private_literal_checks": "passed",
+    "git_diff_check": "passed"
+  },
+  "privacy": {
+    "contains_private_paths": false,
+    "contains_source_hashes": false,
+    "contains_private_event_identifiers": false,
+    "contains_private_frame_or_label_values": false,
+    "private_per_event_diagnostics": "runtime only"
+  },
+  "known_limitations": [
+    "The source-only prediction path remains low recall and high refusal on this limited sample.",
+    "Tracking and pose were not re-evaluated in this formal run because the current source-only adapter does not yet provide decoder-exact PTS-backed tracking or pose predictions.",
+    "The failed formal Pilot is diagnostic evidence, not a release claim and not permission to enter Iteration 4."
+  ]
+}

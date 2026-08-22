@@ -266,8 +266,12 @@ def _person_height_normalized(pose_data: dict[str, Any] | None) -> float:
 
 def _detect_airborne_frames(pose_data: dict[str, Any] | None) -> int:
     """
-    Count frames where visible ankles rise well above the standing baseline.
-    Two or more such frames are treated as strong airborne evidence for jumps.
+    Count a continuous ankle-rise interval bounded by contact-like frames.
+
+    A global body-center range is not enough: camera tilt, zoom and a skater
+    travelling through perspective can all move the pose vertically.  This
+    gate therefore requires at least two consecutive raised-ankle frames plus
+    visible contact-like observations before and after the interval.
     """
     if not isinstance(pose_data, dict):
         return 0
@@ -303,13 +307,33 @@ def _detect_airborne_frames(pose_data: dict[str, Any] | None) -> int:
     baseline_count = max(1, len(ankle_y_series) // 5)
     baseline = sum(ankle_y_series[:baseline_count]) / baseline_count
     airborne_threshold = baseline * 0.85
-    return sum(1 for ankle_y in ankle_y_series if ankle_y < airborne_threshold)
+    raised = [ankle_y < airborne_threshold for ankle_y in ankle_y_series]
+    contact_threshold = baseline * 0.95
+    detected = 0
+    run_start: int | None = None
+    for index, is_raised in enumerate([*raised, False]):
+        if is_raised and run_start is None:
+            run_start = index
+            continue
+        if is_raised or run_start is None:
+            continue
+        run_end = index
+        has_prior_contact = any(value >= contact_threshold for value in ankle_y_series[:run_start])
+        has_later_contact = any(value >= contact_threshold for value in ankle_y_series[run_end:])
+        if run_end - run_start >= 2 and has_prior_contact and has_later_contact:
+            detected += run_end - run_start
+        run_start = None
+    return detected
 
 
 def _detect_rotation_signal(pose_data: dict[str, Any] | None) -> float:
     """
-    Calculate the accumulated absolute X-axis movement of the hip center
-    between adjacent frames as a lightweight rotation proxy.
+    Detect repeated changes in the body's internal left/right orientation.
+
+    Translation of the hip center is deliberately excluded because ordinary
+    skating across the frame is not rotation.  A usable signal needs at least
+    two left/right orientation transitions, which is the minimum evidence for
+    a repeated turn rather than one direction change.
     """
     if not isinstance(pose_data, dict):
         return 0.0
@@ -318,7 +342,7 @@ def _detect_rotation_signal(pose_data: dict[str, Any] | None) -> float:
     if not isinstance(frames, list):
         return 0.0
 
-    hip_x_series: list[float] = []
+    orientation_states: list[int] = []
     for frame in frames:
         if not isinstance(frame, dict):
             continue
@@ -327,23 +351,39 @@ def _detect_rotation_signal(pose_data: dict[str, Any] | None) -> float:
         if not isinstance(keypoints, list):
             continue
 
-        hips = [
-            point
+        points = {
+            int(point.get("id")): point
             for point in keypoints
             if isinstance(point, dict)
-            and point.get("id") in {23, 24}
+            and point.get("id") in {11, 12, 23, 24}
             and float(point.get("visibility", 0.0) or 0.0) >= 0.4
-        ]
-        if not hips:
+        }
+        pair_states: list[int] = []
+        for left_id, right_id in ((11, 12), (23, 24)):
+            left = points.get(left_id)
+            right = points.get(right_id)
+            if left is None or right is None:
+                continue
+            delta_x = float(left.get("x", 0.0) or 0.0) - float(right.get("x", 0.0) or 0.0)
+            if abs(delta_x) < 0.002:
+                continue
+            pair_states.append(1 if delta_x > 0 else -1)
+        if not pair_states or abs(sum(pair_states)) != len(pair_states):
             continue
+        orientation_states.append(pair_states[0])
 
-        hip_x_series.append(sum(float(point.get("x", 0.0) or 0.0) for point in hips) / len(hips))
-
-    if len(hip_x_series) < 3:
+    if len(orientation_states) < 4:
         return 0.0
 
-    total_delta = sum(abs(hip_x_series[index] - hip_x_series[index - 1]) for index in range(1, len(hip_x_series)))
-    return round(total_delta, 4)
+    collapsed = [orientation_states[0]]
+    for state in orientation_states[1:]:
+        if state != collapsed[-1]:
+            collapsed.append(state)
+    transitions = len(collapsed) - 1
+    if transitions < 2:
+        return 0.0
+    coverage = len(orientation_states) / len(frames)
+    return round(min(1.0, transitions / 4.0) * coverage, 4)
 
 
 def _motion_stats(frame_motion_scores: dict[str, Any] | None) -> tuple[float, float]:
@@ -373,11 +413,12 @@ def infer_analysis_profile(
     rotation_signal = _detect_rotation_signal(pose_data)
     relative_vertical = vertical_range / person_height if person_height > 0.05 else 0.0
 
-    if person_height > 0.05:
-        jump_gate = relative_vertical >= 0.12 and max_motion >= 0.06
-    else:
-        jump_gate = vertical_range >= 0.05 and max_motion >= 0.06
-    jump_gate = jump_gate or (airborne_frames >= 2 and hinted_profile == "jump")
+    jump_geometry_candidate = (
+        relative_vertical >= 0.12 and max_motion >= 0.06
+        if person_height > 0.05
+        else vertical_range >= 0.05 and max_motion >= 0.06
+    )
+    jump_gate = airborne_frames >= 2
     spiral_gate = hinted_profile == "spiral" or (
         vertical_range <= 0.06 and avg_motion <= 0.09 and subtype in SPIRAL_SUBTYPES
     )
@@ -392,6 +433,7 @@ def infer_analysis_profile(
         "person_height_reference": round(person_height, 4),
         "relative_vertical_range": round(relative_vertical, 4) if person_height > 0.05 else 0.0,
         "airborne_frames_detected": airborne_frames,
+        "jump_geometry_candidate": jump_geometry_candidate,
         "hip_rotation_signal": rotation_signal,
         "jump_gate_passed": jump_gate,
         "spiral_gate_passed": spiral_gate,
@@ -402,7 +444,7 @@ def infer_analysis_profile(
 
     if mixed_action_input:
         evidence["profile_hint"] = "mixed_auto"
-        mixed_jump_gate = jump_gate and airborne_frames >= 1
+        mixed_jump_gate = jump_gate
         evidence["mixed_jump_gate_passed"] = mixed_jump_gate
         if mixed_jump_gate:
             evidence["profile_confidence"] = "medium"

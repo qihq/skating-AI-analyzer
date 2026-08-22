@@ -24,18 +24,22 @@ def _frame(
     left_ankle_y: float,
     right_ankle_y: float,
     *,
+    center_x: float = 0.5,
+    body_facing: float = 1.0,
     visibility: float = 0.99,
 ) -> dict[str, object]:
     hip_y = com_y - 0.01
     shoulder_y = com_y + 0.01
+    shoulder_half_width = 0.04 * body_facing
+    hip_half_width = 0.025 * body_facing
     keypoints = [
-        {"id": 0, "y": nose_y, "visibility": visibility},
-        {"id": 11, "y": shoulder_y, "visibility": visibility},
-        {"id": 12, "y": shoulder_y, "visibility": visibility},
-        {"id": 23, "y": hip_y, "visibility": visibility},
-        {"id": 24, "y": hip_y, "visibility": visibility},
-        {"id": 27, "y": left_ankle_y, "visibility": visibility},
-        {"id": 28, "y": right_ankle_y, "visibility": visibility},
+        {"id": 0, "x": center_x, "y": nose_y, "visibility": visibility},
+        {"id": 11, "x": center_x + shoulder_half_width, "y": shoulder_y, "visibility": visibility},
+        {"id": 12, "x": center_x - shoulder_half_width, "y": shoulder_y, "visibility": visibility},
+        {"id": 23, "x": center_x + hip_half_width, "y": hip_y, "visibility": visibility},
+        {"id": 24, "x": center_x - hip_half_width, "y": hip_y, "visibility": visibility},
+        {"id": 27, "x": center_x + 0.02, "y": left_ankle_y, "visibility": visibility},
+        {"id": 28, "x": center_x - 0.02, "y": right_ankle_y, "visibility": visibility},
     ]
     return {"keypoints": keypoints}
 
@@ -48,7 +52,7 @@ class ActionProfileInferenceTests(unittest.TestCase):
         self.assertEqual(evidence["profile_hint"], "jump")
         self.assertIn("jump_gate_not_passed", evidence["quality_flags"])
 
-    def test_jump_profile_detected_for_wide_shot_using_relative_height(self) -> None:
+    def test_vertical_range_without_airborne_transition_does_not_confirm_wide_shot_jump(self) -> None:
         pose_data = {
             "frames": [
                 _frame(com_y=0.60, nose_y=0.20, left_ankle_y=0.45, right_ankle_y=0.45),
@@ -60,12 +64,13 @@ class ActionProfileInferenceTests(unittest.TestCase):
         profile, evidence = infer_analysis_profile(JUMP_ACTION_TYPE, JUMP_ACTION_SUBTYPE, pose_data, motion_scores)
 
         self.assertEqual(profile, "jump")
-        self.assertTrue(evidence["jump_gate_passed"])
+        self.assertFalse(evidence["jump_gate_passed"])
+        self.assertEqual(evidence["airborne_frames_detected"], 0)
         self.assertAlmostEqual(evidence["com_vertical_range"], 0.03, places=4)
         self.assertAlmostEqual(evidence["person_height_reference"], 0.25, places=4)
         self.assertAlmostEqual(evidence["relative_vertical_range"], 0.12, places=4)
 
-    def test_jump_profile_detected_for_close_shot_using_relative_height(self) -> None:
+    def test_scale_change_without_airborne_transition_does_not_confirm_close_shot_jump(self) -> None:
         pose_data = {
             "frames": [
                 _frame(com_y=0.72, nose_y=0.10, left_ankle_y=0.90, right_ankle_y=0.90),
@@ -77,10 +82,50 @@ class ActionProfileInferenceTests(unittest.TestCase):
         profile, evidence = infer_analysis_profile(JUMP_ACTION_TYPE, JUMP_ACTION_SUBTYPE, pose_data, motion_scores)
 
         self.assertEqual(profile, "jump")
-        self.assertTrue(evidence["jump_gate_passed"])
+        self.assertFalse(evidence["jump_gate_passed"])
+        self.assertEqual(evidence["airborne_frames_detected"], 0)
         self.assertAlmostEqual(evidence["com_vertical_range"], 0.1, places=4)
         self.assertAlmostEqual(evidence["person_height_reference"], 0.8, places=4)
         self.assertAlmostEqual(evidence["relative_vertical_range"], 0.125, places=4)
+
+    def test_mixed_profile_does_not_treat_horizontal_translation_as_rotation(self) -> None:
+        pose_data = {
+            "frames": [
+                _frame(0.60, 0.20, 0.80, 0.80, center_x=0.20),
+                _frame(0.60, 0.20, 0.80, 0.80, center_x=0.42),
+                _frame(0.60, 0.20, 0.80, 0.80, center_x=0.68),
+                _frame(0.60, 0.20, 0.80, 0.80, center_x=0.82),
+            ]
+        }
+
+        profile, evidence = infer_analysis_profile(
+            "自由滑",
+            "节目片段",
+            pose_data,
+            {"scores": [0.02, 0.08, 0.09, 0.07]},
+        )
+
+        self.assertEqual(profile, "step")
+        self.assertEqual(evidence["hip_rotation_signal"], 0.0)
+        self.assertIn("mixed_action_profile_defaulted_step", evidence["quality_flags"])
+
+    def test_mixed_profile_accepts_repeated_internal_body_orientation_changes_as_rotation(self) -> None:
+        pose_data = {
+            "frames": [
+                _frame(0.60, 0.20, 0.80, 0.80, body_facing=facing)
+                for facing in (1.0, 0.2, -1.0, -0.2, 1.0, 0.2, -1.0)
+            ]
+        }
+
+        profile, evidence = infer_analysis_profile(
+            "自由滑",
+            "节目片段",
+            pose_data,
+            {"scores": [0.02, 0.08, 0.09, 0.07, 0.08, 0.09, 0.07]},
+        )
+
+        self.assertEqual(profile, "spin")
+        self.assertGreaterEqual(evidence["hip_rotation_signal"], 0.15)
 
     def test_jump_profile_detected_from_airborne_ankles_when_com_signal_is_weak(self) -> None:
         pose_data = {

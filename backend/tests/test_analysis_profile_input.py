@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -12,9 +12,11 @@ from app.services.action_profiles import infer_profile_from_input, is_mixed_acti
 from app.services.video import (
     VideoInputWindow,
     _select_motion_weighted_indices,
+    _select_source_scan_indices,
     build_video_input_window,
     cut_action_window_ai_clip,
     detect_action_window,
+    detect_video_duration,
     extract_motion_sampled_frames,
     get_frame_rate_for_profile,
     get_max_frames_for_profile,
@@ -24,6 +26,23 @@ from app.services.video import (
 
 
 class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
+    def test_detect_video_duration_falls_back_to_opencv_when_ffprobe_is_unavailable(self) -> None:
+        capture = Mock()
+        capture.isOpened.return_value = True
+        capture.get.side_effect = lambda prop: {
+            5: 29.995509654243378,
+            7: 334.0,
+        }.get(prop, 0.0)
+
+        with (
+            patch("app.services.video._probe_video", side_effect=FileNotFoundError("ffprobe")),
+            patch("app.services.video.cv2.VideoCapture", return_value=capture),
+        ):
+            duration = detect_video_duration(Path("source.mp4"))
+
+        self.assertAlmostEqual(duration or 0.0, 11.135, places=3)
+        capture.release.assert_called_once_with()
+
     def test_infer_profile_from_axel_input_returns_jump(self) -> None:
         self.assertEqual(infer_profile_from_input("è·³è·ƒ", "Axel è·³è·ƒ"), "jump")
 
@@ -55,6 +74,16 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({27, 28, 29}.issubset(selected))
         self.assertEqual(len(selected), 12)
         self.assertEqual(selected, sorted(selected))
+
+    def test_source_scan_sampling_bounds_coverage_gaps_and_keeps_motion_peak(self) -> None:
+        scores = [0.01 for _ in range(480)]
+        scores[302:307] = [0.7, 0.9, 1.0, 0.9, 0.7]
+
+        selected = _select_source_scan_indices(scores, sample_count=192, max_gap_frames=4)
+
+        self.assertEqual(len(selected), 192)
+        self.assertLessEqual(max(current - previous for previous, current in zip(selected, selected[1:])), 4)
+        self.assertTrue({303, 304, 305}.issubset(selected))
 
     def test_get_slow_motion_scale_maps_240fps_to_8x(self) -> None:
         self.assertEqual(get_slow_motion_scale(240.0), 8.0)
@@ -530,6 +559,59 @@ class AnalysisProfileInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(motion_payload["selection_strategy"], "dense_peak_bursts")
         self.assertEqual(sampling_metadata.action_window_end, 12.0)
         self.assertTrue(any(8.25 <= timestamp <= 9.1 for timestamp in extracted_timestamps))
+
+    async def test_profile_agnostic_scan_uses_full_video_without_action_hint_or_large_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "source.mp4"
+            video_path.write_bytes(b"fake")
+            frames_dir = root / "frames"
+            frames_dir.mkdir()
+            thumb_paths = [root / "thumbs" / f"thumb_{index:05d}.jpg" for index in range(1, 90)]
+            extracted_timestamps: list[float] = []
+
+            async def fake_extract_thumbnails_in_window(
+                _video_path: Path,
+                _thumbs_dir: Path,
+                _start_sec: float,
+                _end_sec: float,
+                frame_rate: int = 5,
+            ) -> list[Path]:
+                self.assertEqual((_start_sec, _end_sec), (0.0, 11.135))
+                self.assertEqual(frame_rate, 8)
+                _thumbs_dir.mkdir(parents=True, exist_ok=True)
+                for thumb_path in thumb_paths:
+                    thumb_path.write_bytes(b"thumb")
+                return thumb_paths
+
+            async def fake_extract_full_frame_at(_video_path: Path, timestamp: float, target_path: Path) -> None:
+                extracted_timestamps.append(round(timestamp, 3))
+                target_path.write_bytes(b"frame")
+
+            with (
+                patch("app.services.video.detect_video_fps", return_value=30.0),
+                patch("app.services.video.detect_video_duration", return_value=11.135),
+                patch("app.services.video.detect_action_window", AsyncMock()) as detect_window_mock,
+                patch("app.services.video._extract_thumbnails_in_window", side_effect=fake_extract_thumbnails_in_window),
+                patch("app.services.video._motion_scores_from_thumbs", return_value=[0.02 for _ in thumb_paths]),
+                patch("app.services.video._extract_full_frame_at", side_effect=fake_extract_full_frame_at),
+            ):
+                sampled_frames, motion_payload, sampling_metadata = await extract_motion_sampled_frames(
+                    video_path=video_path,
+                    frames_dir=frames_dir,
+                    action_type="自由滑",
+                    analysis_profile=None,
+                    profile_agnostic_scan=True,
+                )
+
+        detect_window_mock.assert_not_called()
+        self.assertEqual(len(sampled_frames), 89)
+        self.assertIsNone(motion_payload["analysis_profile_hint"])
+        self.assertEqual(motion_payload["selection_strategy"], "source_scan_coverage")
+        self.assertEqual(motion_payload["sampling_density_policy"], "profile_agnostic_source_scan")
+        self.assertEqual(motion_payload["window_strategy"], "profile_agnostic_scan")
+        self.assertEqual(sampling_metadata.action_window_end, 11.135)
+        self.assertLessEqual(max(current - previous for previous, current in zip(extracted_timestamps, extracted_timestamps[1:])), 0.126)
 
 
 if __name__ == "__main__":

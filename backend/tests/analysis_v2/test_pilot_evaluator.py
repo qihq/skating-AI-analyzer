@@ -190,6 +190,39 @@ def test_perfect_action_fixture_only_emits_requested_metric() -> None:
     assert "event-a" not in str(result)
 
 
+def test_narrow_proposal_with_temporal_iou_point_two_counts_as_recalled() -> None:
+    prediction = {
+        **_identity(),
+        "proposal_start_pts": 1.0,
+        "proposal_end_pts": 1.2,
+        "predicted_profile": "jump",
+    }
+    _, result = evaluate_pilot(_dataset(), _bundle([prediction], ["action"]))
+
+    assert result["aggregate"]["action"]["proposal_recall"]["rate"] == 1
+
+
+def test_narrow_proposal_covering_labelled_action_core_counts_as_recalled() -> None:
+    event = _event()
+    event["start_pts"] = 0.0
+    event["end_pts"] = 10.0
+    event["jump"] = {
+        "takeoff": {"pts": 8.0, "source_frame_index": 240},
+        "apex": {"pts": 8.2, "source_frame_index": 246},
+        "landing": {"pts": 8.4, "source_frame_index": 252},
+        "rotation": event["jump"]["rotation"],
+    }
+    prediction = {
+        **_identity(),
+        "proposal_start_pts": 7.9,
+        "proposal_end_pts": 8.5,
+        "predicted_profile": "jump",
+    }
+    _, result = evaluate_pilot(_dataset([event]), _bundle([prediction], ["action"]))
+
+    assert result["aggregate"]["action"]["proposal_recall"]["rate"] == 1
+
+
 def test_pose_reports_availability_pck_oks_provenance_and_wrong_person() -> None:
     prediction = {**_identity(), "poses": [{"source_frame_index": 42, "pts": 1.4, "identity": "wrong_person", "joints": [{"joint": "nose", "x": .2, "y": .2, "source": "measured"}]}]}
     _, result = evaluate_pilot(_dataset(), _bundle([prediction], ["pose"]))

@@ -267,10 +267,9 @@ def _confirmed_target(legacy: Mapping[str, Any]) -> bool:
     if not isinstance(lock, Mapping):
         return False
     status = str(lock.get("status") or "").lower()
-    return (
-        (status in {"auto_locked", "manual", "confirmed"} and _target_bbox(legacy, 0) is not None)
-        or (_bbox_tuple(lock.get("selected_bbox") or lock.get("bbox")) is not None and status not in {"awaiting_manual", "awaiting_target_selection"})
-    )
+    bbox_source = str(lock.get("bbox_source") or lock.get("selected_bbox_source") or "measured").lower()
+    display_hint = bool(lock.get("bbox_is_display_hint")) or bbox_source in {"display", "display_hint", "fallback", "stale"}
+    return status in {"auto_locked", "locked", "manual", "confirmed"} and not display_hint and _target_bbox(legacy, 0) is not None
 
 
 def _samples_from_observations(observations: Sequence[Mapping[str, Any]], identity: Sequence[Mapping[str, Any]], poses: Sequence[Mapping[str, Any]]) -> list[ProposalEvidenceSample]:
@@ -356,9 +355,16 @@ class _DefaultShadowPipeline:
             pts = _float(candidate.get("pts_sec"), 0.0) or 0.0
             bbox = tuple(float(v) for v in candidate.get("bbox", (.35, .15, .65, .95)))
             score = _clamp(candidate.get("detector_score"), default=.45)
-            if confirmed:
-                track = TrackState(state="confirmed", bbox=bbox, identity_score=max(.62, score), identity_margin=.2, candidate_ids=(str(candidate.get("candidate_id")),), bbox_source="measured", template_update_allowed=False, reasons=("legacy_target_lock",))
-                state, evidence, margin, reasons = classify_identity([score_identity_evidence(str(candidate.get("candidate_id")), {"bbox_continuity": score, "appearance": score, "body_shape": score}, IdentityFeatureReliability(bbox_continuity=1, appearance=.5, body_shape=.5))], margin_threshold=.12, score_threshold=.5)
+            evidence_sources = {str(item) for item in candidate.get("evidence_sources", ())}
+            if confirmed and "legacy_target_lock" in evidence_sources:
+                evidence = score_identity_evidence(
+                    str(candidate.get("candidate_id")),
+                    {"bbox_continuity": 1.0},
+                    IdentityFeatureReliability(bbox_continuity=1.0),
+                    reasons=("confirmed_legacy_target_lock",),
+                )
+                state, evidence, margin, reasons = classify_identity([evidence], margin_threshold=.12, score_threshold=.5)
+                track = TrackState(state="confirmed", bbox=bbox, identity_score=evidence.score, identity_margin=margin, candidate_ids=(str(candidate.get("candidate_id")),), bbox_source="measured", template_update_allowed=False, reasons=("legacy_target_lock",))
                 if state != "confirmed":
                     track = track.model_copy(update={"state": "uncertain", "bbox": None, "bbox_source": "none", "identity_score": score, "identity_margin": margin, "reasons": reasons})
                 segments.append(IdentityTimelineSegment(source_frame_index=frame, pts_sec=pts, state=track.state, track_state=track, best_candidate_id=str(candidate.get("candidate_id")), evidence=(evidence,) if evidence else (), conflict=False, template_update_frozen=True))
