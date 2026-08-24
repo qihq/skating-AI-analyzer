@@ -22,6 +22,8 @@ from app.services.pose import (
     _crop_bounds,
     _empty_payload,
     _manual_lock_blocks_unreliable_tracker_pose,
+    _manual_lock_contained_candidate_bbox,
+    _manual_lock_identity_consistent_observation_bbox,
     _pending_relock_bbox_from_diagnostic,
     _reference_crop_padding_ratio,
     _reference_crop_source,
@@ -330,6 +332,123 @@ class PoseSmoothingTests(unittest.TestCase):
             _manual_lock_blocks_unreliable_tracker_pose(
                 {"manual_override": False},
                 None,
+            )
+        )
+
+    def test_manual_lock_uses_a_contained_same_tracker_candidate_only_as_a_pose_crop_hint(self) -> None:
+        reference_bbox = {"x": 0.25, "y": 0.15, "width": 0.40, "height": 0.70}
+        candidate_bbox = {"x": 0.40, "y": 0.28, "width": 0.12, "height": 0.36}
+        diagnostic = {
+            "state": "continuity_rejected",
+            "rejected_reasons": ["area_ratio", "aspect_ratio"],
+            "candidate_bbox": candidate_bbox,
+            "candidate_geometry": {
+                "area_ratio": 0.154,
+                "candidate_coverage": 1.0,
+                "center_distance_ratio": 0.025,
+            },
+        }
+
+        self.assertEqual(
+            _manual_lock_contained_candidate_bbox(diagnostic, reference_bbox),
+            candidate_bbox,
+        )
+        self.assertFalse(
+            _manual_lock_blocks_unreliable_tracker_pose(
+                {"manual_override": True, "selected_bbox": reference_bbox},
+                diagnostic,
+            )
+        )
+
+    def test_parent_anchor_observation_bridge_uses_two_consecutive_same_id_candidates(self) -> None:
+        reference_bbox = {"x": 0.40, "y": 0.30, "width": 0.08, "height": 0.24}
+        candidate_bbox = {"x": 0.385, "y": 0.25, "width": 0.12, "height": 0.34}
+        previous = {
+            "state": "continuity_rejected",
+            "tracker_id": 7,
+            "rejected_reasons": ["area_ratio"],
+            "candidate_bbox": {"x": 0.39, "y": 0.255, "width": 0.118, "height": 0.335},
+            "candidate_geometry": {
+                "area_ratio": 2.05,
+                "center_distance_ratio": 0.02,
+                "iou": 0.45,
+                "reference_coverage": 0.9,
+                "candidate_coverage": 0.45,
+            },
+        }
+        current = {
+            "state": "continuity_rejected",
+            "tracker_id": 7,
+            "rejected_reasons": ["area_ratio"],
+            "candidate_bbox": candidate_bbox,
+            "candidate_geometry": {
+                "area_ratio": 2.125,
+                "center_distance_ratio": 0.022,
+                "iou": 0.44,
+                "reference_coverage": 0.9,
+                "candidate_coverage": 0.44,
+            },
+        }
+
+        self.assertEqual(
+            _manual_lock_identity_consistent_observation_bbox(
+                {"manual_override": True, "identity_anchor_source": "parent_confirmed"},
+                current,
+                previous,
+                reference_bbox,
+            ),
+            candidate_bbox,
+        )
+
+    def test_parent_anchor_observation_bridge_rejects_one_frame_changed_or_empty_id_candidate(self) -> None:
+        reference_bbox = {"x": 0.40, "y": 0.30, "width": 0.08, "height": 0.24}
+        current = {
+            "state": "continuity_rejected",
+            "tracker_id": 7,
+            "rejected_reasons": ["area_ratio"],
+            "candidate_bbox": {"x": 0.385, "y": 0.25, "width": 0.12, "height": 0.34},
+            "candidate_geometry": {
+                "area_ratio": 2.125,
+                "center_distance_ratio": 0.022,
+                "iou": 0.44,
+                "reference_coverage": 0.9,
+                "candidate_coverage": 0.44,
+            },
+        }
+        changed_id = dict(current, tracker_id=8)
+        empty_id = dict(current, tracker_id="")
+        whitespace_id = dict(current, tracker_id="  ")
+
+        self.assertIsNone(
+            _manual_lock_identity_consistent_observation_bbox(
+                {"manual_override": True, "identity_anchor_source": "parent_confirmed"},
+                current,
+                None,
+                reference_bbox,
+            )
+        )
+        self.assertIsNone(
+            _manual_lock_identity_consistent_observation_bbox(
+                {"manual_override": True, "identity_anchor_source": "parent_confirmed"},
+                current,
+                changed_id,
+                reference_bbox,
+            )
+        )
+        self.assertIsNone(
+            _manual_lock_identity_consistent_observation_bbox(
+                {"manual_override": True, "identity_anchor_source": "parent_confirmed"},
+                empty_id,
+                empty_id,
+                reference_bbox,
+            )
+        )
+        self.assertIsNone(
+            _manual_lock_identity_consistent_observation_bbox(
+                {"manual_override": True, "identity_anchor_source": "parent_confirmed"},
+                whitespace_id,
+                whitespace_id,
+                reference_bbox,
             )
         )
 

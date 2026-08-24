@@ -139,6 +139,16 @@ _STALE_TRACKER_MULTI_POSE_RECOVERY_STATES = {
 _MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_FLAG = "pose_manual_lock_unreliable_tracker_blocked"
 _MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_REASON = "manual_lock_unreliable_tracker_blocked"
 _MANUAL_LOCK_TRACKER_BLOCKED_SOURCE = "manual_lock_tracker_blocked"
+_MANUAL_LOCK_CONTAINED_CANDIDATE_ALLOWED_REASONS = {"area_ratio", "aspect_ratio"}
+_MANUAL_LOCK_CONTAINED_CANDIDATE_AREA_RATIO_RANGE = (0.05, 0.50)
+_MANUAL_LOCK_CONTAINED_CANDIDATE_MIN_COVERAGE = 0.90
+_MANUAL_LOCK_CONTAINED_CANDIDATE_MAX_CENTER_DISTANCE = 0.06
+_PARENT_ANCHOR_OBSERVATION_ALLOWED_REASONS = {"area_ratio", "aspect_ratio"}
+_PARENT_ANCHOR_OBSERVATION_AREA_RATIO_RANGE = (0.05, 4.25)
+_PARENT_ANCHOR_OBSERVATION_MAX_CENTER_DISTANCE = 0.10
+_PARENT_ANCHOR_OBSERVATION_MIN_IOU = 0.05
+_PARENT_ANCHOR_OBSERVATION_MIN_REFERENCE_COVERAGE = 0.10
+_PARENT_ANCHOR_OBSERVATION_MIN_CANDIDATE_COVERAGE = 0.30
 _STALE_TRACKER_MULTI_POSE_RELAXED_REASONS = {
     "target_overlap",
     "tracker_area_ratio",
@@ -601,7 +611,125 @@ def _manual_lock_blocks_unreliable_tracker_pose(
     if not isinstance(diagnostic, dict):
         return True
     state = str(diagnostic.get("state") or "")
+    reference_bbox = _target_seed_bbox(target_lock)
+    if _manual_lock_contained_candidate_bbox(diagnostic, reference_bbox) is not None:
+        return False
     return state not in _MANUAL_LOCK_RELIABLE_TRACKER_STATES or not _tracker_bbox_is_reliable(diagnostic)
+
+
+def _manual_lock_contained_candidate_bbox(
+    diagnostic: dict[str, Any] | None,
+    reference_bbox: dict[str, float] | None,
+) -> dict[str, float] | None:
+    if not isinstance(diagnostic, dict) or not isinstance(reference_bbox, dict):
+        return None
+    if str(diagnostic.get("state") or "") != "continuity_rejected":
+        return None
+    reasons = {str(item) for item in diagnostic.get("rejected_reasons", ()) if item}
+    if not reasons or not reasons.issubset(_MANUAL_LOCK_CONTAINED_CANDIDATE_ALLOWED_REASONS):
+        return None
+    geometry = diagnostic.get("candidate_geometry")
+    candidate = diagnostic.get("candidate_bbox")
+    if not isinstance(geometry, dict) or not isinstance(candidate, dict):
+        return None
+    normalized = _normalized_bbox_from_mapping(candidate)
+    if normalized is None:
+        return None
+    try:
+        area_ratio = float(geometry.get("area_ratio"))
+        candidate_coverage = float(geometry.get("candidate_coverage"))
+        center_distance = float(geometry.get("center_distance_ratio"))
+    except (TypeError, ValueError):
+        return None
+    if not (
+        _MANUAL_LOCK_CONTAINED_CANDIDATE_AREA_RATIO_RANGE[0]
+        <= area_ratio
+        <= _MANUAL_LOCK_CONTAINED_CANDIDATE_AREA_RATIO_RANGE[1]
+        and candidate_coverage >= _MANUAL_LOCK_CONTAINED_CANDIDATE_MIN_COVERAGE
+        and center_distance <= _MANUAL_LOCK_CONTAINED_CANDIDATE_MAX_CENTER_DISTANCE
+        and _bbox_coverage(normalized, reference_bbox) >= _MANUAL_LOCK_CONTAINED_CANDIDATE_MIN_COVERAGE
+    ):
+        return None
+    height = _bbox_height(normalized)
+    aspect = _bbox_width(normalized) / max(height, MANUAL_BBOX_MIN_SIDE)
+    if not (0.10 <= height <= 0.72 and 0.10 <= aspect <= 0.75):
+        return None
+    return normalized
+
+
+def _manual_lock_identity_consistent_observation_bbox(
+    target_lock: dict[str, Any] | None,
+    diagnostic: dict[str, Any] | None,
+    previous_diagnostic: dict[str, Any] | None,
+    reference_bbox: dict[str, float] | None,
+) -> dict[str, float] | None:
+    if (
+        not isinstance(target_lock, dict)
+        or target_lock.get("identity_anchor_source") != "parent_confirmed"
+        or not target_lock.get("manual_override")
+        or not isinstance(diagnostic, dict)
+        or not isinstance(previous_diagnostic, dict)
+        or not isinstance(reference_bbox, dict)
+    ):
+        return None
+    if str(diagnostic.get("state") or "") != "continuity_rejected":
+        return None
+    if str(previous_diagnostic.get("state") or "") != "continuity_rejected":
+        return None
+    tracker_id = diagnostic.get("tracker_id")
+    if (
+        tracker_id is None
+        or (isinstance(tracker_id, str) and not tracker_id.strip())
+        or tracker_id != previous_diagnostic.get("tracker_id")
+    ):
+        return None
+    reasons = {str(item) for item in diagnostic.get("rejected_reasons", ()) if item}
+    previous_reasons = {str(item) for item in previous_diagnostic.get("rejected_reasons", ()) if item}
+    if (
+        not reasons
+        or not previous_reasons
+        or not reasons.issubset(_PARENT_ANCHOR_OBSERVATION_ALLOWED_REASONS)
+        or not previous_reasons.issubset(_PARENT_ANCHOR_OBSERVATION_ALLOWED_REASONS)
+    ):
+        return None
+    candidate = diagnostic.get("candidate_bbox")
+    previous_candidate = previous_diagnostic.get("candidate_bbox")
+    geometry = diagnostic.get("candidate_geometry")
+    if not isinstance(candidate, dict) or not isinstance(previous_candidate, dict) or not isinstance(geometry, dict):
+        return None
+    normalized = _normalized_bbox_from_mapping(candidate)
+    previous_normalized = _normalized_bbox_from_mapping(previous_candidate)
+    if normalized is None or previous_normalized is None:
+        return None
+    try:
+        area_ratio = float(geometry.get("area_ratio"))
+        center_distance = float(geometry.get("center_distance_ratio"))
+        candidate_iou = float(geometry.get("iou"))
+        reference_coverage = float(geometry.get("reference_coverage"))
+        candidate_coverage = float(geometry.get("candidate_coverage"))
+    except (TypeError, ValueError):
+        return None
+    if not (
+        _PARENT_ANCHOR_OBSERVATION_AREA_RATIO_RANGE[0]
+        <= area_ratio
+        <= _PARENT_ANCHOR_OBSERVATION_AREA_RATIO_RANGE[1]
+        and center_distance <= _PARENT_ANCHOR_OBSERVATION_MAX_CENTER_DISTANCE
+        and (
+            candidate_iou >= _PARENT_ANCHOR_OBSERVATION_MIN_IOU
+            or reference_coverage >= _PARENT_ANCHOR_OBSERVATION_MIN_REFERENCE_COVERAGE
+            or candidate_coverage >= _PARENT_ANCHOR_OBSERVATION_MIN_CANDIDATE_COVERAGE
+        )
+        and (
+            _bbox_iou(normalized, previous_normalized) >= _PARENT_ANCHOR_OBSERVATION_MIN_IOU
+            or _bbox_center_distance(normalized, previous_normalized) <= _PARENT_ANCHOR_OBSERVATION_MAX_CENTER_DISTANCE
+        )
+    ):
+        return None
+    height = _bbox_height(normalized)
+    aspect = _bbox_width(normalized) / max(height, MANUAL_BBOX_MIN_SIDE)
+    if not (0.10 <= height <= 0.72 and 0.10 <= aspect <= 0.85):
+        return None
+    return normalized
 
 
 def _detector_relock_bbox_is_partial_shift(diagnostic: dict[str, Any]) -> bool:
@@ -1478,7 +1606,19 @@ def extract_pose(
             tracker_lost_frames = tracker_diagnostic.get("lost_frames") if isinstance(tracker_diagnostic, dict) else None
             pending_relock_bbox = _pending_relock_bbox_from_diagnostic(tracker_diagnostic)
             reference_bbox = current_tracker_bbox or previous_bbox or seed_bbox or pending_relock_bbox
-            if _manual_lock_blocks_unreliable_tracker_pose(target_lock, tracker_diagnostic):
+            contained_candidate_bbox = _manual_lock_contained_candidate_bbox(tracker_diagnostic, seed_bbox)
+            previous_tracker_diagnostic = tracker_diagnostics_by_index.get(frame_index - 1)
+            identity_observation_bbox = _manual_lock_identity_consistent_observation_bbox(
+                target_lock,
+                tracker_diagnostic,
+                previous_tracker_diagnostic,
+                reference_bbox,
+            )
+            if (
+                _manual_lock_blocks_unreliable_tracker_pose(target_lock, tracker_diagnostic)
+                and contained_candidate_bbox is None
+                and identity_observation_bbox is None
+            ):
                 manual_lock_unreliable_tracker_blocked_frames += 1
                 lost_count += 1
                 lost_frames += 1
@@ -1528,6 +1668,11 @@ def extract_pose(
                 raw_tracker_bbox,
                 reference_bbox,
             )
+            if contained_candidate_bbox is not None:
+                unreliable_tracker_crop_bbox = contained_candidate_bbox
+            elif identity_observation_bbox is not None:
+                unreliable_tracker_crop_bbox = identity_observation_bbox
+                reference_bbox = identity_observation_bbox
             rejected_detector_crop_bbox = _rejected_detector_bbox_for_crop(
                 tracker_diagnostic,
                 reference_bbox,
