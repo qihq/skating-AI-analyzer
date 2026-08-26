@@ -5,6 +5,7 @@ import pytest
 from app.analysis_v2.action_classification import (
     ActionClassificationEvidence,
     DEFAULT_CONFIGS,
+    ProfileClassification,
     classify_action,
     classifier_fingerprint,
     classifiers,
@@ -36,6 +37,85 @@ def jump_evidence(**changes):
         temporal_features={"airborne_proxy": 1, "vertical_excursion": 1, "ice_contact_proxy": 1, "periodicity": .02, "horizontal_motion": .05},
         **changes,
     )
+
+
+def physical_confirmation_evidence(profile: str, **changes):
+    sample_fields = {
+        "jump": {"ice_contact_proxy": .70},
+        "spin": {"periodicity": .75},
+        "spiral": {"extension_hold": .55},
+        "step": {"edge_complexity": .60},
+    }[profile]
+    temporal_features = {
+        "jump": {
+            "airborne_proxy": .70,
+            "vertical_excursion": .65,
+            "ice_contact_proxy": .70,
+            "pose_dynamics": .15,
+            "motion": .10,
+            "horizontal_motion": .05,
+            "periodicity": 0,
+            "extension_proxy": 0,
+            "step_complexity": .10,
+        },
+        "spin": {
+            "periodicity": .75,
+            "turning_motion": .75,
+            "pose_dynamics": .15,
+            "motion": .10,
+            "axis_stability": .60,
+            "airborne_proxy": .05,
+            "ice_contact_proxy": .05,
+            "extension_proxy": 0,
+            "step_complexity": .10,
+        },
+        "spiral": {
+            "extension_proxy": .55,
+            "axis_stability": .75,
+            "pose_dynamics": .08,
+            "horizontal_motion": .08,
+            "motion": .04,
+            "periodicity": 0,
+            "airborne_proxy": .05,
+            "ice_contact_proxy": .05,
+            "step_complexity": .08,
+        },
+        "step": {
+            "contact_pattern": .60,
+            "horizontal_motion": .90,
+            "periodicity": 0,
+            "pose_dynamics": .35,
+            "motion": .55,
+            "step_complexity": .60,
+            "airborne_proxy": .05,
+            "ice_contact_proxy": .05,
+            "extension_proxy": 0,
+        },
+    }[profile]
+    samples = tuple(
+        ProposalEvidenceSample(
+            source_frame_index=index,
+            pts_sec=index * .1,
+            camera_compensated_track_motion=.30,
+            pose_dynamics=.25,
+            tracking_observable=True,
+            pose_observable=True,
+            provenance=("source_pts", "source_only_adapter"),
+            **sample_fields,
+        )
+        for index in range(7)
+    )
+    base = {
+        "samples": samples,
+        "temporal_features": temporal_features,
+        "tracking_coverage": 1,
+        "pose_coverage": 1,
+        "observability": "observable",
+        "identity_confirmed": True,
+        "evidence_sources": ("source_only_adapter", "multi_signal_cluster"),
+    }
+    base.update(changes)
+    return evidence(**base)
 
 
 def test_classifier_isolation_and_no_step_fallthrough() -> None:
@@ -72,6 +152,131 @@ def test_sparse_whole_video_envelope_cannot_be_high_confidence_identity() -> Non
     assert result.state == "ambiguous"
     assert result.confidence < .5
     assert result.evidence_summary["localization_is_broad"] is True
+
+
+def test_d3_confirmation_upgrade_can_be_disabled_for_legacy_replay() -> None:
+    sample = jump_evidence()
+
+    legacy = classify_action(sample, classification_confirmation_upgrade=False)
+    default = classify_action(sample)
+
+    assert legacy.model_dump(mode="json") == default.model_dump(mode="json")
+
+
+def test_unlocalized_source_evidence_is_an_explicit_classification_refusal() -> None:
+    result = classify_action(evidence(
+        samples=(),
+        temporal_features={},
+        evidence_sources=("source_only_adapter", "unlocalized_observability_envelope"),
+        observability="partially_observable",
+    ))
+
+    assert result.profile == "unknown"
+    assert result.state == "unknown"
+    assert result.refusal_reason == "proposal_unlocalized"
+    assert result.model_dump(mode="json")["refusal_reason"] == "proposal_unlocalized"
+    assert result.model_validate(result.model_dump(mode="json")) == result
+
+
+def test_unobservable_source_evidence_is_an_explicit_classification_refusal() -> None:
+    result = classify_action(evidence(
+        samples=(),
+        temporal_features={},
+        tracking_coverage=0,
+        pose_coverage=0,
+        observability="unobservable",
+        identity_confirmed=False,
+        evidence_sources=("source_only_adapter", "multi_signal_cluster"),
+    ))
+
+    assert result.profile == "unknown"
+    assert result.state == "unknown"
+    assert result.refusal_reason == "source_evidence_unobservable"
+
+
+def test_only_unknown_classification_can_carry_a_refusal_reason() -> None:
+    confirmed = classify_action(jump_evidence())
+
+    with pytest.raises(ValueError, match="only unknown classifications can carry a refusal"):
+        ProfileClassification.model_validate({
+            **confirmed.model_dump(mode="json"),
+            "refusal_reason": "must-not-coexist-with-confirmed",
+        })
+
+
+@pytest.mark.parametrize("profile", ["jump", "spin", "step", "spiral"])
+def test_d3_uses_one_physical_confirmation_policy_for_every_family(profile: str) -> None:
+    sample = physical_confirmation_evidence(profile)
+
+    legacy = classify_action(sample, classification_confirmation_upgrade=False)
+    upgraded = classify_action(sample)
+
+    assert legacy.profile == profile
+    assert legacy.state == "ambiguous"
+    assert upgraded.profile == profile
+    assert upgraded.state == "confirmed"
+    assert upgraded.evidence_summary["confirmation_policy"] == "source_only_physical_confirmation.v1"
+    assert upgraded.evidence_summary["confirmation_upgrade_contributed"] is True
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_reason"),
+    [
+        ({"samples": physical_confirmation_evidence("jump").samples[:1]}, "insufficient_temporal_persistence"),
+        ({"samples": tuple(item.model_copy(update={"pts_sec": index * .05}) for index, item in enumerate(physical_confirmation_evidence("jump").samples[:3]))}, "insufficient_temporal_persistence"),
+        ({"identity_confirmed": False}, "identity_not_confirmed"),
+        ({"pose_coverage": .25}, "pose_observability_insufficient"),
+        ({"path_a_support": {"jump": .8}, "path_a_contradictions": {"jump": .8}}, "semantic_conflict"),
+    ],
+)
+def test_d3_physical_confirmation_preserves_negative_controls(changes: dict, expected_reason: str) -> None:
+    result = classify_action(physical_confirmation_evidence("jump", **changes))
+
+    assert result.state != "confirmed"
+    assert result.evidence_summary["confirmation_decision_reason"] == expected_reason
+
+
+def test_d3_does_not_confirm_a_small_family_margin() -> None:
+    sample = physical_confirmation_evidence("jump")
+    features = {**sample.temporal_features, "horizontal_motion": .90, "step_complexity": .60}
+
+    result = classify_action(sample.model_copy(update={"temporal_features": features}))
+
+    assert result.profile == "jump"
+    assert result.state == "ambiguous"
+    assert result.evidence_summary["confirmation_decision_reason"] == "family_margin_insufficient"
+
+
+def test_d3_does_not_confirm_weak_ordinary_travel() -> None:
+    samples = tuple(
+        ProposalEvidenceSample(
+            source_frame_index=index,
+            pts_sec=index * .1,
+            camera_compensated_track_motion=.32,
+            pose_dynamics=.18,
+            edge_complexity=.20,
+            tracking_observable=True,
+            pose_observable=True,
+            provenance=("source_pts", "source_only_adapter"),
+        )
+        for index in range(7)
+    )
+
+    result = classify_action(physical_confirmation_evidence(
+        "step",
+        samples=samples,
+        temporal_features={
+            "contact_pattern": .15,
+            "horizontal_motion": .30,
+            "periodicity": 0,
+            "pose_dynamics": .18,
+            "motion": .20,
+            "step_complexity": .20,
+        },
+    ))
+
+    assert result.state == "ambiguous"
+    assert result.evidence_summary["confirmation_decision_reason"] == "family_score_insufficient"
 
 
 def test_subtype_with_three_samples_is_underpowered() -> None:

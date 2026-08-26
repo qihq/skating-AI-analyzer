@@ -272,3 +272,48 @@ def test_arm_span_without_a_raised_extended_leg_is_not_spiral_evidence(tmp_path:
 
     assert max(sample.extension or 0 for sample in bundle.moment_samples) == 0
     assert max(sample.extension_hold for sample in bundle.proposal_samples) == 0
+
+
+def test_multiple_proposals_on_one_source_are_classified_independently(tmp_path: Path) -> None:
+    angles = [0.0] * 8 + [index * 2 * math.pi / 16 for index in range(17)]
+    bundle = build_source_evidence(
+        SOURCE_HASH,
+        _analysis(tmp_path, pose_angles=angles, image_angles=angles),
+    )
+    first = EventProposal(
+        event_id="event-first",
+        source_video_hash=SOURCE_HASH,
+        start_pts=0.0,
+        end_pts=.7,
+        anchor_start_frame=0,
+        anchor_end_frame=7,
+        candidate_profile_scores={"jump": .1, "spin": .1, "step": .1, "spiral": .1},
+        tracking_coverage=1,
+        pose_coverage=1,
+        observability="observable",
+        evidence_sources=("source_only_adapter", "multi_signal_cluster"),
+        provenance_fingerprint="sha256:first",
+    )
+    second = first.model_copy(update={
+        "event_id": "event-second",
+        "start_pts": .8,
+        "end_pts": 2.4,
+        "anchor_start_frame": 8,
+        "anchor_end_frame": 24,
+        "provenance_fingerprint": "sha256:second",
+    })
+
+    first_evidence = build_action_classification_evidence(bundle, first)
+    second_evidence = build_action_classification_evidence(bundle, second)
+    first_result = classify_action(first_evidence)
+    second_result = classify_action(second_evidence)
+
+    assert first_evidence.event_id == first_result.event_id == "event-first"
+    assert second_evidence.event_id == second_result.event_id == "event-second"
+    assert {item.source_frame_index for item in first_evidence.samples}.isdisjoint(
+        item.source_frame_index for item in second_evidence.samples
+    )
+    assert first_evidence.temporal_features["periodicity"] < .18
+    assert second_evidence.temporal_features["periodicity"] >= .18
+    assert first_result.state != "confirmed"
+    assert (second_result.profile, second_result.state) == ("spin", "confirmed")

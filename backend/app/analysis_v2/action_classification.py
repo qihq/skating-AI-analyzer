@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.analysis_v2.contracts import ContractModel
 from app.analysis_v2.event_proposals import EventProposal, ProposalEvidenceSample, PROFILE_KEYS
@@ -25,6 +25,7 @@ from app.analysis_v2.event_proposals import EventProposal, ProposalEvidenceSampl
 Profile = Literal["jump", "spin", "step", "spiral"]
 ClassificationState = Literal["confirmed", "ambiguous", "unknown"]
 _SUBTYPE_REPORTING_MINIMUM = 4
+SOURCE_ONLY_PHYSICAL_CONFIRMATION_VERSION = "source_only_physical_confirmation.v1"
 
 
 def _hash(value: Any) -> str:
@@ -55,6 +56,36 @@ class ProfileClassifierConfig:
             "minimum_evidence": self.minimum_evidence,
             "subtype_minimum_evidence": self.subtype_minimum_evidence,
         })
+
+
+@dataclass(frozen=True)
+class PhysicalConfirmationPolicy:
+    version: str = SOURCE_ONLY_PHYSICAL_CONFIRMATION_VERSION
+    minimum_score: float = .24
+    minimum_margin: float = .12
+    minimum_support: float = .45
+    minimum_support_count: int = 3
+    minimum_support_ratio: float = .50
+    minimum_support_span_sec: float = .25
+    maximum_support_gap_sec: float = .22
+    minimum_pose_coverage: float = .50
+
+    @property
+    def fingerprint(self) -> str:
+        return _hash({
+            "version": self.version,
+            "minimum_score": self.minimum_score,
+            "minimum_margin": self.minimum_margin,
+            "minimum_support": self.minimum_support,
+            "minimum_support_count": self.minimum_support_count,
+            "minimum_support_ratio": self.minimum_support_ratio,
+            "minimum_support_span_sec": self.minimum_support_span_sec,
+            "maximum_support_gap_sec": self.maximum_support_gap_sec,
+            "minimum_pose_coverage": self.minimum_pose_coverage,
+        })
+
+
+DEFAULT_PHYSICAL_CONFIRMATION_POLICY = PhysicalConfirmationPolicy()
 
 
 DEFAULT_CONFIGS: dict[Profile, ProfileClassifierConfig] = {
@@ -158,8 +189,21 @@ class ProfileClassification(ContractModel):
     contributions: tuple[ProfileContribution, ...] = ()
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
     confirmation_task: str | None = None
+    refusal_reason: str | None = None
     definition_version: str = "profile-classification.v1"
     classifier_fingerprint: str
+
+    @model_validator(mode="after")
+    def refusal_is_unknown(self) -> "ProfileClassification":
+        if self.refusal_reason is not None and self.state != "unknown":
+            raise ValueError("only unknown classifications can carry a refusal")
+        return self
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = super().model_dump(*args, **kwargs)
+        if self.refusal_reason is None:
+            payload.pop("refusal_reason", None)
+        return payload
 
 
 def _clamp(value: float) -> float:
@@ -296,7 +340,97 @@ def _subtype(
     return SubtypeResult(subtype=name, state="confirmed" if score >= .8 else "ambiguous", confidence=score, underpowered=False, reason="validation-calibrated subtype evidence")
 
 
-def classify_action(evidence: ActionClassificationEvidence, *, configs: Mapping[Profile, ProfileClassifierConfig] | None = None) -> ProfileClassification:
+def _physical_support(sample: ProposalEvidenceSample, profile: Profile) -> float:
+    if profile == "jump":
+        return sample.ice_contact_proxy
+    if profile == "spin":
+        return sample.periodicity
+    if profile == "spiral":
+        return sample.extension_hold
+    return sample.edge_complexity
+
+
+def _physical_support_summary(
+    evidence: ActionClassificationEvidence,
+    profile: Profile,
+    policy: PhysicalConfirmationPolicy,
+) -> dict[str, Any]:
+    ordered = sorted(evidence.samples, key=lambda item: (item.pts_sec, item.source_frame_index))
+    runs: list[list[ProposalEvidenceSample]] = []
+    active: list[ProposalEvidenceSample] = []
+    for sample in ordered:
+        supported = (
+            sample.tracking_observable
+            and sample.pose_observable
+            and _physical_support(sample, profile) >= policy.minimum_support
+        )
+        contiguous = not active or sample.pts_sec - active[-1].pts_sec <= policy.maximum_support_gap_sec
+        if supported and contiguous:
+            active.append(sample)
+            continue
+        if active:
+            runs.append(active)
+        active = [sample] if supported else []
+    if active:
+        runs.append(active)
+    longest = max(
+        runs,
+        key=lambda run: (run[-1].pts_sec - run[0].pts_sec, len(run)),
+        default=[],
+    )
+    support_count = len(longest)
+    support_span = longest[-1].pts_sec - longest[0].pts_sec if longest else 0.0
+    support_ratio = support_count / len(ordered) if ordered else 0.0
+    return {
+        "profile": profile,
+        "support_feature": {
+            "jump": "ice_contact_proxy",
+            "spin": "periodicity",
+            "spiral": "extension_hold",
+            "step": "edge_complexity",
+        }[profile],
+        "support_count": support_count,
+        "support_ratio": round(support_ratio, 6),
+        "support_span_sec": round(support_span, 6),
+    }
+
+
+def _physical_confirmation_decision(
+    evidence: ActionClassificationEvidence,
+    best: ProfileContribution,
+    margin: float,
+    policy: PhysicalConfirmationPolicy,
+) -> tuple[bool, str, dict[str, Any]]:
+    support = _physical_support_summary(evidence, best.profile, policy)
+    if "unlocalized_observability_envelope" in evidence.evidence_sources:
+        return False, "proposal_unlocalized", support
+    if "sparse_observability_envelope" in evidence.evidence_sources:
+        return False, "proposal_localization_too_broad", support
+    if evidence.semantic_conflict:
+        return False, "semantic_conflict", support
+    if not evidence.identity_confirmed:
+        return False, "identity_not_confirmed", support
+    if evidence.observability != "observable" or evidence.pose_coverage < policy.minimum_pose_coverage:
+        return False, "pose_observability_insufficient", support
+    if best.score < policy.minimum_score:
+        return False, "family_score_insufficient", support
+    if margin < policy.minimum_margin:
+        return False, "family_margin_insufficient", support
+    if (
+        support["support_count"] < policy.minimum_support_count
+        or support["support_ratio"] < policy.minimum_support_ratio
+        or support["support_span_sec"] < policy.minimum_support_span_sec
+    ):
+        return False, "insufficient_temporal_persistence", support
+    return True, "physical_confirmation_satisfied", support
+
+
+def classify_action(
+    evidence: ActionClassificationEvidence,
+    *,
+    configs: Mapping[Profile, ProfileClassifierConfig] | None = None,
+    classification_confirmation_upgrade: bool = True,
+) -> ProfileClassification:
     selected_configs = dict(configs or DEFAULT_CONFIGS)
     results = tuple(classifiers(selected_configs)[profile].classify(evidence) for profile in PROFILE_KEYS)
     ranked = sorted(results, key=lambda item: (item.score, item.confidence), reverse=True)
@@ -307,6 +441,7 @@ def classify_action(evidence: ActionClassificationEvidence, *, configs: Mapping[
     coverage *= 0.55 + 0.45 * evidence.pose_coverage if evidence.pose_coverage > 0 else 0.55
     missing = bool(best.missing_evidence) and evidence.evidence_count < selected_configs[best.profile].minimum_evidence
     localization_is_broad = "sparse_observability_envelope" in evidence.evidence_sources
+    localization_is_unlocalized = "unlocalized_observability_envelope" in evidence.evidence_sources
     if evidence.observability == "unobservable" or coverage <= 0 or missing:
         state: ClassificationState = "unknown"
         profile: Profile | Literal["unknown"] = "unknown"
@@ -327,7 +462,54 @@ def classify_action(evidence: ActionClassificationEvidence, *, configs: Mapping[
         profile = best.profile
         confidence = _clamp(best.confidence * .65)
         task = f"{evidence.event_id}:confirm_action_profile"
-    fp = _hash({"classifier_fingerprints": [item.classifier_fingerprint for item in results], "definition": "profile-classification.v1"})
+    evidence_summary: dict[str, Any] = {
+        "tracking_coverage": evidence.tracking_coverage,
+        "pose_coverage": evidence.pose_coverage,
+        "observability": evidence.observability,
+        "semantic_conflict": evidence.semantic_conflict,
+        "localization_is_broad": localization_is_broad,
+        "missing": list(best.missing_evidence),
+        "contradictions": list(best.contradiction_evidence),
+        "evidence_sources": list(evidence.evidence_sources),
+    }
+    policy_applied = classification_confirmation_upgrade and "source_only_adapter" in evidence.evidence_sources
+    policy = DEFAULT_PHYSICAL_CONFIRMATION_POLICY
+    upgrade_contributed = False
+    if policy_applied:
+        eligible, decision_reason, support = _physical_confirmation_decision(evidence, best, margin, policy)
+        if localization_is_unlocalized:
+            state = "unknown"
+            profile = "unknown"
+            confidence = 0.0
+            task = f"{evidence.event_id}:provide_localized_action_evidence"
+            evidence_summary["refusal_reason"] = "proposal_unlocalized"
+        elif state == "unknown" and (
+            evidence.observability == "unobservable"
+            or evidence.tracking_coverage <= 0
+            or evidence.pose_coverage <= 0
+        ):
+            evidence_summary["refusal_reason"] = "source_evidence_unobservable"
+        elif eligible and state == "ambiguous":
+            state = "confirmed"
+            profile = best.profile
+            confidence = _clamp(best.confidence)
+            task = None
+            upgrade_contributed = True
+        evidence_summary.update({
+            "confirmation_policy": policy.version,
+            "confirmation_policy_fingerprint": policy.fingerprint,
+            "confirmation_decision_reason": decision_reason,
+            "confirmation_upgrade_contributed": upgrade_contributed,
+            "physical_support": support,
+        })
+    refusal_reason = evidence_summary.get("refusal_reason")
+    fp_payload: dict[str, Any] = {
+        "classifier_fingerprints": [item.classifier_fingerprint for item in results],
+        "definition": "profile-classification.v1",
+    }
+    if policy_applied:
+        fp_payload["confirmation_policy_fingerprint"] = policy.fingerprint
+    fp = _hash(fp_payload)
     return ProfileClassification(
         event_id=evidence.event_id,
         profile=profile,
@@ -336,17 +518,9 @@ def classify_action(evidence: ActionClassificationEvidence, *, configs: Mapping[
         margin=margin,
         subtype=_subtype(evidence, best.profile, confidence, selected_configs[best.profile]) if profile != "unknown" else SubtypeResult(confidence=0, reason="broad profile is unknown"),
         contributions=results,
-        evidence_summary={
-            "tracking_coverage": evidence.tracking_coverage,
-            "pose_coverage": evidence.pose_coverage,
-            "observability": evidence.observability,
-            "semantic_conflict": evidence.semantic_conflict,
-            "localization_is_broad": localization_is_broad,
-            "missing": list(best.missing_evidence),
-            "contradictions": list(best.contradiction_evidence),
-            "evidence_sources": list(evidence.evidence_sources),
-        },
+        evidence_summary=evidence_summary,
         confirmation_task=task,
+        refusal_reason=str(refusal_reason) if refusal_reason else None,
         classifier_fingerprint=fp,
     )
 
