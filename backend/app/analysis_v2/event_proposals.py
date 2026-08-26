@@ -12,6 +12,7 @@ from app.analysis_v2.contracts import ContractModel
 
 
 PROFILE_KEYS = ("jump", "spin", "step", "spiral")
+SOURCE_ONLY_PHYSICAL_LOCALIZATION_VERSION = "source_only_physical_localization.v2"
 
 
 class ProposalEvidenceSample(ContractModel):
@@ -134,6 +135,41 @@ def _activation(sample: ProposalEvidenceSample) -> float:
     return max(physical * 0.72, blended) if physical >= 0.12 else 0.0
 
 
+def _source_only_localization_activation(sample: ProposalEvidenceSample) -> float:
+    """Score a source-only physical co-occurrence without selecting a family.
+
+    Source-only observations have no decoder-dense semantic labels. A localized
+    proposal may still be formed when observable, identity-consistent motion
+    co-occurs with observable pose dynamics. A single weak feature is deliberately
+    not enough; the broad observation envelope remains the recall-only fallback.
+    """
+    if "source_only_adapter" not in sample.provenance:
+        return 0.0
+    motion = sample.camera_compensated_track_motion * sample.camera_reliability
+    pose = sample.pose_dynamics
+    edge = sample.edge_complexity
+    if not (
+        sample.tracking_observable
+        and sample.pose_observable
+        and motion >= 0.20
+        and pose >= 0.15
+    ):
+        return 0.0
+    return max(
+        0.16,
+        min(1.0, 0.50 * motion + 0.30 * pose + 0.20 * edge),
+    )
+
+
+def _proposal_activation(
+    sample: ProposalEvidenceSample,
+    *,
+    source_only_localization_upgrade: bool,
+) -> float:
+    upgrade = _source_only_localization_activation(sample) if source_only_localization_upgrade else 0.0
+    return max(_activation(sample), upgrade)
+
+
 def _candidate_scores(samples: Sequence[ProposalEvidenceSample]) -> dict[str, float]:
     def mean(values: Sequence[float]) -> float:
         return sum(values) / len(values) if values else 0.0
@@ -194,23 +230,48 @@ def generate_event_proposals(
     max_active_gap_sec: float = 0.32,
     distinct_valley_sec: float = 0.32,
     padding_sec: float = 0.20,
+    source_only_localization_upgrade: bool = True,
 ) -> EventProposalCollection:
     ordered = sorted(samples, key=lambda item: (item.pts_sec, item.source_frame_index))
-    active = [(item, _activation(item)) for item in ordered if _activation(item) >= activation_threshold]
-    clusters: list[list[ProposalEvidenceSample]] = []
-    for item, _ in active:
-        if not clusters or item.pts_sec - clusters[-1][-1].pts_sec > max_active_gap_sec:
+    active = []
+    for item in ordered:
+        legacy_activation = _activation(item)
+        upgraded_activation = max(
+            legacy_activation,
+            _source_only_localization_activation(item) if source_only_localization_upgrade else 0.0,
+        )
+        active.append((item, legacy_activation, upgraded_activation))
+    active = [item for item in active if item[2] >= activation_threshold]
+    clusters: list[list[tuple[ProposalEvidenceSample, float, float]]] = []
+    for item in active:
+        if not clusters or item[0].pts_sec - clusters[-1][-1][0].pts_sec > max_active_gap_sec:
             clusters.append([item])
         else:
             clusters[-1].append(item)
 
     proposals: list[EventProposal] = []
-    for cluster in clusters:
+    for active_cluster in clusters:
+        cluster = [item for item, _, _ in active_cluster]
+        legacy_active = any(legacy >= activation_threshold for _, legacy, _ in active_cluster)
+        if not legacy_active and len({(item.pts_sec, item.source_frame_index) for item in cluster}) < 2:
+            continue
         start = max(0.0, cluster[0].pts_sec - padding_sec)
         end = min(source_duration_sec, cluster[-1].pts_sec + padding_sec)
         if end - start < 0.18:
             end = min(source_duration_sec, start + 0.18)
-        proposals.append(_build_proposal(source_video_hash, cluster, start_pts=start, end_pts=end, source="multi_signal_cluster"))
+        proposal = _build_proposal(source_video_hash, cluster, start_pts=start, end_pts=end, source="multi_signal_cluster")
+        upgrade_contributed = any(
+            legacy < activation_threshold <= upgraded
+            for _, legacy, upgraded in active_cluster
+        )
+        if upgrade_contributed:
+            proposal = proposal.model_copy(update={
+                "evidence_sources": tuple(sorted({
+                    *proposal.evidence_sources,
+                    SOURCE_ONLY_PHYSICAL_LOCALIZATION_VERSION,
+                })),
+            })
+        proposals.append(proposal)
 
     # Merge genuinely overlapping evidence, but retain a measurable valley between
     # consecutive events. This prevents jump->spin from becoming one action.
@@ -221,9 +282,29 @@ def generate_event_proposals(
             continue
         previous = merged[-1]
         if proposal.start_pts <= previous.end_pts:
-            joined_samples = [item for item in ordered if previous.start_pts <= item.pts_sec <= proposal.end_pts and _activation(item) >= activation_threshold]
+            joined_samples = [
+                item
+                for item in ordered
+                if previous.start_pts <= item.pts_sec <= proposal.end_pts
+                and _proposal_activation(
+                    item,
+                    source_only_localization_upgrade=source_only_localization_upgrade,
+                ) >= activation_threshold
+            ]
             combined = _build_proposal(source_video_hash, joined_samples, start_pts=previous.start_pts, end_pts=max(previous.end_pts, proposal.end_pts), source="overlap_merge")
-            merged[-1] = combined.model_copy(update={"superseded_event_ids": (previous.event_id, proposal.event_id)})
+            combined_sources = combined.evidence_sources
+            if any(
+                SOURCE_ONLY_PHYSICAL_LOCALIZATION_VERSION in item.evidence_sources
+                for item in (previous, proposal)
+            ):
+                combined_sources = tuple(sorted({
+                    *combined_sources,
+                    SOURCE_ONLY_PHYSICAL_LOCALIZATION_VERSION,
+                }))
+            merged[-1] = combined.model_copy(update={
+                "evidence_sources": combined_sources,
+                "superseded_event_ids": (previous.event_id, proposal.event_id),
+            })
         else:
             merged.append(proposal)
 
@@ -236,6 +317,23 @@ def generate_event_proposals(
         if coverage < 0.8:
             broad = _build_proposal(source_video_hash, observable_points, start_pts=0.0, end_pts=source_duration_sec, source="sparse_observability_envelope")
             merged = [broad]
+
+    # Source-only sampling is designed for family classification evidence, not
+    # decoder-dense boundary refinement. When no localized physical cluster is
+    # observable, retain an explicit unknown proposal over the observed source
+    # timeline so proposal recall remains independent from classification and
+    # downstream profile confirmation. This is not an event boundary claim.
+    source_only = any("source_only_adapter" in item.provenance for item in ordered)
+    localized_coverage = interval_union_coverage(merged, source_duration_sec)
+    if source_only and len(observable_points) >= 2 and localized_coverage < 0.8:
+        broad = _build_proposal(
+            source_video_hash,
+            observable_points,
+            start_pts=observable_points[0].pts_sec,
+            end_pts=source_duration_sec,
+            source="unlocalized_observability_envelope",
+        )
+        merged = [broad.model_copy(update={"status": "unknown"}), *merged]
 
     return EventProposalCollection(
         source_video_hash=source_video_hash,

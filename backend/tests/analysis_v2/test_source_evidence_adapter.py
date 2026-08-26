@@ -144,8 +144,13 @@ def _proposal(bundle) -> EventProposal:
         samples=bundle.proposal_samples,
         pipeline_fingerprint="source-only-test.v1",
     )
-    assert collection.proposals
-    return max(collection.proposals, key=lambda item: item.end_pts - item.start_pts)
+    localized = [
+        item
+        for item in collection.proposals
+        if "unlocalized_observability_envelope" not in item.evidence_sources
+    ]
+    assert localized
+    return max(localized, key=lambda item: item.end_pts - item.start_pts)
 
 
 def test_pose_left_right_flips_without_crop_agreement_do_not_create_spin_evidence(tmp_path: Path) -> None:
@@ -162,7 +167,11 @@ def test_pose_left_right_flips_without_crop_agreement_do_not_create_spin_evidenc
 
     assert max(sample.periodicity for sample in bundle.proposal_samples) == 0
     assert max((sample.rotation_periodicity or 0) for sample in bundle.moment_samples) == 0
-    assert not collection.proposals
+    assert not [
+        item
+        for item in collection.proposals
+        if "unlocalized_observability_envelope" not in item.evidence_sources
+    ]
     assert "rotation_consensus_absent" in bundle.warnings
 
 
@@ -248,7 +257,12 @@ def test_dense_source_timeline_does_not_pad_a_short_motion_change_into_a_broad_e
         pipeline_fingerprint="source-only-test.v1",
     )
 
-    assert all(proposal.end_pts - proposal.start_pts < .6 for proposal in collection.proposals)
+    localized = [
+        item
+        for item in collection.proposals
+        if "unlocalized_observability_envelope" not in item.evidence_sources
+    ]
+    assert all(proposal.end_pts - proposal.start_pts < .6 for proposal in localized)
 
 
 def test_arm_span_without_a_raised_extended_leg_is_not_spiral_evidence(tmp_path: Path) -> None:
