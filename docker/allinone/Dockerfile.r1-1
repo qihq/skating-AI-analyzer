@@ -1,0 +1,9 @@
+# R1.1 reuses the sealed, verified complete R1 application layers offline.
+# The release builder verifies the local base identity before building.
+FROM skating-analyzer-v2:trial-20261015-r1-09ea06e4
+ARG TRIAL_VERSION
+ARG SOURCE_MANIFEST_SHA256
+ENV SKATING_TRIAL_VERSION=${TRIAL_VERSION}
+LABEL org.skating.release="R1.1" org.skating.source-manifest-sha256=${SOURCE_MANIFEST_SHA256}
+COPY backend/app /workspace/backend/app
+RUN python -m compileall -q /workspace/backend/app && pip check

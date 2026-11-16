@@ -1,1 +1,1 @@
-"""Application package."""
+"""Skating Analyzer backend package."""

@@ -1,0 +1,21 @@
+# R0: required web/import dependencies only; no analysis models or inference runtime.
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+httpx==0.28.0
+openai==1.57.0
+dashscope==1.20.14
+pydantic==2.10.3
+python-dotenv==1.0.1
+aiofiles==24.1.0
+cryptography==44.0.1
+bcrypt==4.2.1
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+apscheduler==3.10.4
+reportlab==4.2.5
+pypdf==5.1.0
+pdfplumber==0.11.4
+Pillow==10.4.0

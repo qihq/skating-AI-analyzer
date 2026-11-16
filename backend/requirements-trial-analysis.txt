@@ -1,0 +1,7 @@
+-r requirements.txt
+# Keep MediaPipe 0.10.14 on the NumPy 1 ABI and bundled solutions models.
+jax==0.4.30
+jaxlib==0.4.30
+protobuf==4.25.8
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84

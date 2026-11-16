@@ -204,24 +204,7 @@ def _build_preview(target_lock: Any, *, video_name: str, frame_paths: list[Path]
 
 
 def _build_target_lock_payload(target_lock: Any, preview: Any) -> dict[str, Any]:
-    payload = target_lock.build_target_lock_payload(preview)
-    if isinstance(payload.get("selected_bbox"), dict):
-        return payload
-
-    candidates = [item for item in getattr(preview, "candidates", []) if isinstance(item, dict)]
-    selected = None
-    auto_id = getattr(preview, "auto_candidate_id", None)
-    if auto_id:
-        selected = next((item for item in candidates if _candidate_id(item) == str(auto_id)), None)
-    if selected is None and candidates:
-        selected = candidates[0]
-    if selected is not None:
-        try:
-            return target_lock.build_target_lock_payload(preview, selected_candidate=selected, manual=True)
-        except TypeError:
-            payload["selected_bbox"] = selected.get("bbox")
-            payload["selected_candidate_id"] = selected.get("id")
-    return payload
+    return target_lock.build_target_lock_payload(preview)
 
 
 def _track_bboxes(person_tracker: Any, frame_paths: list[Path], target_payload: dict[str, Any], effective_fps: float) -> tuple[list[dict[str, float]] | None, list[str], list[dict[str, Any]]]:
@@ -235,6 +218,7 @@ def _track_bboxes(person_tracker: Any, frame_paths: list[Path], target_payload: 
             selected_bbox,
             initial_frame_index=anchor_index,
             effective_fps=effective_fps,
+            manual_lock_mode=bool(target_payload.get("manual_override")),
         )
         return tracked, list(flags), list(diagnostics)
     except Exception as exc:
@@ -363,7 +347,12 @@ def _failure_notes(pose_data: dict[str, Any], tracker_diagnostics: list[dict[str
     return notes
 
 
-async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, Any]) -> dict[str, Any]:
+async def _analyze_one(
+    video_path: Path,
+    output_dir: Path,
+    modules: dict[str, Any],
+    identity_anchors: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     video_id = video_path.stem
     work_dir = output_dir / "work" / video_id
     frames_dir = work_dir / "frames"
@@ -396,6 +385,7 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
             None,
             profile_agnostic_scan=True,
         )
+        source_hash = _sha256_file(video_path)
         candidates = _target_candidates(
             person_tracker=person_tracker,
             target_lock=target_lock,
@@ -411,7 +401,15 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
             candidates=candidates,
             analysis_profile=None,
         )
-        target_payload = _build_target_lock_payload(target_lock, preview)
+        anchor = (identity_anchors or {}).get(source_hash)
+        if anchor is not None:
+            target_payload = modules["identity_anchor"].target_lock_payload_from_parent_anchor(
+                anchor,
+                _frame_names(frame_paths),
+                motion_scores.get("selected", []) if isinstance(motion_scores, dict) else [],
+            )
+        else:
+            target_payload = _build_target_lock_payload(target_lock, preview)
         bbox_per_frame, tracker_flags, tracker_diagnostics = _track_bboxes(
             person_tracker,
             frame_paths,
@@ -435,7 +433,6 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
             pose_data,
             motion_scores,
         )
-        source_hash = _sha256_file(video_path)
         source_inputs = {
             "frame_paths": frame_paths,
             "sampling": sampling,
@@ -453,6 +450,21 @@ async def _analyze_one(video_path: Path, output_dir: Path, modules: dict[str, An
         )
         proposal_rows: list[dict[str, Any]] = []
         for proposal in proposal_collection.proposals:
+            is_unlocalized_fallback = "unlocalized_observability_envelope" in proposal.evidence_sources
+            if is_unlocalized_fallback:
+                proposal_rows.append({
+                    "proposal": proposal.model_dump(mode="json"),
+                    "classification_evidence": None,
+                    "classification": {
+                        "profile": "unknown",
+                        "state": "unknown",
+                        "confidence": 0.0,
+                        "margin": 0.0,
+                        "semantic_labels_consumed": False,
+                    },
+                    "moments": {"moments": [], "semantic_labels_consumed": False},
+                })
+                continue
             classification_evidence = source_evidence_adapter.build_action_classification_evidence(source_evidence, proposal)
             classification = action_classification.classify_action(classification_evidence)
             moment_profile = classification.profile if classification.profile in {"jump", "spin", "step", "spiral"} else "step"
@@ -713,6 +725,17 @@ async def _main() -> int:
         help="Analyze only videos whose file name matches one of these exact names. Can be passed multiple times.",
     )
     parser.add_argument("--compare", type=Path, default=None, help="Optional baseline JSON to compare against.")
+    parser.add_argument(
+        "--identity-anchors",
+        type=Path,
+        default=None,
+        help="Optional private parent-confirmed identity-anchor manifest for non-tracking diagnostic masks.",
+    )
+    parser.add_argument(
+        "--redact-progress",
+        action="store_true",
+        help="Print only ordinal source aliases while preserving private names in the private output artifact.",
+    )
     args = parser.parse_args()
 
     repo = _repo_root(args.repo)
@@ -722,7 +745,7 @@ async def _main() -> int:
     _install_backend(repo, model_root)
 
     from app.analysis_v2 import action_classification, event_proposals, profile_moments
-    from app.analysis_v2.evaluation import source_evidence_adapter
+    from app.analysis_v2.evaluation import identity_anchor, source_evidence_adapter
     from app.services import action_profiles, biomechanics, person_tracker, pose, target_lock, video
 
     modules = {
@@ -736,7 +759,11 @@ async def _main() -> int:
         "event_proposals": event_proposals,
         "profile_moments": profile_moments,
         "source_evidence_adapter": source_evidence_adapter,
+        "identity_anchor": identity_anchor,
     }
+    identity_anchors = None
+    if args.identity_anchors is not None:
+        identity_anchors = identity_anchor.load_parent_identity_anchor_manifest(args.identity_anchors.resolve()).by_source()
 
     only_names = {str(name).strip() for name in args.only if str(name).strip()}
     video_paths = sorted(path for path in args.video_dir.iterdir() if path.suffix.lower() in VIDEO_SUFFIXES)
@@ -749,8 +776,9 @@ async def _main() -> int:
         video_paths = video_paths[: args.limit]
     results: list[dict[str, Any]] = []
     for index, video_path in enumerate(video_paths, start=1):
-        print(f"[{index}/{len(video_paths)}] {video_path.name}", flush=True)
-        results.append(await _analyze_one(video_path, output_dir / args.label, modules))
+        progress_name = f"source-{index:03d}" if args.redact_progress else video_path.name
+        print(f"[{index}/{len(video_paths)}] {progress_name}", flush=True)
+        results.append(await _analyze_one(video_path, output_dir / args.label, modules, identity_anchors))
 
     payload = {
         "label": args.label,
