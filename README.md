@@ -1,100 +1,185 @@
-# Skating Analyzer
+# Skating Analyzer — V2
 
-AI-powered figure skating training analysis system built with React, FastAPI, MediaPipe, YOLO/ByteTrack, and Docker.
+**English** | [中文](./README.zh.md)
 
-[Chinese README](./README.zh.md) | [Contributing](./CONTRIBUTING.md) | [License](./LICENSE) | [Screenshot Guide](./SCREENSHOT_GUIDE.md)
+An evidence-first figure-skating analysis pipeline built with FastAPI, React, MediaPipe,
+YOLO/ByteTrack and Docker. V2 runs **in shadow alongside** the stable `v5.2.x` pipeline:
+the legacy pipeline remains the public authority, while V2 builds its own versioned,
+rebuildable evidence artifacts and compares them against a frozen evaluation baseline.
 
-## Overview
+[Contributing](./CONTRIBUTING.md) | [License](./LICENSE) | [Synology deployment guide](./SYNOLOGY_STEP_BY_STEP.md) | [Golden A/B runbook](./docs/golden-eval-ab-runbook.md)
 
-Skating Analyzer helps skaters, parents, and coaches review training videos with a repeatable analysis pipeline. The app uploads a video, samples motion frames, locks onto the target skater, runs pose and person tracking, resolves takeoff/apex/landing moments, calls AI vision models when configured, and turns the results into reports, plans, archives, and progress views.
+---
 
-The current pipeline version is `v5.2.320`.
+## What this branch is
 
-## Modern Animal Island UI
+The `v2` branch contains the V2 analysis pipeline and its tooling. It does **not** replace
+the `v5.2.x` product pipeline — both live in the same repository and share the same
+database, models and Docker packaging.
 
-The app now includes an optional **Animal Island-inspired modern interface** for family use. The classic interface remains available and unchanged; switch between the two from the top bar at any time.
+| | Legacy (`v5.2.x`) | V2 |
+|---|---|---|
+| Public authority | yes — every user-visible report | no — `public_authority = "legacy"` |
+| Writes user data | yes | no — `writes_user_data = false` |
+| Output | reports, plans, archives | versioned JSON artifacts under an isolated runtime |
+| Runtime | normal application runtime | isolated shadow runtime, bounded local queue |
+| Purpose | shipped product | measurable pipeline that can be gated on evidence |
 
-- **Four clear spaces**: Today Island (`/home`), Start Review / Rink Cabin (`/review`), Growth Islands (`/growth`), and Resident Services (`/me`). Previously scattered screens are grouped into these destinations without breaking legacy URLs.
-- **Unified review workspace**: Report summary, key moments, body and pose, follow-up questions, and diagnostics are sections of one analysis detail page. Legacy workspace `tab` links map to the matching modern section.
-- **Responsive by design**: Phone PWA uses a safe-area-aware dock fixed to the viewport bottom; iPad portrait keeps the dock and uses a two-column canvas; iPad landscape and desktop use a persistent left rail. Only the current destination is highlighted, including Start Review.
-- **Family-friendly atmosphere**: Automatic morning, daytime, sunset, and night themes can be pinned manually. The scene uses Animal Island grass texture, sea, and tree-line artwork with time-aware colour treatment; night mode uses dedicated high-contrast chrome text. Child and parent modes share the same layout while adjusting copy, density, and protected tools.
-- **Refined navigation assets**: The four primary destinations use adapted Animal Island map, camera, miles, and design icons. The review action stays neutral outside the review workspace and becomes sun-yellow only when active.
-- **PWA support**: The production build registers a same-origin service worker, includes an installable manifest, and provides navigation fallback when the shell is cached. API and write requests are not cached.
-- **Integrated growth tools**: Training plans and comparisons now open through dedicated hubs, so routes without IDs no longer lead to invalid-parameter dead ends.
-- **Animal Island dialogs and sharing**: Parent PIN prompts, milestone cards, plans, comparisons, monthly stories, and annual collections use the same responsive island dialog language. Long-form posters grow with their content; annual collections pair a compact cover card with the full PDF download.
-- **Complete annual PDF runtime**: The all-in-one image includes pinned `reportlab` and `pypdf` dependencies, and missing runtime modules are reported explicitly if an incomplete deployment is detected.
+Switching pipelines is a configuration change, not a fork:
 
-The natural palette, rounded cards, and navigation language are adapted from [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui), licensed under CC BY-NC 4.0. This adaptation is for personal, non-commercial use and retains attribution.
+```env
+SKATING_ANALYSIS_PIPELINE=legacy   # legacy | shadow | v2
+```
 
-## Recent Updates (P0 — P2)
+## Design principles
 
-The current release ships three major tracks: **P0 Growth Home**, **P1 Monthly Story & Sharing**, and **P2 Annual & Event Timeline**, plus golden evaluation tooling, person tracker improvements, and an OpenCode API compatibility fix.
+These are enforced in code, not just documented.
 
-### P0 — Growth Home Dashboard
+- **Stage order is a contract.** A stage may only consume artifacts from stages to its
+  left. Invalidating one stage invalidates every descendant, so a stale cache can never
+  silently feed a downstream claim.
+- **Nothing is mutated in place.** The completed legacy analysis is passed *into* a shadow
+  run as an immutable input. A shadow run is a rebuildable, versioned JSON artifact.
+- **Evidence before conclusions.** Reports are only allowed to explain claims that were
+  already fused from cited evidence; a claim that cannot cite its inputs cannot be printed.
+- **Refusal is a valid result.** Rotation, identity and moment estimators return an explicit
+  refusal or an insufficiency flag instead of an unqualified number.
+- **Fail closed.** Trial gates, runtime preflight and the contamination sentinel deny by
+  default when their preconditions are not met.
 
-A parent-facing growth dashboard that gives a panoramic view of a skater's training history:
+## Pipeline
 
-- **Growth Summary API**: Aggregates lesson count, completed analyses, current-month analysis count, milestone totals, latest analysis with training focus, and KPI trend data — all consumed by the frontend dashboard.
-- **GrowthKpiBar**: Radar-style KPI strip showing Force Score trends, session counts, completed analyses, and milestone totals at a glance.
-- **MilestoneTimeline**: Chronological milestone list with system-detected / parent-confirmed / coach-confirmed verification badges, unlock timestamps, and source analysis links.
-- **ActionPhaseStrip**: Profile-aware keyframe phase display — shows jump T/A/L, spin entry/main/exit, spiral hold, or step sequence coverage frames depending on the analysis profile, with optional video playback.
-- **Growth Home Page** (`/home`): Unified dashboard combining KPIs, latest analysis summary, current focus, next action, action phase strip, milestone timeline, and navigation links to all growth tools.
+Stage order is defined once in `SHADOW_STAGE_ORDER` and is part of the contract:
 
-### P1 — Monthly Story & Sharing
+```
+timebase → observations → candidates → identity → pose → events → moments → rotation → path_reviews → claims
+```
 
-Reviewable monthly growth chapters with family highlight quotes and milestone share cards:
+| Stage | What it establishes | Key modules |
+|---|---|---|
+| `timebase` | exact source PTS mapping between requested time, decoded frames and media | `timebase.py` |
+| `observations` | bounded decoded observation stream, preserved holes and discontinuities | `detection.py`, `pose_observations.py` |
+| `candidates` | person-track candidates with qualification and exclusion rules | `detection.py`, `tracking_states.py` |
+| `identity` | identity timeline, conflict intervals, manual anchors and segment re-anchoring | `identity.py`, `evaluation/identity_anchor.py`, `services/segment_reanchor.py` |
+| `pose` | identity-authorized pose samples with per-point quality | `pose_v2.py`, `services/pose_quality.py`, `services/pose_geometry.py` |
+| `events` | profile-scoped event proposals and revisioned action-label facts | `event_proposals.py`, `event_label_facts.py`, `action_classification.py` |
+| `moments` | revisioned, event-scoped takeoff / apex / landing proposals | `profile_moments.py`, `moment_selectors.py`, `event_moment_facts.py` |
+| `rotation` | conservative multi-cue projected-turn estimates on exact source PTS | `rotation.py`, `rotation_facts.py`, `services/jump_rotation.py` |
+| `path_reviews` | bounded semantic-review adapters over the legacy vision payloads | `path_review.py`, `fusion_inputs.py` |
+| `claims` | deterministic claim fusion and the report boundary that explains it | `claim_fusion.py`, `claim_report.py`, `facts.py` |
 
-- **Family Highlight Quotes**: Optional quote + speaker (skater/parent/coach) fields on the review upload form — `highlight_quote` (max 280 chars) and `quote_speaker`. Persisted on `Analysis` and surfaced in detail views and monthly fact snapshots.
-- **Monthly Facts Engine** (`monthly_facts.py`): Deterministic fact aggregation per skater/month — session counts, comparable jump metrics (before/after values, sample count, source analysis IDs), milestone unlocks within the month, recurring observations from report issue categories, training focus tracking, and verbatim quote preservation. All facts ordered deterministically. Quality flags such as `insufficient_comparable_evidence` are set when no reliable trend exists. Up to four representative frame references are selected from milestone-linked or good-quality analyses.
-- **Structured Chapter Generation** (`monthly_chapters.py`): Calls the active `report` provider with a deterministic fact snapshot and structured JSON schema. Validates that every highlight references existing fact IDs, the quote text is copied verbatim, the narrative stays under 1600 characters, and forbidden claim phrases (injury, fear, fatigue diagnosis, level prediction, coaching confirmation) are absent unless the exact phrase appears in a supplied fact. Provider failure preserves the `facts_ready` revision — the snapshot is never deleted.
-- **Growth API** (`/api/growth`): Six endpoints — `POST facts`, `POST generate`, `GET list`, `GET by ID`, `PATCH final_text`, `POST publish`. Published revisions are immutable; regeneration creates the next revision.
-- **Monthly Chapters UI** (`/chapters`): Skater/month selectors, explicit flow buttons (Gather Facts → Generate → Edit → Publish), revision history selector, MonthlyFactPreview grouping facts by count/metric/milestone/observation/quote with source/quality badges, and MonthlyChapterEditor with separate AI-draft and parent-editable final text, character counter, and publish confirmation dialog.
-- **Milestone Share Cards** (`milestoneShareCanvas.ts`): 1080×1350 JPEG share image generator with title, date, skater name, verification badge, note quote, optional metric panel, and optional keyframe image. Gradient-themed design; falls back to "no frame" panel when the image is absent. Download, copy-to-clipboard, and native share buttons on each milestone in the timeline.
+Everything downstream of `claims` — presentation and the analysis experience — is a
+consumer, not a producer: `presentation.py`, `fact_consumers.py`, `comparison.py`.
 
-### P2 — Annual & Event Timeline
+### Analysis experience (`analysis-experience.v2`)
 
-Year-end growth collections that compile monthly chapters into a downloadable PDF:
+The V2 user-facing surface is a structured, versioned payload rather than free-form prose:
+a summary, a body of sections, a "more" area and a report view. It is served by
+`GET /api/analysis-v2/{analysis_id}/experience-v2` and rendered by the
+`frontend/src/analysis-v2/` components. Capability discovery reports which experiences a
+deployment supports, so the UI degrades instead of guessing.
 
-- **Annual Collections API** (`/api/annual`): Preview a collection (snapshot of selected chapters + milestones), create a collection with source hash for reproducibility, list collections per skater/year, and list annual milestones with cover-ready metadata.
-- **Annual PDF Export** (`annual_pdf.py`): ReportLab-generated A4 PDF with cover page, table of contents, monthly chapter narratives, milestone timeline, and representative frame images. Background export via `BackgroundTasks` with status tracking (`pending` → `processing` → `completed`/`failed`).
-- **Resumable Exports**: Incomplete exports from a crashed/restarted server are automatically recovered on startup. Resumed exports track `resumed_at` timestamps and keep the original `created_at` for ordering.
-- **Annual Collections UI** (`/annual`): Multi-step page — pick chapters from published monthly chapters, select milestones, preview the collection, and trigger PDF export. Shows live export status with progress, success/failure states, and download link. Entry link "制作年度合集" on Growth Home appears only when published chapters exist.
+## Repository layout
 
-### Infrastructure & Tooling
+```
+backend/app/analysis_v2/     V2 pipeline: contracts, stages, orchestration, presentation
+backend/app/analysis_v2/evaluation/
+                             golden store, gate policy, G2/G8/G9 evaluators, adapters
+backend/app/services/        shared services, including V2 tracking / pose / jump helpers
+backend/app/trial.py         fail-closed trial gates (see "Trial mode")
+backend/app/routers/         analysis_v2.py, segment_reanchor.py and the legacy routers
+frontend/src/analysis-v2/    analysis experience, golden workspace, shadow workspace
+frontend/src/components/     V2 panels: jump stage replay, rotation, segment re-anchor, trial
+docker/allinone/             all-in-one images (standard, analysis, trial)
+docs/                        architecture notes, evaluation runbook, plans and specs
+scripts/                     release, verification and model-provenance tooling
+```
 
-- **Follow-up keyframe review**: The correction keyframe preview in the follow-up chat now includes T/A/L quick-jump buttons that open a full-screen modal video player with keyframe preview image, loading indicator, and Escape-to-close. The growth dashboard action-phase video player replaces native browser controls with a custom play/pause button, draggable seek bar, real-time time display, and auto-preload with poster image. The comparison page syncs video playback with a ready-state gate for smoother synchronized seeking.
-- **MiMo/OpenCode API fix**: Removed the redundant `api-key` header from MiMo chat completion requests. OpenCode's new `sk-` format keys rejected the dual-header (`api-key` + `Authorization: Bearer`) auth pattern that the old base64-format keys tolerated. Added diagnostic logging showing active provider ID, type, base URL, model, and decrypted key prefix.
-- **Golden eval tooling**: Added `golden_overrides.py` for per-sample override logic, `diff_baselines.py` for comparing eval runs, corresponding test suites, and a `golden-eval-ab-runbook.md` documenting the A/B evaluation workflow.
-- **Person tracker**: Improved target relock decision logic, added self-heal recovery for manual-lock lost targets, and expanded test coverage for relock scenarios.
-- **Keyframe candidates**: Enhanced arbitration diagnostics and vertical extrema confidence thresholds.
-- **Debug page**: Golden label anchors now capture tracking anchor metadata (bbox, timestamp, frame ID), action window boundaries, and revision tracking for finer-grained labeling.
+## API surface
 
-## Version History
+V2 routes are mounted on three prefixes: `/api/analysis` (analysis experience and
+revisioned facts), `/api/shadow` (shadow orchestration runs) and `/api/golden/v2`
+(golden evaluation). Runtime capabilities are reported by `/api/capabilities`.
 
-- `v5.2.320`: Consolidated the prompt contract so Path A consumes only its intended video and pose evidence, with consistent structured output and repair handling across vision calls. Full reanalysis requested from follow-up now resets the target lock and bypasses same-video historical T/A/L reuse, while clearly noting that identical source evidence can still yield the same result. Manual AI input windows are available as soon as a video is selected even when browser duration metadata is unavailable; the latest-plan Continue Training arrow is constrained to its intended size. MiMo/OpenCode requests use Bearer authentication only, and backend parallel-test dependencies are documented. Added follow-up T/A/L keyframe quick-jump review with full-screen modal player, keyframe preview image, and Escape-to-close; replaced native browser video controls in the growth dashboard action-phase strip with a custom play/pause button, draggable seek bar, auto-preload, poster image, and real-time time display; hardened compare-page synchronized playback with a video ready-state gate.
-- `v5.2.319`: P0 Growth Home dashboard with KPI radar, milestone timeline, skill evolution, and profile-aware action phases; P1 monthly growth chapters with highlight quotes, deterministic facts, structured generation, chapter workspace, and milestone share cards; P2 annual collections with chapter/milestone picker, preview, background PDF export, resume-on-restart, and download; removed redundant `api-key` header for MiMo/OpenCode compatibility; added golden overrides, diff baselines, and A/B eval runbook; improved person tracker relock and self-heal logic; enhanced keyframe arbitration diagnostics; debug golden labels capture tracking anchors and action window bounds.
-- `v5.2.318`: Applied action-label and keyframe correction cards are persisted back into `analyses`, legacy applied corrections are backfilled at startup, and the report/follow-up chat workspaces refresh their current analysis detail before showing correction success.
-- `v5.2.315`: Exported all-in-one Docker image from `codex/face-identity-target-lock` with face identity model layer, skater face profile API, target diagnostics, parent UI, and profile deletion.
-- `v5.2.313`: Completed archive/progress records now link straight into `/golden?analysis_id=...`; the Golden workspace preselects URL-requested analyses without forcing an unrelated debug run.
-- `v5.2.308`: Mobile target bbox selection supports pinch zoom/pan/reset; manual action windows trigger denser sampling and padded jump coverage; keyframe evidence adapts to jump/spin/step/spiral profiles; subscores are normalized with source labels and compare fallbacks; report/progress share cards add comments and subscore bars while follow-up sharing uses a short multi-turn timeline.
-- `v5.2.307`: Comparison generation is persisted in `analysis_comparisons` background tasks; full source videos go only through the active `vision` model while the `report` provider summarizes structured JSON text; comparison result history, retry, sharing, mobile-muted synchronized playback, and training-plan fallbacks were hardened.
-- `v5.2.306`: Follow-up chat detects multiple questions in user notes and answers each explicitly; training plan generation uses child-safe low-impact prompts with strict JSON schema; archive page adds aggregate API for parent mode, clickable calendar day detail modal, and jump-to-latest-month navigation.
-- `v5.2.305`: Follow-up can run a video-AI-only full-source keyframe rerun that produces a proposed keyframes correction card without resetting target lock, rerunning pose/biomechanics, or overwriting reports.
-- `v5.2.304`: Follow-up chat can queue full-video reanalysis with target-lock reset; retry confirmations explain when the skater lock will be rebuilt; report/chat share images resize for long text while exporting compressed JPEGs.
-- `v5.2.303`: Review uploads no longer require a precise action subtype or skill node; "unknown / broad category only" is accepted, and user comments are passed into video-temporal action recognition.
-- `v5.2.11`: Videos use full-context AI input by default; optional manual start/end windows are supported in review and debug flows; Path A consumes the generated AI clip.
-- `v5.2.10`: Startup no longer seeds AI provider rows; configure model instances from `/settings/api`.
-- `v5.2.9`: Path A requests stricter JSON, recovers malformed model output, retries a JSON-only repair pass, and reports fall back to Path B/top-issue evidence with action-specific drills.
-- `v5.2.8`: Reused lost tracker boxes can be used as padded pose crop hints for distant tiny skaters.
+All routes in this table are under `/api/analysis`.
 
-Earlier versions (v5.2.1 through v5.2.7) focused on tracker stability, pose smoothing, keyframe confidence, and pipeline robustness. See [git log](https://github.com/qihq/skating-AI-analyzer/commits/master) for the full history.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/{analysis_id}/experience-v2` | versioned analysis experience payload |
+| GET | `/{analysis_id}/experience-v2/diagnostic` | diagnostic view of the same experience |
+| POST | `/growth-admission` | decide whether an analysis may enter growth records |
+| GET | `/{analysis_id}/event-proposals` | profile-scoped event proposals |
+| POST | `/{analysis_id}/event-proposals/mutate` | revise an event proposal |
+| GET/POST | `/{analysis_id}/events/{event_id}/label-facts` | read / propose action-label facts |
+| POST | `/{analysis_id}/events/{event_id}/label-facts/{revision}/apply` | apply a label revision |
+| POST | `/{analysis_id}/events/{event_id}/label-facts/{revision}/dismiss` | dismiss a label revision |
+| GET/POST | `/{analysis_id}/events/{event_id}/moment-proposals` | read / propose T/A/L moments |
+| POST | `/{analysis_id}/events/{event_id}/moment-proposals/{revision}/apply` | apply a moment revision |
+| POST | `/{analysis_id}/events/{event_id}/moment-proposals/{revision}/dismiss` | dismiss a moment revision |
+| GET | `/{analysis_id}/source-frames/{index}/image` | source frame image bound to an observation |
+| GET | `/{analysis_id}/observations` | decoded observation stream |
+| GET | `/{analysis_id}/identity` | identity timeline and conflict intervals |
+| GET | `/{analysis_id}/pose-v2/detail` | pose samples with quality metadata |
+| POST | `/{analysis_id}/identity/anchors/preview` | preview a manual identity anchor |
+| POST | `/{analysis_id}/identity/anchors/confirm` | confirm an identity anchor |
+| GET | `/pilot12-detection`, `/pilot12-event-proposals`, `/pilot14-action-classification` | frozen pilot evaluation inputs |
 
-## Architecture
+Manual segment re-anchoring is nested under the same prefix:
 
-- **Backend**: FastAPI + SQLAlchemy + SQLite (async), with Pydantic contracts, idempotent additive migrations, background analysis tasks, AI provider abstraction layer, and retry/fallback logic.
-- **Frontend**: React 18 + TypeScript + Tailwind + Recharts, with Canvas-based share image generation, responsive layout (phone/tablet/desktop), and child/parent mode routing.
-- **Analysis Pipeline**: Video precheck → frame extraction → target selection → YOLO/ByteTrack tracking → MediaPipe pose → biomechanics → semantic keyframe resolution → dual-path vision analysis (Path A/B) → AI report → skill unlock → training plan.
-- **AI Provider Layer**: Slot-based active provider selection (`vision`, `report`), OpenAI-compatible, Claude-compatible, and MiMo backends, with encryption-at-rest for API keys.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/{analysis_id}/identity/segments` | saved-evidence segment candidates |
+| GET | `/{analysis_id}/identity/segments/images/{observation_index}` | candidate image |
+| POST | `/{analysis_id}/identity/segments/preview` | preview a re-anchored segment |
+| POST | `/{analysis_id}/identity/segments/confirm` | confirm a re-anchored segment |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}` | read a saved revision |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}/pose` | pose for that revision |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}/images/{filename}` | images for that revision |
+
+Re-anchoring works from **saved evidence only**. It never re-runs the detector, never
+restores deleted media and never fabricates a segment that the saved observations cannot
+support.
+
+Shadow orchestration runs are exposed under `/api/shadow`, and the golden store,
+evaluator status and G2 baseline under `/api/golden/v2`.
+
+## Golden evaluation
+
+V2 is only useful if it can be measured, so evaluation is a first-class subsystem rather
+than a test fixture.
+
+- **Frozen golden store** (`evaluation/golden_store.py`, `golden_schema.py`) — versioned
+  labelled samples with source media identity and content hashes.
+- **Gate policy** (`evaluation/gate_policy.py`) — `golden-gate-policy.v2` defines the
+  thresholds and tolerances that a candidate must clear. Policies are versioned so a
+  result can always be attributed to the policy that judged it.
+- **Metric families** — `g2_baseline.py` (baseline regression), `g8_moments.py`
+  (leakage-safe moment aggregation) and `g9_rotation.py` (convention-safe, refusal-aware
+  rotation scoring).
+- **Pilot evaluator** (`evaluation/pilot_evaluator.py`) with adapters that build proposals
+  from source observations only, so the evaluator cannot see resolved labels.
+
+The workflow is documented in [docs/golden-eval-ab-runbook.md](./docs/golden-eval-ab-runbook.md).
+
+## Trial mode
+
+`backend/app/trial.py` implements fail-closed gates for isolated trial deployments. A
+profile can be baked into an image (`/etc/skating-trial-profile`) so it cannot be changed
+at runtime by an environment variable:
+
+| Profile | Behaviour |
+|---|---|
+| `off` | normal install; every feature available |
+| `web-preview` | read-only preview; video upload and analysis are disabled |
+| `legacy-analysis-preview` | existing legacy local analysis only; new diagnostics, shadow, controlled evaluation and external AI are all disabled |
+
+`docker/allinone/Dockerfile.trial` builds the trial image with pinned, hash-locked
+requirements (`requirements-trial-web.lock`, `requirements-trial-analysis.lock`), so a
+trial install cannot silently resolve different dependency versions.
+
+Trial deployments report `target_nas_verified=false` and `new_diagnostics=false` in their
+capabilities payload until someone actually verifies them on the target hardware. The
+system does not infer verification from a successful build.
 
 ## Deployment
 
@@ -116,11 +201,16 @@ docker run -d \
 docker compose up -d
 ```
 
-The `.env` file should contain at minimum:
+`.env` needs at minimum:
 
 ```env
 SECRET_KEY=your-random-secret
 ```
+
+See [.env.example](./.env.example) for the full set and [.env.v2.example](./.env.v2.example)
+for the isolated V2 development layout. Never point the V2 paths at production data.
+
+The Synology step-by-step guide is [SYNOLOGY_STEP_BY_STEP.md](./SYNOLOGY_STEP_BY_STEP.md).
 
 ## Development
 
@@ -136,18 +226,37 @@ npm install
 npm run dev
 ```
 
-### Running Tests
+To run V2 in isolation, copy `.env.v2.example` to `.env.v2.local`, point every path at a
+separate runtime directory, and set `SKATING_ANALYSIS_PIPELINE=shadow`.
+
+## Testing
 
 ```bash
-# Backend
+# Backend — 192 test modules, 55 of them in tests/analysis_v2/
 cd backend
 pip install -r requirements-test.txt
 python -m pytest tests -q -n 4 --dist loadfile
 
-# Frontend
-cd frontend && npm test
+# Frontend — 76 test modules (Vitest)
+cd frontend
+npm test
 ```
+
+## Privacy and data handling
+
+- Uploaded videos, extracted frames, databases and backups are runtime data and are never
+  committed. `.gitignore` excludes `data/`, `backups/`, `models/`, `deliverables/`, `*.pt`
+  and image archives.
+- API keys are stored encrypted at rest and are never written to logs in full.
+- V2 shadow runs write only inside their own isolated runtime directory. The contamination
+  sentinel (`contamination_inventory.py`) snapshots family state before and after a run so
+  an unintended write is detected rather than assumed absent.
+- This repository contains no family media, no real training videos and no personal data.
 
 ## License
 
-MIT License. See [LICENSE](./LICENSE) for details.
+MIT License — see [LICENSE](./LICENSE).
+
+The optional Animal Island-inspired interface is adapted from
+[guokaigdg/animal-island-ui](https:/github.com/guokaigdg/animal-island-ui) under
+CC BY-NC 4.0, for personal non-commercial use, with attribution retained.

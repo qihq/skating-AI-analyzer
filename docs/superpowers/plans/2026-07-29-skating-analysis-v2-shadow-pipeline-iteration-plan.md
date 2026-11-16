@@ -1,5 +1,9 @@
 # Skating Analyzer V2 Full-System Shadow Rebuild Iteration Plan
 
+> **执行状态（2026-09-08）：历史计划，暂停按原顺序执行。** 当前执行入口是 `docs/superpowers/plans/2026-09-08-v2-v3-evolution-roadmap.md`。本文件的设计约束、已完成记录和证据路径保留；未完成 checkbox 不再自动代表当前任务。任何恢复、替换或放弃本计划的决定，必须先写入新路线图并保留原因。
+>
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps in the 2026-08-15 amendment use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the complete V2 Shadow pipeline while applying the approved `golden-gate-policy.v2` thresholds: G1 at 18 videos and 18 valid events, G2 at 24-30 events, Pose at 24-40 representative frames, and separately reported subtypes at a minimum of 4 samples with a target of 6.
@@ -63,7 +67,7 @@ Deliver an identity-safe, timestamp-correct V2 skating-analysis pipeline for mai
 The following actions happen only when implementation begins, not while reviewing this plan.
 
 1. Create a dedicated branch from the approved main commit, suggested name `codex/skating-analysis-v2`.
-2. Create a separate worktree, suggested path `C:\Users\qihq\Documents\skating-analyzer-v2`.
+2. Create a separate worktree, suggested path `.`.
 3. Give the V2 worktree its own untracked runtime data directory and database. Never point experimental analysis at the main worktree's writable `data` directory.
 4. Register private Golden source videos by path or copy them into the V2 runtime data directory. Do not add them to Git.
 5. Commit each bounded full-stack behavior change with its tests and evidence. Include the UI changes required by that slice, but exclude unrelated visual or product refactors.
@@ -1816,7 +1820,7 @@ Expected: no changes to the numeric G3-G12 accuracy and safety thresholds.
 
 - Modify: `docs/evaluation/v2/owner-labeling-guide.md`
 - Modify: `docs/superpowers/specs/2026-07-29-skating-analysis-v2-shadow-pipeline-design.md`
-- Modify: `docs/development/iteration-8-identity-tracking.md`
+- Modify: （内部开发记录）
 - Modify: `docs/evaluation/v2/golden-v2-sanitized-summary-template.json`
 - Create: `docs/evaluation/v2/golden-gate-policy-v2-transition.json`
 - Modify: `backend/tests/analysis_v2/test_golden_privacy_boundary.py`
@@ -1941,7 +1945,7 @@ Expected: all privacy tests PASS.
 Run:
 
 ```powershell
-git add -- docs/evaluation/v2/owner-labeling-guide.md docs/superpowers/specs/2026-07-29-skating-analysis-v2-shadow-pipeline-design.md docs/development/iteration-8-identity-tracking.md docs/evaluation/v2/golden-v2-sanitized-summary-template.json docs/evaluation/v2/golden-gate-policy-v2-transition.json backend/tests/analysis_v2/test_golden_privacy_boundary.py
+git add -- docs/evaluation/v2/owner-labeling-guide.md docs/superpowers/specs/2026-07-29-skating-analysis-v2-shadow-pipeline-design.md internal development notes docs/evaluation/v2/golden-v2-sanitized-summary-template.json docs/evaluation/v2/golden-gate-policy-v2-transition.json backend/tests/analysis_v2/test_golden_privacy_boundary.py
 git commit -m "docs: align active v2 guidance with reduced gates"
 ```
 
@@ -1998,7 +2002,7 @@ Set the PIN in the process environment without committing it, then run only the 
 
 ```powershell
 $headers = @{ 'X-Parent-Pin' = $env:GOLDEN_PARENT_PIN }
-$status = Invoke-RestMethod -Uri 'http://192.168.50.179:27831/api/golden/v2/g2/status' -Headers $headers -Method Get
+$status = Invoke-RestMethod -Uri 'http://192.0.2.10:27831/api/golden/v2/g2/status' -Headers $headers -Method Get
 $status | Select-Object gate_policy_version,status,event_count,required_event_range,profile_ranges | ConvertTo-Json -Depth 6
 ```
 
@@ -2012,8 +2016,8 @@ Run:
 
 ```powershell
 $headers = @{ 'X-Parent-Pin' = $env:GOLDEN_PARENT_PIN }
-$catalog = Invoke-RestMethod -Uri 'http://192.168.50.179:27831/api/golden/v2/catalog' -Headers $headers -Method Get
-$progress = Invoke-RestMethod -Uri 'http://192.168.50.179:27831/api/golden/v2/evaluator/progress' -Headers $headers -Method Get
+$catalog = Invoke-RestMethod -Uri 'http://192.0.2.10:27831/api/golden/v2/catalog' -Headers $headers -Method Get
+$progress = Invoke-RestMethod -Uri 'http://192.0.2.10:27831/api/golden/v2/evaluator/progress' -Headers $headers -Method Get
 [pscustomobject]@{
   videos = $catalog.source_count
   events = $catalog.event_count

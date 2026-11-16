@@ -1,126 +1,173 @@
-# Skating Analyzer
+# Skating Analyzer — V2
 
-基于 React、FastAPI、MediaPipe、YOLO/ByteTrack 和 Docker 的花样滑冰训练视频分析系统。
+[English](./README.md) | **中文**
 
-[English README](./README.md) | [贡献指南](./CONTRIBUTING.md) | [许可证](./LICENSE) | [截图说明](./SCREENSHOT_GUIDE.md)
+一个以证据为先的花样滑冰分析管线，基于 FastAPI、React、MediaPipe、YOLO/ByteTrack 和 Docker 构建。
+V2 **与稳定的 `v5.2.x` 管线并行运行**：legacy 管线仍是产品对外权威，V2 在同一仓库内构建自己的、
+可重建、带版本号的证据产物，并与冻结的评测基线做对照。
 
-## 项目简介
+[贡献指南](./CONTRIBUTING.md) | [许可证](./LICENSE) | [群晖部署指南](./SYNOLOGY_STEP_BY_STEP.md) | [Golden A/B 运行手册](./docs/golden-eval-ab-runbook.md)
 
-Skating Analyzer 面向滑冰学员、家长和教练，用一套可复现的分析流程辅助复盘训练视频。系统会上传视频、抽取运动采样帧、锁定目标滑行者、运行姿态与人体跟踪、解析起跳/腾空/落冰关键时刻，并在配置 AI 供应商后调用视觉模型生成结构化报告、训练计划、档案和进度视图。
+---
 
-当前分析管线版本为 `v5.2.320`。
+## 这个分支是什么
 
-## 动森成长岛现代界面
+`v2` 分支包含 V2 分析管线及其工具链。它**不替代** `v5.2.x` 产品管线——两者位于同一仓库，
+共用同一套数据库、模型和 Docker 打包方式。
 
-系统新增可选的**动森风格现代界面**，面向家庭使用场景。经典界面保持原样，且可随时在顶部切换。
+| | Legacy（`v5.2.x`） | V2 |
+|---|---|---|
+| 对外权威 | 是——所有用户可见的报告 | 否——`public_authority = "legacy"` |
+| 写入用户数据 | 是 | 否——`writes_user_data = false` |
+| 产出 | 报告、计划、档案 | 隔离运行时下的带版本 JSON 产物 |
+| 运行时 | 常规应用运行时 | 隔离 shadow 运行时，有界本地队列 |
+| 目的 | 已交付产品 | 可被证据门禁约束、可度量的管线 |
 
-- **四个清楚空间**：今日岛屿（`/home`）、开始复盘 / 冰场小屋（`/review`）、成长群岛（`/growth`）、居民服务处（`/me`）。原先分散的功能入口已聚合，同时保留旧 URL 兼容。
-- **统一复盘工作台**：报告总结、关键时刻、身体与姿态、AI 追问和诊断都收在同一次分析详情中；旧 workspace 的 `tab` 链接会自动映射到对应分区。
-- **三端适配**：手机 PWA 使用固定在视口底部、适配安全区的底部 Dock；iPad 竖屏保留 Dock 并采用双栏；iPad 横屏和桌面端则显示固定左侧导航。所有入口仅在当前页面显示选中态，包括“开始复盘”。
-- **家庭友好氛围**：晨间、白天、傍晚和夜间主题会自动切换，也可手动固定；场景使用动森草地纹理、海面和树线素材，并随时段改变色调；夜间模式为顶栏和页头使用独立的高对比文字颜色。儿童/家长模式共享布局，仅调整文案、信息密度和受保护的高级工具。
-- **优化的导航素材**：四个一级入口使用适配自动森的地图、相机、里程和设计图标；“开始复盘”在非复盘空间保持中性色，只在复盘空间激活为日光黄色。
-- **PWA 支持**：生产版会注册同源 Service Worker，提供可安装 Manifest 和已缓存应用壳的导航离线回退；API 和写操作不会被缓存。
-- **整合成长入口**：训练计划与对比现在通过独立中心进入，无 ID 的入口不会再落到“无效参数”死路。
-- **统一动森弹窗与分享**：家长 PIN、里程碑、训练计划、对比、月度故事和年度合集采用一致的三端动森弹窗；长内容海报随文字自动增高，年度合集使用精简封面摘要卡配合完整 PDF 下载。
-- **完整年度 PDF 运行环境**：all-in-one 镜像包含固定版本的 `reportlab` 与 `pypdf`；如果部署不完整，错误信息会明确指出缺少的模块。
+切换管线是配置变更，而不是分叉：
 
-自然色、圆润卡片和导航语言参考并适配自 [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui)。原仓库使用 CC BY-NC 4.0 许可证；本适配仅供个人非商业使用，并保留原作者署名。
+```env
+SKATING_ANALYSIS_PIPELINE=legacy   # legacy | shadow | v2
+```
 
-## 最近更新（P0 — P2）
+## 设计原则
 
-当前版本交付三条核心产品线：**P0 成长看板**、**P1 月度故事与分享**、**P2 年度合集与事件时间线**，以及 Golden 评测工具链、人物追踪改进和 OpenCode API 兼容修复。
+以下原则在代码中强制执行，不只是文档约定。
 
-### P0 — 成长看板
+- **阶段顺序即契约。** 一个阶段只能消费位于其左侧阶段的产物。任一阶段失效，其所有下游阶段
+  随之失效，因此陈旧缓存无法悄悄喂给下游结论。
+- **不就地修改。** 已完成的 legacy 分析作为**不可变输入**传入 shadow 运行。一次 shadow 运行
+  就是一个可重建、带版本号的 JSON 产物。
+- **结论之前先有证据。** 报告只被允许解释已经融合好的 claim；无法引用其输入证据的 claim
+  不允许被打印出来。
+- **拒绝是合法结果。** 旋转、身份和关键时刻估计器在证据不足时返回显式拒绝或不足标记，
+  而不是一个没有限定的数字。
+- **失败即关闭。** 试用门禁、运行时预检和污染哨兵在前置条件不满足时默认拒绝。
 
-面向家长的成长仪表盘，全景展示孩子的训练轨迹：
+## 分析管线
 
-- **成长摘要 API**：聚合课次数量、完成分析数、当月分析数、里程碑总数、最新分析及其训练重点，以及 Force Score 趋势数据，供前端看板消费。
-- **GrowthKpiBar**：雷达式 KPI 条带，一目了然地展示 Force Score 趋势、课次计数、完成分析数和里程碑总数。
-- **MilestoneTimeline**：按时间排列的里程碑列表，带有系统检测 / 家长确认 / 教练确认验证徽章、解锁时间戳和关联分析链接。
-- **ActionPhaseStrip**：根据分析类型展示不同阶段的关键帧——跳跃显示 T/A/L，旋转显示 entry/main/exit，燕式显示 hold，步法显示覆盖帧，支持视频回放。
-- **成长首页** (`/home`)：统一看板，整合 KPI、最新分析摘要、当前重点、下一步动作、关键帧阶段条、里程碑时间线及各成长工具导航入口。
+阶段顺序在 `SHADOW_STAGE_ORDER` 中只定义一次，且属于契约：
 
-### P1 — 月度故事与分享
+```
+timebase → observations → candidates → identity → pose → events → moments → rotation → path_reviews → claims
+```
 
-可审核的月度成长章节，配备家庭金句引用和里程碑分享卡片：
+| 阶段 | 确立什么 | 主要模块 |
+|---|---|---|
+| `timebase` | 请求时间、解码帧与媒体之间精确的源 PTS 映射 | `timebase.py` |
+| `observations` | 有界解码观测流，保留空洞与不连续点 | `detection.py`、`pose_observations.py` |
+| `candidates` | 带资格判定与排除规则的人物跟踪候选 | `detection.py`、`tracking_states.py` |
+| `identity` | 身份时间线、冲突区间、人工锚点与分段重锚 | `identity.py`、`evaluation/identity_anchor.py`、`services/segment_reanchor.py` |
+| `pose` | 经身份授权的姿态样本，含逐点质量 | `pose_v2.py`、`services/pose_quality.py`、`services/pose_geometry.py` |
+| `events` | 按 profile 划分的事件提案与带修订的动作标签事实 | `event_proposals.py`、`event_label_facts.py`、`action_classification.py` |
+| `moments` | 带修订、事件作用域的起跳 / 腾空 / 落冰提案 | `profile_moments.py`、`moment_selectors.py`、`event_moment_facts.py` |
+| `rotation` | 基于精确源 PTS 的保守多线索投影转体估计 | `rotation.py`、`rotation_facts.py`、`services/jump_rotation.py` |
+| `path_reviews` | 对 legacy 视觉载荷的有界语义复核适配层 | `path_review.py`、`fusion_inputs.py` |
+| `claims` | 确定性 claim 融合，以及解释这些 claim 的报告边界 | `claim_fusion.py`、`claim_report.py`、`facts.py` |
 
-- **家庭金句引用**：复盘上传表单新增可选字段——`highlight_quote`（最多 280 字）和 `quote_speaker`（孩子本人/家长/教练）。持久化在 `Analysis` 表，并在详情和月度事实快照中展示。
-- **月度事实引擎** (`monthly_facts.py`)：按滑行者/月份的确定性事实聚合——课次计数、可比较跳跃指标（前后值、样本数、关联分析 ID）、当月里程碑解锁、报告问题类别的重复观察、训练重点追踪，以及逐字保留的金句。全部事实按确定性顺序排列。当无可靠趋势时自动标记 `insufficient_comparable_evidence` 等质量标志。从里程碑关联或高质量分析中选取最多四张代表性帧引用。
-- **结构化章节生成** (`monthly_chapters.py`)：调用活跃的 `report` 供应商，传入确定性事实快照和结构化 JSON schema。验证每个亮点都引用存在的事实 ID、金句文本逐字复制、叙事不超过 1600 字，且禁止推断受伤、恐惧、疲劳诊断、一定能升级、教练确认等结论（除非该表述在供给事实中逐字出现）。供应商失败时保留 `facts_ready` 修订——快照永不删除。
-- **成长 API** (`/api/growth`)：六个端点——`POST facts`、`POST generate`、`GET list`、`GET by ID`、`PATCH final_text`、`POST publish`。已发布的修订不可变；重新生成会创建下一个修订。
-- **月度章节工作台** (`/chapters`)：滑行者/月份选择器、显式流程按钮（整理本月事实 → 生成叙事初稿 → 编辑 → 发布）、修订历史选择器、MonthlyFactPreview 按 count/metric/milestone/observation/quote 分组事实并显示来源/质量徽章，MonthlyChapterEditor 分离 AI 初稿与家长可编辑最终文字，含字符计数器和发布确认弹窗。
-- **里程碑分享卡片** (`milestoneShareCanvas.ts`)：1080×1350 JPEG 分享图生成器，包含标题、日期、滑行者名称、验证徽章、金句引用、可选指标面板和可选关键帧图片。渐变主题设计；图片缺失时优雅降级为无图片面板。每个里程碑卡片上设有下载、复制到剪贴板和系统分享按钮。
+`claims` 之后的一切——呈现层与分析体验——都是消费者而非生产者：
+`presentation.py`、`fact_consumers.py`、`comparison.py`。
 
-### P2 — 年度合集与事件时间线
+### 分析体验（`analysis-experience.v2`）
 
-将月度章节汇编为可下载 PDF 的年度成长合集：
+V2 面向用户的产物是结构化的、带版本号的载荷，而不是自由文本：包含摘要、分区正文、
+"更多"区域和报告视图。它由 `GET /api/analysis/{analysis_id}/experience-v2` 提供，
+由 `frontend/src/analysis-v2/` 下的组件渲染。能力发现接口会声明某个部署支持哪些体验，
+因此界面会优雅降级，而不是靠猜测。
 
-- **年度合集 API** (`/api/annual`)：预览合集（选中章节 + 里程碑的快照）、创建合集并记录来源哈希以保证可复现性、按滑行者/年份列出合集、列出含封面元数据的年度里程碑。
-- **年度 PDF 导出** (`annual_pdf.py`)：基于 ReportLab 生成 A4 排版 PDF，包含封面页、目录、月度章节叙事、里程碑时间线和代表性帧图片。通过 `BackgroundTasks` 后台导出，状态跟踪（`pending` → `processing` → `completed`/`failed`）。
-- **断点续传**：服务器崩溃/重启后的未完成导出任务会在启动时自动恢复。续传导出追踪 `resumed_at` 时间戳，保留原始 `created_at` 以维持排序。
-- **年度合集界面** (`/annual`)：多步骤页面——从已发布月度章节中选取、选择里程碑、预览合集、触发 PDF 导出。显示实时导出状态，包括进度、成功/失败状态和下载链接。成长首页"制作年度合集"入口仅在存在已发布章节时显示。
+## 仓库结构
 
-### 基础设施与工具
+```
+backend/app/analysis_v2/     V2 管线：契约、阶段、编排、呈现
+backend/app/analysis_v2/evaluation/
+                             golden 存储、门禁策略、G2/G8/G9 评测器、适配层
+backend/app/services/        共享服务，含 V2 跟踪 / 姿态 / 跳跃辅助模块
+backend/app/trial.py         失败即关闭的试用门禁（见"试用模式"）
+backend/app/routers/         analysis_v2.py、segment_reanchor.py 及 legacy 路由
+frontend/src/analysis-v2/    分析体验、golden 工作台、shadow 工作台
+frontend/src/components/     V2 面板：跳跃阶段回放、旋转、分段重锚、试用
+docker/allinone/             all-in-one 镜像（标准、analysis、trial）
+docs/                        架构说明、评测手册、计划与设计
+scripts/                     发布、校验与模型溯源工具
+```
 
-- **追问关键帧 Review**：追问聊天中的修正关键帧预览新增 T/A/L 快速定位按钮，点击即可以全屏模态视频播放器打开，包含关键帧预览图、加载提示和 Esc 关闭。成长看板的动作阶段视频播放器替换原生浏览器控件，改为自定义播放/暂停按钮、可拖拽进度条、实时时间显示，并支持自动预加载与封面图。对比页面同步视频播放增加就绪状态门控，使同步跳转更流畅。
-- **MiMo/OpenCode API 修复**：移除 MiMo 聊天补全请求中多余的 `api-key` header；OpenCode 新 `sk-` 格式 Key 拒绝双 header 认证模式。新增诊断日志，输出活跃供应商 ID、类型、Base URL、模型和已解密 Key 前缀，方便排查认证问题。
-- **Golden 评测工具链**：新增 `golden_overrides.py`（逐样本覆盖逻辑）、`diff_baselines.py`（评测运行对比）、对应测试套件，以及 `golden-eval-ab-runbook.md` A/B 评测流程文档。
-- **人物追踪**：改进目标重锁定决策逻辑，新增手动锁定目标丢失后的自愈恢复，扩展重锁定场景测试覆盖。
-- **关键帧候选**：增强仲裁诊断和垂直极值置信度阈值。
-- **Debug 页面**：Golden 标注锚点现在捕获跟踪锚元数据（bbox、时间戳、帧 ID）、动作窗口边界和修订版本号，支持更精细的标注。
+## API 概览
 
-## 版本历史
+V2 路由挂载在三个前缀下：`/api/analysis`（分析体验与带修订的事实）、
+`/api/shadow`（shadow 编排运行）、`/api/golden/v2`（golden 评测）。
+运行时能力由 `/api/capabilities` 报告。
 
-- `v5.2.320`：统一视觉提示词契约，Path A 仅使用规定的视频与姿态证据，并让各视觉调用共用一致的结构化输出与修复处理。追问中的完整重新分析会重置主人物锁定、跳过同视频历史 T/A/L 复用并重新定位关键帧；若源视频证据与模型判断一致，结果仍可能相同。选择视频后即可填写可选 AI 输入时间区间，即使浏览器无法读取时长；”继续训练”箭头尺寸也已固定。MiMo/OpenCode 仅使用 Bearer 认证，并补充后端并行测试依赖说明。新增追问 T/A/L 关键帧快速定位 Review，以全屏模态播放器展示，包含关键帧预览图和 Esc 关闭；将成长看板动作阶段视频播放器替换为自定义播放/暂停按钮、可拖拽进度条、自动预加载、封面图和实时时间显示；对比页同步播放增加视频就绪状态门控。
-- `v5.2.319`：P0 成长看板，含 KPI 雷达图、里程碑时间线、技能演进和按类型展示阶段数据；P1 月度成长章节，含家庭金句、确定性事实聚合、结构化章节生成、章节工作台和里程碑分享卡；P2 年度合集，含章节/里程碑选择、预览、后台 PDF 导出、断点续传和下载；移除多余 `api-key` header 兼容 OpenCode 新 `sk-` 格式 Key；新增 golden overrides、diff baselines 和 A/B 评测手册；改进人物追踪重锁定和自愈逻辑；增强关键帧仲裁诊断；debug golden 标注支持跟踪锚点和动作窗口边界。
-- `v5.2.318`：已应用的动作识别和关键帧修正会写回 `analyses`；启动时自动回填历史已应用修正；报告/追问聊天工作台会在显示成功前刷新当前分析详情。
-- `v5.2.315`：从 `codex/face-identity-target-lock` 导出 all-in-one Docker 镜像，包含人脸身份模型层、滑行者人脸档案 API、目标诊断、父级 UI 及档案删除功能。
-- `v5.2.313`：已完成的进展/档案记录可直接跳转到 `/golden`；Golden 工作台按 URL 自动选中正式分析，不再强行打开无关 debug run。
-- `v5.2.308`：手机端主角框选支持双指放大、平移和重置；手动动作区间启用更高密度采样；关键帧按 jump/spin/step/spiral 展示；分项评分统一修正来源和回退逻辑；报告/进展分享图加入 comments 与分项条，追问分享改为清晰多轮时间线。
-- `v5.2.307`：对比生成持久化为 `analysis_comparisons` 后台任务；完整源视频只交给激活的 `vision` 模型；`report` provider 只基于结构化 JSON 文本生成总结；新增对比结果历史、重试、分享、手机端全静音同步播放。
-- `v5.2.306`：追问聊天能识别用户备注中的多个问题并逐一回答；训练计划改用儿童安全低冲击提示词并强制 JSON schema；Archive 新增家长模式聚合接口、日历详情弹窗和快速导航。
-- `v5.2.305`：追问可只跑视频 AI 全量视频关键帧重识别，生成待确认关键帧修正卡，不重跑 pose/生物力学/视觉报告。
-- `v5.2.304`：追问聊天可提交重置主人物锁定的完整视频重新分析；重试确认会说明是否重新建立 skater lock；分享图可随长文本自适应高度。
-- `v5.2.303`：Review 上传不再要求精确动作子类或技能节点；支持"不确定 / 只知道大类"，并把用户补充说明传入动作识别。
-- `v5.2.11`：默认使用全量视频上下文；Review 和 Debug 支持可选手动起止点；Path A 使用生成的 AI clip。
-- `v5.2.10`：后端启动不再自动 seed AI provider；请在 `/settings/api` 创建模型实例。
-- `v5.2.9`：Path A 请求更严格的 JSON、恢复非标准模型输出、追加 JSON-only 修复重试；并回退 Path B/top-issue 兜底。
-- `v5.2.8`：丢失后复用的 tracker bbox 可作为带 padding 的 pose crop hint，用于远距离小目标滑行者。
+下表所有路由均位于 `/api/analysis` 之下。
 
-更早版本（v5.2.1 — v5.2.7）聚焦跟踪稳定性、姿态平滑、关键帧置信度和管线鲁棒性。完整历史见 [git log](https://github.com/qihq/skating-AI-analyzer/commits/master)。
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/{analysis_id}/experience-v2` | 带版本号的分析体验载荷 |
+| GET | `/{analysis_id}/experience-v2/diagnostic` | 同一体验的诊断视图 |
+| POST | `/growth-admission` | 判定一次分析能否进入成长记录 |
+| GET | `/{analysis_id}/event-proposals` | 按 profile 划分的事件提案 |
+| POST | `/{analysis_id}/event-proposals/mutate` | 修订事件提案 |
+| GET/POST | `/{analysis_id}/events/{event_id}/label-facts` | 读取 / 提出动作标签事实 |
+| POST | `/{analysis_id}/events/{event_id}/label-facts/{revision}/apply` | 应用某个标签修订 |
+| POST | `/{analysis_id}/events/{event_id}/label-facts/{revision}/dismiss` | 驳回某个标签修订 |
+| GET/POST | `/{analysis_id}/events/{event_id}/moment-proposals` | 读取 / 提出 T/A/L 关键时刻 |
+| POST | `/{analysis_id}/events/{event_id}/moment-proposals/{revision}/apply` | 应用某个关键时刻修订 |
+| POST | `/{analysis_id}/events/{event_id}/moment-proposals/{revision}/dismiss` | 驳回某个关键时刻修订 |
+| GET | `/{analysis_id}/source-frames/{index}/image` | 与某个观测绑定的源帧图像 |
+| GET | `/{analysis_id}/observations` | 解码观测流 |
+| GET | `/{analysis_id}/identity` | 身份时间线与冲突区间 |
+| GET | `/{analysis_id}/pose-v2/detail` | 带质量元数据的姿态样本 |
+| POST | `/{analysis_id}/identity/anchors/preview` | 预览人工身份锚点 |
+| POST | `/{analysis_id}/identity/anchors/confirm` | 确认人工身份锚点 |
+| GET | `/pilot12-detection`、`/pilot12-event-proposals`、`/pilot14-action-classification` | 冻结的 pilot 评测输入 |
 
-## 核心功能
+人工分段重锚嵌套在同一前缀下：
 
-- 视频上传、异步分析与阶段感知重试；不知道精确动作名时可只提交动作大类。
-- 运动采样、视频预检、模糊过滤。
-- 目标预览、手动 bbox 框选、YOLO + ByteTrack 人体跟踪和逐帧 bbox 诊断。
-- MediaPipe 姿态提取，支持平滑、多候选和 crop 回退逻辑。
-- 生物力学指标，包括阶段时序、跳跃证据、旋转估算和姿态质量。
-- Qwen 3.6 Plus 视频语义时间定位，用于动作大类识别与起跳/腾空/落冰区间解析。
-- 语义关键帧时间戳仲裁，融合视频 AI、运动密度和骨架候选。
-- 双路径视觉分析，支持 video context、供应商回退、非标准 JSON 恢复和成本限制。
-- AI 辅助报告、训练计划、技能树、历史档案、进度追踪、儿童模式和家长模式。
-- 后台对比工作台——持久化对比历史、完整源视频 AI 对比、同步播放和分享图导出。
-- 成长看板 (P0) —— KPI 雷达、里程碑时间线、当前重点、下一步动作和技能演进视图。
-- 月度成长章节 (P1) —— 家庭金句、确定性事实、AI 生成可审核章节、章节工作台和里程碑分享卡片。
-- 年度合集导出 (P2) —— 月度章节汇编为 PDF，含封面、目录、叙事和里程碑，支持断点续传。
-- 已完成视频的持久化 AI 追问，基于现有证据回答，支持 AI/手动修正卡和报告重新生成。
-- 响应式 archive/report 工作台：archive 支持分页列表和日历 tab；report 保持主报告简洁，高级内容通过 workspace tab 展示。
-- Pose Debug 与 Debug 页面，用于骨架回放、tracker 诊断和日志检查。
-- Docker Compose 与 all-in-one Docker 部署，适合 NAS 或本地单容器运行。
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/{analysis_id}/identity/segments` | 基于已保存证据的分段候选 |
+| GET | `/{analysis_id}/identity/segments/images/{observation_index}` | 候选图像 |
+| POST | `/{analysis_id}/identity/segments/preview` | 预览重锚后的分段 |
+| POST | `/{analysis_id}/identity/segments/confirm` | 确认重锚后的分段 |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}` | 读取已保存的修订 |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}/pose` | 该修订的姿态 |
+| GET | `/{analysis_id}/identity/segments/revisions/{revision}/images/{filename}` | 该修订的图像 |
 
-## 分析流程
+重锚**只使用已保存证据**。它不会重跑检测器、不会恢复已删除媒体，也不会凭空生成已保存观测
+无法支撑的分段。
 
-1. 上传源视频并创建分析记录；不知道精确动作名称时，可以只填写动作大类。
-2. 解析 AI 输入范围：填写手动起止点时使用手动片段，否则默认使用完整源视频时间轴。
-3. 执行视频预检、运动采样和关键帧/动作时序解析，时间戳保持源视频绝对时间。
-4. 生成目标预览候选；置信度不足或存在多人/人工复核标记时等待手动选择。
-5. 使用 YOLO/ByteTrack 跟踪目标滑行者，并执行逐帧 bbox 连续性检查。
-6. 运行 MediaPipe 姿态提取和平滑处理。
-7. 根据分析类型（跳跃/旋转/步法/燕式/自由滑）计算生物力学指标。
-8. 如果在 `/settings/api` 中配置了 AI 供应商，系统会通过双路径视觉分析生成结构化报告和训练计划。
-9. 完成的分析记录可在报告、追问、档案和进度视图中复查。
-10. 成长看板、月度章节和年度合集可按自身节奏依次使用。
+Shadow 编排运行位于 `/api/shadow`，golden 存储、评测器状态与 G2 基线位于 `/api/golden/v2`。
+
+## Golden 评测
+
+V2 只有可度量才有意义，因此评测是一等子系统，而不是测试夹具。
+
+- **冻结的 golden 存储**（`evaluation/golden_store.py`、`golden_schema.py`）——带版本号的
+  标注样本，含源媒体身份与内容哈希。
+- **门禁策略**（`evaluation/gate_policy.py`）——`golden-gate-policy.v2` 定义候选必须通过的
+  阈值与容差。策略带版本号，因此任何结果都能追溯到判定它的那份策略。
+- **指标族**——`g2_baseline.py`（基线回归）、`g8_moments.py`（防泄漏的关键时刻聚合）、
+  `g9_rotation.py`（约定安全、能识别拒绝的旋转评分）。
+- **Pilot 评测器**（`evaluation/pilot_evaluator.py`）配合适配层，仅从源观测构建提案，
+  因此评测器看不到已解出的标注。
+
+工作流见 [docs/golden-eval-ab-runbook.md](./docs/golden-eval-ab-runbook.md)。
+
+## 试用模式
+
+`backend/app/trial.py` 为隔离试用部署实现失败即关闭的门禁。profile 可以被烘焙进镜像
+（`/etc/skating-trial-profile`），从而无法在运行时用环境变量改动：
+
+| Profile | 行为 |
+|---|---|
+| `off` | 常规安装；全部功能可用 |
+| `web-preview` | 只读预览；禁止上传视频与分析 |
+| `legacy-analysis-preview` | 仅既有 legacy 本地分析；新诊断、shadow、受控评测和外部 AI 全部关闭 |
+
+`docker/allinone/Dockerfile.trial` 用固定且带哈希锁的依赖
+（`requirements-trial-web.lock`、`requirements-trial-analysis.lock`）构建试用镜像，
+因此试用安装不会悄悄解析到不同的依赖版本。
+
+试用部署在其能力载荷中报告 `target_nas_verified=false` 与 `new_diagnostics=false`，
+直到有人在目标硬件上真正验证过。系统不会因为一次构建成功就推断验证已通过。
 
 ## 部署
 
@@ -142,11 +189,16 @@ docker run -d \
 docker compose up -d
 ```
 
-`.env` 文件至少需包含：
+`.env` 至少需要：
 
 ```env
-SECRET_KEY=你的随机密钥
+SECRET_KEY=your-random-secret
 ```
+
+完整变量见 [.env.example](./.env.example)；隔离 V2 开发布局见
+[.env.v2.example](./.env.v2.example)。切勿把 V2 的路径指向生产数据。
+
+群晖分步部署见 [SYNOLOGY_STEP_BY_STEP.md](./SYNOLOGY_STEP_BY_STEP.md)。
 
 ## 开发
 
@@ -162,18 +214,35 @@ npm install
 npm run dev
 ```
 
-### 运行测试
+若要隔离运行 V2，把 `.env.v2.example` 复制为 `.env.v2.local`，将所有路径指向独立的运行时
+目录，并设置 `SKATING_ANALYSIS_PIPELINE=shadow`。
+
+## 测试
 
 ```bash
-# 后端
+# 后端——192 个测试模块，其中 55 个位于 tests/analysis_v2/
 cd backend
 pip install -r requirements-test.txt
 python -m pytest tests -q -n 4 --dist loadfile
 
-# 前端
-cd frontend && npm test
+# 前端——76 个测试模块（Vitest）
+cd frontend
+npm test
 ```
+
+## 隐私与数据处理
+
+- 上传的视频、抽帧图片、数据库和备份都属于运行时数据，永不提交。`.gitignore` 排除
+  `data/`、`backups/`、`models/`、`deliverables/`、`*.pt` 以及镜像归档。
+- API 密钥加密存储，且不会完整写入日志。
+- V2 shadow 运行只写入自己的隔离运行时目录。污染哨兵（`contamination_inventory.py`）
+  在运行前后对家庭状态做快照，从而**检测**到意外写入，而不是假定它不存在。
+- 本仓库不包含家庭媒体、真实训练视频或任何个人数据。
 
 ## 许可证
 
-MIT License。详见 [LICENSE](./LICENSE)。
+MIT License——见 [LICENSE](./LICENSE)。
+
+可选的动森风格界面参考并适配自
+[guokaigdg/animal-island-ui](https:/github.com/guokaigdg/animal-island-ui)，
+原仓库使用 CC BY-NC 4.0 许可证；本适配仅供个人非商业使用，并保留原作者署名。

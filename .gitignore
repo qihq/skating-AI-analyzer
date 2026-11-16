@@ -55,3 +55,9 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal development notes and local pointers (never published)
+docs/development/
+.r1-current-evidence
+.trial-release-path
+normal
