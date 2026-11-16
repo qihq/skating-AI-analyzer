@@ -2520,5 +2520,184 @@ class PersonTrackerTests(unittest.TestCase):
         self.assertTrue(diagnostics[1]["golden_anchor_conflict"])
 
 
+class TargetTrackingContinuityTests(unittest.TestCase):
+    """Label-free detector/association fixtures; no detector or pose model is loaded."""
+
+    def _sequence(self, boxes_by_index, tracks_by_index, anchor=4):
+        frames = [Path(f"sample_{i:03d}.jpg") for i in range(len(boxes_by_index))]
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        current = [0]
+
+        def read_frame(_tracker, frame_path):
+            current[0] = frames.index(frame_path)
+            return image
+
+        def detect(_tracker, _image):
+            return list(boxes_by_index[current[0]])
+
+        def associate(_tracker, _boxes):
+            rows = tracks_by_index[current[0]]
+            return _FakeDetections([r[:4] for r in rows], [r[4] for r in rows])
+
+        with (
+            patch.object(PersonBBoxTracker, "_read_frame", read_frame),
+            patch.object(PersonBBoxTracker, "_detect", detect),
+            patch.object(PersonBBoxTracker, "_update_tracks", associate),
+        ):
+            return track_person_bbox_detailed(
+                frames, {"x": 100 / 320, "y": 50 / 240, "width": 40 / 320, "height": 100 / 240},
+                initial_frame_index=anchor, effective_fps=5, manual_lock_mode=True,
+            )
+
+    def test_middle_anchor_continuous_target_in_both_directions_reaches_pose(self):
+        from app.services.pose import _manual_lock_blocks_unreliable_tracker_pose
+
+        a = [(84.0 + 4 * i, 50.0, 124.0 + 4 * i, 150.0) for i in range(9)]
+        b = [(132.0 - 4 * i, 50.0, 172.0 - 4 * i, 150.0) for i in range(9)]
+        boxes = [[(*aa, .95), (*bb, .95)] for aa, bb in zip(a, b)]
+        tracks = [[(*aa, 1), (*bb, 2)] for aa, bb in zip(a, b)]
+        tracked, flags, diagnostics = self._sequence(boxes, tracks)
+        self.assertEqual(len(diagnostics), 9)
+        self.assertEqual([d["frame_index"] for d in diagnostics], list(range(9)))
+        self.assertEqual([d["frame"] for d in diagnostics], [f"sample_{i:03d}.jpg" for i in range(9)])
+        self.assertEqual(sum(d["frame"] == "sample_004.jpg" for d in diagnostics), 1)
+        for i, diagnostic in enumerate(diagnostics):
+            self.assertEqual(diagnostic["state"], "tracked")
+            self.assertEqual(diagnostic["tracker_id"], 1)
+            self.assertAlmostEqual(tracked[i]["x"], a[i][0] / 320, places=4)
+            self.assertFalse(_manual_lock_blocks_unreliable_tracker_pose({"manual_override": True}, diagnostic))
+
+    def test_crossing_competitor_and_missing_evidence_remain_lost(self):
+        from app.services.pose import _manual_lock_blocks_unreliable_tracker_pose
+
+        a = [(84. + 4 * i, 50., 124. + 4 * i, 150.) for i in range(9)]
+        b = [(132. - 4 * i, 50., 172. - 4 * i, 150.) for i in range(9)]
+        # B crosses A's expected path; at index 6 their boxes coincide exactly.
+        boxes = [[(*aa, .95), (*bb, .95)] for aa, bb in zip(a, b)]
+        tracks = [[(*aa, 1), (*bb, 2)] for aa, bb in zip(a, b)]
+        for i in (0, 1, 2, 6, 7, 8):
+            boxes[i] = [(*b[i], .95)]
+            tracks[i] = [(*b[i], 2)]
+        boxes[1] = []
+        tracks[1] = []
+        boxes[7] = []
+        tracks[7] = []
+        _, _, diagnostics = self._sequence(boxes, tracks)
+        for i in (0, 1, 2, 6, 7, 8):
+            self.assertNotEqual(diagnostics[i]["state"], "tracked")
+            self.assertTrue(_manual_lock_blocks_unreliable_tracker_pose({"manual_override": True}, diagnostics[i]))
+        self.assertEqual([diagnostics[i]["state"] for i in (3, 4, 5)], ["tracked"] * 3)
+
+    def test_missing_track_keeps_detector_and_active_identity_evidence(self):
+        a = (100., 50., 140., 150.)
+        boxes = [[(*a, .95)] for _ in range(9)]
+        tracks = [[(*a, 1)] for _ in range(9)]
+        for i in (0, 1, 2, 6, 7, 8):
+            tracks[i] = [(*a, 2)]
+        _, _, diagnostics = self._sequence(boxes, tracks)
+        d = diagnostics[0]
+        self.assertEqual(d["detection_evidence"]["count"], 1)
+        self.assertEqual(d["association_evidence"]["count"], 1)
+        self.assertFalse(d["association_evidence"]["selected_track_present"])
+        self.assertEqual(d["association_evidence"]["candidates"][0]["tracker_id"], 2)
+        self.assertAlmostEqual(d["detection_evidence"]["candidates"][0]["confidence"], .95)
+        self.assertEqual(d["tracking_direction"], "backward")
+        self.assertEqual(d["sequence_frame_index"], 4)
+        self.assertEqual(d["anchor_frame_index"], 4)
+
+    def test_empty_detection_evidence_does_not_reuse_previous_observation(self):
+        a = (100., 50., 140., 150.)
+        boxes = [[(*a, .95)] for _ in range(9)]
+        tracks = [[(*a, 1)] for _ in range(9)]
+        boxes[2] = []
+        tracks[2] = []
+        _, _, diagnostics = self._sequence(boxes, tracks)
+        self.assertEqual(diagnostics[2]["detection_evidence"]["count"], 0)
+        self.assertEqual(diagnostics[2]["detection_evidence"]["candidates"], [])
+        self.assertEqual(diagnostics[2]["association_evidence"]["count"], 0)
+        self.assertEqual(diagnostics[6]["tracking_direction"], "forward")
+        self.assertEqual(diagnostics[6]["sequence_frame_index"], 2)
+
+    def test_expired_identity_cannot_survive_unobserved_frames(self):
+        # Real ByteTrack with synthetic detections; B occupies A's former box after
+        # absence beyond ByteTrack's own buffer. Geometry alone is not identity.
+        from app.services.pose import _manual_lock_blocks_unreliable_tracker_pose
+
+        tracker = PersonBBoxTracker(yolo_model=object(), effective_fps=5, manual_lock_mode=True)
+        a = (100., 50., 140., 150., .95)
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        with patch.object(tracker, "_detect", return_value=[a]):
+            for i in range(3):
+                _, initial = tracker.process_frame_detailed(image, a[:4], frame_index=i)
+        self.assertEqual(initial["state"], "tracked")
+        old_id = tracker._target_tracker_id
+        clock = tracker._tracker.frame_id
+        gap = tracker._tracker.max_time_lost + 3
+        with patch.object(tracker, "_detect", return_value=[]):
+            for i in range(gap):
+                result, diagnostic = tracker.process_frame_detailed(image, a[:4], frame_index=3 + i)
+                self.assertIsNone(result)
+                self.assertTrue(_manual_lock_blocks_unreliable_tracker_pose({"manual_override": True}, diagnostic))
+        with patch.object(tracker, "_detect", return_value=[a]):
+            for i in range(3):
+                result, diagnostic = tracker.process_frame_detailed(image, a[:4], frame_index=3 + gap + i)
+                self.assertIsNone(result)
+                self.assertEqual(tracker._target_tracker_id, old_id)
+                self.assertTrue(_manual_lock_blocks_unreliable_tracker_pose({"manual_override": True}, diagnostic))
+        self.assertEqual(tracker._tracker.frame_id, clock + gap + 3)
+
+    def test_empty_initial_frame_does_not_initialize_detection_dependencies(self):
+        tracker = PersonBBoxTracker(yolo_model=object(), manual_lock_mode=True)
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        with patch.object(tracker, "_detect", return_value=[]), patch.object(tracker, "_get_tracker", side_effect=AssertionError("must stay lazy")):
+            result, diagnostic = tracker.process_frame_detailed(image, (100., 50., 140., 150.))
+        self.assertIsNone(result)
+        self.assertEqual(diagnostic["state"], "lost_reused")
+
+    def test_tracking_observations_are_bounded_and_json_serializable(self):
+        import json
+
+        tracker = PersonBBoxTracker(yolo_model=object(), manual_lock_mode=True)
+        a = (100., 50., 140., 150.)
+        boxes = [(*a, .95)] * 40
+        tracks = _FakeDetections([a] * 40, list(range(1, 41)))
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        with patch.object(tracker, "_detect", return_value=boxes), patch.object(tracker, "_update_tracks", return_value=tracks):
+            result, diagnostic = tracker.process_frame_detailed(image, a)
+        self.assertIsNotNone(result)
+        for key in ("detection_evidence", "association_evidence"):
+            self.assertEqual(diagnostic[key]["count"], 40)
+            self.assertTrue(diagnostic[key]["truncated"])
+            self.assertEqual(len(diagnostic[key]["candidates"]), 32)
+            self.assertEqual(diagnostic[key]["candidates"][0]["xyxy"], list(a))
+        self.assertEqual(diagnostic["detection_evidence"]["frame_size"], {"width": 320, "height": 240})
+        self.assertTrue(diagnostic["association_evidence"]["selected_track_present"])
+        json.dumps(diagnostic, allow_nan=False)
+
+    def test_first_anchor_has_forward_provenance_and_no_duplicate(self):
+        a = (100., 50., 140., 150.)
+        _, _, diagnostics = self._sequence([[(*a, .95)]] * 3, [[(*a, 1)]] * 3, anchor=0)
+        self.assertEqual([d["sequence_frame_index"] for d in diagnostics], [0, 1, 2])
+        self.assertEqual([d["tracking_direction"] for d in diagnostics], ["forward"] * 3)
+        self.assertEqual([d["anchor_frame_index"] for d in diagnostics], [0] * 3)
+
+    def test_short_occlusion_preserves_the_existing_target_identity(self):
+        tracker = PersonBBoxTracker(yolo_model=object(), effective_fps=5, manual_lock_mode=True)
+        a = (100., 50., 140., 150., .95)
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        states = []
+        with patch.object(tracker, "_detect", side_effect=[[a]] * 3 + [[]] * 2 + [[a]] * 3):
+            for i in range(8):
+                result, diagnostic = tracker.process_frame_detailed(image, a[:4], frame_index=i)
+                states.append(diagnostic["state"])
+                if i < 3 or i >= 5:
+                    self.assertIsNotNone(result)
+                    self.assertEqual(diagnostic["tracker_id"], 1)
+                else:
+                    self.assertIsNone(result)
+        self.assertEqual(states[3:5], ["lost_reused", "lost_reused"])
+        self.assertEqual(tracker._tracker.frame_id, 8)
+
+
 if __name__ == "__main__":
     unittest.main()

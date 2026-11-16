@@ -268,7 +268,18 @@ class AnalysisKeyframeCandidatesTests(unittest.IsolatedAsyncioTestCase):
                 session.add(analysis)
                 await session.commit()
 
+            # Capture the real production consumer arguments; all model/media IO is fake.
+            jump_calls = []
+            real_jump_consumer = analysis_router.infer_jump_subtype_evidence
+            def capture_jump(pose, anchors, fps):
+                jump_calls.append(anchors)
+                return real_jump_consumer(pose, anchors, fps)
+
+            # b"fake-video" is a placeholder, never pass it to a real decoder.
             with (
+                patch.object(analysis_router, "infer_jump_subtype_evidence", side_effect=capture_jump),
+                patch("app.services.video.detect_video_duration", return_value=None),
+                patch("app.services.semantic_keyframe_pipeline.detect_video_duration", return_value=None),
                 patch(
                     "app.routers.analysis.encode_frames",
                     AsyncMock(return_value=[SimpleNamespace(frame_id="frame_0004", data_url="data:image/jpeg;base64,AAA")]),
@@ -284,6 +295,9 @@ class AnalysisKeyframeCandidatesTests(unittest.IsolatedAsyncioTestCase):
                 patch("app.routers.analysis.suggest_memory_updates", AsyncMock(return_value=None)),
             ):
                 await analysis_router.process_analysis(analysis_id, retry_from="biomechanics")
+            self.assertTrue(jump_calls)
+            self.assertTrue(all(c["T"]["source"] == "key_frame_candidates" for c in jump_calls))
+            self.assertTrue(all(c["T"]["evidence"]["support_frames"] for c in jump_calls))
 
             async with database.AsyncSessionLocal() as session:
                 saved = await session.get(models.Analysis, analysis_id)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.pose_geometry import recover_pose_geometry
+
 import logging
 import asyncio
 import copy
@@ -105,6 +107,7 @@ from app.services.analysis_chat import (
     serialize_chat_message,
 )
 from app.services.action_profiles import (
+    attach_profile_evidence,
     infer_analysis_profile,
     infer_jump_subtype_evidence,
     infer_profile_from_input,
@@ -164,7 +167,8 @@ from app.services.phase_smoother import smooth_phases
 from app.services.pipeline_version import CURRENT_PIPELINE_VERSION
 from app.services.pose import extract_pose
 from app.services.llm_context import build_analysis_prompt_context
-from app.services.report import apply_child_score_floor, calculate_force_score, clean_json_text, effective_report_subscores, ensure_report_subscores, generate_report
+from app.trial import external_ai_allowed, trial_profile
+from app.services.report import local_fallback_report, apply_child_score_floor, calculate_force_score, clean_json_text, effective_report_subscores, ensure_report_subscores, generate_report
 from app.services.skill_progress import auto_update_skill_progress
 from app.services.skills import sync_skater_progress
 from app.services.target_lock import (
@@ -1149,11 +1153,12 @@ def _initial_analysis_profile(action_type: str, action_subtype: str | None) -> s
 
 
 def _analysis_profile_hint_for_sampling(action_type: str, action_subtype: str | None, stored_profile: str | None) -> str | None:
-    if stored_profile:
-        return stored_profile
     if is_mixed_action_input(action_type, action_subtype):
         return MIXED_ACTION_AUTO_LOCK_INPUT_PROFILE
-    return infer_profile_hint(action_type, action_subtype)
+    explicit_profile = infer_profile_from_input(action_type, action_subtype)
+    if explicit_profile:
+        return explicit_profile
+    return stored_profile or infer_profile_hint(action_type, action_subtype)
 
 
 def _video_ai_action_family(video_temporal: dict[str, Any] | None) -> str | None:
@@ -1590,7 +1595,7 @@ def _build_bio_data_for_profile(
         if analysis_profile == "jump":
             profile_evidence["jump_subtype_evidence"] = infer_jump_subtype_evidence(
                 pose_data,
-                bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {},
+                bio_data.get("jump_stage_anchors", {}),
                 sampling_metadata.effective_fps,
             )
         merged_quality_flags = bio_data.get("quality_flags") if isinstance(bio_data.get("quality_flags"), list) else []
@@ -1600,7 +1605,7 @@ def _build_bio_data_for_profile(
         target_flags = target_lock.get("quality_flags") if isinstance(target_lock.get("quality_flags"), list) else []
         merged_quality_flags.extend(flag for flag in target_flags if flag not in merged_quality_flags)
         bio_data["quality_flags"] = merged_quality_flags
-        bio_data["profile_evidence"] = profile_evidence
+        bio_data = attach_profile_evidence(bio_data, profile_evidence)
     return bio_data
 
 
@@ -4445,6 +4450,8 @@ async def _regenerate_report_from_saved_analysis(
             )
             user_note = analysis.note
             profile_evidence = bio_data.get("profile_evidence") if isinstance(bio_data.get("profile_evidence"), dict) else None
+            if not persisted_v2_authority and profile_evidence is not None:
+                bio_data = attach_profile_evidence(bio_data, profile_evidence)
             if persisted_claims:
                 # Keep prompt context and report generation claim-only for V2;
                 # compatibility slots are not an authority fallback.
@@ -4616,6 +4623,8 @@ async def _start_video_temporal_task_if_missing(
     current_task: asyncio.Task | None,
     input_window: VideoInputWindow | None,
 ) -> tuple[asyncio.Task | None, float | None, dict[str, Any] | None]:
+    if not external_ai_allowed():
+        return None, None, None
     if current_task is not None or isinstance(motion_scores.get("video_temporal"), dict):
         return current_task, None, None
     handle = await start_video_temporal_task(
@@ -4702,6 +4711,8 @@ async def process_analysis(
             if retry_from_stage is None:
                 retry_from_stage = _default_retry_stage_for_error(analysis.error_code)
 
+            if trial_profile() == "legacy-analysis-preview":
+                retry_from_stage = "extract_frames"
             analysis.status = 'processing'
             analysis.error_code = None
             analysis.error_detail = None
@@ -4871,6 +4882,12 @@ async def process_analysis(
                         analysis_profile_hint,
                         input_window=input_window,
                     )
+                    if not existing_target_lock_confirmed and not golden_overrides:
+                        sampled_frames, motion_scores = await prepare_continuous_pose_inputs(
+                            video_path, processing_frames_dir,
+                            (upload_frames_dir.parent if upload_frames_dir is not None else processing_frames_dir.parent) / f'tracking_{processing_frames_dir.name}',
+                            sampled_frames, motion_scores, sampling_metadata,
+                        )
                     motion_scores = attach_input_window_payload(dict(motion_scores), input_window)
                     motion_scores = _attach_video_identity(motion_scores, video_identity) or motion_scores
                     video_temporal_task, started_duration, started_ai_clip = await _start_video_temporal_task_if_missing(
@@ -4907,6 +4924,8 @@ async def process_analysis(
             if upload_frames_dir is not None:
                 persist_frames(sampled_frames, upload_frames_dir)
 
+            local_detected_candidates = ([] if _is_confirmed_target_lock(existing_target_lock)
+                else await asyncio.to_thread(_formal_target_preview_candidates, sampled_frames, motion_scores))
             preview = build_target_preview(
                 analysis_id,
                 [frame.name for frame in sampled_frames],
@@ -4916,7 +4935,7 @@ async def process_analysis(
                 detected_candidates=(
                     []
                     if existing_target_lock_confirmed
-                    else _formal_target_preview_candidates(sampled_frames, motion_scores)
+                    else local_detected_candidates
                 ),
             )
             target_lock = existing_target_lock if existing_target_lock_confirmed else build_target_lock_payload(preview)
@@ -4937,6 +4956,10 @@ async def process_analysis(
                 context=f"save_extract_frames:{analysis_id}",
             )
             if not saved:
+                return
+
+            if trial_profile() == "legacy-analysis-preview" and not existing_target_lock_confirmed and not local_detected_candidates:
+                await _save_local_analysis_result(analysis_id, action_type, timings, total_start, pose_ran=False)
                 return
 
             if not existing_target_lock_confirmed and preview.target_lock_status != "auto_locked":
@@ -5003,6 +5026,8 @@ async def process_analysis(
                     message='分段重试复用缓存帧时启动视频语义定位失败，将回退使用现有关键帧。',
                     detail=stringify_exception(exc),
                 )
+            local_detected_candidates = ([] if _is_confirmed_target_lock(existing_target_lock)
+                else await asyncio.to_thread(_formal_target_preview_candidates, sampled_frames, motion_scores))
             preview = build_target_preview(
                 analysis_id,
                 [frame.name for frame in sampled_frames],
@@ -5012,7 +5037,7 @@ async def process_analysis(
                 detected_candidates=(
                     []
                     if _is_confirmed_target_lock(existing_target_lock)
-                    else _formal_target_preview_candidates(sampled_frames, motion_scores)
+                    else local_detected_candidates
                 ),
             )
             target_lock = existing_target_lock if _is_confirmed_target_lock(existing_target_lock) else build_target_lock_payload(preview)
@@ -5067,7 +5092,10 @@ async def process_analysis(
                 target_lock["golden_frame_timestamps"] = _motion_timestamp_by_frame_id(
                     motion_scores if isinstance(motion_scores, dict) else None
                 )
-                bbox_per_frame = _build_bbox_per_frame(sampled_frames, target_lock, sampling_metadata.effective_fps)
+                bbox_per_frame = await asyncio.to_thread(_build_bbox_per_frame, sampled_frames, target_lock, sampling_metadata.effective_fps,
+                    tracking_manifest=motion_scores.get('continuous_tracking'),
+                    tracking_dir=(upload_frames_dir.parent if upload_frames_dir is not None else processing_frames_dir.parent) / str((motion_scores.get('continuous_tracking') or {}).get('pool_directory', 'tracking')),
+                )
                 tracker_summary = _tracker_debug_summary(target_lock, len(sampled_frames))
                 await _append_analysis_log(
                     analysis_id,
@@ -5093,6 +5121,8 @@ async def process_analysis(
                     target_lock,
                     bbox_per_frame,
                     sampling_metadata.effective_fps,
+                    frame_times=motion_scores.get("selected"),
+                    slow_motion_scale=float(motion_scores.get("slow_motion_scale") or 1.),
                 )
                 timings['pose_s'] = _elapsed_seconds(pose_start)
                 tiny_target_risk_flags = _tiny_target_pose_tracking_risk_flags(target_lock, pose_data)
@@ -5228,7 +5258,7 @@ async def process_analysis(
                 if analysis_profile == "jump":
                     profile_evidence["jump_subtype_evidence"] = infer_jump_subtype_evidence(
                         pose_data,
-                        bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {},
+                        bio_data.get("jump_stage_anchors", {}),
                         sampling_metadata.effective_fps,
                     )
                 stable_non_jump_profile_reuse: dict[str, Any] | None = None
@@ -5478,7 +5508,7 @@ async def process_analysis(
                     if analysis_profile == 'jump':
                         profile_evidence['jump_subtype_evidence'] = infer_jump_subtype_evidence(
                             pose_data,
-                            bio_data.get('key_frames') if isinstance(bio_data.get('key_frames'), dict) else {},
+                            bio_data.get('jump_stage_anchors', {}),
                             sampling_metadata.effective_fps,
                         )
                     merged_quality_flags = bio_data.get('quality_flags') if isinstance(bio_data.get('quality_flags'), list) else []
@@ -5509,6 +5539,7 @@ async def process_analysis(
                             '髋部旋转信号弱，可能不是旋转或存在视角遮挡',
                         )
                         bio_data['profile_warning'] = profile_warning
+                    bio_data = attach_profile_evidence(bio_data, profile_evidence)
                 timings['biomechanics_s'] = _elapsed_seconds(biomechanics_start)
                 saved = await _save_analysis_fields_with_retry(
                     analysis_id,
@@ -5548,6 +5579,7 @@ async def process_analysis(
                 bio_data = analysis.bio_data
                 analysis_profile = analysis.analysis_profile or analysis_profile_hint or 'jump'
                 profile_evidence = bio_data.get('profile_evidence', {}) if isinstance(bio_data.get('profile_evidence'), dict) else {}
+                bio_data = attach_profile_evidence(bio_data, profile_evidence)
             await _append_analysis_log(
                 analysis_id,
                 stage='biomechanics',
@@ -5555,6 +5587,10 @@ async def process_analysis(
                 message='分段重试复用已有生物力学结果。',
                 retry_from_stage=retry_from_stage,
             )
+
+        if trial_profile() == "legacy-analysis-preview":
+            await _save_local_analysis_result(analysis_id, action_type, timings, total_start, bio_data=bio_data, pose_ran=True)
+            return
 
         if run_vision:
             reused_resolved, reused_frames, reused_records, reused_video_temporal = (None, [], [], video_temporal_result)
@@ -6210,6 +6246,29 @@ async def process_analysis(
         cleanup_processing_dir(analysis_id)
 
 
+async def _save_local_analysis_result(
+    analysis_id: str, action_type: str, timings: dict, total_start: float,
+    *, bio_data: dict | None = None, pose_ran: bool,
+) -> None:
+    report = local_fallback_report(action_type, {}, bio_data)
+    report["local_execution"] = {"decode": True, "detection": True,
+        "tracking": pose_ran, "pose": pose_ran, "external_ai": False}
+    if not pose_ran:
+        report["summary"] = "本地解码和人物检测已完成，未找到可确认的人物目标；证据不足，未执行人物追踪或姿态分析。"
+    timings["total_s"] = _elapsed_seconds(total_start)
+    fields = {
+        "report": report, "force_score": None, "status": "completed",
+        "pipeline_version": "legacy/local-r1", "processing_timings": dict(timings),
+        "error_code": None, "error_detail": None, "error_message": None,
+        "retry_from_stage": None,
+    }
+    if pose_ran and isinstance(bio_data, dict):
+        fields["bio_data"] = bio_data
+    if not pose_ran:
+        fields.update(pose_data=None, bio_data=None, target_lock=None, target_lock_status=None)
+    await _save_analysis_fields_with_retry(analysis_id, fields, context=f"save_local_result:{analysis_id}")
+
+
 async def process_analysis_with_media_renditions(
     analysis_id: str,
     retry_from_stage: str | None = None,
@@ -6226,9 +6285,16 @@ async def process_analysis_with_media_renditions(
     )
     analysis_task = asyncio.create_task(process_analysis(analysis_id, retry_from_stage, **kwargs))
     tasks = [analysis_task, *( [rendition_task] if rendition_task is not None else [])]
-    for result in await asyncio.gather(*tasks, return_exceptions=True):
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if isinstance(results[0], Exception) and not external_ai_allowed():
+        await _save_analysis_fields_with_retry(analysis_id, {
+            "status": "failed", "error_code": "UNKNOWN_ERROR",
+            "error_message": "本地分析发生异常，请重试同一条记录。",
+            "error_detail": str(results[0]), "retry_from_stage": "extract_frames",
+        }, context=f"local_worker_failure:{analysis_id}")
+    for result in results:
         if isinstance(result, Exception):
-            logger.warning("Analysis %s concurrent media work failed without changing analysis status: %s", analysis_id, result)
+            logger.warning("Analysis %s concurrent work failed: %s", analysis_id, result)
 
 
 def _normalize_optional_text(value: str | None) -> str | None:
@@ -6315,6 +6381,8 @@ async def _mark_analysis_failed(
             analysis.error_code = code.value
             analysis.error_detail = detail
             analysis.error_message = friendly_error_title(code)
+            if not external_ai_allowed() and not _is_retry_stage(analysis.retry_from_stage):
+                analysis.retry_from_stage = "extract_frames"
             analysis.processing_logs = logs[-MAX_ANALYSIS_LOG_ENTRIES:]
             if timings is not None:
                 analysis.processing_timings = dict(timings)
@@ -6700,7 +6768,74 @@ def _auto_eval_snapshot_from_analysis(analysis: Analysis) -> AnalysisAutoEvalSna
     )
 
 
-def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) -> PoseResponse:
+def _saved_pose_number(value: object) -> float | None:
+    # JSON-safe finite number from saved payloads; bool/NaN/Inf/malformed -> unknown.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if number != number or number == float("inf") or number == float("-inf"):
+        return None
+    return number
+
+
+def _pose_frame_stem(frame_name: str) -> str:
+    name = frame_name.strip()
+    return name[:-4] if name.lower().endswith(".jpg") else name
+
+
+def _saved_pose_frame_timestamps(
+    pose_frames: object,
+    frame_motion_scores: dict[str, Any] | None,
+) -> dict[str, float]:
+    # Only saved "selected" times for frames that really exist in pose_data are exposed.
+    # The full pose frame name is used as key; missing/invalid values stay unknown and
+    # are never derived from frame index, fps, the action window or a default rate.
+    if not isinstance(frame_motion_scores, dict) or not isinstance(pose_frames, list):
+        return {}
+    selected = frame_motion_scores.get("selected")
+    if not isinstance(selected, list):
+        return {}
+    timestamp_by_stem: dict[str, float] = {}
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        frame_id = str(item.get("frame_id") or "").strip()
+        timestamp = _saved_pose_number(item.get("timestamp"))
+        if not frame_id or timestamp is None or timestamp < 0:
+            continue
+        stem = _pose_frame_stem(frame_id)
+        if stem:
+            timestamp_by_stem[stem] = timestamp
+    frame_timestamps: dict[str, float] = {}
+    for frame in pose_frames:
+        if not isinstance(frame, dict):
+            continue
+        frame_name = frame.get("frame")
+        if not isinstance(frame_name, str) or not frame_name.strip():
+            continue
+        timestamp = timestamp_by_stem.get(_pose_frame_stem(frame_name))
+        if timestamp is not None:
+            frame_timestamps[frame_name] = timestamp
+    return frame_timestamps
+
+
+def _saved_effective_fps(frame_motion_scores: dict[str, Any] | None) -> float | None:
+    # video.extract_motion_sampled_frames persists this sampling rate alongside selected.
+    # Pose diagnostics and the source video's fps are not sampling metadata.
+    if not isinstance(frame_motion_scores, dict):
+        return None
+    effective_fps = _saved_pose_number(frame_motion_scores.get("effective_fps"))
+    return effective_fps if effective_fps is not None and effective_fps > 0 else None
+
+
+def _build_pose_response(
+    analysis_id: str,
+    pose_data: dict[str, object] | None,
+    frame_motion_scores: dict[str, Any] | None = None,
+) -> PoseResponse:
     safe_pose_data = pose_data if isinstance(pose_data, dict) else {"connections": [], "frames": []}
     frame_urls = {
         frame.get("frame", ""): f"/api/frames/{analysis_id}/{frame.get('frame', '')}"
@@ -6711,6 +6846,8 @@ def _build_pose_response(analysis_id: str, pose_data: dict[str, object] | None) 
         connections=safe_pose_data.get("connections", []),
         frames=safe_pose_data.get("frames", []),
         frame_urls=frame_urls,
+        frame_timestamps=_saved_pose_frame_timestamps(safe_pose_data.get("frames", []), frame_motion_scores),
+        effective_fps=_saved_effective_fps(frame_motion_scores),
         pose_diagnostics=safe_pose_data.get("pose_diagnostics") if isinstance(safe_pose_data.get("pose_diagnostics"), dict) else None,
         source_timeline=safe_pose_data.get("source_timeline") if isinstance(safe_pose_data.get("source_timeline"), dict) else None,
     )
@@ -6757,6 +6894,8 @@ def _formal_target_preview_candidates(
         try:
             detected = detect_person_candidates(frame_path, include_zoomed_small_targets=True)
         except Exception as exc:  # noqa: BLE001
+            if trial_profile() == "legacy-analysis-preview":
+                raise
             logger.info("Could not detect target preview candidates on %s: %s", frame_path, exc)
             continue
         for candidate in detected:
@@ -6819,6 +6958,8 @@ def _build_target_preview_cached_first(analysis: Analysis, frame_names: list[str
     saved_preview = _target_preview_from_saved_lock(analysis.id, analysis.target_lock_status or analysis.status, analysis.target_lock, frame_names)
     if saved_preview is not None:
         return saved_preview
+    if trial_profile() == "legacy-analysis-preview":
+        raise HTTPException(status_code=409, detail="没有已保存的目标候选；请等待处理完成，或重试该记录。")
 
     frames_dir = _frames_dir_for_analysis(analysis)
     return build_target_preview(
@@ -7328,14 +7469,37 @@ def _golden_anchor_bboxes_by_frame(
     return output
 
 
+from app.services.continuous_tracking import prepare_continuous_pose_inputs, track_bound_pose_frames
+
+
 def _build_bbox_per_frame(
     sampled_frames: list[Path],
     target_lock: dict[str, Any],
     effective_fps: float | None = None,
+    *,
+    tracking_manifest: dict | None = None,
+    tracking_dir: Path | None = None,
 ) -> list[dict[str, float]] | None:
     selected_bbox = target_lock.get("selected_bbox")
     if not isinstance(selected_bbox, dict):
         return None
+    if tracking_manifest is not None:
+        boxes, diagnostics, summary = track_bound_pose_frames(
+            sampled_frames, target_lock, tracking_manifest,
+            tracking_dir or sampled_frames[0].parent.parent / "tracking", record_receipts=True,
+        )
+        target_lock["pose_frame_bindings"] = tracking_manifest.get("pose_bindings", [])
+        target_lock["bbox_per_frame"] = boxes
+        target_lock["person_tracker_diagnostics"] = diagnostics
+        target_lock["continuous_tracking_summary"] = summary
+        target_lock["tracking_observation_count"] = len(tracking_manifest.get("observations", []))
+        target_lock["tracker_type"] = "yolo_bytetrack_continuous"
+        if summary.get("cap_reached"):
+            _append_target_lock_flags(target_lock, ["tracking_observation_cap_reached"])
+        if any(not d.get("input_binding_valid") or d.get("state") != "tracked" for d in diagnostics):
+            _append_target_lock_flags(target_lock, ["continuous_tracking_unreliable_input"])
+        return boxes
+    target_lock["tracking_input_mode"] = "legacy_sparse_unbound"
     preview_frame_index = target_lock.get("preview_frame_index")
     try:
         anchor_index = int(preview_frame_index) if preview_frame_index is not None else 0
@@ -7373,6 +7537,8 @@ def _build_bbox_per_frame(
         target_lock["tracker_type"] = "yolo_bytetrack"
         return bbox_per_frame
     except PersonTrackerUnavailable:
+        if trial_profile() == "legacy-analysis-preview":
+            raise
         logger.info("person tracker unavailable during bbox tracking", exc_info=True)
         _append_target_lock_flags(target_lock, [PERSON_TRACKER_UNAVAILABLE_FLAG])
         if manual_lock_mode:
@@ -7383,6 +7549,8 @@ def _build_bbox_per_frame(
                 fallback_reason=PERSON_TRACKER_UNAVAILABLE_FLAG,
             )
     except Exception:  # noqa: BLE001
+        if trial_profile() == "legacy-analysis-preview":
+            raise
         logger.warning("person tracker failed during bbox tracking", exc_info=True)
         _append_target_lock_flags(target_lock, [PERSON_TRACKER_FAILED_FLAG])
         if manual_lock_mode:
@@ -7880,6 +8048,12 @@ async def _backfill_frame_if_needed(analysis: Analysis, frame_path: Path, filena
 
 
 async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) -> Analysis:
+    # New complete contracts are read-only on GET. Missing images remain
+    # explicit; opening a saved result must not launch decoding or inference.
+    if isinstance(analysis.bio_data, dict) and analysis.bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        return analysis
+    if trial_profile() == "legacy-analysis-preview" or (isinstance(analysis.report, dict) and analysis.report.get("source") == "legacy/local"):
+        return analysis
     if not _can_backfill_artifacts(analysis.status):
         return analysis
 
@@ -7915,6 +8089,8 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
                 else None
             ),
             sampling_metadata.effective_fps,
+            frame_times=(analysis.frame_motion_scores or {}).get("selected"),
+            slow_motion_scale=max(float(analysis.source_fps or 30.) / NORMAL_PLAYBACK_FPS, 1.) if analysis.is_slow_motion else 1.,
         )
         analysis.pose_data = computed_pose
         pose_data = computed_pose
@@ -7981,6 +8157,14 @@ async def _ensure_phase3_artifacts(session: AsyncSession, analysis: Analysis) ->
             )
             changed = True
 
+    if changed and isinstance(analysis.bio_data, dict) and analysis.bio_data.get("jump_stage_contract"):
+        rebuilt = dict(analysis.bio_data)
+        evidence = dict(rebuilt.get("profile_evidence") or {})
+        if analysis.analysis_profile == "jump":
+            evidence["jump_subtype_evidence"] = infer_jump_subtype_evidence(
+                pose_data, rebuilt.get("jump_stage_anchors", {}), sampling_metadata.effective_fps)
+            rebuilt = attach_profile_evidence(rebuilt, evidence)
+        analysis.bio_data = rebuilt
     if changed:
         await _commit_analysis_session(session, context=f"ensure_phase3_artifacts:{analysis.id}", refresh=analysis)
 
@@ -8259,12 +8443,25 @@ def _keyframe_candidate_map(analysis: Analysis) -> dict[str, dict[str, Any]]:
 
 def _legacy_keyframes(analysis: Analysis) -> dict[str, Any]:
     bio_data = _bio_dict(analysis)
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        from app.services.jump_stages import non_jump_frame_references
+        return {**non_jump_frame_references(bio_data),
+                **{key: anchor.get("frame_id") for key, anchor in bio_data.get("jump_stage_anchors", {}).items()
+                   if isinstance(anchor, dict) and anchor.get("status") == "available"}}
     keyframes = bio_data.get("key_frames")
     return keyframes if isinstance(keyframes, dict) else {}
 
 
 def _legacy_keyframe_timestamps(analysis: Analysis) -> dict[str, Any]:
     bio_data = _bio_dict(analysis)
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        from app.services.jump_stages import non_jump_frame_references
+        refs = non_jump_frame_references(bio_data)
+        timestamps = bio_data.get("key_frame_timestamps") or {}
+        return {**{key: timestamps.get(key) for key in refs},
+                **{role: bio_data.get("jump_stages", {}).get(node, {}).get("playback_timestamp")
+                   for node, role in (("takeoff", "T"), ("apex", "A"), ("landing", "L"))
+                   if bio_data.get("jump_stages", {}).get(node, {}).get("status") != "not_applicable"}}
     timestamps = bio_data.get("key_frame_timestamps")
     return timestamps if isinstance(timestamps, dict) else {}
 
@@ -8338,6 +8535,18 @@ def _frame_exists_and_url(analysis: Analysis, frame_id: str) -> tuple[bool, str 
 
 
 def _build_keyframe_side(analysis: Analysis, key: str) -> CompareKeyframeSide:
+    bio = _bio_dict(analysis)
+    if bio.get("jump_stage_contract") == "tal-evidence.v1" and key in {"T", "A", "L"}:
+        node = {"T": "takeoff", "A": "apex", "L": "landing"}.get(key)
+        stage = bio.get("jump_stages", {}).get(node, {})
+        frame_id = stage.get("frame_id")
+        exists, url = _frame_exists_and_url(analysis, frame_id) if frame_id else (False, None)
+        return CompareKeyframeSide(frame_id=frame_id, frame_url=url,
+            timestamp=stage.get("playback_timestamp"), confidence=stage.get("confidence"),
+            source=stage.get("source"), phase_label=node, selection_reason=stage.get("reason"),
+            quality_flags=[*stage.get("quality_flags", []), *stage.get("warnings", [])],
+            available=bool(exists), missing_reason=None if exists else stage.get("reason", "stage_frame_unavailable"),
+            timing_status=stage.get("time_source", "unavailable"))
     source_index = None
     source_pts = None
     timing_status = "unavailable"
@@ -9398,6 +9607,8 @@ async def upload_analysis(
     manual_action_window_end_sec: float | None = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisUploadResponse:
+    from app.services.local_runtime import require_local_runtime
+    require_local_runtime()
     if action_type not in VALID_ACTION_TYPES:
         raise HTTPException(status_code=400, detail="action_type 必须是 跳跃 / 旋转 / 步法 / 自由滑 之一。")
 
@@ -10896,7 +11107,14 @@ async def get_analysis_pose(analysis_id: str, session: AsyncSession = Depends(ge
     analysis = _build_stale_analysis_snapshot(analysis) or analysis
     if analysis.status != "awaiting_target_selection":
         analysis = await _ensure_phase3_artifacts(session, analysis)
-    return _build_pose_response(analysis_id, analysis.pose_data)
+    response = _build_pose_response(
+        analysis_id,
+        analysis.pose_data,
+        analysis.frame_motion_scores if isinstance(analysis.frame_motion_scores, dict) else None,
+    )
+
+    geometry, reason = recover_pose_geometry(analysis, _frames_dir_for_analysis(analysis))
+    return PoseResponse.model_validate({**response.model_dump(), "geometry": geometry, "geometry_unavailable_reason": reason})
 
 
 @router.get("/{analysis_id}/media", response_model=MediaManifest)
@@ -10985,6 +11203,8 @@ async def retry_analysis(
     manual_action_window_end_sec: float | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisRetryResponse:
+    from app.services.local_runtime import require_local_runtime
+    require_local_runtime()
     retry_from_value = retry_from if isinstance(retry_from, str) and retry_from.strip() else None
     reset_target_lock_value = reset_target_lock if isinstance(reset_target_lock, bool) else False
     force_keyframe_refresh_value = force_keyframe_refresh if isinstance(force_keyframe_refresh, bool) else False
@@ -11284,6 +11504,8 @@ async def confirm_target_lock(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> AnalysisDetail:
+    from app.services.local_runtime import require_local_runtime
+    require_local_runtime()
     analysis = await session.get(Analysis, analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
@@ -11504,7 +11726,7 @@ async def extend_plan(
 
 
 @frames_router.get("/{analysis_id}/{filename}")
-async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session)) -> FileResponse:
+async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Depends(get_session), saved_only: bool = False) -> FileResponse:
     if not (
         filename.startswith("frame_")
         or filename.startswith("semantic_")
@@ -11519,7 +11741,12 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     if analysis is None:
         raise HTTPException(status_code=404, detail="未找到该分析记录。")
 
-    analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
+    if saved_only:
+        # Saved images remain readable when the original video is offline.
+        saved_frames_dir = Path(analysis.video_path).parent / "frames"
+        restored_frames_dir = saved_frames_dir if saved_frames_dir.is_dir() else _frames_dir_for_analysis(analysis)
+    else:
+        analysis, restored_frames_dir = await _restore_missing_analysis_frames(session, analysis)
     frames_dir = restored_frames_dir.resolve() if restored_frames_dir.exists() else (UPLOADS_DIR / analysis_id / "frames").resolve()
     semantic_dir = (UPLOADS_DIR / analysis_id / "semantic_frames").resolve()
     frames_root = (
@@ -11542,7 +11769,7 @@ async def get_frame(analysis_id: str, filename: str, session: AsyncSession = Dep
     ):
         frames_root = semantic_dir
         frame_path = (frames_root / filename).resolve()
-    if frames_root in frame_path.parents:
+    if not saved_only and frames_root in frame_path.parents:
         frame_path, _ = await _backfill_frame_if_needed(analysis, frame_path, filename)
     if frames_root not in frame_path.parents or not frame_path.exists():
         raise HTTPException(status_code=404, detail="未找到该视频帧。")

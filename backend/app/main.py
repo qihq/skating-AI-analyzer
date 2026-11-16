@@ -96,6 +96,8 @@ async def lifespan(_: FastAPI):
     log_pose_runtime_mode()
     logger.info("startup: init db")
     await init_db()
+    from app.services.local_runtime import recover_interrupted_local_analyses
+    await recover_interrupted_local_analyses()
     logger.info("startup: backfill applied corrections")
     await _backfill_applied_corrections_startup()
     await _recover_annual_exports_startup()
@@ -166,3 +168,16 @@ app.include_router(shadow_router)
 @app.get("/api/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+# Trial gates run before routing/dependencies/body parsing and background task creation.
+from app.trial import TrialGate, trial_capabilities, trial_profile
+
+if trial_profile() != "off":
+    if runtime_config.pipeline_mode.value != "legacy":
+        raise RuntimeError("Trial requires SKATING_ANALYSIS_PIPELINE=legacy")
+    app.add_middleware(TrialGate, routes=app.router.routes)
+
+@app.get("/api/trial")
+async def trial_status():
+    return trial_capabilities()

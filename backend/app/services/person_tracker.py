@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -270,6 +271,7 @@ _TERMINAL_LOSS_TAIL_GRACE_FRAMES = 6
 _TERMINAL_LOSS_TAIL_GRACE_MIN_TRACKED_FRAMES = 12
 _TERMINAL_LOSS_TAIL_GRACE_MAX_TERMINAL_RATIO = 0.25
 _MAX_DIAGNOSTIC_REJECTED_CANDIDATES = 4
+_MAX_TRACKING_OBSERVATION_CANDIDATES = 32
 _RECOVERED_LOSS_STATES = {
     "relocked",
     "detector_relocked",
@@ -864,6 +866,19 @@ def _loss_recovery_summary(diagnostics: Sequence[dict[str, Any]]) -> dict[str, A
     }
 
 
+class RecoverableTrackingError(ValueError):
+    """A known detector capability or transient per-image failure."""
+
+
+class TrackingSequenceError(RuntimeError):
+    """A fatal frame fault with completed observations retained, never replayed."""
+
+    def __init__(self, cause, boxes, diagnostics):
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.boxes = list(boxes)
+        self.diagnostics = list(diagnostics)
+
+
 class PersonBBoxTracker:
     """YOLO person detector + ByteTrack target association for sampled frame sequences."""
 
@@ -874,12 +889,17 @@ class PersonBBoxTracker:
         byte_tracker_factory: Any | None = None,
         effective_fps: float | None = None,
         manual_lock_mode: bool = False,
+        full_frame_only: bool = False,
+        isolate_frame_failures: bool = False,
     ) -> None:
         self._yolo_model = yolo_model
         self._byte_tracker_factory = byte_tracker_factory
         self._tracker: Any | None = None
         self._effective_fps = max(float(effective_fps or 5.0), 1.0)
         self._manual_lock_mode = bool(manual_lock_mode)
+        self._full_frame_only = bool(full_frame_only)
+        self._isolate_frame_failures = bool(isolate_frame_failures)
+        self._frame_fault_requires_confirmation = False
         self._target_tracker_id: int | None = None
         self._last_known_xyxy: tuple[float, float, float, float] | None = None
         self._lost_frames = 0
@@ -955,7 +975,12 @@ class PersonBBoxTracker:
         tracked: list[dict[str, float]] = []
         diagnostics: list[dict[str, Any]] = []
         for frame_index, frame_path in enumerate(frames):
-            frame = self._read_frame(frame_path)
+            try:
+                frame = self._read_frame(frame_path)
+            except Exception as exc:
+                if not self._isolate_frame_failures:
+                    raise
+                raise TrackingSequenceError(exc, tracked, diagnostics) from exc
             frame_h, frame_w = frame.shape[:2]
             if frame_index == 0 and self._last_known_xyxy is None:
                 self._last_known_xyxy = _bbox_to_xyxy(_normalize_bbox(initial_bbox), frame_w, frame_h)
@@ -979,17 +1004,38 @@ class PersonBBoxTracker:
                 self._pending_detector_relock_xyxy = None
                 self._pending_detector_relock_count = 0
 
-            target_xyxy, diagnostic = self.process_frame_detailed(
-                frame,
-                self._last_known_xyxy,
-                frame_index=frame_index,
-                frame_path=frame_path,
-                support_anchor_bbox=(
-                    support_anchor_bboxes_by_frame.get(frame_index)
-                    if isinstance(support_anchor_bboxes_by_frame, dict)
-                    else None
-                ),
-            )
+            try:
+                target_xyxy, diagnostic = self.process_frame_detailed(
+                    frame,
+                    self._last_known_xyxy,
+                    frame_index=frame_index,
+                    frame_path=frame_path,
+                    support_anchor_bbox=(
+                        support_anchor_bboxes_by_frame.get(frame_index)
+                        if isinstance(support_anchor_bboxes_by_frame, dict)
+                        else None
+                    ),
+                )
+            except RecoverableTrackingError as exc:
+                if not self._isolate_frame_failures:
+                    raise
+                # A valid image does not establish a person lock. Keep history
+                # only as a prediction; recovery must pass the existing gates.
+                self._lost_frames += 1
+                self._pending_relock_tracker_id = None
+                self._pending_relock_count = 0
+                self._clear_pending_detector_relock()
+                self._clear_pending_confirmed_partial_recovery()
+                self._frame_fault_requires_confirmation = True
+                target_xyxy = None
+                diagnostic = {"state": "lost_reused", "frame_index": frame_index,
+                    "frame": frame_path.name, "tracker_id": self._target_tracker_id,
+                    "lost_frames": self._lost_frames,
+                    "rejected_reasons": [str(exc)], "frame_fault": True}
+            except Exception as exc:
+                if not self._isolate_frame_failures:
+                    raise
+                raise TrackingSequenceError(exc, tracked, diagnostics) from exc
             if golden_xyxy is not None:
                 automatic_xyxy = target_xyxy
                 target_xyxy = golden_xyxy
@@ -1048,6 +1094,83 @@ class PersonBBoxTracker:
         frame_path: Path | None = None,
         support_anchor_bbox: dict[str, Any] | None = None,
     ) -> tuple[tuple[float, float, float, float] | None, dict[str, Any]]:
+        """Associate one sampled observation and retain bounded, label-free evidence."""
+        raw_boxes = self._detect(frame_bgr)
+        if self._frame_fault_requires_confirmation:
+            self._lost_frames += 1
+            frame_h, frame_w = frame_bgr.shape[:2]
+            target, diagnostic = self._handle_lost_with_detector_relock(
+                frame_bgr, raw_boxes,
+                frame_index=frame_index, frame_path=frame_path,
+                frame_w=frame_w, frame_h=frame_h,
+                seed_xyxy=seed_xyxy,
+                fallback_xyxy=self._last_known_xyxy,
+                prediction_xyxy=self._predict_next_xyxy(frame_w, frame_h),
+                base_reasons=["frame_fault_identity_confirmation_required", "no_active_tracks"],
+                allow_local_zoom=False,
+            )
+            if target is not None:
+                self._frame_fault_requires_confirmation = False
+            return target, diagnostic
+        # Empty samples still advance an existing tracker's lifecycle. Otherwise
+        # an expired identity can remain active indefinitely through occlusion.
+        tracked = self._update_tracks(raw_boxes) if raw_boxes or self._tracker is not None else None
+        result, diagnostic = self._associate_frame_detailed(
+            frame_bgr, seed_xyxy, raw_boxes=raw_boxes, tracked=tracked,
+            frame_index=frame_index, frame_path=frame_path,
+            support_anchor_bbox=support_anchor_bbox,
+        )
+        frame_h, frame_w = frame_bgr.shape[:2]
+        limit = _MAX_TRACKING_OBSERVATION_CANDIDATES
+        diagnostic["detection_evidence"] = {
+            "bbox_coordinate_space": "normalized_sample_canvas",
+            "xyxy_coordinate_space": "sample_canvas_pixels",
+            "frame_size": {"width": frame_w, "height": frame_h},
+            "count": len(raw_boxes),
+            "truncated": len(raw_boxes) > limit,
+            "candidates": [
+                {
+                    "bbox": _xyxy_to_bbox(box[:4], frame_w, frame_h),
+                    "xyxy": [float(value) for value in box[:4]],
+                    "confidence": float(box[4]),
+                }
+                for box in raw_boxes[:limit]
+            ],
+        }
+        ids = getattr(tracked, "tracker_id", None)
+        track_count = len(tracked) if tracked is not None else 0
+        diagnostic["association_evidence"] = {
+            "bbox_coordinate_space": "normalized_sample_canvas",
+            "xyxy_coordinate_space": "sample_canvas_pixels",
+            "status": "updated" if tracked is not None else "not_initialized_no_detections",
+            "tracker_frame_index": getattr(self._tracker, "frame_id", None),
+            "max_time_lost": getattr(self._tracker, "max_time_lost", None),
+            "count": track_count,
+            "truncated": track_count > limit,
+            "selected_track_present": ids is not None and any(int(tid) == diagnostic.get("tracker_id") for tid in ids),
+            "candidates": [
+                {
+                    "bbox": _xyxy_to_bbox(tracked.xyxy[i], frame_w, frame_h),
+                    "xyxy": [float(value) for value in tracked.xyxy[i]],
+                    "tracker_id": int(ids[i]) if ids is not None else None,
+                    "confidence": self._detection_confidence(tracked, i),
+                }
+                for i in range(min(track_count, limit))
+            ],
+        }
+        return result, diagnostic
+
+    def _associate_frame_detailed(
+        self,
+        frame_bgr: np.ndarray,
+        seed_xyxy: Sequence[float] | None,
+        *,
+        raw_boxes: Sequence[tuple[float, float, float, float, float]],
+        tracked: Any,
+        frame_index: int = 0,
+        frame_path: Path | None = None,
+        support_anchor_bbox: dict[str, Any] | None = None,
+    ) -> tuple[tuple[float, float, float, float] | None, dict[str, Any]]:
         frame_h, frame_w = frame_bgr.shape[:2]
         fallback_xyxy = tuple(float(value) for value in (self._last_known_xyxy or seed_xyxy)) if (self._last_known_xyxy or seed_xyxy) is not None else None
         support_anchor_xyxy = self._support_anchor_xyxy(
@@ -1055,7 +1178,6 @@ class PersonBBoxTracker:
             frame_w=frame_w,
             frame_h=frame_h,
         )
-        raw_boxes = self._detect(frame_bgr)
         if not raw_boxes:
             self._lost_frames += 1
             self._clear_pending_confirmed_partial_recovery()
@@ -1095,7 +1217,6 @@ class PersonBBoxTracker:
                 extra_rejected_candidates=[support_anchor_rejection] if support_anchor_rejection else None,
             )
 
-        tracked = self._update_tracks(raw_boxes)
         if len(tracked) == 0 or getattr(tracked, "tracker_id", None) is None:
             self._lost_frames += 1
             self._clear_pending_confirmed_partial_recovery()
@@ -1840,7 +1961,7 @@ class PersonBBoxTracker:
         except Exception as exc:
             raise PersonTrackerUnavailable("supervision is not installed.") from exc
 
-        xyxy = np.array([[box[0], box[1], box[2], box[3]] for box in raw_boxes], dtype=np.float32)
+        xyxy = np.array([[box[0], box[1], box[2], box[3]] for box in raw_boxes], dtype=np.float32).reshape(-1, 4)
         confidence = np.array([box[4] for box in raw_boxes], dtype=np.float32)
         class_id = np.zeros(len(raw_boxes), dtype=int)
         detections = sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
@@ -1935,8 +2056,8 @@ class PersonBBoxTracker:
         if len(self._accepted_xyxy_history) > _ACCEPTED_HISTORY:
             del self._accepted_xyxy_history[:-_ACCEPTED_HISTORY]
 
-    def _appearance_signature(self, frame_bgr: np.ndarray, xyxy: Sequence[float]) -> np.ndarray | None:
-        if not self._appearance_relock_enabled:
+    def _appearance_signature(self, frame_bgr: np.ndarray, xyxy: Sequence[float], *, independent: bool = False) -> np.ndarray | None:
+        if not independent and not self._appearance_relock_enabled:
             return None
         try:
             import cv2  # type: ignore
@@ -1959,6 +2080,8 @@ class PersonBBoxTracker:
         crop = frame_bgr[torso_top:torso_bottom, torso_left:torso_right]
         if crop.size <= 0:
             return None
+        if independent:
+            return self._independent_color_hist(crop)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         hist = cv2.calcHist([hsv], [0, 1], None, [_APPEARANCE_RELOCK_H_BINS, _APPEARANCE_RELOCK_S_BINS], [0, 180, 0, 256])
         hist = cv2.normalize(hist, hist).flatten()
@@ -1968,6 +2091,286 @@ class PersonBBoxTracker:
         if norm <= 0.0:
             return None
         return hist.astype(np.float32)
+
+    @staticmethod
+    def _independent_color_hist(crop: np.ndarray) -> np.ndarray | None:
+        """Reliability-weighted colour, including achromatic luminance evidence.
+
+        Hue is ill-conditioned when RGB channel spread is near quantization
+        noise (including dark pixels with a misleadingly high HSV saturation).
+        Below 8 levels use luminance only, blend up to full hue at 32 levels.
+        Four overlapping neutral bins preserve dark/light spatial differences;
+        unreliable hue is never interpreted as a second clothing colour.
+        This descriptor is only for independent segment identity, not relock EMA.
+        """
+        import cv2
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        pixels = crop.astype(np.float32)
+        chroma = pixels.max(axis=2)-pixels.min(axis=2)
+        reliable = np.clip((chroma-8.)/24., 0., 1.)
+        h = np.minimum(hsv[:,:,0].astype(int)*_APPEARANCE_RELOCK_H_BINS//180,
+                       _APPEARANCE_RELOCK_H_BINS-1)
+        s = np.minimum(hsv[:,:,1].astype(int)*_APPEARANCE_RELOCK_S_BINS//256,
+                       _APPEARANCE_RELOCK_S_BINS-1)
+        colour = np.bincount((h*_APPEARANCE_RELOCK_S_BINS+s).ravel(),
+                            weights=reliable.ravel(),
+                            minlength=_APPEARANCE_RELOCK_H_BINS*_APPEARANCE_RELOCK_S_BINS)
+        luminance = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        neutral = np.array([np.sum((1.-reliable)*np.maximum(0., 1.-abs(luminance-c)/85.))
+                            for c in (0.,85.,170.,255.)])
+        hist = np.concatenate((colour, neutral)).astype(np.float32)
+        norm = float(np.linalg.norm(hist))
+        return hist/norm if norm > 0 and np.isfinite(hist).all() else None
+
+    @staticmethod
+    def _independent_body_region(frame_bgr: np.ndarray, xyxy: Sequence[float]) -> dict:
+        """One image-derived body span, independent of every reference descriptor.
+
+        A height-bounded central corridor prevents arm-driven detector width from
+        changing the sampling scale. Robust row extents tolerate sparse arm rows. The detector centre is retained: this is neither
+        a foreground recentering search nor a replacement detection/pose box.
+        Weak, clipped, or too small regions remain unsupported.
+        """
+        if len(xyxy) < 4 or not np.isfinite(xyxy[:4]).all():
+            return {"status": "invalid_box"}
+        frame_h, frame_w = frame_bgr.shape[:2]
+        left, top, right, bottom = _clamp_xyxy(xyxy, frame_w, frame_h)
+        height = int(round(bottom-top))
+        centre = (left+right)/2.
+        radius = height*.35
+        x0, x1 = int(round(centre-radius)), int(round(centre+radius))
+        y0, y1 = int(round(top+height*.18)), int(round(top+height*.62))
+        region = {"version": "body_span_v6", "corridor_xyxy": [x0,y0,x1,y1],
+                  "status": "region_insufficient", "detector_box_unchanged": True}
+        if not (0 <= x0 < x1 <= frame_w and 0 <= y0 < y1 <= frame_h):
+            return region
+        crop = frame_bgr[y0:y1, x0:x1]
+        if min(crop.shape[:2], default=0) < 16:
+            return region
+        # A single local background estimate, no clothing colour assumptions.
+        # Estimate each row's background from height-scaled lateral context.
+        # This removes horizontal background bands without treating any fixed
+        # scene colour as foreground. Context is diagnostic, never a pose box.
+        context_left = max(0, int(round(centre-height*.60)))
+        context_right = min(frame_w, int(round(centre+height*.60)))
+        margin = max(2, int(round(height*.12)))
+        context = frame_bgr[y0:y1,context_left:context_right]
+        rim = np.concatenate((context[:,:margin], context[:,-margin:]), axis=1)
+        background = np.median(rim, axis=1)
+        # An interior surrounding surface is usable only when both sides
+        # agree AND that surface is stable along the band. Two coloured halves
+        # of a body must never be mistaken for a row-varying background.
+        inner_radius = height*.25
+        ix0, ix1 = int(round(centre-inner_radius)), int(round(centre+inner_radius))
+        inner = frame_bgr[y0:y1, ix0:ix1]
+        if inner.shape[1] >= 4:
+            side_left = np.median(inner[:,:2], axis=1)
+            side_right = np.median(inner[:,-2:], axis=1)
+            surface = (side_left+side_right)/2.
+            stable = np.max(np.abs(surface-np.median(surface,axis=0)),axis=1) <= 12.
+            agreeing = np.max(np.abs(side_left-side_right),axis=1) <= 12.
+            local_surface = float((stable & agreeing).mean()) >= .75
+        else:
+            local_surface = False
+        # An agreeing inner surface is not evidence that clothing ends there.
+        # Keep the original inner mask, but inspect the original box's torso
+        # band for pixels distinct from BOTH this surface and lateral context.
+        # This preserves outer garment panels without making outside scenery
+        # foreground merely because it differs from a dark garment. Geometry
+        # is determined once from this image; no reference score selects it.
+        lateral_background = background
+        if local_surface:
+            raw_left = int(round(left+(right-left)*.18))
+            raw_right = int(round(right-(right-left)*.18))
+            x0 = min(ix0, max(context_left, raw_left))
+            x1 = max(ix1, min(context_right, raw_right))
+            crop = frame_bgr[y0:y1, x0:x1]
+            values = crop.astype(np.float32)
+            differs_inner = np.max(np.abs(values-surface[:,None,:]), axis=2) > 24.
+            differs_context = np.max(np.abs(values-lateral_background[:,None,:]), axis=2) > 24.
+            columns = np.arange(x0,x1)
+            inner_columns = (columns >= ix0) & (columns < ix1)
+            torso_columns = (columns >= raw_left) & (columns < raw_right)
+            mask = differs_inner & (inner_columns[None,:] |
+                                   (torso_columns[None,:] & differs_context))
+            region["outer_evidence_xyxy"] = [raw_left,y0,raw_right,y1]
+            region["outer_supported_row_fraction"] = float(
+                np.any(mask & ~inner_columns[None,:],axis=1).mean())
+            background = surface
+        else:
+            mask = np.max(np.abs(crop.astype(np.float32)-background[:,None,:]), axis=2) > 24.
+        region["background_source"] = "inner_surface_with_outer_evidence" if local_surface else "lateral_context"
+        region["corridor_xyxy"] = [x0,y0,x1,y1]
+        region["inner_surface_xyxy"] = [ix0,y0,ix1,y1]
+        spans = []
+        clipped = 0
+        for row in mask:
+            points = np.flatnonzero(row)
+            if len(points):
+                spans.append((int(points[0]), int(points[-1]+1)))
+                clipped += int(points[0] == 0 or points[-1] == len(row)-1)
+        region.update(context_xyxy=[context_left,y0,context_right,y1],
+                      background_bgr=background.tolist(),
+                      foreground_fraction=float(mask.mean()),
+                      supported_row_fraction=len(spans)/len(mask),
+                      clipped_row_fraction=clipped/len(mask))
+        if len(spans) < .75*len(mask) or clipped >= .5*len(mask):
+            return region
+        # Opposite garment regions may have different contrast to the same
+        # background. Use robust lateral extents across rows, not a median of
+        # row widths that would discard one side of a patterned garment.
+        extent = np.asarray(spans, dtype=np.float32)
+        width = int(round(float(np.quantile(extent[:,1], .75)-
+                                np.quantile(extent[:,0], .25))))
+        if local_surface:
+            # Retaining detector centre must not cut off one-sided clothing.
+            # Enclose both robust extents symmetrically, rather than placing
+            # their width at an unrelated centre and losing an outer panel.
+            width = int(round(2*max(centre-(x0+np.quantile(extent[:,0],.25)),
+                                    x0+np.quantile(extent[:,1],.75)-centre)))
+        if width < max(16, height*.18):
+            return region
+        bx0, bx1 = int(round(centre-width/2.)), int(round(centre+width/2.))
+        region.update(status="supported", feature_xyxy=[bx0,y0,bx1,y1],
+                      body_width_pixels=width)
+        return region
+
+    def _independent_identity_signature(self, frame_bgr: np.ndarray, xyxy: Sequence[float], *,
+                                        _alignment: bool = True) -> dict | None:
+        """Image-derived body geometry with the original pooled/information gates.
+
+        At most 49 descriptors; residual whole-region shifts remain at 1/16.
+        Outer 1/8 shifts are rejection sentinels. The region is determined once
+        from this candidate, before any reference comparison, and never refit.
+        """
+        import cv2
+        geometry = self._independent_body_region(frame_bgr, xyxy)
+        if geometry["status"] != "supported":
+            return None
+        pooled = self._appearance_signature(frame_bgr, xyxy, independent=True)
+        if pooled is None or np.count_nonzero(pooled > .20) < 2:
+            return None
+        frame_h, frame_w = frame_bgr.shape[:2]
+        left, top, right, bottom = _clamp_xyxy(xyxy, frame_w, frame_h)
+        x0,y0,x1,y1 = geometry["feature_xyxy"]
+
+        def describe(sx=0., sy=0.):
+            ax0,ay0,ax1,ay1 = (int(round(x0+sx)), int(round(y0+sy)),
+                             int(round(x1+sx)), int(round(y1+sy)))
+            if not (0 <= ax0 < ax1 <= frame_w and 0 <= ay0 < ay1 <= frame_h):
+                return None
+            crop = frame_bgr[ay0:ay1,ax0:ax1]
+            if min(crop.shape[:2]) < 16:
+                return None
+            shifted_pooled = (pooled if sx == sy == 0. else self._appearance_signature(
+                frame_bgr, (left+sx,top+sy,right+sx,bottom+sy), independent=True))
+            if shifted_pooled is None or np.count_nonzero(shifted_pooled > .20) < 2:
+                return None
+            cells = []
+            for row in range(4):
+                for col in range(4):
+                    hist = self._independent_color_hist(
+                        crop[row*crop.shape[0]//4:(row+1)*crop.shape[0]//4,
+                             col*crop.shape[1]//4:(col+1)*crop.shape[1]//4])
+                    if hist is None:
+                        return None
+                    cells.append(hist)
+            layout = np.asarray(cells, dtype=np.float32)
+            diversity = float(1-np.mean(layout @ layout.T))
+            gray = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (16,16),
+                              interpolation=cv2.INTER_AREA).astype(np.float32)
+            contrast = float(gray.std())
+            if diversity < .08 or contrast < 6.:
+                return None
+            structure = (gray-gray.mean()).flatten()
+            structure /= np.linalg.norm(structure)
+            return {"pooled": shifted_pooled/np.linalg.norm(shifted_pooled), "layout": layout,
+                    "structure": structure, "spatial_diversity": diversity,
+                    "luminance_contrast": contrast}
+
+        result = describe()
+        if result is None:
+            return None
+        result["geometry"] = geometry
+        if _alignment:
+            result["spatial_key"] = hashlib.sha256(
+                frame_bgr[y0:y1,x0:x1].tobytes()).hexdigest()
+            variants = []
+            for dy in (-2., -1., -.5, 0., .5, 1., 2.):
+                for dx in (-2., -1., -.5, 0., .5, 1., 2.):
+                    if dx == dy == 0.:
+                        continue
+                    sx,sy = dx*(x1-x0)/16.,dy*(y1-y0)/16.
+                    if not (0 <= left+sx < right+sx <= frame_w and
+                            0 <= top+sy < bottom+sy <= frame_h):
+                        continue
+                    sig = describe(sx,sy)
+                    if sig is not None:
+                        variants.append({"offset_torso": [dx/16.,dy/16.],
+                                         "offset_pixels": [sx,sy],
+                                         "in_bounds": max(abs(dx),abs(dy)) <= 1., "signature": sig})
+            result["alignment_variants"] = variants
+        return result
+
+    @staticmethod
+    def _independent_identity_scores(a: dict, b: dict) -> dict:
+        """One full-crop transform must pass all the unchanged spatial gates.
+
+        Compare in a stable order so reference/support/candidate argument order
+        cannot select a different transformation. Pooled proposals remain raw;
+        a translated pair must also retain pooled agreement and information.
+        """
+        def scores(x, y):
+            cells = np.sum(x["layout"]*y["layout"], axis=1)
+            return {"pooled_cosine": float(np.dot(x["pooled"], y["pooled"])),
+                    "layout_mean": float(np.mean(cells)),
+                    "layout_lower_quartile": float(np.quantile(cells, .25)),
+                    "structure_correlation": float(np.dot(x["structure"], y["structure"]))}
+
+        def margin(s):
+            return min(s["pooled_cosine"]/.90, s["layout_mean"]/.90,
+                       s["layout_lower_quartile"]/.75, s["structure_correlation"]/.85)
+
+        raw = scores(a, b)
+        result = {**raw, "alignment": {"offset_torso": [0., 0.],
+                    "offset_pixels": [0., 0.], "shifted_signature": None}, "raw": raw}
+        if margin(raw) >= 1.:
+            return result
+        first, second = sorted((a, b), key=lambda s: s.get("spatial_key", ""))
+        best = float("-inf")
+        outside_best = float("-inf")
+        # At most 97 comparisons. Outer translations are rejection sentinels:
+        # a best match outside the allowed window cannot be clipped to its edge.
+        # Each side is shifted
+        # against the other's original, never two shifts summed together.
+        for original, moving in ((first, second), (second, first)):
+            for variant in moving.get("alignment_variants", []):
+                candidate = scores(original, variant["signature"])
+                # Register by spatial structure, subject to all identity gates.
+                # Optimizing the weakest gate can clip a larger real shift to
+                # the acceptance boundary and hide contradictory structure.
+                if margin(candidate) < 1.:
+                    continue
+                value = candidate["structure_correlation"]
+                if not variant["in_bounds"]:
+                    outside_best = max(outside_best, value)
+                    continue
+                if value > best:
+                    best = value
+                    result = {**candidate, "raw": raw, "alignment": {
+                        "shifted_signature": moving.get("spatial_key"),
+                        "offset_torso": variant["offset_torso"],
+                        "offset_pixels": variant["offset_pixels"]}}
+        if outside_best > best + 1e-6:
+            return {**raw, "raw": raw, "alignment": {
+                "status": "out_of_bounds", "offset_torso": [0., 0.],
+                "offset_pixels": [0., 0.], "shifted_signature": None,
+                "best_allowed_structure": best if np.isfinite(best) else None,
+                "outside_structure": outside_best}}
+        return result
+
 
     def _update_appearance_anchor(self, frame_bgr: np.ndarray, xyxy: Sequence[float]) -> None:
         signature = self._appearance_signature(frame_bgr, xyxy)
@@ -3025,6 +3428,7 @@ class PersonBBoxTracker:
             confidence = float(raw_box[4])
             relax_identity = (
                 relax_long_lost_single_candidate
+                and not self._frame_fault_requires_confirmation
                 and source == "full_frame_yolo_relock"
                 and self._long_lost_single_detector_reacquire_allowed(
                     boxes,
@@ -3044,7 +3448,7 @@ class PersonBBoxTracker:
                 source=source,
                 relax_long_lost_single_candidate=relax_identity,
             )
-            if reasons and self._long_lost_pending_detector_relock_allowed(
+            if reasons and not self._frame_fault_requires_confirmation and self._long_lost_pending_detector_relock_allowed(
                 candidate_xyxy,
                 confidence,
                 frame_w=frame_w,
@@ -3416,7 +3820,7 @@ class PersonBBoxTracker:
 
         local_crop_bounds: list[int] | None = None
         local_boxes: list[tuple[float, float, float, float, float]] = []
-        if allow_local_zoom and prediction_xyxy is not None:
+        if allow_local_zoom and not self._full_frame_only and prediction_xyxy is not None:
             _add_flag(self.quality_flags, PERSON_TRACKER_LOCAL_ZOOM_RELOCK_ATTEMPTED_FLAG)
             local_boxes, local_crop_bounds = self._local_zoom_relock_boxes(
                 frame_bgr,
@@ -4147,6 +4551,12 @@ def _create_byte_tracker(effective_fps: float) -> Any:
 
 
 def _resolve_yolo_model_path() -> str:
+    from app.trial import trial_profile
+    if trial_profile() == "legacy-analysis-preview":
+        model = Path(os.getenv(_YOLO_MODEL_PATH_ENV, "/models/yolov8n.pt"))
+        if not model.is_file():
+            raise PersonTrackerUnavailable(f"Packaged person model missing: {model}")
+        return str(model)
     configured_path = os.getenv(_YOLO_MODEL_PATH_ENV, "").strip()
     if configured_path:
         candidate = Path(configured_path)
@@ -4441,7 +4851,12 @@ def track_person_bbox_detailed(
         }
         if golden_anchor_bboxes_by_frame:
             kwargs["golden_anchor_bboxes_by_frame"] = golden_anchor_bboxes_by_frame
-        return _track_forward_detailed(frames, normalized_initial, **kwargs)
+        tracked, flags, diagnostics = _track_forward_detailed(frames, normalized_initial, **kwargs)
+        for frame_index, diagnostic in enumerate(diagnostics):
+            diagnostic["tracking_direction"] = "forward"
+            diagnostic["sequence_frame_index"] = frame_index
+            diagnostic["anchor_frame_index"] = start_index
+        return tracked, flags, diagnostics
 
     backward_frames = list(reversed(frames[: start_index + 1]))
     support_by_frame = support_anchor_bboxes_by_frame if isinstance(support_anchor_bboxes_by_frame, dict) else {}
@@ -4490,6 +4905,9 @@ def track_person_bbox_detailed(
     diagnostics = list(reversed(backward_diagnostics))[0:-1] + forward_diagnostics
     for frame_index, diagnostic in enumerate(diagnostics):
         diagnostic.pop("sequence_summary", None)
+        diagnostic["tracking_direction"] = "backward" if frame_index < start_index else "forward"
+        diagnostic["sequence_frame_index"] = abs(frame_index - start_index)
+        diagnostic["anchor_frame_index"] = start_index
         diagnostic["frame_index"] = frame_index
         if frame_index < len(frames):
             diagnostic["frame"] = frames[frame_index].name

@@ -321,6 +321,7 @@ class TargetPreview:
     lock_confidence: float
     candidates: list[dict[str, Any]]
     target_lock_status: str
+    preview_frame_source: str | None = None
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -2700,6 +2701,9 @@ def _motion_anchor_frame_names(motion_scores: dict[str, Any] | None, *, limit: i
     if not isinstance(motion_scores, dict):
         return []
     selected = [item for item in motion_scores.get("selected", []) if isinstance(item, dict)]
+    if motion_scores.get("motion_signal_version") == 2:
+        from app.services.keyframe_candidates import _bound_motion_score
+        selected = [r for r in selected if _bound_motion_score(r) is not None]
 
     def sort_key(item: dict[str, Any]) -> tuple[float, float]:
         try:
@@ -3002,6 +3006,12 @@ def build_target_preview(
         if existing_preview_frame in frame_list
         else detected_preview_frame or _motion_anchor_frame(frame_list, motion_scores)
     )
+    preview_frame_source = (
+        "existing_lock" if existing_preview_frame in frame_list else
+        "detected_candidate" if detected_preview_frame else
+        "motion_peak" if preview_frame in _motion_anchor_frame_names(motion_scores) else
+        "uniform_fallback" if preview_frame else None
+    )
     preview_frame_index = frame_list.index(preview_frame) if preview_frame in frame_list else None
     candidates = _merge_candidate_lists(detected, _fallback_candidates(frame_names))
 
@@ -3264,6 +3274,7 @@ def build_target_preview(
         lock_confidence=round(lock_confidence, 4),
         candidates=candidates,
         target_lock_status=target_lock_status,
+        preview_frame_source=preview_frame_source,
     )
 
 
@@ -3274,6 +3285,9 @@ def _motion_anchor_frame(frame_list: Sequence[str], motion_scores: dict[str, Any
         return frame_list[0]
 
     available = set(frame_list)
+    if motion_scores.get("motion_signal_version") == 2:
+        return next((name for name in _motion_anchor_frame_names(motion_scores, limit=len(frame_list))
+                     if name in available), frame_list[0])
     selected = motion_scores.get("selected")
     if not isinstance(selected, list):
         return frame_list[0]
@@ -3345,6 +3359,7 @@ def build_target_lock_payload(
         return {
             "preview_frame": preview.preview_frame,
             "preview_frame_index": preview.preview_frame_index,
+            "preview_frame_source": preview.preview_frame_source,
             "candidates": preview.candidates,
             "selected_candidate_id": None,
             "selected_bbox": selected_bbox,
@@ -3381,6 +3396,7 @@ def build_target_lock_payload(
     return {
         "preview_frame": preview_frame,
         "preview_frame_index": preview_frame_index,
+        "preview_frame_source": preview.preview_frame_source,
         "candidates": preview.candidates,
         "selected_candidate_id": chosen.get("id") if isinstance(chosen, dict) else preview.auto_candidate_id,
         "selected_bbox": chosen.get("bbox") if isinstance(chosen, dict) else None,

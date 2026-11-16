@@ -9,6 +9,7 @@ from typing import Any
 from app.schemas import Severity
 from app.analysis_v2.claim_report import build_claim_explainer_prompt, constrain_report_payload
 from app.analysis_v2.contracts import EvidenceClaim
+from app.services.action_profiles import profile_warning_from_evidence
 from app.services.analysis_errors import AnalysisErrorCode, classify_ai_failure
 from app.services.providers import get_active_provider, request_text_completion
 from app.services.snowball import build_memory_context
@@ -134,6 +135,9 @@ def effective_report_subscores(
     report: dict[str, Any] | None,
     bio_data: dict[str, Any] | None,
 ) -> tuple[dict[str, int], str]:
+    from app.trial import external_ai_allowed
+    if not external_ai_allowed() or (isinstance(report, dict) and report.get("source") == "legacy/local"):
+        return {}, "unscored_local"
     report_subscores = valid_subscores(report.get("subscores") if isinstance(report, dict) else None)
     if report_subscores:
         return report_subscores, "ai_fused"
@@ -297,6 +301,7 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         user_note = payload.get("note")
     action_confirmation = payload.get("action_confirmation")
 
+    profile_warning = payload.get("profile_warning")
     normalized = {
         "summary": str(payload.get("summary", "")).strip(),
         "issues": normalized_issues,
@@ -316,11 +321,180 @@ def normalize_report(payload: dict[str, Any], bio_data: dict[str, Any] | None = 
         ),
         "action_confirmation": action_confirmation if isinstance(action_confirmation, dict) else None,
     }
+    if isinstance(profile_warning, str) and profile_warning.strip():
+        normalized["profile_warning"] = profile_warning.strip()
     return attach_score_breakdown(normalized)
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+_PROFILE_ROUTE_LABELS = {
+    "jump": "跳跃",
+    "spin": "旋转",
+    "step": "步法",
+    "spiral": "燕式滑行/螺旋线",
+    "mixed_auto": "自由滑片段自动分析",
+}
+
+_PROFILE_INTERNAL_FLAG_PREFIXES = (
+    "mixed_action_profile_",
+    "jump_gate_",
+    "spin_rotation_signal_",
+)
+
+_PROFILE_INTERNAL_FLAGS = {
+    "jump_spin_ambiguous",
+    "profile_route_only",
+}
+
+
+def _profile_evidence_from_bio(bio_data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(bio_data, dict):
+        return {}
+    evidence = bio_data.get("profile_evidence")
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def _profile_warning_from_bio(bio_data: dict[str, Any] | None) -> str:
+    if not isinstance(bio_data, dict):
+        return ""
+    warning = _text(bio_data.get("profile_warning"))
+    if warning:
+        return warning
+    return profile_warning_from_evidence(_profile_evidence_from_bio(bio_data))
+
+
+def _is_profile_internal_flag(flag: Any) -> bool:
+    text = _text(flag)
+    if not text:
+        return True
+    return text in _PROFILE_INTERNAL_FLAGS or any(text.startswith(prefix) for prefix in _PROFILE_INTERNAL_FLAG_PREFIXES)
+
+
+def _build_profile_boundary_prompt(bio_data: dict[str, Any] | None) -> str:
+    evidence = _profile_evidence_from_bio(bio_data)
+    warning = _profile_warning_from_bio(bio_data)
+    if not evidence and not warning:
+        return ""
+
+    hint = _text(evidence.get("profile_hint")).lower()
+    mixed = bool(evidence.get("mixed_action_input")) or hint == "mixed_auto"
+    route_label = _PROFILE_ROUTE_LABELS.get(hint, "未明确")
+    confidence = _text(evidence.get("profile_confidence")).lower()
+    confidence_label = {"low": "较低（仅路由）", "medium": "中等（候选）", "high": "较高"}.get(confidence, "未标注")
+    route_source = (
+        "自动分类（自由滑片段），不是用户指定动作"
+        if mixed
+        else "用户输入标签/动作大类决定路由，不是自动动作确认"
+    )
+    candidate_parts: list[str] = []
+    if "jump_geometry_candidate" in evidence:
+        candidate_parts.append(f"跳跃几何候选={'是' if evidence.get('jump_geometry_candidate') else '否'}")
+    if "jump_gate_passed" in evidence:
+        candidate_parts.append(f"腾空门槛={'通过' if evidence.get('jump_gate_passed') else '未通过'}")
+    if "mixed_jump_gate_passed" in evidence:
+        candidate_parts.append(f"混合片段腾空候选={'是' if evidence.get('mixed_jump_gate_passed') else '否'}")
+    if "airborne_frames_detected" in evidence:
+        candidate_parts.append(f"检测到的腾空帧数={evidence.get('airborne_frames_detected')}")
+    if evidence.get("jump_spin_ambiguous"):
+        candidate_parts.append("跳跃/旋转区分=证据不足")
+    if "hip_rotation_signal" in evidence:
+        candidate_parts.append(f"旋转线索强度={evidence.get('hip_rotation_signal')}")
+    constraints = evidence.get("negative_constraints")
+    constraint_texts = (
+        [text for text in (_text(item) for item in constraints) if text]
+        if isinstance(constraints, list)
+        else []
+    )
+    jump_metrics_warning = _text(bio_data.get("jump_metrics_warning")) if isinstance(bio_data, dict) else ""
+
+    lines = [
+        "=== 动作分类路由边界（路由不等于动作确认） ===",
+        f"- 路由方向：{route_label}；路由置信度：{confidence_label}",
+        f"- 标签来源：{route_source}",
+        f"- 候选线索：{'；'.join(candidate_parts) if candidate_parts else '无明确候选线索'}",
+        f"- 未排除边界：{'；'.join(constraint_texts) if constraint_texts else '当前没有额外排除结论'}",
+        f"- 可读边界提示：{warning or '当前只有分析路由，不能当作已确认动作。'}",
+        "- 证据规则：路由/profile 名称、候选 flag 和用户标签只决定分析重点，不能写成已确认跳跃/旋转/步法/燕式。",
+        "- 证据规则：只有独立可见证据（离地/腾空/落冰、刃型、旋转轴、连续姿态等）才能支持具体跳种、周数或单双跳；"
+        "jump_features 或几何候选不能循环证明已经发生跳跃。",
+        "- 证据规则：路由为步法/旋转/燕式时，不得否定画面中独立可见的跳跃；证据不足时写“不可确认具体动作”。",
+        "- 证据规则：用户备注只能作为关注线索，不能作为自动动作证据。",
+    ]
+    if isinstance(bio_data, dict) and bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        import json
+        lines.append("- 五节点候选与测量可用性（candidate不等于接触确认；空值不得补值）：" + json.dumps(
+            {key: bio_data.get(key) for key in ("jump_stages", "jump_measurements")}, ensure_ascii=False))
+    if jump_metrics_warning:
+        lines.append(f"- 既有指标限制：{jump_metrics_warning}")
+    return "\n".join(lines)
+
+
+def _apply_profile_warning_to_report(
+    report: dict[str, Any],
+    bio_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(bio_data, dict) and bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        import copy
+        report = {**report, **{key: copy.deepcopy(bio_data[key]) for key in (
+            "jump_stage_contract", "jump_stages", "jump_measurements")}}
+    warning = _profile_warning_from_bio(bio_data)
+    if not warning:
+        return report
+
+    updated = dict(report)
+    updated["profile_warning"] = warning
+    summary = _text(updated.get("summary"))
+    if warning not in summary:
+        updated["summary"] = f"{summary} {warning}".strip()
+
+    issues = updated.get("issues")
+    if isinstance(issues, list):
+        issue_texts = [
+            _text(issue.get("description")) if isinstance(issue, dict) else _text(issue)
+            for issue in issues
+        ]
+        if all(warning not in text for text in issue_texts):
+            if not issues or all(isinstance(issue, dict) for issue in issues):
+                updated["issues"] = [
+                    *issues,
+                    {
+                        "category": "动作分类边界",
+                        "description": warning,
+                        "severity": Severity.low.value,
+                        "phase": None,
+                        "frames": [],
+                        "source": "结构化证据",
+                    },
+                ]
+            elif all(isinstance(issue, str) for issue in issues):
+                updated["issues"] = [*issues, warning]
+            else:
+                updated["issues"] = [
+                    *issues,
+                    {
+                        "category": "动作分类边界",
+                        "description": warning,
+                        "severity": Severity.low.value,
+                        "phase": None,
+                        "frames": [],
+                        "source": "结构化证据",
+                    },
+                ]
+    else:
+        updated["issues"] = [
+            {
+                "category": "动作分类边界",
+                "description": warning,
+                "severity": Severity.low.value,
+                "phase": None,
+                "frames": [],
+                "source": "结构化证据",
+            }
+        ]
+    return updated
 
 
 def _norm_key(value: Any) -> str:
@@ -721,8 +895,9 @@ def _summary_from_evidence(
         "spiral": "燕式滑行",
         "step": "步法",
     }
+    label = labels.get(profile, action_type)
     if not issues:
-        return f"本次{labels.get(profile, action_type)}动作流程可继续复核，训练上先保留基础节奏和姿态控制。"
+        return f"本次按{label}方向分析，动作流程可继续复核，训练上先保留基础节奏和姿态控制。"
     main = "；".join(_text(issue.get("description")) for issue in issues[:2] if _text(issue.get("description")))
     focus = {
         "jump": "起跳发力、空中轴心和落冰滑出",
@@ -730,7 +905,7 @@ def _summary_from_evidence(
         "spiral": "浮足伸展、支撑腿稳定和滑行速度",
         "step": "蹬冰力量、重心转移和节奏",
     }.get(profile, "核心技术细节")
-    return f"本次{labels.get(profile, action_type)}可确认的主要问题是：{main}。后续训练重点放在{focus}。"
+    return f"本次按{label}方向分析，可观察到的主要问题是：{main}。后续训练重点放在{focus}。"
 
 
 def _refine_report_with_structured_evidence(
@@ -1172,6 +1347,9 @@ def _fallback_report(
         "subscores": _fallback_subscores(),
         "data_quality": "partial",
     }
+    profile_warning = _profile_warning_from_bio(bio_data)
+    if profile_warning:
+        payload["profile_warning"] = profile_warning
     action_confirmation = _action_confirmation_from_meta(dual_path_meta)
     if action_confirmation:
         payload["action_confirmation"] = action_confirmation
@@ -1185,7 +1363,8 @@ def _fallback_report(
     )
     if note_response:
         payload["user_note_response"] = note_response
-    return _apply_low_confidence_notice(normalize_report(payload, bio_data), vision_summary)
+    report = _apply_low_confidence_notice(normalize_report(payload, bio_data), vision_summary)
+    return _apply_profile_warning_to_report(report, bio_data)
 
 
 def _fallback_report_after_parse_failure(
@@ -1266,9 +1445,13 @@ def _fallback_report_after_ai_failure(
     }
     score_text = " / ".join(f"{_format_subscore_label(key)} {subscores[key]}" for key in SUBSCORE_KEYS)
     quality_flags = bio_data.get("quality_flags") if isinstance(bio_data, dict) and isinstance(bio_data.get("quality_flags"), list) else []
-    issues = [QUALITY_FLAG_DESCRIPTIONS.get(str(flag), str(flag)) for flag in quality_flags if flag]
+    issues = [
+        QUALITY_FLAG_DESCRIPTIONS.get(str(flag), str(flag))
+        for flag in quality_flags
+        if flag and not _is_profile_internal_flag(flag)
+    ]
 
-    return {
+    report = {
         "summary": f"{action_type}动作生物力学评分:{score_text}",
         "issues": issues,
         "improvements": [],
@@ -1279,6 +1462,7 @@ def _fallback_report_after_ai_failure(
         "fallback_reason": reason,
         "fallback_detail": detail[:500],
     }
+    return _apply_profile_warning_to_report(report, bio_data)
 
 
 def _is_deepseek_v4_provider(provider: Any) -> bool:
@@ -1291,6 +1475,53 @@ def _report_response_format(provider: Any) -> dict[str, str] | None:
     if _is_deepseek_v4_provider(provider):
         return {"type": "json_object"}
     return None
+
+
+def _native_claim_only_fallback(
+    claims: Sequence[EvidenceClaim],
+    *,
+    reason: str | None = None,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """Fail closed on the V2 claim-only path without legacy evidence.
+
+    This path never reads vision, bio/profile routing, dual-path metadata, or
+    legacy prompt context. The bounded claim envelope is still produced by
+    ``constrain_report_payload``, including for an explicit empty claim tuple.
+    """
+    if claims:
+        summary = "已融合证据已保存；本次未生成外部 AI 解释，不输出未经验证的技术结论。"
+    else:
+        summary = "当前没有可用的已融合证据，暂不生成技术结论。"
+    base = {
+        "summary": summary,
+        "issues": [],
+        "improvements": [],
+        "training_focus": "请以已保存的融合证据为准，待外部 AI 可用后再生成技术解释。",
+        "subscores": {},
+        "data_quality": "insufficient",
+    }
+    constrained = constrain_report_payload(base, claims)
+    report = dict(constrained) if isinstance(constrained, dict) else {}
+    report["summary"] = _text(report.get("summary")) or summary
+    if not isinstance(report.get("issues"), list):
+        report["issues"] = []
+    if not isinstance(report.get("improvements"), list):
+        report["improvements"] = []
+    report["training_focus"] = _text(report.get("training_focus")) or base["training_focus"]
+    if not isinstance(report.get("subscores"), dict):
+        report["subscores"] = {}
+    report["data_quality"] = _text(report.get("data_quality")) or "insufficient"
+    report["unsupported_claims"] = list(report.get("unsupported_claims") or ())
+    report["evidence_claims"] = report.get("evidence_claims")
+    report["report_source_fact_hash"] = report.get("report_source_fact_hash")
+    if report.get("action_confirmation") is None:
+        report.pop("action_confirmation", None)
+    if reason:
+        report["fallback_reason"] = reason
+    if detail:
+        report["fallback_detail"] = detail[:500]
+    return report
 
 
 async def generate_report(
@@ -1319,12 +1550,21 @@ async def generate_report(
     Raises:
         No AI provider exception is intentionally propagated; failures become fallback reports.
     """
+    from app.trial import external_ai_allowed
+
     # V2 report generation receives only the bounded, fused claim envelope.
     # Legacy callers continue to use the historical vision/bio payloads.
     # ``None`` means legacy mode; an empty tuple is an explicit V2 envelope
     # with no eligible claims and must remain claim-only/fail-closed.
     claim_only = fused_claims is not None
     claim_tuple = tuple(fused_claims or ())
+    # Legacy bio/profile routing must never enter the V2 claim-only authority.
+    legacy_bio_data = None if claim_only else bio_data
+
+    if not external_ai_allowed():
+        if claim_only:
+            return _native_claim_only_fallback(claim_tuple, reason="external_ai_disabled")
+        return local_fallback_report(action_type, vision_structured, bio_data)
 
     def _claim_safe(report: dict[str, Any]) -> dict[str, Any]:
         return constrain_report_payload(report, claim_tuple) if claim_only else report
@@ -1337,17 +1577,23 @@ async def generate_report(
         # the historical prompt/memory behavior below.
         memory_context = "" if claim_only or prompt_context is not None else await build_memory_context(skater_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Report provider unavailable, using biomechanics fallback: %s", exc)
+        logger.warning("Report provider unavailable, using fallback: %s", exc)
         failure = classify_ai_failure(exc)
-        return _claim_safe(_fallback_report_after_ai_failure(
+        if claim_only:
+            return _native_claim_only_fallback(
+                claim_tuple,
+                reason=failure.code.value,
+                detail=failure.detail,
+            )
+        return _fallback_report_after_ai_failure(
             action_type,
-            bio_data,
+            legacy_bio_data,
             failure.detail,
             failure.code.value,
             vision_structured=vision_structured,
             dual_path_meta=dual_path_meta,
             prompt_context=prompt_context,
-        ))
+        )
 
     system_prompt = REPORT_SYSTEM_PROMPT if not memory_context else f"{REPORT_SYSTEM_PROMPT}\n\n{memory_context}"
     if claim_only:
@@ -1363,11 +1609,13 @@ async def generate_report(
         dual_block = ""
         video_temporal_block = ""
         prompt_bio_data: dict[str, Any] = {}
+        profile_boundary_block = ""
     else:
         vision_summary = summarize_vision_for_report(vision_structured)
         dual_block = _build_dual_path_report_context(dual_path_meta)
         video_temporal_block = _build_video_temporal_report_context(vision_structured, dual_path_meta)
         prompt_bio_data = bio_data or {}
+        profile_boundary_block = _build_profile_boundary_prompt(prompt_bio_data)
         context_block = (
             "\n\n=== 统一分析上下文 ===\n" + render_prompt_context(prompt_context, include_bio=False)
             if prompt_context is not None
@@ -1433,7 +1681,8 @@ async def generate_report(
         "不要输出泛化的“稳定轴心/软膝盖”模板，除非同时说明具体练习方法、阶段、次数和儿童安全边界。"
         "所有训练建议必须低冲击、短时长、可由家长或教练安全监督；不要安排负重、Bosu、旋转椅或痛苦拉伸。\n\n"
         f"用于生成报告的视觉摘要：\n{json.dumps(vision_summary, ensure_ascii=False)}\n\n"
-        f"骨骼几何指标：\n{json.dumps(prompt_bio_data, ensure_ascii=False)}"
+        f"骨骼几何指标：\n{json.dumps(prompt_bio_data, ensure_ascii=False)}\n\n"
+        f"{profile_boundary_block}"
         + context_block
         + dual_block
         + video_temporal_block
@@ -1462,17 +1711,23 @@ async def generate_report(
                 ],
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Report AI request failed after retries, using biomechanics fallback: %s", exc)
+            logger.warning("Report AI request failed after retries, using fallback: %s", exc)
             failure = classify_ai_failure(exc)
-            return _claim_safe(_fallback_report_after_ai_failure(
+            if claim_only:
+                return _native_claim_only_fallback(
+                    claim_tuple,
+                    reason=failure.code.value,
+                    detail=failure.detail,
+                )
+            return _fallback_report_after_ai_failure(
                 action_type,
-                bio_data,
+                legacy_bio_data,
                 failure.detail,
                 failure.code.value,
                 vision_structured=vision_structured,
                 dual_path_meta=dual_path_meta,
                 prompt_context=prompt_context,
-            ))
+            )
 
         cleaned = clean_json_text(raw_content)
         try:
@@ -1484,9 +1739,14 @@ async def generate_report(
             )
             continue
 
-        parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
+        if claim_only:
+            # V2 authority is the claim envelope only; legacy vision/dual
+            # quality hints must not change the report's quality field.
+            parsed["data_quality"] = str(parsed.get("data_quality", "partial")).strip() or "partial"
+        else:
+            parsed["data_quality"] = _resolve_report_data_quality(parsed, vision_structured, dual_path_meta)
 
-        if prompt_context is not None and prompt_context.user_note:
+        if not claim_only and prompt_context is not None and prompt_context.user_note:
             parsed["user_note"] = prompt_context.user_note
 
         claim_boundary: dict[str, Any] | None = None
@@ -1495,7 +1755,7 @@ async def generate_report(
             # technical keys such as timestamp/turns.
             claim_boundary = constrain_report_payload(parsed, claim_tuple)
             parsed = claim_boundary
-        report = _apply_low_confidence_notice(normalize_report(parsed, bio_data), vision_summary)
+        report = _apply_low_confidence_notice(normalize_report(parsed, legacy_bio_data), vision_summary)
         if not claim_only:
             report = _refine_report_with_structured_evidence(
                 report,
@@ -1504,6 +1764,7 @@ async def generate_report(
                 dual_path_meta=dual_path_meta,
                 prompt_context=prompt_context,
             )
+            report = _apply_profile_warning_to_report(report, bio_data)
         report = _claim_safe(report)
         if claim_boundary is not None:
             report["unsupported_claims"] = list(claim_boundary.get("unsupported_claims") or ())
@@ -1520,11 +1781,32 @@ async def generate_report(
             f"Report payload missing required fields on attempt {attempt}/{REPORT_JSON_MAX_ATTEMPTS}: {cleaned[:500]}"
         )
 
-    return _claim_safe(_fallback_report_after_parse_failure(
+    if claim_only:
+        return _native_claim_only_fallback(
+            claim_tuple,
+            reason=AnalysisErrorCode.AI_RESPONSE_PARSE_FAIL.value,
+            detail=last_failure_detail,
+        )
+    return _fallback_report_after_parse_failure(
         action_type,
         vision_structured,
-        bio_data,
+        legacy_bio_data,
         last_failure_detail,
         dual_path_meta=dual_path_meta,
         prompt_context=prompt_context,
-    ))
+    )
+
+
+def local_fallback_report(action_type: str, vision_structured: dict, bio_data: dict | None = None) -> dict:
+    """Reuse the report shape without treating fallback scores as measurements."""
+    report = _fallback_report(action_type, vision_structured, bio_data)
+    report.update(
+        source="legacy/local", subscores={}, score_breakdown=None,
+        summary="本地处理结果已保存；证据不足以给出技术评分或动作结论。",
+        training_focus="请结合原视频与教练观察复核；本结果不代表真人准确率已验证。",
+        issues=[{"category": "数据质量", "description": "仅保存本地检测、追踪及可用姿态事实；未调用外部 AI。", "severity": "low", "frames": []}],
+        improvements=[], data_quality="insufficient", technical_conclusion=None,
+    )
+    # The local summary/issues replacement above must not drop the routing
+    # boundary. Re-apply it only after the final overwrite (idempotent).
+    return _apply_profile_warning_to_report(report, bio_data)

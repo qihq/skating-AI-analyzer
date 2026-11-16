@@ -269,6 +269,14 @@ def _fake_extract_precise_frames(_: Path, output_dir: Path, records: list[dict[s
 
 
 class SemanticKeyframePipelineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # These source.mp4 fixtures are synthetic bytes, with no real metadata.
+        for target in ("app.services.video.detect_video_duration",
+                       "app.services.semantic_keyframe_pipeline.detect_video_duration"):
+            metadata = patch(target, return_value=None)
+            metadata.start()
+            self.addCleanup(metadata.stop)
+
     def _motion_aligned_jump_bio(
         self,
         *,

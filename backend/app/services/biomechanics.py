@@ -11,6 +11,9 @@ import math
 import warnings
 from typing import Any
 
+from app.services.pose_quality import analysis_point, finite_number
+from app.services.pose_observations import observation_slots
+
 import numpy as np
 
 from app.services.keyframe_candidates import detect_key_frame_candidates
@@ -147,15 +150,10 @@ def _empty_analysis(
 
 
 def _point(keypoints: list[dict[str, Any]], index: int) -> dict[str, float] | None:
-    if index >= len(keypoints):
-        return None
-    raw = keypoints[index]
-    if raw.get("x") is None or raw.get("y") is None:
-        return None
-    visibility = float(raw.get("visibility", 0.0))
-    if bool(raw.get("interpolated", False)) and visibility < 0.3:
-        return None
-    return {"x": float(raw.get("x", 0.0)), "y": float(raw.get("y", 0.0)), "z": float(raw.get("z", 0.0))}
+    # Preserve biomechanics' existing visibility policy while sharing explicit
+    # quality rejection, ID lookup and finite-coordinate checks.
+    raw = analysis_point(keypoints, index)
+    return {axis: float(raw.get(axis, 0.)) for axis in ("x", "y", "z")} if raw is not None else None
 
 
 def _biomechanics_frames(pose_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1232,14 +1230,27 @@ def _build_sampling_context(
 
 
 def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int, effective_fps: float) -> float:
+    # A requested rotation interval must be one complete usable shoulder run.
+    # Skipping a rejected middle observation would manufacture a transition
+    # and shorten the elapsed duration at the same time.
+    source = pose_data.get("frames", [])
+    indices = [i for i, frame in enumerate(source) if isinstance(frame, dict)
+               and start_frame <= _frame_number(str(frame.get("frame", ""))) <= end_frame]
+    if not indices:
+        return 0.
+    slots = observation_slots({"frames": source[indices[0]:indices[-1] + 1]})
     angles: list[float] = []
-    for frame in _biomechanics_frames(pose_data):
-        frame_idx = _frame_number(str(frame.get("frame", "")))
-        if start_frame <= frame_idx <= end_frame:
-            left = _point(frame.get("keypoints", []), 11)
-            right = _point(frame.get("keypoints", []), 12)
-            if left and right:
-                angles.append(math.atan2(right["y"] - left["y"], right["x"] - left["x"]))
+    times: list[float | None] = []
+    for frame in slots:
+        if frame is None:
+            return 0.
+        left = _point(frame.get("keypoints", []), 11)
+        right = _point(frame.get("keypoints", []), 12)
+        if not left or not right:
+            return 0.
+        angles.append(math.atan2(right["y"] - left["y"], right["x"] - left["x"]))
+        times.append(finite_number((frame.get("temporal") or {}).get(
+            "analysis_timestamp", frame.get("analysis_timestamp", frame.get("timestamp")))))
     if len(angles) < 2:
         return 0.0
 
@@ -1250,7 +1261,8 @@ def _rotation_rps(pose_data: dict[str, Any], start_frame: int, end_frame: int, e
         total_rotation = sum(abs(_normalized_angle_delta(current, previous)) for previous, current in zip(angles, angles[1:]))
 
     total_turns = total_rotation / (2 * math.pi)
-    duration = max((len(angles) - 1) / effective_fps, 1 / effective_fps)
+    duration = (times[-1] - times[0]) if all(t is not None for t in times) else max(
+        (len(angles) - 1) / effective_fps, 1 / effective_fps)
     return round(total_turns / duration, 2)
 
 
@@ -1302,6 +1314,9 @@ def _invalid_metrics(reason: str) -> dict[str, Any]:
 def sanitize_biomechanics_data(bio_data: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(bio_data, dict):
         return _empty_analysis()
+
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        return dict(bio_data)
 
     analysis_profile = str(bio_data.get("analysis_profile", "jump") or "jump")
     if analysis_profile != "jump":
@@ -1374,9 +1389,8 @@ def attach_key_frame_candidates(
 ) -> dict[str, Any]:
     """Return biomechanics payload with T/A/L key-frame candidates attached.
 
-    The legacy ``key_frames`` field is left untouched. Candidate detection is
-    additive so older consumers can keep reading ``key_frames`` while newer
-    evaluation paths inspect ``key_frame_candidates``.
+    Legacy labels remain available for audit. New consumers use validated
+    ``jump_stage_anchors`` and persist five-node availability and measurements.
     """
     updated = dict(bio_data) if isinstance(bio_data, dict) else {}
     try:
@@ -1395,7 +1409,8 @@ def attach_key_frame_candidates(
             "quality_flags": [warning],
             "error": str(exc),
         }
-    return updated
+    from .jump_stages import attach_jump_stages
+    return attach_jump_stages(updated, pose_data, motion_scores, analysis_profile)
 
 
 def _score_from_values(values: list[float], ideal: float, tolerance: float, invert: bool = False) -> int:

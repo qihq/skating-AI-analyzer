@@ -71,6 +71,7 @@ class EventPrediction(_StrictModel):
     proposal_start_pts: float | None = Field(default=None, ge=0)
     proposal_end_pts: float | None = Field(default=None, ge=0)
     predicted_profile: Literal["jump", "spin", "step", "spiral", "unknown"] | None = None
+    predicted_profile_state: Literal["confirmed", "ambiguous", "unknown"] | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     tracks: list[TrackPrediction] = Field(default_factory=list, max_length=100_000)
     moments: list[MomentPrediction] = Field(default_factory=list, max_length=32)
@@ -88,10 +89,25 @@ class EventPrediction(_StrictModel):
         return self
 
 
+class SourceProposal(_StrictModel):
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposal_id: str = Field(min_length=1, max_length=128)
+    start_pts: float = Field(ge=0)
+    end_pts: float = Field(ge=0)
+    localization: Literal["localized", "unlocalized"] = "localized"
+
+    @model_validator(mode="after")
+    def interval_is_ordered(self) -> "SourceProposal":
+        if self.end_pts <= self.start_pts:
+            raise ValueError("source proposal end must follow start")
+        return self
+
+
 class PilotPredictionBundle(_StrictModel):
     schema_version: Literal["golden-pilot-predictions.v1"] = "golden-pilot-predictions.v1"
     pipeline_fingerprint: str = Field(min_length=8, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:-]+$")
     evaluation_masks: list[EvaluationMask] = Field(min_length=1, max_length=5)
+    proposals: list[SourceProposal] = Field(default_factory=list, max_length=10_000)
     predictions: list[EventPrediction] = Field(default_factory=list, max_length=2_000)
 
     @model_validator(mode="after")
@@ -101,6 +117,9 @@ class PilotPredictionBundle(_StrictModel):
         keys = [(item.source_sha256, item.event_id) for item in self.predictions]
         if len(keys) != len(set(keys)):
             raise ValueError("prediction event identities must be unique")
+        proposal_keys = [(item.source_sha256, item.proposal_id) for item in self.proposals]
+        if len(proposal_keys) != len(set(proposal_keys)):
+            raise ValueError("source proposal identities must be unique")
         return self
 
 
@@ -145,6 +164,9 @@ def evaluate_pilot(dataset: GoldenDatasetV2, bundle: PilotPredictionBundle) -> t
     masks = set(bundle.evaluation_masks)
     events = sorted(dataset.events, key=lambda item: (item.source_sha256, item.event_id))
     predictions = {(item.source_sha256, item.event_id): item for item in bundle.predictions}
+    proposals_by_source: dict[str, list[SourceProposal]] = defaultdict(list)
+    for item in bundle.proposals:
+        proposals_by_source[item.source_sha256].append(item)
     tracks_by_event: dict[tuple[str, str], list[Any]] = defaultdict(list)
     poses_by_event: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for item in dataset.tracks:
@@ -162,7 +184,7 @@ def evaluate_pilot(dataset: GoldenDatasetV2, bundle: PilotPredictionBundle) -> t
             metrics["tracking"] = _tracking_metrics(tracks_by_event[key], prediction)
             failures.extend(metrics["tracking"].pop("failure_codes"))
         if "action" in masks:
-            metrics["action"] = _action_metrics(event, prediction)
+            metrics["action"] = _action_metrics(event, prediction, proposals_by_source[event.source_sha256])
             failures.extend(metrics["action"].pop("failure_codes"))
         if "key_moments" in masks:
             metrics["key_moments"] = _moment_metrics(event, prediction)
@@ -260,7 +282,10 @@ def _public_stratum(value: str) -> str:
 
 def _leakage_fields(bundle: PilotPredictionBundle) -> list[str]:
     forbidden = {
-        "tracking": ("golden.track", "golden.bbox", "label.track", "label.bbox"),
+        "tracking": (
+            "golden.track", "golden.bbox", "label.track", "label.bbox",
+            "upstream.parent_confirmed_identity_anchor", "parent.identity_anchor",
+        ),
         "action": ("golden.profile", "golden.event", "label.profile", "label.event"),
         "key_moments": ("golden.takeoff", "golden.apex", "golden.landing", "golden.t", "golden.a", "golden.l", "label.takeoff", "label.apex", "label.landing"),
         "rotation": ("golden.rotation", "golden.turn", "label.rotation", "label.turn"),
@@ -386,31 +411,63 @@ def _longest_gap(points: list[float]) -> float:
     return round(max(gaps, default=0.0), 6)
 
 
-def _action_metrics(event: Any, prediction: EventPrediction | None) -> dict[str, Any]:
-    proposal = False
-    if prediction and prediction.proposal_start_pts is not None:
-        proposal_start = prediction.proposal_start_pts
-        proposal_end = prediction.proposal_end_pts
-        intersection = max(0.0, min(event.end_pts, proposal_end) - max(event.start_pts, proposal_start))
-        union = max(event.end_pts, proposal_end) - min(event.start_pts, proposal_start)
-        temporal_iou = intersection / max(union, 1e-9)
-        core_pts = _labelled_action_core_pts(event)
-        proposal = temporal_iou + 1e-9 >= 0.20 or bool(
-            intersection > 0 and core_pts is not None and proposal_start <= core_pts <= proposal_end
-        )
+def _proposal_matches_event(event: Any, proposal_start: float, proposal_end: float) -> bool:
+    intersection = max(0.0, min(event.end_pts, proposal_end) - max(event.start_pts, proposal_start))
+    union = max(event.end_pts, proposal_end) - min(event.start_pts, proposal_start)
+    temporal_iou = intersection / max(union, 1e-9)
+    core_pts = _labelled_action_core_pts(event)
+    return temporal_iou + 1e-9 >= 0.20 or bool(
+        intersection > 0 and core_pts is not None and proposal_start <= core_pts <= proposal_end
+    )
+
+
+def _action_metrics(
+    event: Any,
+    prediction: EventPrediction | None,
+    source_proposals: Sequence[SourceProposal] = (),
+) -> dict[str, Any]:
+    proposal_intervals = [(item.start_pts, item.end_pts) for item in source_proposals]
+    if not proposal_intervals and prediction and prediction.proposal_start_pts is not None:
+        proposal_intervals.append((prediction.proposal_start_pts, prediction.proposal_end_pts))
+    proposal = any(
+        _proposal_matches_event(event, proposal_start, proposal_end)
+        for proposal_start, proposal_end in proposal_intervals
+    )
+    localized_proposal = any(
+        item.localization == "localized" and _proposal_matches_event(event, item.start_pts, item.end_pts)
+        for item in source_proposals
+    )
+    if not source_proposals:
+        localized_proposal = proposal
+    used_unlocalized_fallback = proposal and not localized_proposal
     predicted = prediction.predicted_profile if prediction and prediction.predicted_profile else "missing"
+    predicted_state = (
+        prediction.predicted_profile_state
+        if prediction and prediction.predicted_profile_state
+        else "confirmed" if predicted not in {"unknown", "missing"}
+        else "unknown" if predicted == "unknown"
+        else "missing"
+    )
     correct = predicted == event.profile
+    rejected = predicted_state != "confirmed"
     failures = []
     if not proposal:
         failures.append("action_proposal_missed")
+    elif used_unlocalized_fallback:
+        failures.append("action_proposal_unlocalized")
     if not correct:
         failures.append("action_class_wrong" if predicted != "missing" else "action_prediction_missing")
+    elif rejected:
+        failures.append("action_class_uncertain")
     return {
         "proposal_recall": rate(int(proposal), 1),
+        "localized_proposal_recall": rate(int(localized_proposal), 1),
+        "unlocalized_fallback": rate(int(used_unlocalized_fallback), 1),
         "class_accuracy": rate(int(correct), 1),
         "actual_profile": event.profile,
         "predicted_profile": predicted,
-        "rejected": predicted in {"unknown", "missing"},
+        "predicted_profile_state": predicted_state,
+        "rejected": rejected,
         "failure_codes": failures,
     }
 
@@ -584,7 +641,11 @@ def _aggregate(diagnostics: list[dict[str, Any]], masks: set[str]) -> dict[str, 
         aggregate["tracking"] = _sum_rate_metrics(diagnostics, "tracking", ["confirmed_coverage", "uncertain_coverage", "lost_coverage", "correct_localization", "wrong_person", "false_relock", "low_iou"])
         aggregate["tracking"]["longest_missing_sec"] = max((item["metrics"]["tracking"]["longest_missing_sec"] for item in diagnostics), default=0.0)
     if "action" in masks:
-        aggregate["action"] = _sum_rate_metrics(diagnostics, "action", ["proposal_recall", "class_accuracy"])
+        aggregate["action"] = _sum_rate_metrics(
+            diagnostics,
+            "action",
+            ["proposal_recall", "localized_proposal_recall", "unlocalized_fallback", "class_accuracy"],
+        )
         matrix: dict[str, Counter[str]] = defaultdict(Counter)
         for item in diagnostics:
             metric = item["metrics"]["action"]

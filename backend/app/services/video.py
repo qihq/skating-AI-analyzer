@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import shutil
 import uuid
@@ -655,6 +656,53 @@ async def extract_frames(video_path: Path, frames_dir: Path, frame_rate: int = F
     return frames
 
 
+async def _extract_uniform_frames_in_window(
+    video_path: Path, frames_dir: Path, start_sec: float, end_sec: float,
+    frame_rate: int, sample_count: int,
+) -> tuple[list[Path], list[dict[str, object]], int]:
+    """Keep decoded PTS on the source playback clock, then subsample records.
+
+    select does not synthesize/duplicate frames like fps does. FFmpeg's default
+    input timestamp normalization is shared with the output-side seek path.
+    showinfo supplies decoded pts_time (printed precision, not exact rational PTS).
+    The compatibility source_thumb_index denotes the uniform extraction ordinal
+    here, explicitly distinguished from motion thumbnail ordinals in the payload.
+    """
+    width, height = _frame_dimensions()
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    filters = (
+        f"trim=start={start_sec:.9f}:end={end_sec:.9f},"
+        f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{1 / frame_rate:.9f})',"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,showinfo"
+    )
+    log = await _run_ffmpeg([
+        "-hide_banner", "-loglevel", "info", "-y", "-i", str(video_path),
+        "-an", "-vf", filters, "-vsync", "0", "-pix_fmt", "yuvj420p",
+        str(frames_dir / "frame_%04d.jpg"),
+    ])
+    decoded = re.findall(r"\[Parsed_showinfo[^\]]*\]\s+n:\s*(\d+).*?pts_time:([^\s]+)", log)
+    records = []
+    for ordinal, pts in decoded:
+        index, timestamp = int(ordinal), float(pts)
+        path = frames_dir / f"frame_{index + 1:04d}.jpg"
+        if (math.isfinite(timestamp) and start_sec <= timestamp < end_sec
+                and path.is_file() and path.stat().st_size > 0):
+            records.append({"frame_id": path.stem, "source_thumb_index": index,
+                            "source_sample_index": index, "timestamp": timestamp,
+                            "motion_score": None})
+    if not records:
+        raise RuntimeError("所选视频窗口内没有可解码的有效帧，请调整时间窗口或检查视频文件。")
+    paths = sample_frame_paths([frames_dir / (str(r["frame_id"]) + ".jpg") for r in records], sample_count)
+    selected_ids = {p.stem for p in paths}
+    selected = [r for r in records if r["frame_id"] in selected_ids]
+    # Restore helpers must not see leftover unselected fallback images.
+    for path in frames_dir.glob("frame_*.jpg"):
+        if path.stem not in selected_ids:
+            path.unlink(missing_ok=True)
+    return paths, selected, len(records)
+
+
 def detect_video_fps(video_path: Path) -> float:
     """
     用 FFprobe 读取视频实际帧率。
@@ -1071,7 +1119,7 @@ def filter_frames(frame_paths: Sequence[Path]) -> list[Path]:
     return frame_list[:MIN_FILTERED_FRAMES]
 
 
-async def _run_ffmpeg(args: list[str]) -> None:
+async def _run_ffmpeg(args: list[str]) -> str:
     attempts = 2
     last_message = "未知错误"
     for attempt in range(1, attempts + 1):
@@ -1088,7 +1136,7 @@ async def _run_ffmpeg(args: list[str]) -> None:
             returncode, stderr = await asyncio.to_thread(_run_ffmpeg_sync, cmd)
         message = stderr.decode("utf-8", errors="ignore").strip()
         if returncode == 0:
-            return
+            return message
 
         last_message = message or "未知错误"
         retryable = any(fragment in last_message.lower() for fragment in FFMPEG_RETRYABLE_ERRORS)
@@ -2122,50 +2170,8 @@ async def extract_motion_sampled_frames(
     try:
         thumbs = await _extract_thumbnails_in_window(video_path, thumbs_dir, start_sec, end_sec, frame_rate=frame_rate)
     except Exception:  # noqa: BLE001
-        logger.warning(
-            "Thumbnail extraction inside action window failed for %s, falling back to full-video sampling",
-            video_path,
-            exc_info=True,
-        )
-        if thumbs_dir.exists():
-            shutil.rmtree(thumbs_dir, ignore_errors=True)
-        if profile_agnostic_scan:
-            source_duration = detect_video_duration(video_path)
-            start_sec, end_sec = 0.0, min(float(MAX_SECONDS), float(source_duration or MAX_SECONDS))
-        else:
-            start_sec, end_sec = _fallback_profile_window(action_type, analysis_profile, source_fps)
-        effective_duration = max((end_sec - start_sec) / max(slow_motion_scale, 1e-6), 1e-6)
-        requested_sample_count, profile_cap, sampling_density_policy = get_sampling_density(
-            analysis_profile,
-            effective_duration,
-            manual_window=manual_window_dense,
-            action_type=action_type,
-        )
-        if profile_agnostic_scan:
-            profile_cap = max(1, SOURCE_SCAN_MAX_FRAMES)
-            requested_sample_count = min(
-                profile_cap,
-                max(32, math.ceil(effective_duration * frame_rate) + 1),
-            )
-            sampling_density_policy = "profile_agnostic_source_scan"
-        window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
-            start_sec,
-            end_sec,
-            requested_sample_count,
-            slow_motion_scale,
-        )
-        sampling_metadata = VideoSamplingMetadata(
-            action_window_start=round(start_sec, 3),
-            action_window_end=round(end_sec, 3),
-            window_start_sec=window_start_sec,
-            window_end_sec=window_end_sec,
-            effective_fps=effective_fps,
-            source_fps=round(source_fps, 3),
-            is_slow_motion=is_slow_motion,
-        )
-        thumbs = await _extract_thumbnails(video_path, thumbs_dir, frame_rate=frame_rate)
-    if not thumbs:
-        raise RuntimeError("视频缩略图抽取结果为空，请检查上传文件是否损坏。")
+        logger.warning("Window thumbnail extraction failed; retaining the selected window", exc_info=True)
+        thumbs = []
 
     scores = _motion_scores_from_thumbs(thumbs)
     selected_indices = (
@@ -2176,11 +2182,18 @@ async def extract_motion_sampled_frames(
 
     output_paths: list[Path] = []
     selected_records: list[dict[str, object]] = []
+    uniform_fallback = False
+    uniform_frame_count = 0
     try:
+        if not selected_indices:
+            raise RuntimeError("No usable window thumbnails")
         for output_index, thumb_index in enumerate(selected_indices, start=1):
             timestamp = start_sec + (thumb_index / frame_rate)
             target_path = frames_dir / f"frame_{output_index:04d}.jpg"
             await _extract_full_frame_at(video_path, timestamp, target_path)
+            # ffmpeg can succeed at EOF without writing an image; use the uniform fallback.
+            if not target_path.is_file() or target_path.stat().st_size == 0:
+                raise RuntimeError(f"No decoded frame at {timestamp:.3f}s")
             output_paths.append(target_path)
             selected_records.append(
                 {
@@ -2198,16 +2211,19 @@ async def extract_motion_sampled_frames(
         )
         for existing_frame in frames_dir.glob("frame_*.jpg"):
             existing_frame.unlink(missing_ok=True)
-        output_paths = sample_frame_paths(await extract_frames(video_path, frames_dir, frame_rate=frame_rate), requested_sample_count)
-        selected_records = [
-            {
-                "frame_id": frame_path.stem,
-                "source_thumb_index": index,
-                "timestamp": round(start_sec + index / frame_rate, 3),
-                "motion_score": None,
-            }
-            for index, frame_path in enumerate(output_paths)
-        ]
+        output_paths, selected_records, uniform_frame_count = await _extract_uniform_frames_in_window(
+            video_path, frames_dir, start_sec, end_sec, frame_rate, requested_sample_count,
+        )
+        uniform_fallback = True
+
+    window_start_sec, window_end_sec, effective_fps = _effective_sampling_context(
+        start_sec, end_sec, len(output_paths), slow_motion_scale,
+    )
+    sampling_metadata = VideoSamplingMetadata(
+        action_window_start=round(start_sec, 3), action_window_end=round(end_sec, 3),
+        window_start_sec=window_start_sec, window_end_sec=window_end_sec,
+        effective_fps=effective_fps, source_fps=round(source_fps, 3), is_slow_motion=is_slow_motion,
+    )
 
     motion_payload = {
         "frame_rate": frame_rate,
@@ -2230,18 +2246,29 @@ async def extract_motion_sampled_frames(
         "max_frames_for_profile": requested_sample_count,
         "profile_frame_cap": profile_cap,
         "sampling_density_policy": sampling_density_policy,
-        "selection_strategy": "source_scan_coverage" if profile_agnostic_scan else ("dense_peak_bursts" if dense_peak_bursts else "motion_weighted"),
+        "selection_strategy": "uniform_window_fallback" if uniform_fallback else ("source_scan_coverage" if profile_agnostic_scan else ("dense_peak_bursts" if dense_peak_bursts else "motion_weighted")),
+        "timestamp_basis": "decoded_source_pts_time" if uniform_fallback else "requested_source_seek_time",
+        "timestamp_precision": "ffmpeg_showinfo_decimal" if uniform_fallback else "millisecond_seek_target",
+        "source_index_basis": "uniform_extraction_ordinal" if uniform_fallback else "window_thumbnail_ordinal",
+        "uniform_frame_count": uniform_frame_count,
+        "effective_fps_basis": "resolved_count_over_effective_window",
         "window_strategy": input_window.input_window_mode if input_window is not None else ("profile_agnostic_scan" if profile_agnostic_scan else "full_video_debug" if full_video_window else "detected_action_window"),
         "sampling_profile_source": sampling_profile_source,
         "manual_window_dense_sampling": _manual_window_dense_sampling(input_window),
         "window_diagnostics": window_diagnostics,
-        "top_motion_peaks": [
+        "top_motion_peaks": [] if uniform_fallback else [
             {**record, "timestamp": round(start_sec + float(record["timestamp_offset"]), 3)}
             for record in _motion_peak_records(scores, frame_rate=frame_rate)
         ],
-        "coverage_gaps": _coverage_gap_records(selected_indices, frame_rate=frame_rate),
+        "coverage_gaps": ([
+            {"from_thumb_index": left["source_sample_index"], "to_thumb_index": right["source_sample_index"],
+             "gap_frames": right["source_sample_index"] - left["source_sample_index"],
+             "gap_seconds": round(right["timestamp"] - left["timestamp"], 6)}
+            for left, right in zip(selected_records, selected_records[1:])
+            if right["source_sample_index"] - left["source_sample_index"] > 1
+        ] if uniform_fallback else _coverage_gap_records(selected_indices, frame_rate=frame_rate)),
         "selected": selected_records,
-        "scores": [round(score, 4) for score in scores],
+        "scores": [] if uniform_fallback else [round(score, 4) for score in scores],
     }
     attach_input_window_payload(motion_payload, input_window)
 
@@ -2285,8 +2312,8 @@ def build_timestamp_map(sampling_payload: dict[str, object] | None) -> dict[str,
     """
     Build frame_id(stem) -> seconds from extract_motion_sampled_frames metadata.
 
-    Fallback timestamps may not include action-window offset, so callers should
-    treat them as ordering/relative-position hints rather than physical time.
+    Timestamps use the source playback clock. timestamp_basis in the sampling
+    payload distinguishes requested seek targets from decoded fallback PTS.
     """
     if not isinstance(sampling_payload, dict):
         return {}

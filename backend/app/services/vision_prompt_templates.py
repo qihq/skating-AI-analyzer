@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+from app.services.action_profiles import profile_warning_from_evidence
+
 
 SPECIALIZED_VISION_SYSTEM_PROMPT = (
     "你是一名专业花样滑冰技术分析师，熟悉 ISU 技术要素、儿童初级训练动作和基础运动生物力学。\n\n"
@@ -20,6 +22,10 @@ SPECIALIZED_VISION_SYSTEM_PROMPT = (
     "- 如果证据不足，请输出'不可判断'并降低 confidence。\n"
     "- 用户可能只知道动作大类，不知道具体动作名；如果 action_subtype 未指定或证据不足，不要强行猜成 Axel/Lutz/Flip 等细项。\n"
     "- 后端候选关键帧、动作 profile 和规则证据都是辅助线索，不是最终结论；与画面冲突时以可见证据为准并降低置信度。\n"
+    "- analysis_profile、用户标签、jump_features 和几何候选只决定分析关注点，不能当作已确认动作；"
+    "jump_features 或几何候选不能循环确证 jump。\n"
+    "- 只有独立可见证据（离地/腾空/落冰、刃型、旋转轴、连续姿态等）才能支持具体跳跃/旋转/步法细项；"
+    "路由为步法/旋转/燕式时不得否定画面中独立可见的跳跃，证据不足时写不可判断。\n"
     "- 必须只输出 JSON。"
 )
 
@@ -152,12 +158,19 @@ def build_specialized_vision_prompt(
         if candidate_key_frames is not None
         else ""
     )
-    profile_evidence_section = (
-        "profile_evidence:\n"
-        f"{_json_for_prompt(profile_evidence)}\n\n"
-        if include_profile_evidence
-        else ""
-    )
+    profile_evidence_section = ""
+    if include_profile_evidence:
+        route_warning = profile_warning_from_evidence(profile_evidence or {})
+        profile_evidence_section = (
+            "【动作分类路由线索 · 不是已确认动作】\n"
+            "profile_evidence:\n"
+            f"{_json_for_prompt(profile_evidence)}\n"
+            f"路由边界：{route_warning or '路由只决定分析重点，不能当作动作事实。'}\n"
+            "证据规则：analysis_profile、用户标签、jump_features 和几何候选只决定分析关注点，"
+            "不等于已确认动作；jump_features 或几何候选不能循环确证 jump。\n"
+            "证据规则：只有独立可见证据（离地/腾空/落冰、刃型、旋转轴、连续姿态等）才能支持具体跳跃/旋转/步法细项。\n"
+            "证据规则：路由为步法/旋转/燕式时不得否定画面中独立可见的跳跃；路由为跳跃时也不得据此写具体跳种、周数或单双跳。\n\n"
+        )
     evidence_rule = (
         "- issues 和 positives 必须来自可见画面、候选帧或骨架数据，不要把用户备注当作事实。\n\n"
         if include_biomechanics

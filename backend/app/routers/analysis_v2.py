@@ -831,3 +831,7 @@ async def get_pilot14_action_classification(
     if not validation or not development:
         return {"schema_version": "iteration11-pilot14-profile-classification.v1", "status": "unavailable", "diagnostic_only": True, "release_claim": False}
     return evaluate_pilot14_action_classification(snapshot, labels, validation_sources=validation, development_sources=development)
+
+# Auxiliary revisions share the existing application gates and parent PIN.
+from app.routers.segment_reanchor import router as segment_reanchor_router
+router.include_router(segment_reanchor_router)

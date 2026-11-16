@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +27,9 @@ class ReportImprovement(BaseModel):
 
 
 class StructuredReport(BaseModel):
+    local_execution: dict[str, bool] | None = None
+    source: str | None = None
+    technical_conclusion: str | None = None
     summary: str
     issues: list[ReportIssue] = Field(default_factory=list)
     improvements: list[ReportImprovement] = Field(default_factory=list)
@@ -699,11 +702,14 @@ class TrainingSessionDetail(TrainingSessionPublic):
 
 
 class PoseFrameKeypoint(BaseModel):
+    quality: dict[str, Any] | None = None
+    # None preserves unknown quality in older saved records.
+    interpolated: bool | None = None
     id: int
     name: str
-    x: float
-    y: float
-    z: float
+    x: float | None
+    y: float | None
+    z: float | None
     visibility: float
 
 
@@ -715,6 +721,15 @@ class TargetBBox(BaseModel):
 
 
 class PoseFrame(BaseModel):
+    projection_geometry: dict[str, Any] | None = None
+    identity_id: int | str | None = None
+    event_id: str | None = None
+    timestamp: float | None = None
+    temporal: dict[str, Any] | None = None
+    input_binding_valid: bool | None = None
+    image_binding_valid: bool | None = None
+    identity_status: str | None = None
+    tracker_id: int | str | None = None
     frame: str
     keypoints: list[PoseFrameKeypoint]
     target_bbox: TargetBBox | None = None
@@ -832,7 +847,29 @@ class DebugGoldenLabelResponse(DebugGoldenLabelRequest):
     updated_at: str | None = None
 
 
+class PoseContentRect(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class PoseGeometry(BaseModel):
+    schema_version: Literal["pose-geometry.v1"]
+    coordinate_space: Literal["sample_normalized"]
+    sample_width: int
+    sample_height: int
+    content_rect: PoseContentRect
+    source_width: int
+    source_height: int
+    rotation_degrees: Literal[0]
+    crop: Literal["none"]
+    provenance: Literal["saved_metadata_verified_frames"]
+
+
 class PoseResponse(BaseModel):
+    geometry: PoseGeometry | None = None
+    geometry_unavailable_reason: str | None = None
     connections: list[list[int]]
     frames: list[PoseFrame]
     frame_urls: dict[str, str]

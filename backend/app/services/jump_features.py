@@ -10,6 +10,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.services.jump_stages import resolve_anchor
+from app.services.pose_quality import analysis_point, finite_number
+from app.services.pose_observations import frame_usable, observation_slots, _frame_key
+
 
 ANKLE_LEFT = 27
 ANKLE_RIGHT = 28
@@ -21,26 +25,26 @@ TOE_PULSE_THRESHOLD = 0.04
 MIN_CONFIDENCE = 0.5
 
 
-def _frame_number(frame_name: str) -> int:
-    digits = "".join(char for char in frame_name if char.isdigit())
-    return int(digits or "0")
+def _point_quality_summary(frames):
+    points = [p for f in frames if isinstance(f, dict) for p in f.get("keypoints", []) if isinstance(p, dict)]
+    return {"policy": "native_visible_only.v2", "interpolation_usage": "display_only",
+            "excluded_interpolated": sum(bool(p.get("interpolated")) for p in points),
+            "excluded_limb_uncertain": sum((p.get("quality") or {}).get("limb_consistency", {}).get("status") == "uncertain" for p in points),
+            "source_counts": {source: sum((p.get("quality") or {}).get("source", "legacy_unknown") == source for p in points)
+                              for source in {(p.get("quality") or {}).get("source", "legacy_unknown") for p in points}}}
 
 
-def _keypoint(keypoints: list[dict[str, Any]], index: int, min_visibility: float = 0.3) -> dict[str, float] | None:
-    if index >= len(keypoints):
+def _keypoint(keypoints: list[dict[str, Any]], index: int, min_visibility: float = 0.3) -> dict[str, Any] | None:
+    raw = analysis_point(keypoints, index, max(.3, min_visibility))
+    if raw is None:
         return None
-    raw = keypoints[index]
-    if raw.get("x") is None or raw.get("y") is None:
-        return None
-    visibility = float(raw.get("visibility", 0.0) or 0.0)
-    if visibility < min_visibility and not raw.get("interpolated"):
-        return None
-    return {
-        "x": float(raw.get("x", 0.0) or 0.0),
-        "y": float(raw.get("y", 0.0) or 0.0),
-        "z": float(raw.get("z", 0.0) or 0.0),
-        "visibility": visibility,
-    }
+    x, y, z = float(raw["x"]), float(raw["y"]), float(raw.get("z", 0.))
+    visibility = float(raw["visibility"])
+    quality = raw.get("quality")
+    quality = quality if isinstance(quality, dict) else {}
+    return {"x": x, "y": y, "z": z, "visibility": visibility,
+            "interpolated": False, "quality": dict(quality) if quality else {
+                "source": "legacy_visible_observation", "analysis_usable": True}}
 
 
 def _midpoint(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
@@ -57,20 +61,45 @@ def _sample_window(
     effective_fps: float,
     seconds: float,
 ) -> list[tuple[int, dict[str, Any]]]:
+    # The final contiguous segment must reach the requested anchor. Do not
+    # compress invalid frames or substitute earlier observations for it.
+    slots = observation_slots({"frames": frames[:takeoff_index + 1]})
+    tail = []
+    for frame in reversed(slots):
+        if frame is None:
+            break
+        tail.append(frame)
+    tail.reverse()
+    if not tail:
+        return []
+    start = takeoff_index - len(tail) + 1
+    temporal = frames[takeoff_index].get("temporal") or {}
+    end = finite_number(temporal.get("analysis_timestamp", frames[takeoff_index].get(
+        "analysis_timestamp", frames[takeoff_index].get("timestamp"))))
+    if end is not None:
+        return [(i, frame) for i, frame in enumerate(tail, start=start)
+                if (time := finite_number((frame.get("temporal") or {}).get(
+                    "analysis_timestamp", frame.get("analysis_timestamp", frame.get("timestamp"))))) is not None
+                and 0 <= end - time <= seconds + 1e-9]
     count = max(1, round(seconds * max(effective_fps, 1e-6)))
-    start = max(0, takeoff_index - count)
-    return list(enumerate(frames[start : takeoff_index + 1], start=start))
+    return list(enumerate(tail, start=start))[-(count + 1):]
 
 
-def _takeoff_index(frames: list[dict[str, Any]], key_frames: dict[str, Any]) -> int:
-    takeoff_name = str(key_frames.get("T") or "")
-    takeoff_number = _frame_number(takeoff_name)
-    if takeoff_number:
-        for index, frame in enumerate(frames):
-            if _frame_number(str(frame.get("frame", ""))) == takeoff_number:
-                return index
-        return max(0, min(len(frames) - 1, takeoff_number - 1))
-    return max(0, len(frames) // 3)
+def _valid_tail(window: list[tuple[int, dict[str, Any]]], required: tuple[int, ...]) -> list[tuple[int, dict[str, Any]]]:
+    """Metric-specific native evidence ending at the anchor, with holes intact."""
+    tail = []
+    next_index = None
+    for index, frame in reversed(window):
+        if (not frame_usable(frame) or (next_index is not None and next_index != index + 1)
+                or any(_keypoint(frame.get("keypoints", []), k) is None for k in required)):
+            break
+        tail.append((index, frame))
+        next_index = index
+    return list(reversed(tail))
+
+
+def _takeoff_index(frames: list[dict[str, Any]], key_frames: dict[str, Any]) -> int | None:
+    return resolve_anchor({"frames": frames}, key_frames).get("pose_index")
 
 
 def _com(frame: dict[str, Any]) -> dict[str, float] | None:
@@ -87,7 +116,7 @@ def _com(frame: dict[str, Any]) -> dict[str, float] | None:
         )
         if point is not None
     ]
-    if not points:
+    if len(points) != 4:
         return None
     return {
         "x": sum(point["x"] for point in points) / len(points),
@@ -129,13 +158,17 @@ def _takeoff_foot(window: list[tuple[int, dict[str, Any]]]) -> tuple[str, float]
     return ("left" if left_score > right_score else "right"), round(min(1.0, confidence * 4), 3)
 
 
-def _ankle_series(window: list[tuple[int, dict[str, Any]]], ankle_index: int) -> list[float]:
-    values: list[float] = []
+def _ankle_series(window: list[tuple[int, dict[str, Any]]], ankle_index: int) -> list[float | None]:
+    # Keep holes: removing them fabricates adjacent contact pulses across gaps.
+    values: list[float | None] = []
     for _, frame in window:
         keypoints = frame.get("keypoints", [])
-        point = _keypoint(keypoints, ankle_index, 0.0) if isinstance(keypoints, list) else None
-        if point is not None:
-            values.append(point["y"])
+        point = _keypoint(keypoints, ankle_index) if isinstance(keypoints, list) else None
+        temporal = frame.get("temporal") or {}
+        if frame.get("tracking_state") in {"lost", "interpolated", "low_confidence"} or (
+                temporal and temporal.get("segment_id") is None):
+            point = None
+        values.append(point["y"] if point is not None else None)
     return values
 
 
@@ -145,8 +178,14 @@ def _toe_pick(window: list[tuple[int, dict[str, Any]]]) -> tuple[bool, float, fl
         values = _ankle_series(window, ankle_index)
         if len(values) < 3:
             continue
-        deltas = [values[index] - values[index - 1] for index in range(1, len(values))]
-        for previous, current in zip(deltas, deltas[1:]):
+        for i in range(1, len(values)-1):
+            triple = values[i-1:i+2]
+            if any(v is None for v in triple):
+                continue
+            segment_ids = [(f.get("temporal") or {}).get("segment_id") for _, f in window[i-1:i+2]]
+            if len(set(segment_ids)) != 1:
+                continue
+            previous, current = triple[1]-triple[0], triple[2]-triple[1]
             # 设计说明: 图像坐标 y 向下增大，点冰表现为脚踝短促下探后回弹。
             if previous > TOE_PULSE_THRESHOLD and current < -TOE_PULSE_THRESHOLD:
                 strengths.append(min(abs(previous), abs(current)))
@@ -156,6 +195,8 @@ def _toe_pick(window: list[tuple[int, dict[str, Any]]]) -> tuple[bool, float, fl
 
 
 def _feet_together(frame: dict[str, Any]) -> tuple[bool, float, float]:
+    if not frame_usable(frame):
+        return False, 0., 0.
     keypoints = frame.get("keypoints", [])
     if not isinstance(keypoints, list):
         return False, 0.0, 0.0
@@ -173,10 +214,8 @@ def _free_leg_swing(window: list[tuple[int, dict[str, Any]]]) -> tuple[float, fl
     amplitudes: list[float] = []
     for hip_index, ankle_index in ((HIP_LEFT, ANKLE_LEFT), (HIP_RIGHT, ANKLE_RIGHT)):
         angles: list[float] = []
-        for _, frame in window:
+        for _, frame in _valid_tail(window, (hip_index, ankle_index)):
             keypoints = frame.get("keypoints", [])
-            if not isinstance(keypoints, list):
-                continue
             hip = _keypoint(keypoints, hip_index)
             ankle = _keypoint(keypoints, ankle_index)
             if hip and ankle:
@@ -201,6 +240,7 @@ def _body_facing(frame: dict[str, Any]) -> tuple[float, float] | None:
 
 
 def _approach_direction(window: list[tuple[int, dict[str, Any]]]) -> tuple[str, float]:
+    window = _valid_tail(window, (11, 12, 23, 24))
     points = [(index, _com(frame), _body_facing(frame)) for index, frame in window]
     valid = [(index, com, facing) for index, com, facing in points if com is not None and facing is not None]
     if len(valid) < 2:
@@ -220,6 +260,7 @@ def _approach_direction(window: list[tuple[int, dict[str, Any]]]) -> tuple[str, 
 
 
 def _edge_score(window: list[tuple[int, dict[str, Any]]]) -> tuple[float, str, float]:
+    window = _valid_tail(window, (11, 12, 23, 24))
     points = [(_com(frame), _body_facing(frame)) for _, frame in window]
     valid = [(com, facing) for com, facing in points if com is not None and facing is not None]
     if len(valid) < 3:
@@ -269,10 +310,24 @@ def compute_jump_evidence(
         return {"quality_flags": ["jump_evidence_insufficient_pose"]}
 
     fps = max(float(effective_fps or 5.0), 1e-6)
-    takeoff_idx = _takeoff_index(frames, key_frames if isinstance(key_frames, dict) else {})
+    anchor = resolve_anchor(pose_data, key_frames)
+    if anchor["status"] != "available":
+        return {"anchor": anchor, "point_quality": _point_quality_summary(frames), "quality_flags": ["jump_takeoff_anchor_unavailable", *anchor["quality_flags"]],
+                "contact_evidence_status": "uncertain", "takeoff_foot": "unknown", "takeoff_foot_confidence": 0.,
+                "toe_pick_pulse": None, "toe_pick_strength": None, "toe_pick_confidence": 0.,
+                "feet_together_at_takeoff": None, "feet_distance_shoulder_ratio": None, "feet_together_confidence": 0.,
+                "free_leg_swing_amplitude": None, "free_leg_swing_confidence": 0.,
+                "approach_direction": "unknown", "approach_direction_confidence": 0.,
+                "pre_takeoff_edge_score": None, "pre_takeoff_edge_label": "unknown", "pre_takeoff_edge_confidence": 0.}
+    takeoff_idx = anchor["pose_index"]
     takeoff_frame = frames[takeoff_idx]
-    short_window = _sample_window(frames, takeoff_idx, fps, 0.2)
-    approach_window = _sample_window(frames, takeoff_idx, fps, 0.5)
+    support = anchor.get("evidence", {}).get("support_frames")
+    window_frames = frames
+    if support is not None:
+        allowed = {_frame_key(ref.get("frame_id")) for ref in support}
+        window_frames = [f if isinstance(f, dict) and _frame_key(f.get("frame") or f.get("frame_id")) in allowed else None for f in frames]
+    short_window = _sample_window(window_frames, takeoff_idx, fps, 0.2)
+    approach_window = _sample_window(window_frames, takeoff_idx, fps, 0.5)
 
     takeoff_foot, takeoff_foot_confidence = _takeoff_foot(short_window)
     toe_pick_pulse, toe_pick_strength, toe_pick_confidence = _toe_pick(short_window)
@@ -282,6 +337,9 @@ def compute_jump_evidence(
     edge_score, edge_label, edge_confidence = _edge_score(approach_window)
 
     evidence: dict[str, Any] = {
+        "anchor": anchor,
+        "window_support": {"short": [_frame_key(f.get("frame") or f.get("frame_id")) for _, f in short_window],
+                           "approach": [_frame_key(f.get("frame") or f.get("frame_id")) for _, f in approach_window]},
         "takeoff_foot": takeoff_foot if takeoff_foot_confidence >= MIN_CONFIDENCE else "unknown",
         "takeoff_foot_confidence": takeoff_foot_confidence,
         "toe_pick_pulse": toe_pick_pulse and toe_pick_confidence >= MIN_CONFIDENCE,
@@ -299,6 +357,18 @@ def compute_jump_evidence(
         "pre_takeoff_edge_confidence": edge_confidence,
         "quality_flags": [],
     }
+    evidence["point_quality"] = _point_quality_summary([f for _, f in approach_window])
+    incomplete = not short_window or any(_keypoint(f.get("keypoints", []), ankle) is None
+                     for _, f in short_window for ankle in (ANKLE_LEFT, ANKLE_RIGHT))
+    if incomplete:
+        evidence["quality_flags"].append("jump_contact_evidence_incomplete")
+        evidence["contact_evidence_status"] = "uncertain"
+        evidence["toe_pick_pulse"] = False
+        evidence["toe_pick_confidence"] = 0.
+        evidence["takeoff_foot"] = "unknown"
+        evidence["takeoff_foot_confidence"] = 0.
+    else:
+        evidence["contact_evidence_status"] = "weak_geometry_only"
     if edge_confidence < MIN_CONFIDENCE:
         evidence["quality_flags"].append("jump_edge_signal_weak")
     return evidence

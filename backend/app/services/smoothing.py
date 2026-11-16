@@ -1,8 +1,8 @@
 """姿态关键点时序平滑与可见性插值。
 
-职责: 对逐帧 MediaPipe 关键点执行 One-Euro 去抖，并在短时遮挡时补齐坐标。
-输入: pose.py 输出的 frames 列表与有效采样帧率。
-输出: 保持原 payload 结构的平滑 frames，插值点会附加 interpolated 标记。
+职责: 在实际时间及可信同人连续段内执行居中局部拟合，保留独立的展示插值质量。
+输入: 带同帧时间/身份的 frames，及仅供旧格式兼容的采样帧率。
+输出: 保持点ID和画布坐标系的副本，附加 temporal/quality 来源。OneEuroFilter 留供既有关键帧消费者使用。
 """
 
 from __future__ import annotations
@@ -86,124 +86,167 @@ def _valid_effective_fps(effective_fps: float | None) -> float:
     return value
 
 
-def _keypoint_by_id(keypoints: list[dict[str, Any]], keypoint_id: int) -> dict[str, Any] | None:
-    for keypoint in keypoints:
-        if int(keypoint.get("id", -1)) == keypoint_id:
-            return keypoint
-    if keypoint_id < len(keypoints):
-        return keypoints[keypoint_id]
-    return None
+# Offline centered quadratic fit. Uniform-cadence kernel [-1,4,10,4,-1]/16
+# preserves constant velocity/acceleration and removes alternating jitter.
+# Two endpoints per segment and runs shorter than five remain unchanged.
+# One-sample model spikes remain ambiguous without independent evidence.
+PROCESSING_VERSION = "pose-temporal.v2"
+MAX_CONTINUOUS_GAP_SECONDS = 0.5
+MAX_INTERPOLATED_POINTS = 3
 
 
-def _visible_indices(values: list[dict[str, Any] | None]) -> list[int]:
-    return [
-        index
-        for index, keypoint in enumerate(values)
-        if keypoint is not None and float(keypoint.get("visibility", 0.0) or 0.0) >= VISIBILITY_THRESHOLD
-    ]
+def finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
-def _interpolate_value(before: dict[str, Any], after: dict[str, Any], ratio: float, axis: str) -> float:
-    return float(before.get(axis, 0.0) or 0.0) + (float(after.get(axis, 0.0) or 0.0) - float(before.get(axis, 0.0) or 0.0)) * ratio
+def pose_temporal_segments(frames: list[dict[str, Any]], effective_fps: float) -> list[int | None]:
+    """Bound processing to trusted, increasing actual-time/identity segments."""
+    fps = _valid_effective_fps(effective_fps)
+    explicit = any("timestamp" in f or "analysis_timestamp" in f or "temporal" in f for f in frames)
+    segments: list[int | None] = []
+    previous_time = None
+    previous_identity = None
+    previous_valid = False
+    segment = -1
+    for i, frame in enumerate(frames):
+        temporal = dict(frame.get("temporal") or {})
+        if "analysis_timestamp" in temporal:
+            timestamp = finite_number(temporal["analysis_timestamp"])
+            source = temporal.get("time_source", "unknown")
+        elif "analysis_timestamp" in frame:
+            timestamp = finite_number(frame["analysis_timestamp"])
+            source = "frame_analysis_timestamp"
+        elif "timestamp" in frame:
+            timestamp = finite_number(frame["timestamp"])
+            source = "frame_timestamp"
+        elif not explicit:
+            timestamp, source = i / fps, "legacy_effective_fps"
+        else:
+            timestamp, source = None, "unknown"
+        identity = (frame.get("identity_id"), frame.get("tracker_id"))
+        state_valid = (bool(frame.get("keypoints")) and
+                       frame.get("tracking_state") in (None, "tracked") and
+                       frame.get("input_binding_valid") is not False)
+        increasing = timestamp is not None and (previous_time is None or timestamp > previous_time)
+        valid = state_valid and increasing
+        boundary = (not previous_valid or identity != previous_identity or
+                    (timestamp is not None and previous_time is not None and
+                     timestamp - previous_time > MAX_CONTINUOUS_GAP_SECONDS))
+        if valid and boundary:
+            segment += 1
+        temporal.update(processing_version=PROCESSING_VERSION, time_source=source,
+                        analysis_timestamp=timestamp, segment_id=segment if valid else None,
+                        continuous=valid and not boundary)
+        if not valid:
+            temporal["boundary_reason"] = "unknown_or_nonincreasing_time" if not increasing else "untrusted_or_missing_target"
+        elif boundary:
+            temporal["boundary_reason"] = "segment_start_or_gap_or_identity_change"
+        frame["temporal"] = temporal
+        segments.append(segment if valid else None)
+        previous_time, previous_identity, previous_valid = timestamp, identity, valid
+    return segments
 
 
-def _interpolate_keypoint(
-    values: list[dict[str, Any] | None],
-    frame_index: int,
-    visible: list[int],
-) -> dict[str, Any] | None:
-    current = values[frame_index]
-    if current is not None and float(current.get("visibility", 0.0) or 0.0) >= VISIBILITY_THRESHOLD:
-        result = dict(current)
-        result["interpolated"] = bool(result.get("interpolated", False))
-        return result
+def _native(point: dict[str, Any]) -> bool:
+    quality = point.get("quality") or {}
+    return (not point.get("interpolated") and quality.get("analysis_usable") is not False and
+            (finite_number(point.get("visibility")) or 0.) >= VISIBILITY_THRESHOLD and
+            all(finite_number(point.get(axis)) is not None for axis in ("x", "y")))
 
-    previous_candidates = [index for index in visible if index < frame_index]
-    next_candidates = [index for index in visible if index > frame_index]
-    if not previous_candidates or not next_candidates:
-        return dict(current) if current is not None else None
 
-    previous_index = previous_candidates[-1]
-    next_index = next_candidates[0]
-    previous = values[previous_index]
-    next_keypoint = values[next_index]
-    if previous is None or next_keypoint is None:
-        return dict(current) if current is not None else None
-
-    ratio = (frame_index - previous_index) / max(next_index - previous_index, 1)
-    interpolated = dict(current or previous)
-    interpolated["x"] = _interpolate_value(previous, next_keypoint, ratio, "x")
-    interpolated["y"] = _interpolate_value(previous, next_keypoint, ratio, "y")
-    interpolated["z"] = _interpolate_value(previous, next_keypoint, ratio, "z")
-    interpolated["visibility"] = float((current or {}).get("visibility", 0.0) or 0.0)
-    interpolated["interpolated"] = True
-    return interpolated
+def _fit_current(times: list[float], values: list[float]) -> float:
+    import numpy as np
+    offsets = np.asarray(times) - times[2]
+    scale = max(abs(offsets))
+    if scale <= MIN_DT_SECONDS:
+        return values[2]
+    design = np.column_stack((np.ones(5), offsets/scale, (offsets/scale)**2))
+    weights = np.sqrt([1., 4., 6., 4., 1.])
+    weighted = design * weights[:, None]
+    if np.linalg.cond(weighted) > 1e6:
+        return values[2]
+    return float(np.linalg.lstsq(weighted, np.asarray(values)*weights, rcond=None)[0][0])
 
 
 def smooth_keypoint_sequence(frames: list[dict[str, Any]], effective_fps: float) -> list[dict[str, Any]]:
-    """Smooth and interpolate pose keypoints across frames.
+    """Immutable-source time-aligned pose with independent display/analysis quality.
 
-    Args:
-        frames: Pose frames containing keypoints in MediaPipe 33-point format.
-        effective_fps: Sampling rate on the real action timeline.
-
-    Returns:
-        A deep-copied frame list with smoothed x/y coordinates and interpolation markers.
-
-    Raises:
-        无。
+    Fit only five consecutive native points in one trusted segment. Missing
+    points cannot enter the fit. Timestamp-weighted display interpolation has
+    a three-point/.5-analysis-second cap and never upgrades native evidence.
     """
-    if not frames:
-        return []
-
-    fps = _valid_effective_fps(effective_fps)
-    smoothed_frames = copy.deepcopy(frames)
-    max_keypoint_count = max(
-        (len(frame.get("keypoints", [])) for frame in smoothed_frames if isinstance(frame.get("keypoints", []), list)),
-        default=0,
-    )
-    if max_keypoint_count == 0:
-        return smoothed_frames
-
-    for keypoint_id in range(max_keypoint_count):
-        series = [
-            _keypoint_by_id(frame.get("keypoints", []), keypoint_id)
-            if isinstance(frame.get("keypoints", []), list)
-            else None
-            for frame in smoothed_frames
-        ]
-        visible = _visible_indices(series)
-        if not visible:
-            for frame in smoothed_frames:
-                keypoints = frame.get("keypoints", [])
-                if not isinstance(keypoints, list):
+    output = copy.deepcopy(frames)
+    segments = pose_temporal_segments(output, effective_fps)
+    from app.services.limb_consistency import assess_limb_consistency
+    limb_quality = assess_limb_consistency(output, segments, _native)
+    by_id: dict[int, dict[int, dict[str, Any]]] = {}
+    for i, frame in enumerate(output):
+        for point in frame.get("keypoints", []):
+            point_id = point.get("id")
+            if isinstance(point_id, int):
+                by_id.setdefault(point_id, {})[i] = point
+    for point_id, series in by_id.items():
+        raw = copy.deepcopy(series)
+        native = {i for i, p in raw.items() if _native(p) and segments[i] is not None
+                  and limb_quality.get((i, point_id), {}).get("status") != "uncertain"}
+        for i, point in series.items():
+            original = raw[i]
+            coordinates = {a: finite_number(original.get(a)) for a in ("x", "y", "z")}
+            quality = {"processing_version": PROCESSING_VERSION,
+                       "raw_visibility": finite_number(original.get("visibility")),
+                       "raw_coordinates": coordinates, "upstream_quality": original.get("quality"),
+                       "source": "native_observation" if i in native else "low_visibility",
+                       "analysis_usable": i in native}
+            point["quality"] = quality
+            point.update(coordinates)
+            limb = limb_quality.get((i, point_id))
+            if limb is not None:
+                quality["limb_consistency"] = limb
+            if limb is not None and limb["status"] == "uncertain":
+                # Preserve the actual raw observation for transparent replay.
+                # It must not be used as a smoothing/interpolation anchor.
+                quality.update(source="limb_uncertain", analysis_usable=False)
+                point["interpolated"] = False
+                continue
+            if i in native:
+                point["interpolated"] = False
+                window = list(range(i-2, i+3))
+                if all(j in native and segments[j] == segments[i] for j in window):
+                    times = [output[j]["temporal"]["analysis_timestamp"] for j in window]
+                    for axis in ("x", "y"):
+                        point[axis] = _fit_current(times, [float(raw[j][axis]) for j in window])
+                    quality.update(source="smoothed_native", support_frame_indices=window)
+                continue
+            quality["source"] = "display_interpolation" if original.get("interpolated") else (
+                "missing" if coordinates["x"] is None or coordinates["y"] is None else "low_visibility")
+            if original.get("interpolated"):
+                continue
+            if _native(original) and segments[i] is None:
+                # A clock failure must not erase a real current-frame observation.
+                quality["source"] = "native_observation" if output[i].get("input_binding_valid") is not False and output[i].get("tracking_state") in (None, "tracked") else "untrusted_observation"
+                point["interpolated"] = False
+                continue
+            point["interpolated"] = False
+            before = max((j for j in native if j < i and segments[j] == segments[i]), default=None) if segments[i] is not None else None
+            after = min((j for j in native if j > i and segments[j] == segments[i]), default=None) if segments[i] is not None else None
+            if before is not None and after is not None:
+                start = output[before]["temporal"]["analysis_timestamp"]
+                end = output[after]["temporal"]["analysis_timestamp"]
+                if (after-before-1 <= MAX_INTERPOLATED_POINTS and 0 < end-start <= MAX_CONTINUOUS_GAP_SECONDS
+                        and not any(limb_quality.get((j, point_id), {}).get("status") == "uncertain"
+                                    for j in range(before+1, after))):
+                    ratio = (output[i]["temporal"]["analysis_timestamp"]-start)/(end-start)
+                    for axis in ("x", "y", "z"):
+                        a, b = finite_number(raw[before].get(axis)), finite_number(raw[after].get(axis))
+                        point[axis] = a+(b-a)*ratio if a is not None and b is not None else None
+                    point["interpolated"] = True
+                    quality.update(source="display_interpolation", support_frame_indices=[before, after], ratio=ratio)
                     continue
-                keypoint = _keypoint_by_id(keypoints, keypoint_id)
-                if keypoint is None:
-                    continue
-                keypoint["x"] = None
-                keypoint["y"] = None
-                keypoint["z"] = None
-                keypoint["interpolated"] = False
-            continue
-
-        x_filter = OneEuroFilter()
-        y_filter = OneEuroFilter()
-        for frame_index, frame in enumerate(smoothed_frames):
-            keypoints = frame.get("keypoints", [])
-            if not isinstance(keypoints, list):
-                continue
-            keypoint = _keypoint_by_id(keypoints, keypoint_id)
-            if keypoint is None:
-                continue
-
-            prepared = _interpolate_keypoint(series, frame_index, visible)
-            if prepared is None:
-                continue
-
-            timestamp = frame_index / fps
-            keypoint.update(prepared)
-            keypoint["x"] = x_filter.filter(float(prepared.get("x", 0.0) or 0.0), timestamp)
-            keypoint["y"] = y_filter.filter(float(prepared.get("y", 0.0) or 0.0), timestamp)
-
-    return smoothed_frames
+            point.update(x=None, y=None, z=None)
+    return output

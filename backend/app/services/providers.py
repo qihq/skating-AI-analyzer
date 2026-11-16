@@ -564,6 +564,8 @@ async def _request_claude_compatible_completion(
     max_tokens: int,
     timeout: float,
 ) -> str:
+    from app.trial import require_external_ai
+    require_external_ai()
     system_prompt, normalized_messages = _split_system_messages(messages)
     if not normalized_messages:
         normalized_messages = [{"role": "user", "content": "Reply with ok."}]
@@ -612,6 +614,8 @@ async def _request_mimo_completion(
     response_format: dict[str, Any] | None = None,
     timeout: float,
 ) -> str:
+    from app.trial import require_external_ai
+    require_external_ai()
     payload: dict[str, Any] = {
         "model": provider.model_id,
         "messages": messages,
@@ -689,6 +693,8 @@ async def request_text_completion(
         AnalysisPipelineError: When auth, quota, or timeout failures are classified.
         Exception: For non-retryable provider errors that do not map to a known pipeline code.
     """
+    from app.trial import require_external_ai
+    require_external_ai()
 
     async def operation() -> str:
         if is_claude_compatible_provider(provider.provider):
@@ -759,6 +765,8 @@ async def request_dashscope_video_completion(
         AnalysisPipelineError: When provider, budget, or request failures should trigger fallback.
         Exception: For non-retryable SDK errors.
     """
+    from app.trial import require_external_ai
+    require_external_ai()
     if provider.provider != "qwen":
         raise AnalysisPipelineError(
             AnalysisErrorCode.UNKNOWN_ERROR,
@@ -873,6 +881,8 @@ async def request_doubao_vision_completion(
         AnalysisPipelineError: When provider, file size, or duration constraints are not satisfied.
         Exception: For non-retryable provider errors.
     """
+    from app.trial import require_external_ai
+    require_external_ai()
     if provider.provider != "doubao":
         raise AnalysisPipelineError(
             AnalysisErrorCode.UNKNOWN_ERROR,
@@ -949,6 +959,8 @@ async def request_mimo_video_completion(
     Local action clips are sent as Base64 data URLs because this project does
     not publish temporary video files to a public URL.
     """
+    from app.trial import require_external_ai
+    require_external_ai()
     if not is_mimo_provider(provider.provider):
         raise AnalysisPipelineError(
             AnalysisErrorCode.UNKNOWN_ERROR,
@@ -1003,6 +1015,8 @@ async def request_mimo_video_completion(
 
 
 async def get_active_provider(slot: str, session: AsyncSession | None = None) -> ActiveProviderConfig:
+    from app.trial import require_external_ai
+    require_external_ai()
     owns_session = session is None
     if owns_session:
         session = AsyncSessionLocal()
@@ -1050,6 +1064,8 @@ async def get_provider_config_by_id(
     slot: str | None = None,
     session: AsyncSession | None = None,
 ) -> ActiveProviderConfig:
+    from app.trial import require_external_ai
+    require_external_ai()
     owns_session = session is None
     if owns_session:
         session = AsyncSessionLocal()
@@ -1082,6 +1098,8 @@ async def get_vision_providers(session: AsyncSession | None = None) -> list[Acti
     Raises:
         RuntimeError: When no usable provider can be resolved.
     """
+    from app.trial import require_external_ai
+    require_external_ai()
     requested = [item.strip().lower() for item in os.getenv("VISION_PROVIDERS", "").split(",") if item.strip()]
     if requested:
         providers = [config for name in requested if (config := _env_vision_provider_config(name)) is not None]
@@ -1147,6 +1165,8 @@ async def activate_provider(provider: AIProvider, session: AsyncSession) -> AIPr
 
 
 async def test_provider_connectivity(provider: AIProvider) -> tuple[bool, str]:
+    from app.trial import require_external_ai
+    require_external_ai()
     api_key = decrypt_api_key(provider.api_key)
     if not api_key:
         return False, "API Key 为空，请先更新该供应商配置。"

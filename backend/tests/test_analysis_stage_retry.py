@@ -1389,7 +1389,10 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 session.add(analysis)
                 await session.commit()
 
+            # b"fake-video" is a placeholder, never pass it to a real decoder.
             with (
+                patch("app.services.video.detect_video_duration", return_value=None),
+                patch("app.services.semantic_keyframe_pipeline.detect_video_duration", return_value=None),
                 patch("app.routers.analysis.extract_pose", side_effect=AssertionError("pose should not rerun")),
                 patch("app.routers.analysis.analyze_biomechanics", side_effect=AssertionError("biomechanics should not rerun")),
                 patch(
@@ -1434,6 +1437,121 @@ class AnalysisStageRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(saved.cross_validation["path_b_failed"])
                 self.assertIn("auto_eval", saved.cross_validation)
                 self.assertIsInstance(saved.report, dict)
+
+
+class SamplingProfileHintContractTests(unittest.TestCase):
+    def test_analysis_profile_hint_matrix_prioritizes_input_and_locks_mixed_action(self) -> None:
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        hint = analysis_router._analysis_profile_hint_for_sampling
+
+        mixed_cases = (
+            ("自由滑", None, None),
+            ("自由滑", "节目片段", None),
+            ("自由滑", None, "spin"),
+            ("自由滑", None, "jump"),
+            ("自由滑", None, "step"),
+            ("自由滑", "节目片段", "spin"),
+            ("自由滑", "节目片段", "jump"),
+            ("自由滑", "节目片段", "step"),
+        )
+        for action_type, action_subtype, stored_profile in mixed_cases:
+            with self.subTest(
+                action_type=action_type,
+                action_subtype=action_subtype,
+                stored_profile=stored_profile,
+            ):
+                self.assertEqual(
+                    hint(action_type, action_subtype, stored_profile),
+                    analysis_router.MIXED_ACTION_AUTO_LOCK_INPUT_PROFILE,
+                )
+
+        explicit_cases = (
+            ("跳跃", "单跳", "spin", "jump"),
+            ("跳跃", "未指定", "spin", "jump"),
+            ("jump", None, "spin", "jump"),
+            ("旋转", "蹲转", "jump", "spin"),
+            ("步法", "螺旋线序列", "step", "spiral"),
+            ("步法", "步法序列", "spin", "step"),
+        )
+        for action_type, action_subtype, stored_profile, expected in explicit_cases:
+            with self.subTest(
+                action_type=action_type,
+                action_subtype=action_subtype,
+                stored_profile=stored_profile,
+            ):
+                self.assertEqual(hint(action_type, action_subtype, stored_profile), expected)
+
+        self.assertEqual(hint("未知动作", None, "spin"), "spin")
+        self.assertEqual(hint("未知动作", None, None), "step")
+
+    def test_sampling_density_contract_matches_for_initial_and_retry_profiles(self) -> None:
+        from app.services.video import get_frame_rate_for_profile, get_sampling_density
+
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        hint = analysis_router._analysis_profile_hint_for_sampling
+        cases = (
+            ("自由滑", None),
+            ("自由滑", "节目片段"),
+            ("跳跃", "单跳"),
+        )
+        for action_type, action_subtype in cases:
+            first_profile = hint(action_type, action_subtype, None)
+            for stored_profile in ("spin", "jump", "step"):
+                retry_profile = hint(action_type, action_subtype, stored_profile)
+                self.assertEqual(retry_profile, first_profile)
+                self.assertEqual(get_frame_rate_for_profile(retry_profile), get_frame_rate_for_profile(first_profile))
+                for duration in (2.5, 12.0):
+                    first_density = get_sampling_density(first_profile, duration)
+                    retry_density = get_sampling_density(retry_profile, duration)
+                    self.assertEqual(first_density, retry_density)
+                    requested, cap, policy = first_density
+                    self.assertGreater(requested, 0)
+                    self.assertLessEqual(requested, cap)
+                    self.assertTrue(policy)
+
+        self.assertEqual(
+            get_sampling_density(hint("跳跃", "单跳", "spin"), 4.0)[2],
+            "jump_fixed_dense",
+        )
+        self.assertEqual(
+            get_sampling_density(hint("旋转", "蹲转", "jump"), 4.0)[2],
+            "duration_aware_dense",
+        )
+
+    def test_manual_window_density_uses_contract_for_each_duration(self) -> None:
+        from app.services.video import get_sampling_density
+
+        sys.modules.pop("app.routers.analysis", None)
+        import app.routers.analysis as analysis_router
+
+        hint = analysis_router._analysis_profile_hint_for_sampling
+        profiles = (
+            hint("跳跃", "单跳", "spin"),
+            hint("旋转", "蹲转", "jump"),
+            hint("步法", "螺旋线序列", "step"),
+            hint("步法", "步法序列", "spin"),
+        )
+        self.assertEqual(profiles, ("jump", "spin", "spiral", "step"))
+
+        for profile in profiles:
+            for duration in (3.25, 8.0, 20.0):
+                requested, cap, policy = get_sampling_density(profile, duration, manual_window=True)
+                self.assertEqual(policy, "manual_window_dense")
+                self.assertEqual(requested, cap)
+                self.assertGreater(requested, 0)
+
+            short_requested, short_cap, short_policy = get_sampling_density(profile, 2.0)
+            long_requested, long_cap, long_policy = get_sampling_density(profile, 20.0)
+            self.assertTrue(short_policy)
+            self.assertTrue(long_policy)
+            self.assertLessEqual(short_requested, short_cap)
+            self.assertLessEqual(long_requested, long_cap)
+            if profile != "jump":
+                self.assertGreaterEqual(long_requested, short_requested)
 
 
 if __name__ == "__main__":

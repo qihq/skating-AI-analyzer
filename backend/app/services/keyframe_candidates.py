@@ -11,13 +11,16 @@ import os
 from dataclasses import dataclass
 import copy
 import math
+import statistics
 from typing import Any, Iterable
 
 from .smoothing import OneEuroFilter
+from .pose_quality import analysis_point, finite_number
+from .pose_observations import observation_slots, _frame_key, observation_time_error
 
 
 # Phase 1.1 平滑增强 feature flag（默认 OFF，保留原 3 帧滑动平均行为）。
-# ON 时 _smooth() 改用 smoothing.OneEuroFilter 按 frame_index / fps 滤波，
+# ON 时 _smooth() 改用 smoothing.OneEuroFilter 按实际时间戳（缺省才用 frame_index / fps）滤波，
 # 抑制 MediaPipe 抖动导致的 apex 假阳性与膝/踝信号失真。
 # 路线图: 见 plans/codex-multi-pose-allinone-fixes-eventual-lagoon.md Phase 1.1。
 _KEYFRAME_ONE_EURO_SMOOTHING_ENV = "KEYFRAME_ONE_EURO_SMOOTHING"
@@ -84,17 +87,7 @@ MOTION_FALLBACK_COMPRESSED_CONFIDENCE_CAP = 0.34
 TEMPORAL_GEOMETRY_UNRELIABLE_CONFIDENCE_CAP = 0.49
 TEMPORAL_GEOMETRY_COMPRESSED_CONFIDENCE_CAP = 0.34
 WEAK_GEOMETRY_CONFIDENCE_CAP = 0.34
-EXCLUDED_TRACKING_STATES = {"lost", "interpolated", "low_confidence"}
-EXCLUDED_TRACKER_STATES = {
-    "full_frame_yolo_relock_pending",
-    "local_zoom_yolo_relock_pending",
-    "relock_pending",
-    "detector_relocked",
-    "relocked",
-    "continuity_rejected",
-    "relock_rejected",
-    "lost_reused",
-}
+from .tracking_states import EXCLUDED_TRACKING_STATES, EXCLUDED_TRACKER_STATES
 MOTION_FALLBACK_MIN_PEAK_SCORE = 0.04
 PARTIAL_TAL_LOW_MOTION_FALLBACK_MIN_PEAK_SCORE = 0.015
 ORDERED_TAL_CONFIDENCE_FLOOR = 0.35
@@ -646,57 +639,15 @@ def _keypoint(
     *,
     min_visibility: float = MIN_VISIBILITY,
 ) -> _Point | None:
-    if not isinstance(keypoints, list):
+    raw = analysis_point(keypoints, index, min_visibility)
+    if raw is None:
         return None
-
-    raw: Any | None = None
-    if index < len(keypoints) and isinstance(keypoints[index], dict):
-        raw = keypoints[index]
-    else:
-        raw = next(
-            (
-                item
-                for item in keypoints
-                if isinstance(item, dict) and int(item.get("id", -1) or -1) == index
-            ),
-            None,
-        )
-    if not isinstance(raw, dict):
-        return None
-
-    x_value = _to_float(raw.get("x"))
-    y_value = _to_float(raw.get("y"))
-    if x_value is None or y_value is None:
-        return None
-    z_value = _to_float(raw.get("z")) or 0.0
-    visibility = _to_float(raw.get("visibility"))
-    if visibility is None:
-        visibility = 1.0
-    if visibility < min_visibility:
-        return None
-    return _Point(x=x_value, y=y_value, z=z_value, visibility=visibility)
+    return _Point(float(raw["x"]), float(raw["y"]), float(raw.get("z", 0.)), float(raw["visibility"]))
 
 
 def _visibility_score(keypoints: Any) -> float:
-    if not isinstance(keypoints, list):
-        return 0.0
-    values: list[float] = []
-    for index in (SHOULDER_LEFT, SHOULDER_RIGHT, HIP_LEFT, HIP_RIGHT, KNEE_LEFT, KNEE_RIGHT, ANKLE_LEFT, ANKLE_RIGHT):
-        raw: Any | None = None
-        if index < len(keypoints) and isinstance(keypoints[index], dict):
-            raw = keypoints[index]
-        else:
-            raw = next(
-                (
-                    item
-                    for item in keypoints
-                    if isinstance(item, dict) and int(item.get("id", -1) or -1) == index
-                ),
-                None,
-            )
-        if isinstance(raw, dict) and raw.get("x") is not None and raw.get("y") is not None:
-            values.append(_to_float(raw.get("visibility")) if _to_float(raw.get("visibility")) is not None else 1.0)
-    return sum(values) / len(values) if values else 0.0
+    points = [_keypoint(keypoints, k) for k in (11, 12, 23, 24, 25, 26, 27, 28)]
+    return sum(p.visibility if p else 0. for p in points) / len(points)
 
 
 def _midpoint(a: _Point, b: _Point) -> _Point:
@@ -724,15 +675,15 @@ def _com_y(keypoints: Any) -> tuple[float | None, float | None]:
     hips = [_keypoint(keypoints, HIP_LEFT), _keypoint(keypoints, HIP_RIGHT)]
     visible = [point for point in shoulders + hips if point is not None]
     hip_points = [point for point in hips if point is not None]
-    com = sum(point.y for point in visible) / len(visible) if visible else None
-    hip = sum(point.y for point in hip_points) / len(hip_points) if hip_points else None
+    com = sum(point.y for point in visible) / 4 if len(visible) == 4 else None
+    hip = sum(point.y for point in hip_points) / 2 if len(hip_points) == 2 else None
     return com, hip
 
 
 def _ankle_y(keypoints: Any) -> float | None:
     ankles = [_keypoint(keypoints, ANKLE_LEFT), _keypoint(keypoints, ANKLE_RIGHT)]
     visible = [point.y for point in ankles if point is not None]
-    return sum(visible) / len(visible) if visible else None
+    return sum(visible) / 2 if len(visible) == 2 else None
 
 
 def _knee_angle(keypoints: Any) -> float | None:
@@ -756,6 +707,26 @@ def _valid_effective_fps(effective_fps: float | None) -> float:
     return numeric
 
 
+def _bound_motion_score(item: dict[str, Any]) -> float | None:
+    """Read v2 evidence only when the interval ends at this exact input image."""
+    if item.get("motion_status") != "valid":
+        return None
+    interval = item.get("motion_interval")
+    if not isinstance(interval, dict):
+        return None
+    current = interval.get("current")
+    if not isinstance(current, dict) or any(
+        current.get(key) is None or current.get(key) != item.get(field)
+        for key, field in (("index", "source_sample_index"), ("sha256", "sha256"),
+                           ("source_pts", "source_pts"), ("source_time_base", "source_time_base"),
+                           ("timestamp", "timestamp"))
+    ):
+        return None
+    if _to_float(item.get("analysis_timestamp")) is None:
+        return None
+    return _to_float(item.get("motion_score"))
+
+
 def _selected_records(motion_scores: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[float]]:
     if not isinstance(motion_scores, dict):
         return {}, [], []
@@ -767,6 +738,8 @@ def _selected_records(motion_scores: dict[str, Any] | None) -> tuple[dict[str, d
         if frame_id:
             by_frame[frame_id] = item
 
+    if motion_scores.get("motion_signal_version") == 2:
+        return by_frame, selected, []  # Never expose a positional legacy fallback.
     scores = [
         float(score)
         for score in motion_scores.get("scores", [])
@@ -780,6 +753,10 @@ def _motion_records(motion_scores: dict[str, Any] | None, effective_fps: float) 
         return []
 
     _, selected, score_series = _selected_records(motion_scores)
+    if motion_scores.get("motion_signal_version") == 2:
+        return [(i, _frame_stem(r.get("frame_id")), r["analysis_timestamp"], score)
+                for i, r in enumerate(selected)
+                if (score := _bound_motion_score(r)) is not None]
     records: list[tuple[int, str, float, float]] = []
     if selected:
         for index, item in enumerate(selected):
@@ -808,6 +785,8 @@ def _dense_motion_score_records(
 ) -> list[tuple[int, str, float, float]]:
     if not isinstance(motion_scores, dict):
         return []
+    if motion_scores.get("motion_signal_version") == 2:
+        return []  # Explicit pool records must not masquerade as nearest sparse images.
     _, _, score_series = _selected_records(motion_scores)
     if len(score_series) < MOTION_FALLBACK_DENSE_MIN_SCORE_COUNT:
         return []
@@ -1985,6 +1964,8 @@ def _motion_score_at(
     selected: list[dict[str, Any]],
     score_series: list[float],
 ) -> float | None:
+    if any(r.get("motion_signal_version") == 2 for r in selected):
+        return _bound_motion_score(by_frame.get(frame_id, {}))
     if frame_id in by_frame:
         value = _to_float(by_frame[frame_id].get("motion_score"))
         if value is not None:
@@ -2013,7 +1994,12 @@ def _timestamp_at(
     fps: float,
     by_frame: dict[str, dict[str, Any]],
     selected: list[dict[str, Any]],
-) -> float:
+) -> float | None:
+    temporal = frame.get("temporal") or {}
+    if any(k in frame for k in ("timestamp", "analysis_timestamp")) or "analysis_timestamp" in temporal:
+        return finite_number(temporal.get("analysis_timestamp", frame.get("analysis_timestamp", frame.get("timestamp"))))
+    if any(r.get("motion_signal_version") == 2 for r in selected):
+        return _to_float(by_frame.get(frame_id, {}).get("analysis_timestamp"))
     if frame_id in by_frame:
         value = _to_float(by_frame[frame_id].get("timestamp"))
         if value is not None:
@@ -2051,11 +2037,14 @@ def _build_signals(
             continue
         keypoints = frame.get("keypoints", [])
         frame_id = _frame_stem(frame.get("frame") or frame.get("frame_id") or f"frame_{index + 1:04d}")
+        timestamp = _timestamp_at(frame, index, frame_id, effective_fps, by_frame, selected)
+        if timestamp is None:
+            continue
         signals.append(
             _FrameSignal(
                 index=index,
                 frame_id=frame_id,
-                timestamp=_timestamp_at(frame, index, frame_id, effective_fps, by_frame, selected),
+                timestamp=timestamp,
                 com_y=_com_y(keypoints)[0],
                 hip_y=_com_y(keypoints)[1],
                 ankle_y=_ankle_y(keypoints),
@@ -2085,23 +2074,22 @@ def _excluded_pose_frame_counts(pose_data: dict[str, Any] | None) -> dict[str, i
     return counts
 
 
-def _smooth(values: list[float | None], *, fps: float | None = None) -> list[float | None]:
+def _smooth(values: list[float | None], *, fps: float | None = None, timestamps: list[float] | None = None) -> list[float | None]:
     """Smooth a 1-D signal across frames.
 
     默认: 3 帧滑动平均（前后各 1 帧），保留旧行为。
     Phase 1.1: 当 KEYFRAME_ONE_EURO_SMOOTHING=1 且 fps 有效时，改用 One-Euro
-    滤波；时间戳取 frame_index / fps。对 None 输入原样返回 None，
-    每个 One-Euro 滤波器在首次有效样本后才开始平滑。
+    滤波；优先使用观测时间戳，缺省才取 frame_index / fps。None 保持缺口，
+    缺口重置 One-Euro 状态，不将两侧样本拼成连续证据。
     """
 
     if not _one_euro_smoothing_enabled() or fps is None or fps <= 0:
         smoothed: list[float | None] = []
         for index in range(len(values)):
-            window = [
-                values[item]
-                for item in range(max(0, index - 1), min(len(values), index + 2))
-                if values[item] is not None
-            ]
+            if values[index] is None:
+                smoothed.append(None)
+                continue
+            window = _window_values(values, index, 1, 1)
             smoothed.append(sum(window) / len(window) if window else None)
         return smoothed
 
@@ -2111,18 +2099,22 @@ def _smooth(values: list[float | None], *, fps: float | None = None) -> list[flo
     for index, value in enumerate(values):
         if value is None:
             smoothed.append(None)
+            filter_instance = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
             continue
-        timestamp = index / fps
+        timestamp = timestamps[index] if timestamps is not None else index / fps
         smoothed.append(filter_instance.filter(float(value), timestamp))
     return smoothed
 
 
 def _window_values(values: list[float | None], index: int, before: int, after: int) -> list[float]:
-    return [
-        float(values[item])
-        for item in range(max(0, index - before), min(len(values), index + after + 1))
-        if values[item] is not None
-    ]
+    if not 0 <= index < len(values) or values[index] is None:
+        return []
+    low, high = index, index
+    while low > max(0, index - before) and values[low - 1] is not None:
+        low -= 1
+    while high < min(len(values) - 1, index + after) and values[high + 1] is not None:
+        high += 1
+    return [float(v) for v in values[low:high + 1]]
 
 
 def _window_average(values: list[float | None], index: int, before: int, after: int) -> float | None:
@@ -4107,7 +4099,7 @@ def _apply_ordered_confidence_floor(candidates: Iterable[dict[str, Any]]) -> Non
         warnings.append("confidence_floor_from_ordered_tal")
 
 
-def detect_key_frame_candidates(
+def _detect_contiguous_candidates(
     pose_data: dict[str, Any] | None,
     motion_scores: dict[str, Any] | None,
     analysis_profile: str,
@@ -4192,9 +4184,13 @@ def detect_key_frame_candidates(
             fallback["excluded_pose_frames"] = excluded_counts
             return fallback
 
-    smoothed_com = _smooth([signal.com_y for signal in signals], fps=fps)
-    smoothed_knee = _smooth([signal.knee_angle for signal in signals], fps=fps)
-    smoothed_ankle = _smooth([signal.ankle_y for signal in signals], fps=fps)
+    if not valid_pose_count:
+        return {**{k: _empty_candidate(["no_usable_pose_or_independent_motion"]) for k in ("T", "A", "L")},
+                "quality_flags": quality_flags + ["no_usable_pose_or_independent_motion"]}
+
+    smoothed_com = _smooth([signal.com_y for signal in signals], fps=fps, timestamps=[s.timestamp for s in signals])
+    smoothed_knee = _smooth([signal.knee_angle for signal in signals], fps=fps, timestamps=[s.timestamp for s in signals])
+    smoothed_ankle = _smooth([signal.ankle_y for signal in signals], fps=fps, timestamps=[s.timestamp for s in signals])
     motion_norm = _normalized_motion(signals)
     search_windows = _motion_search_windows(signals)
     search_window: tuple[int, int] | None = search_windows[0] if search_windows else None
@@ -4600,3 +4596,130 @@ def detect_key_frame_candidates(
         "excluded_pose_frames": excluded_counts,
         "quality_flags": list(dict.fromkeys(quality_flags)),
     }
+
+
+def detect_key_frame_candidates(pose_data, motion_scores, analysis_profile, effective_fps):
+    """Run the existing detector on comparable observation runs, never across holes.
+
+    Runs also break when the set of usable points changes. This keeps each
+    metric's support native and prevents any stage/window borrowing across a
+    rejected point, without modifying the persisted/display pose.
+    """
+    if analysis_profile != "jump" or not isinstance(pose_data, dict) or not pose_data.get("frames"):
+        return _detect_contiguous_candidates(pose_data, motion_scores, analysis_profile, effective_fps)
+    fps = _valid_effective_fps(effective_fps)
+    frames = pose_data["frames"]
+    ids = [_frame_key(f.get("frame") or f.get("frame_id")) if isinstance(f, dict) else None for f in frames]
+    duplicates = {k for k in ids if k and ids.count(k) > 1}
+    selected = (motion_scores or {}).get("selected", [])
+    selected = selected if isinstance(selected, list) else []
+    selected_ids = [_frame_key(r.get("frame_id")) for r in selected if isinstance(r, dict)]
+    duplicate_motion = {k for k in selected_ids if k and selected_ids.count(k) > 1}
+    by_id = {_frame_key(r.get("frame_id")): r for r in selected if isinstance(r, dict)}
+    indices = {id(frame): i for i, frame in enumerate(frames)}
+    explicit_times = [finite_number((f.get("temporal") or {}).get("analysis_timestamp", f.get("timestamp")))
+                      for f in frames if isinstance(f, dict)]
+    deltas = [b-a for a,b in zip(explicit_times, explicit_times[1:]) if a is not None and b is not None and b>a]
+    max_gap = min(2/fps, 1.5*statistics.median(deltas)) + .002 if deltas else 2/fps + .002
+    groups, group, signature = [], [], None
+    exclusions = [{"pose_index": i, "frame_id": ids[i], "reason": reason}
+                  for i, frame in enumerate(frames) if isinstance(frame, dict)
+                  if (reason := observation_time_error(frame))]
+    previous_time = None
+    # Shared observation policy inserts a boundary slot for explicit time,
+    # identity, binding, relock and segment discontinuities.
+    for frame in observation_slots(pose_data, motion_scores):
+        index = indices.get(id(frame)) if frame is not None else None
+        key = ids[index] if index is not None else None
+        reason = None
+        stamp = None
+        if index is None:
+            reason = "observation_boundary_or_unusable_frame"
+        elif key is None or key in duplicates or key in duplicate_motion:
+            reason = "missing_or_ambiguous_frame_id"
+        else:
+            temporal = frame.get("temporal") or {}
+            stamp = finite_number(temporal.get("analysis_timestamp", frame.get("analysis_timestamp", frame.get("timestamp"))))
+            record = by_id.get(key, {})
+            selected_time = finite_number(record.get("analysis_timestamp", record.get("timestamp")))
+            playback = finite_number(temporal.get("playback_timestamp", frame.get("timestamp")))
+            if record and record.get("analysis_timestamp") is not None and stamp is not None and (r_analysis := finite_number(record["analysis_timestamp"])) is not None and abs(stamp-r_analysis) > .002:
+                reason = "frame_analysis_time_mismatch"
+            if record and playback is not None and (rtime := finite_number(record.get("timestamp"))) is not None and abs(playback-rtime) > .002:
+                reason = "frame_time_mismatch"
+            if stamp is None:
+                stamp = selected_time if selected_time is not None else index / fps
+            if previous_time is not None and (stamp <= previous_time or stamp - previous_time > max_gap):
+                if group: groups.append(group)
+                group, signature = [], None
+                exclusions.append({"pose_index": index, "frame_id": key, "reason": "time_discontinuity"})
+        if reason:
+            if group: groups.append(group)
+            group, signature, previous_time = [], None, None
+            exclusions.append({"pose_index": index, "frame_id": key, "reason": reason})
+            continue
+        usable = tuple(k for k in (11,12,23,24,25,26,27,28) if _keypoint(frame.get("keypoints"), k) is not None)
+        if signature is not None and usable != signature:
+            if group: groups.append(group)
+            group = []
+            exclusions.append({"pose_index": index, "frame_id": key, "reason": "point_support_changed"})
+        signature = usable
+        group.append((index, frame, stamp, usable))
+        previous_time = stamp
+    if group: groups.append(group)
+    results = []
+    for segment, run in enumerate(groups):
+        run_frames = []
+        records = []
+        for index, frame, stamp, usable in run:
+            key = ids[index]
+            run_frames.append({**frame, "timestamp": stamp})
+            record = by_id.get(key)
+            if record:
+                records.append({**record, "frame_id": key,
+                                "timestamp": record.get("timestamp") if (motion_scores or {}).get("motion_signal_version") == 2 else stamp,
+                                "analysis_timestamp": stamp})
+        metadata = {**(motion_scores or {}), "selected": records, "scores": []} if records else None
+        local_pose = {**pose_data, "frames": run_frames}
+        result = _detect_contiguous_candidates(local_pose, metadata, "jump", fps)
+        refs = [{"pose_index": i, "frame_id": ids[i], "timestamp": t,
+                 "support_point_ids": list(points)} for i, _, t, points in run]
+        for role in ("T", "A", "L"):
+            c = result[role]
+            if not c.get("frame_id"): continue
+            matches = [(i, frame, t, pts) for i, frame, t, pts in run if ids[i] == _frame_key(c["frame_id"])]
+            if len(matches) != 1:
+                result[role] = _empty_candidate(["candidate_frame_not_in_support_run"])
+                continue
+            i, frame, stamp, points = matches[0]
+            motion_only = bool(c.get("evidence", {}).get("motion_fallback"))
+            required = (11,12,23,24) if role == "A" else (11,12,23,24,27,28)
+            if not motion_only and not all(k in points for k in required):
+                result[role] = _empty_candidate(["candidate_required_pose_unusable"])
+                continue
+            if motion_only:
+                # No geometry from the legacy fallback may masquerade as pose support.
+                score = c.get("evidence", {}).get("motion_score")
+                c["evidence"] = {"motion_fallback": True, "motion_score": score}
+                c["warnings"] = list(dict.fromkeys([*c.get("warnings", []), "motion_only_not_contact_or_pose_evidence"]))
+            c["evidence"].update({"pose_index": i, "signal_source": "motion_only" if motion_only else "pose_geometry",
+                "support_point_ids": [] if motion_only else list(points),
+                "support_frames": [{**r, "support_point_ids": []} for r in refs] if motion_only else refs,
+                "continuous_segment": segment, "identity_id": frame.get("identity_id"), "tracker_id": frame.get("tracker_id"),
+                "excluded_observations": exclusions})
+            c["timestamp"] = round(stamp, 3)
+        results.append(result)
+    excluded_counts = _excluded_pose_frame_counts(pose_data)
+    if not results:
+        return {**{k: _empty_candidate(["no_trusted_observation_run"]) for k in ("T","A","L")},
+                "quality_flags": ["no_trusted_observation_run"], "excluded_observations": exclusions, "excluded_pose_frames": excluded_counts}
+    # One run per event: never stitch individually attractive phases across runs.
+    result = max(results, key=lambda r: (sum(bool(r[k].get("frame_id")) for k in ("T","A","L")),
+                                         sum(r[k].get("confidence",0) for k in ("T","A","L"))))
+    result["excluded_observations"] = exclusions
+    result["excluded_pose_frames"] = excluded_counts
+    if excluded_counts:
+        result["quality_flags"] = list(dict.fromkeys([*result.get("quality_flags", []), "keyframe_candidates_excluded_unreliable_pose_frames"]))
+    if exclusions:
+        result["quality_flags"] = list(dict.fromkeys([*result.get("quality_flags", []), "candidate_support_boundaries_preserved"]))
+    return result

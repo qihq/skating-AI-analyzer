@@ -39,6 +39,9 @@ UNKNOWN_PHASE = "不可分析"
 def _key_frame_phase_overrides(bio_data: dict | None) -> dict[str, str]:
     if not isinstance(bio_data, dict):
         return {}
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        # Candidate geometry cannot settle independent visual phase votes.
+        return {}
     key_frames = bio_data.get("key_frames")
     if not isinstance(key_frames, dict):
         return {}

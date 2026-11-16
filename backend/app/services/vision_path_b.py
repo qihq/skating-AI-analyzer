@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.action_profiles import profile_warning_from_evidence
 from app.services.providers import ActiveProviderConfig, request_text_completion
 from app.services.report import clean_json_text
 from app.services.video import FramePayload
@@ -198,12 +199,18 @@ def _build_user_prompt(
 ) -> str:
     blocks: list[str] = []
     if analysis_profile or profile_evidence:
+        route_warning = profile_warning_from_evidence(profile_evidence or {})
         blocks.append(
-            "【动作识别已知信息 · 请勿推翻】\n"
-            f"  分析 profile：{analysis_profile or 'unknown'}\n"
-            f"  规则证据：{json.dumps(profile_evidence or {}, ensure_ascii=False)}\n"
-            "  JUMP_SUBTYPE_EVIDENCE: prioritize jump_subtype_evidence; "
-            "pre_takeoff_edge_score near 0 supports Lutz outside edge, near 1 supports Flip inside edge."
+            "【动作分类路由线索 · 不是已确认动作】\n"
+            f"  分析路由：{analysis_profile or '未明确'}\n"
+            f"  路由边界：{route_warning or '路由只决定分析重点，不能当作动作事实。'}\n"
+            f"  规则证据（仅作线索，不能自行证明动作）：{json.dumps(profile_evidence or {}, ensure_ascii=False)}\n"
+            "  证据规则：analysis_profile、用户标签和规则证据只决定分析关注点，不等于已确认动作；"
+            "只有独立可见证据（离地/腾空/落冰、刃型、旋转轴、连续姿态等）才能支持跳跃、旋转及其细项。\n"
+            "  证据规则：jump_features 或几何候选不能循环确证 jump；若与画面独立证据冲突，以画面为准并降低 confidence。\n"
+            "  证据规则：路由为步法/旋转/燕式时不得否定画面中独立可见的跳跃；路由为跳跃时也不得据此写具体跳种、周数或单双跳。\n"
+            "  JUMP_SUBTYPE_EVIDENCE: 只有存在独立可见的起跳/刃型证据时，"
+            "pre_takeoff_edge_score near 0 may support Lutz outside edge, near 1 may support Flip inside edge."
         )
     if jump_metrics_text:
         blocks.append(f"【整体生物力学摘要】\n  {jump_metrics_text}")

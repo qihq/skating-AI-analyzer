@@ -897,3 +897,42 @@ def adapt_legacy_key_moments(
             )
         )
     return tuple(output)
+
+class SegmentAnchorSelection(ContractModel):
+    """Exact saved candidate binding. Human identity source, no quality input."""
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+    analysis_id: str = Field(min_length=1)
+    expected_revision: int = Field(ge=0)
+    segment: int = Field(ge=0)
+    observation_index: int = Field(ge=0)
+    candidate_index: int = Field(ge=0)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_pts: int
+    source_time_base: str = Field(min_length=1)
+    source_origin_sec: float
+    slow_motion_scale: float = Field(gt=0)
+    geometry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    binding_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bbox: list[float] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_boolean_numbers(cls, value):
+        def check(v):
+            if isinstance(v, bool):
+                raise ValueError("boolean numeric evidence forbidden")
+            if isinstance(v, dict):
+                for item in v.values(): check(item)
+            if isinstance(v, (list, tuple)):
+                for item in v: check(item)
+        check(value)
+        return value
+
+
+class SegmentAnchorConfirmation(ContractModel):
+    selection: SegmentAnchorSelection
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
+    confirmation: Literal["confirm_manual_segment_target"]

@@ -73,6 +73,9 @@ def extract_key_frame_stems(bio_data: dict[str, Any] | None) -> set[str]:
     """Extract stems from bio_data['key_frames']; only meaningful for jump profiles."""
     if not isinstance(bio_data, dict):
         return set()
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        from .jump_stages import available_stage_anchors, non_jump_frame_references
+        return {a["frame_id"] for a in available_stage_anchors(bio_data).values()} | set(non_jump_frame_references(bio_data).values())
     kf = bio_data.get("key_frames")
     if not isinstance(kf, dict):
         return set()

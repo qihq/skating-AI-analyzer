@@ -69,12 +69,12 @@ def _event(event_id: str = "event-a", profile: str = "jump", *, unobservable_rot
 
 def _dataset(events: list[dict] | None = None) -> GoldenDatasetV2:
     events = events or [_event()]
-    event_ids = {item["event_id"] for item in events}
     tracks = [
-        {"label_id": f"track-{event_id}-{index}", "event_id": event_id, "source_sha256": HASH, "source_frame_index": frame, "pts": pts, "bbox": BBOX, "state": "confirmed", "revision": REVISION}
-        for event_id in event_ids
-        for index, (frame, pts) in enumerate(((30, 1.0), (31, 1.033)), 1)
+        {"label_id": f"track-{event['event_id']}-{index}", "event_id": event["event_id"], "source_sha256": HASH, "source_frame_index": frame, "pts": pts, "bbox": BBOX, "state": "confirmed", "revision": REVISION}
+        for event in events
+        for index, (frame, pts) in enumerate(((round(event["start_pts"] * 30), event["start_pts"]), (round(event["start_pts"] * 30) + 1, event["start_pts"] + .033)), 1)
     ]
+    event_ids = {item["event_id"] for item in events}
     poses = [{"label_id": "pose-event-a-1", "event_id": "event-a", "source_sha256": HASH, "source_frame_index": 42, "pts": 1.4, "joints": [{"joint": "nose", "x": .2, "y": .2, "visibility": 1}], "observability": "observable", "revision": REVISION}] if "event-a" in event_ids else []
     return GoldenDatasetV2.model_validate({
         "dataset_id": "pilot-fixture", "revision": REVISION,
@@ -85,6 +85,15 @@ def _dataset(events: list[dict] | None = None) -> GoldenDatasetV2:
 
 def _bundle(predictions: list[dict], masks: list[str]) -> PilotPredictionBundle:
     return PilotPredictionBundle.model_validate({"pipeline_fingerprint": "pipeline-12345678", "evaluation_masks": masks, "predictions": predictions})
+
+
+def _bundle_with_proposals(predictions: list[dict], proposals: list[dict], masks: list[str]) -> PilotPredictionBundle:
+    return PilotPredictionBundle.model_validate({
+        "pipeline_fingerprint": "pipeline-12345678",
+        "evaluation_masks": masks,
+        "proposals": proposals,
+        "predictions": predictions,
+    })
 
 
 def _identity() -> dict:
@@ -167,6 +176,21 @@ def test_golden_tal_in_prediction_inputs_triggers_leakage(field: str) -> None:
         evaluate_pilot(_dataset(), _bundle([prediction], ["key_moments"]))
 
 
+def test_parent_identity_anchor_is_upstream_for_action_but_leakage_for_tracking() -> None:
+    prediction = {
+        **_identity(),
+        "input_fields": ["upstream.parent_confirmed_identity_anchor"],
+        "proposal_start_pts": 1,
+        "proposal_end_pts": 2,
+        "predicted_profile": "jump",
+    }
+
+    _, action = evaluate_pilot(_dataset(), _bundle([prediction], ["action"]))
+    assert action["aggregate"]["action"]["class_accuracy"]["rate"] == 1
+    with pytest.raises(EvaluationLeakageError):
+        evaluate_pilot(_dataset(), _bundle([prediction], ["tracking"]))
+
+
 def test_manifest_and_prediction_reordering_does_not_change_result() -> None:
     events = [_event("event-b"), _event("event-a")]
     predictions = [
@@ -188,6 +212,23 @@ def test_perfect_action_fixture_only_emits_requested_metric() -> None:
     assert "rotation" not in result["aggregate"]
     assert HASH not in str(result)
     assert "event-a" not in str(result)
+
+
+def test_ambiguous_top_profile_is_scored_but_remains_rejected() -> None:
+    prediction = {
+        **_identity(),
+        "proposal_start_pts": 1,
+        "proposal_end_pts": 2,
+        "predicted_profile": "jump",
+        "predicted_profile_state": "ambiguous",
+    }
+
+    private, result = evaluate_pilot(_dataset(), _bundle([prediction], ["action"]))
+
+    assert result["aggregate"]["action"]["class_accuracy"]["rate"] == 1
+    assert result["aggregate"]["action"]["rejection"]["rate"] == 1
+    assert private["events"][0]["metrics"]["action"]["predicted_profile_state"] == "ambiguous"
+    assert "action_class_uncertain" in private["events"][0]["failure_codes"]
 
 
 def test_narrow_proposal_with_temporal_iou_point_two_counts_as_recalled() -> None:
@@ -221,6 +262,73 @@ def test_narrow_proposal_covering_labelled_action_core_counts_as_recalled() -> N
     _, result = evaluate_pilot(_dataset([event]), _bundle([prediction], ["action"]))
 
     assert result["aggregate"]["action"]["proposal_recall"]["rate"] == 1
+
+
+def test_source_level_proposals_are_evaluated_independently_from_event_classification() -> None:
+    prediction = {
+        **_identity(),
+        "predicted_profile": "jump",
+        "predicted_profile_state": "confirmed",
+    }
+    proposal = {
+        "source_sha256": HASH,
+        "proposal_id": "proposal-a",
+        "start_pts": 1.0,
+        "end_pts": 2.0,
+    }
+
+    _, result = evaluate_pilot(
+        _dataset(),
+        _bundle_with_proposals([prediction], [proposal], ["action"]),
+    )
+
+    assert result["aggregate"]["action"]["proposal_recall"]["rate"] == 1
+    assert result["aggregate"]["action"]["localized_proposal_recall"]["rate"] == 1
+    assert result["aggregate"]["action"]["unlocalized_fallback"]["rate"] == 0
+    assert result["aggregate"]["action"]["class_accuracy"]["rate"] == 1
+
+
+def test_unlocalized_source_fallback_recovers_recall_but_remains_a_failure() -> None:
+    proposal = {
+        "source_sha256": HASH,
+        "proposal_id": "proposal-fallback",
+        "start_pts": 0.0,
+        "end_pts": 10.0,
+        "localization": "unlocalized",
+    }
+
+    private, result = evaluate_pilot(
+        _dataset(),
+        _bundle_with_proposals([], [proposal], ["action"]),
+    )
+
+    action = result["aggregate"]["action"]
+    assert action["proposal_recall"]["rate"] == 1
+    assert action["localized_proposal_recall"]["rate"] == 0
+    assert action["unlocalized_fallback"]["rate"] == 1
+    assert "action_proposal_unlocalized" in private["events"][0]["failure_codes"]
+
+
+def test_multiple_events_on_one_source_can_each_match_a_distinct_source_proposal() -> None:
+    first = _event("event-a")
+    second = _event("event-b")
+    second["start_pts"] = 4.0
+    second["end_pts"] = 5.0
+    second["jump"]["takeoff"] = {"pts": 4.1, "source_frame_index": 123}
+    second["jump"]["apex"] = {"pts": 4.4, "source_frame_index": 132}
+    second["jump"]["landing"] = {"pts": 4.8, "source_frame_index": 144}
+    proposals = [
+        {"source_sha256": HASH, "proposal_id": "proposal-a", "start_pts": 1.0, "end_pts": 2.0},
+        {"source_sha256": HASH, "proposal_id": "proposal-b", "start_pts": 4.0, "end_pts": 5.0},
+    ]
+
+    _, result = evaluate_pilot(
+        _dataset([first, second]),
+        _bundle_with_proposals([], proposals, ["action"]),
+    )
+
+    assert result["aggregate"]["action"]["proposal_recall"]["numerator"] == 2
+    assert result["aggregate"]["action"]["proposal_recall"]["denominator"] == 2
 
 
 def test_pose_reports_availability_pck_oks_provenance_and_wrong_person() -> None:

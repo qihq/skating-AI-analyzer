@@ -255,6 +255,9 @@ def _dedupe_texts(items: list[Any]) -> list[str]:
 def _candidate_key_frames_from_bio(bio_data: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(bio_data, dict):
         return {}
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        from .jump_stages import available_stage_anchors, non_jump_frame_references
+        return {**non_jump_frame_references(bio_data), **available_stage_anchors(bio_data)}
     candidates = bio_data.get("key_frame_candidates")
     if isinstance(candidates, dict):
         return candidates

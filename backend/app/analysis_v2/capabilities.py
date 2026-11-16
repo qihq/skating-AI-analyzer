@@ -51,15 +51,25 @@ class AdvancedRuntimeCapabilities(BaseModel):
 
 
 def build_public_capabilities(config: RuntimeConfig) -> RuntimeCapabilities:
+    from app.trial import trial_profile
+    tools_enabled = trial_profile() == "off"
     return RuntimeCapabilities(
         supported_analysis_experience_schema_versions=["analysis-experience.v2"],
         runtime_mode=config.pipeline_mode,
         public_authority="legacy",
-        parent_tools=ParentToolCapabilities(shadow=True, golden=True, diagnostics=True),
+        parent_tools=ParentToolCapabilities(shadow=tools_enabled, golden=tools_enabled, diagnostics=tools_enabled),
     )
 
 
 def build_advanced_capabilities(config: RuntimeConfig) -> AdvancedRuntimeCapabilities:
+    from app.trial import trial_profile
+    if trial_profile() != "off":
+        return AdvancedRuntimeCapabilities(
+            runtime_mode=config.pipeline_mode, public_authority="legacy",
+            shadow_status="disabled", isolated_runtime=config.is_isolated,
+            baseline_source_commit="c291324c62bcc930f96f3429dcdc9521e060b516",
+            ds918_compatible=None,
+        )
     if config.pipeline_mode is PipelineMode.LEGACY:
         status = "disabled"
     elif not config.is_isolated:

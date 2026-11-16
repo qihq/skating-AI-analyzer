@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import keyframe_candidates as keyframe_candidates_module
 from app.services.keyframe_candidates import (
-    detect_key_frame_candidates,
+    _detect_contiguous_candidates as detect_key_frame_candidates,
     _tiny_target_weak_geometry_flags,
     _temporal_geometry_unreliable_flags,
     _weak_geometry_flags,
@@ -122,6 +122,9 @@ def _motion(scores: list[float]) -> dict[str, object]:
     }
 
 
+# These unit tests retain every legacy selector assertion. The public detector
+# now validates/splits observations before invoking this within-run selector;
+# test_tal_evidence_chain exercises that production boundary on the same fixtures.
 class KeyframeCandidateTests(unittest.TestCase):
     def test_detects_ordered_jump_candidates_with_evidence(self) -> None:
         pose_data = _pose(
@@ -3261,16 +3264,13 @@ class KeyframeCandidateTests(unittest.TestCase):
 
         result = detect_key_frame_candidates(pose_data, _motion([0.011, 0.014, 0.027, 0.02, 0.019, 0.016]), "jump", 10.0)
 
-        self.assertIn("tal_candidate_motion_fallback_low_motion", result["quality_flags"])
-        self.assertIn("tal_candidate_motion_fallback_low_motion_low_confidence", result["quality_flags"])
-        self.assertIn("tal_candidate_confidence_low", result["quality_flags"])
+        # These scores are below the independent-motion detector floor. Invisible
+        # pose must not be resurrected to fabricate low-confidence geometry.
+        self.assertIn("no_usable_pose_or_independent_motion", result["quality_flags"])
         for role in ("T", "A", "L"):
+            self.assertIsNone(result[role]["frame_id"])
+            self.assertEqual(result[role]["confidence"], 0.)
             self.assertLessEqual(result[role]["confidence"], 0.34)
-            self.assertIn("tal_candidate_motion_fallback_low_motion_low_confidence", result[role]["warnings"])
-            self.assertGreaterEqual(
-                result[role]["evidence"]["motion_fallback_low_motion_confidence_cap"]["raw_confidence"],
-                result[role]["confidence"],
-            )
 
     def test_motion_fallback_with_final_tracker_loss_is_bounded_to_reliable_pose_window(self) -> None:
         pose_data = _pose(

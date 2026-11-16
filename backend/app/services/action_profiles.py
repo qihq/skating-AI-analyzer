@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import copy
+import math
 from typing import Any
 
 from app.services.jump_features import compute_jump_evidence
+from app.services.pose_quality import analysis_point
+from app.services.pose_observations import (
+    frame_usable as _routing_frame_usable,
+    observation_slots as _routing_observations,
+)
 
 
 ANALYSIS_PROFILES = {"jump", "spin", "step", "spiral"}
@@ -171,219 +178,136 @@ def infer_jump_subtype_evidence(
     return compute_jump_evidence(pose_data, key_frames, float(effective_fps or 5.0))
 
 
-def _max_vertical_range(pose_data: dict[str, Any] | None) -> float:
-    if not isinstance(pose_data, dict):
-        return 0.0
-    trajectory = pose_data.get("com_trajectory")
-    if isinstance(trajectory, dict):
-        return float(trajectory.get("vertical_range", 0.0) or 0.0)
-
-    frames = pose_data.get("frames", [])
-    points: list[float] = []
-    if not isinstance(frames, list):
-        return 0.0
-    for frame in frames:
-        if not isinstance(frame, dict):
+def _max_vertical_range(
+    pose_data: dict[str, Any] | None,
+    motion_metadata: dict[str, Any] | None = None,
+) -> float:
+    # Recompute from observations: an unattributed CoM cache cannot override
+    # point quality, identity, or time boundaries in saved frames.
+    ranges: list[float] = []
+    current: list[float] = []
+    for frame in _routing_observations(pose_data, motion_metadata):
+        points = [analysis_point(frame.get("keypoints"), k, .5) for k in (11, 12, 23, 24)] if frame else []
+        if not points or any(p is None for p in points):
+            if current:
+                ranges.append(max(current) - min(current))
+                current = []
             continue
-        keypoints = frame.get("keypoints", [])
-        if not isinstance(keypoints, list):
-            continue
-        visible = [
-            point
-            for point in keypoints
-            if isinstance(point, dict)
-            and float(point.get("visibility", 0.0) or 0.0) >= 0.5
-            and point.get("id") in {11, 12, 23, 24}
-        ]
-        if not visible:
-            continue
-        points.append(sum(float(point.get("y", 0.0) or 0.0) for point in visible) / len(visible))
-    return max(points) - min(points) if points else 0.0
+        current.append(sum(float(p["y"]) for p in points) / len(points))
+    if current:
+        ranges.append(max(current) - min(current))
+    return max(ranges, default=0.)
 
 
-def _person_height_normalized(pose_data: dict[str, Any] | None) -> float:
-    """
-    Estimate normalized person height using the Y distance from nose to ankle midpoint.
-    Returns 0.0 when the height cannot be computed reliably.
-    """
-    if not isinstance(pose_data, dict):
-        return 0.0
-
-    frames = pose_data.get("frames", [])
-    if not isinstance(frames, list):
-        return 0.0
-
+def _person_height_normalized(
+    pose_data: dict[str, Any] | None,
+    motion_metadata: dict[str, Any] | None = None,
+) -> float:
+    """Nose-to-bilateral-ankle height from usable same-frame observations."""
     heights: list[float] = []
-    for frame in frames:
-        if not isinstance(frame, dict):
+    for frame in _routing_observations(pose_data, motion_metadata):
+        if frame is None:
             continue
-
-        keypoints = frame.get("keypoints", [])
-        if not isinstance(keypoints, list):
+        points = [analysis_point(frame.get("keypoints"), k, .5) for k in (0, 27, 28)]
+        if any(p is None for p in points):
             continue
-
-        nose = next(
-            (
-                point
-                for point in keypoints
-                if isinstance(point, dict)
-                and point.get("id") == 0
-                and float(point.get("visibility", 0.0) or 0.0) >= 0.5
-            ),
-            None,
-        )
-        left_ankle = next(
-            (
-                point
-                for point in keypoints
-                if isinstance(point, dict)
-                and point.get("id") == 27
-                and float(point.get("visibility", 0.0) or 0.0) >= 0.5
-            ),
-            None,
-        )
-        right_ankle = next(
-            (
-                point
-                for point in keypoints
-                if isinstance(point, dict)
-                and point.get("id") == 28
-                and float(point.get("visibility", 0.0) or 0.0) >= 0.5
-            ),
-            None,
-        )
-        if nose is None or (left_ankle is None and right_ankle is None):
-            continue
-
-        ankles = [point for point in (left_ankle, right_ankle) if point is not None]
-        ankle_y = sum(float(point.get("y", 0.0) or 0.0) for point in ankles) / len(ankles)
-        height = abs(ankle_y - float(nose.get("y", 0.0) or 0.0))
-        if height > 0.05:
+        nose, left, right = points
+        height = abs((float(left["y"]) + float(right["y"])) / 2 - float(nose["y"]))
+        if height > .05:
             heights.append(height)
+    return sum(heights) / len(heights) if heights else 0.
 
-    return sum(heights) / len(heights) if heights else 0.0
+
+def _trusted_ankle_y(frame: Any) -> float | None:
+    if not _routing_frame_usable(frame):
+        return None
+    ankles = [analysis_point(frame.get("keypoints"), k, .4) for k in (27, 28)]
+    if any(p is None for p in ankles):
+        return None
+    return sum(float(p["y"]) for p in ankles) / 2
 
 
-def _detect_airborne_frames(pose_data: dict[str, Any] | None) -> int:
-    """
-    Count a continuous ankle-rise interval bounded by contact-like frames.
 
-    A global body-center range is not enough: camera tilt, zoom and a skater
-    travelling through perspective can all move the pose vertically.  This
-    gate therefore requires at least two consecutive raised-ankle frames plus
-    visible contact-like observations before and after the interval.
-    """
-    if not isinstance(pose_data, dict):
-        return 0
+def _detect_airborne_frames(
+    pose_data: dict[str, Any] | None,
+    motion_metadata: dict[str, Any] | None = None,
+) -> int:
+    """Count contact-bounded ankle-rise candidates within usable segments."""
+    observations = [_trusted_ankle_y(frame) for frame in _routing_observations(pose_data, motion_metadata)]
 
-    frames = pose_data.get("frames", [])
-    if not isinstance(frames, list):
-        return 0
+    segments: list[list[float]] = []
+    current_segment: list[float] = []
+    for value in observations:
+        if value is None:
+            if current_segment:
+                segments.append(current_segment)
+                current_segment = []
+        else:
+            current_segment.append(value)
+    if current_segment:
+        segments.append(current_segment)
 
-    ankle_y_series: list[float] = []
-    for frame in frames:
-        if not isinstance(frame, dict):
-            continue
-
-        keypoints = frame.get("keypoints", [])
-        if not isinstance(keypoints, list):
-            continue
-
-        ankles = [
-            point
-            for point in keypoints
-            if isinstance(point, dict)
-            and point.get("id") in {27, 28}
-            and float(point.get("visibility", 0.0) or 0.0) >= 0.4
-        ]
-        if not ankles:
-            continue
-
-        ankle_y_series.append(sum(float(point.get("y", 0.0) or 0.0) for point in ankles) / len(ankles))
-
-    if len(ankle_y_series) < 3:
-        return 0
-
-    baseline_count = max(1, len(ankle_y_series) // 5)
-    baseline = sum(ankle_y_series[:baseline_count]) / baseline_count
-    airborne_threshold = baseline * 0.85
-    raised = [ankle_y < airborne_threshold for ankle_y in ankle_y_series]
-    contact_threshold = baseline * 0.95
     detected = 0
-    run_start: int | None = None
-    for index, is_raised in enumerate([*raised, False]):
-        if is_raised and run_start is None:
-            run_start = index
+    for segment in segments:
+        if len(segment) < 4:
             continue
-        if is_raised or run_start is None:
-            continue
-        run_end = index
-        has_prior_contact = any(value >= contact_threshold for value in ankle_y_series[:run_start])
-        has_later_contact = any(value >= contact_threshold for value in ankle_y_series[run_end:])
-        if run_end - run_start >= 2 and has_prior_contact and has_later_contact:
-            detected += run_end - run_start
-        run_start = None
+        baseline_count = max(1, len(segment) // 5)
+        baseline = sum(segment[:baseline_count]) / baseline_count
+        airborne_threshold = baseline * 0.85
+        contact_threshold = baseline * 0.95
+        raised = [ankle_y < airborne_threshold for ankle_y in segment]
+        run_start: int | None = None
+        for index, is_raised in enumerate([*raised, False]):
+            if is_raised and run_start is None:
+                run_start = index
+                continue
+            if is_raised or run_start is None:
+                continue
+            run_end = index
+            has_prior_contact = any(value >= contact_threshold for value in segment[:run_start])
+            has_later_contact = any(value >= contact_threshold for value in segment[run_end:])
+            if run_end - run_start >= 2 and has_prior_contact and has_later_contact:
+                detected += run_end - run_start
+            run_start = None
     return detected
 
 
-def _detect_rotation_signal(pose_data: dict[str, Any] | None) -> float:
-    """
-    Detect repeated changes in the body's internal left/right orientation.
-
-    Translation of the hip center is deliberately excluded because ordinary
-    skating across the frame is not rotation.  A usable signal needs at least
-    two left/right orientation transitions, which is the minimum evidence for
-    a repeated turn rather than one direction change.
-    """
-    if not isinstance(pose_data, dict):
-        return 0.0
-
-    frames = pose_data.get("frames", [])
-    if not isinstance(frames, list):
-        return 0.0
-
-    orientation_states: list[int] = []
-    for frame in frames:
-        if not isinstance(frame, dict):
+def _detect_rotation_signal(
+    pose_data: dict[str, Any] | None,
+    motion_metadata: dict[str, Any] | None = None,
+) -> float:
+    """Repeated internal orientation changes, never across rejected slots."""
+    frames = pose_data.get("frames", []) if isinstance(pose_data, dict) else []
+    if not isinstance(frames, list) or not frames:
+        return 0.
+    segments: list[list[int]] = []
+    states: list[int] = []
+    for frame in _routing_observations(pose_data, motion_metadata):
+        pairs: list[int] = []
+        if frame is not None:
+            points = {k: analysis_point(frame.get("keypoints"), k, .4) for k in (11, 12, 23, 24)}
+            for left_id, right_id in ((11, 12), (23, 24)):
+                left, right = points[left_id], points[right_id]
+                if left is None or right is None:
+                    break
+                delta = float(left["x"]) - float(right["x"])
+                if abs(delta) < .002:
+                    break
+                pairs.append(1 if delta > 0 else -1)
+        if len(pairs) != 2 or pairs[0] != pairs[1]:
+            if states:
+                segments.append(states)
+                states = []
             continue
-
-        keypoints = frame.get("keypoints", [])
-        if not isinstance(keypoints, list):
-            continue
-
-        points = {
-            int(point.get("id")): point
-            for point in keypoints
-            if isinstance(point, dict)
-            and point.get("id") in {11, 12, 23, 24}
-            and float(point.get("visibility", 0.0) or 0.0) >= 0.4
-        }
-        pair_states: list[int] = []
-        for left_id, right_id in ((11, 12), (23, 24)):
-            left = points.get(left_id)
-            right = points.get(right_id)
-            if left is None or right is None:
-                continue
-            delta_x = float(left.get("x", 0.0) or 0.0) - float(right.get("x", 0.0) or 0.0)
-            if abs(delta_x) < 0.002:
-                continue
-            pair_states.append(1 if delta_x > 0 else -1)
-        if not pair_states or abs(sum(pair_states)) != len(pair_states):
-            continue
-        orientation_states.append(pair_states[0])
-
-    if len(orientation_states) < 4:
-        return 0.0
-
-    collapsed = [orientation_states[0]]
-    for state in orientation_states[1:]:
-        if state != collapsed[-1]:
-            collapsed.append(state)
-    transitions = len(collapsed) - 1
-    if transitions < 2:
-        return 0.0
-    coverage = len(orientation_states) / len(frames)
-    return round(min(1.0, transitions / 4.0) * coverage, 4)
+        states.append(pairs[0])
+    if states:
+        segments.append(states)
+    signals = []
+    for states in segments:
+        transitions = sum(a != b for a, b in zip(states, states[1:]))
+        if len(states) >= 4 and transitions >= 2:
+            signals.append(min(1., transitions / 4.) * len(states) / len(frames))
+    return round(max(signals, default=0.), 4)
 
 
 def _motion_stats(frame_motion_scores: dict[str, Any] | None) -> tuple[float, float]:
@@ -395,6 +319,127 @@ def _motion_stats(frame_motion_scores: dict[str, Any] | None) -> tuple[float, fl
     max_motion = max(scores)
     avg_motion = sum(scores) / len(scores)
     return max_motion, avg_motion
+
+
+def _dedupe_values(values: list[Any]) -> list[Any]:
+    output: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(value)
+    return output
+
+
+def profile_warning_from_evidence(profile_evidence: dict[str, Any] | None) -> str:
+    """Render a family-readable boundary warning from profile routing evidence.
+
+    The warning deliberately speaks about routing/candidate evidence rather than
+    exposing internal enum or flag names. It never turns a route into a confirmed
+    action, jump count, or a claim that the skater did not jump.
+    """
+    if not isinstance(profile_evidence, dict) or not profile_evidence:
+        return ""
+
+    flags = profile_evidence.get("quality_flags")
+    flag_set = {str(flag) for flag in flags} if isinstance(flags, list) else set()
+    hint = str(profile_evidence.get("profile_hint") or "").strip().lower()
+    mixed = bool(profile_evidence.get("mixed_action_input")) or hint == "mixed_auto"
+    ambiguous = bool(profile_evidence.get("jump_spin_ambiguous")) or "jump_spin_ambiguous" in flag_set
+    jump_gate = bool(profile_evidence.get("jump_gate_passed"))
+    mixed_jump_gate = bool(profile_evidence.get("mixed_jump_gate_passed"))
+    confidence = str(profile_evidence.get("profile_confidence") or "").strip().lower()
+    parts: list[str] = []
+
+    if mixed and ambiguous:
+        parts.append(
+            "原始骨架出现旋转线索，但证据不足以区分跳跃与旋转；"
+            "不能确认动作类型、具体圈数或单跳/连跳，也不能排除跳跃。"
+        )
+    elif mixed and mixed_jump_gate:
+        parts.append(
+            "原始骨架检测到腾空候选，但只能作为线索，"
+            "不能确认冰刀已离地、具体跳种、周数或单跳/连跳。"
+        )
+    elif mixed:
+        parts.append(
+            "原始骨架未检测到明确跳跃或旋转线索；仅凭这些线索不能判断当前动作，"
+            "且未检出不代表视频中没有跳跃，不能据此否定跳跃。"
+        )
+    elif hint == "jump":
+        if jump_gate:
+            parts.append(
+                "用户输入标签决定按跳跃方向路由分析；本次腾空门槛通过只作辅助候选，"
+                "不代表动作已自动确认，具体跳种、周数和单跳/连跳仍需独立证据。"
+            )
+        else:
+            parts.append(
+                "用户输入标签决定按跳跃方向路由分析；本次未检测到明确腾空证据，"
+                "不能确认跳跃动作、具体跳种或周数。"
+            )
+    elif hint == "spin":
+        if confidence == "low" or "spin_rotation_signal_weak" in flag_set:
+            parts.append("本次按旋转方向路由分析，旋转线索偏弱，不能确认具体旋转类型、周数或完成质量。")
+        else:
+            parts.append("本次按旋转方向路由分析，但路由结果不等同于已确认具体旋转动作或周数。")
+    elif hint == "spiral":
+        parts.append("本次按燕式滑行/螺旋线方向路由分析，路由结果不等同于已确认具体动作或完成质量。")
+    elif hint == "step":
+        parts.append("本次按步法方向路由分析，路由结果不等同于已确认具体步法类型；未检出不代表没有跳跃。")
+    else:
+        parts.append("当前动作分类仅作为分析路由，不代表已确认具体动作或周数。")
+
+    recovered_family = next(
+        (
+            profile_evidence.get(key)
+            for key in ("video_ai_action_family", "recovered_action_family", "video_action_family")
+            if profile_evidence.get(key)
+        ),
+        None,
+    )
+    if recovered_family:
+        parts.append(
+            "视频语义家族恢复信息只作补充线索，不改变原始骨架的置信度、腾空门槛或动作确认状态。"
+        )
+
+    if profile_evidence.get("jump_geometry_candidate") is True and not mixed:
+        parts.append("几何指标只提供跳跃候选线索，不能循环证明已发生跳跃。")
+
+    return " ".join(parts)
+
+
+def attach_profile_evidence(
+    bio_data: dict[str, Any],
+    profile_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach routing evidence to bio data without mutating either input.
+
+    The returned dict is safe to attach repeatedly during restore/retry: old
+    quality flags are preserved, new flags are merged with de-duplication, and
+    the same evidence always produces the same warning. Profile booleans and
+    counts are copied verbatim; this helper never promotes route evidence into a
+    confirmed action.
+    """
+    base = dict(bio_data) if isinstance(bio_data, dict) else {}
+    evidence_copy = copy.deepcopy(profile_evidence) if isinstance(profile_evidence, dict) else {}
+
+    existing_flags = base.get("quality_flags")
+    merged_flags: list[Any] = list(existing_flags) if isinstance(existing_flags, list) else []
+    evidence_flags = evidence_copy.get("quality_flags")
+    if isinstance(evidence_flags, list):
+        merged_flags.extend(evidence_flags)
+    base["quality_flags"] = _dedupe_values(merged_flags)
+
+    base["profile_evidence"] = evidence_copy
+    warning = profile_warning_from_evidence(evidence_copy)
+    if warning:
+        base["profile_warning"] = warning
+
+    # jump_metrics_warning is an older consumer-facing field. Keep it untouched
+    # when present; profile_warning is additive and does not replace it.
+    return base
 
 
 def infer_analysis_profile(
@@ -409,7 +454,7 @@ def infer_analysis_profile(
     max_motion, avg_motion = _motion_stats(frame_motion_scores)
     vertical_range = _max_vertical_range(pose_data)
     person_height = _person_height_normalized(pose_data)
-    airborne_frames = _detect_airborne_frames(pose_data)
+    airborne_frames = _detect_airborne_frames(pose_data, frame_motion_scores)
     rotation_signal = _detect_rotation_signal(pose_data)
     relative_vertical = vertical_range / person_height if person_height > 0.05 else 0.0
 
@@ -440,22 +485,39 @@ def infer_analysis_profile(
         "quality_flags": [],
         "negative_constraints": [],
         "mixed_action_input": mixed_action_input,
+        "profile_route_only": False,
+        "jump_spin_ambiguous": False,
     }
 
     if mixed_action_input:
         evidence["profile_hint"] = "mixed_auto"
+        evidence["profile_route_only"] = True
         mixed_jump_gate = jump_gate
         evidence["mixed_jump_gate_passed"] = mixed_jump_gate
         if mixed_jump_gate:
             evidence["profile_confidence"] = "medium"
             evidence["quality_flags"].append("mixed_action_profile_inferred_jump_from_motion")
+            evidence["negative_constraints"].append(
+                "自动检测到腾空/离地候选，仅作为跳跃路由线索，不等同于冰刀离冰事实或已确认跳跃；"
+                "具体跳种、周数、单跳/连跳仍需独立画面证据确认。"
+            )
             return "jump", evidence
         if rotation_signal >= 0.15 and max_motion >= 0.04:
-            evidence["profile_confidence"] = "medium"
+            evidence["profile_confidence"] = "low"
+            evidence["jump_spin_ambiguous"] = True
             evidence["quality_flags"].append("mixed_action_profile_inferred_spin_from_rotation")
+            evidence["quality_flags"].append("jump_spin_ambiguous")
+            evidence["negative_constraints"].append(
+                "当前证据不足以区分跳跃与旋转，旋转线索只能支持按旋转方向路由分析；"
+                "旋转线索不能排除跳跃，也不能确认旋转动作、周数或单跳/连跳。"
+            )
             return "spin", evidence
         evidence["profile_confidence"] = "low"
         evidence["quality_flags"].append("mixed_action_profile_defaulted_step")
+        evidence["negative_constraints"].append(
+            "未检测到明确的跳跃或旋转线索时默认按步法路由分析；"
+            "未检出不代表视频中没有跳跃，不能据此否定跳跃。"
+        )
         return "step", evidence
 
     if spiral_gate:
@@ -474,11 +536,18 @@ def infer_analysis_profile(
     if action_type == "自由滑":
         return "step", evidence
     if jump_gate and hinted_profile == "jump":
+        evidence["profile_route_only"] = True
+        evidence["negative_constraints"].append(
+            "用户标签决定按跳跃路由分析，腾空门槛只作辅助候选，不代表动作已自动确认；"
+            "具体跳种、周数或单跳/连跳仍需独立证据。"
+        )
         return "jump", evidence
 
     if hinted_profile == "jump":
+        evidence["profile_route_only"] = True
         evidence["negative_constraints"].append(
-            "几何证据不足（CoM 垂直范围低、无腾空帧检测），但用户填写了跳跃，保留 jump profile"
+            "几何证据不足（CoM 垂直范围低、无腾空帧检测），但用户填写了跳跃，保留 jump profile；"
+            "用户标签只决定路由方向，不是自动动作确认"
         )
         evidence["quality_flags"].append("jump_gate_not_passed")
         evidence["profile_confidence"] = "low"

@@ -309,5 +309,50 @@ class AnalysisBBoxTrackingTests(unittest.TestCase):
         self.assertIn("bbox_tracker_failed_fallback", target_lock["quality_flags"])
 
 
+
+    def test_middle_anchor_real_association_keeps_evidence_aligned_for_pose(self):
+        import json
+        import numpy as np
+        from app.services.person_tracker import PersonBBoxTracker
+        from app.services.pose import _manual_lock_blocks_unreliable_tracker_pose
+
+        frames = [Path(f"sample_{i:03d}.jpg") for i in range(9)]
+        target_lock = {
+            "selected_bbox": {"x": 100 / 320, "y": 50 / 240, "width": 40 / 320, "height": 100 / 240},
+            "preview_frame_index": 4, "manual_override": True, "quality_flags": [],
+        }
+
+        def read_frame(_tracker, frame_path):
+            image = np.zeros((240, 320, 3), dtype=np.uint8)
+            image[0, 0, 0] = frames.index(frame_path)
+            return image
+
+        def detect(_tracker, image):
+            x = 84. + 4 * int(image[0, 0, 0])
+            return [(x, 50., x + 40., 150., .95), (240., 50., 280., 150., .95)]
+
+        # Only the detector and image reader are replaced. Real ByteTrack and
+        # the production router/sequence/pose guard execute without model loading.
+        with patch.object(PersonBBoxTracker, "_read_frame", read_frame), patch.object(PersonBBoxTracker, "_detect", detect):
+            tracked = _build_bbox_per_frame(frames, target_lock, effective_fps=5)
+        diagnostics = target_lock["person_tracker_diagnostics"]
+        self.assertEqual(len(tracked), len(frames))
+        self.assertEqual(len(diagnostics), len(frames))
+        for i, d in enumerate(diagnostics):
+            self.assertEqual(d["frame_index"], i)
+            self.assertEqual(d["frame"], frames[i].name)
+            self.assertEqual(d["anchor_frame_index"], 4)
+            self.assertEqual(d["sequence_frame_index"], abs(i - 4))
+            self.assertEqual(d["tracking_direction"], "backward" if i < 4 else "forward")
+            self.assertEqual(d["association_evidence"]["tracker_frame_index"], abs(i - 4) + 1)
+            self.assertTrue(d["association_evidence"]["selected_track_present"])
+            self.assertEqual(d["detection_evidence"]["count"], 2)
+            self.assertEqual(d["state"], "tracked")
+            self.assertAlmostEqual(tracked[i]["x"], (84 + 4 * i) / 320, places=4)
+            self.assertFalse(_manual_lock_blocks_unreliable_tracker_pose(target_lock, d))
+        self.assertEqual(sum(d["frame_index"] == 4 for d in diagnostics), 1)
+        json.dumps(target_lock, allow_nan=False)
+
+
 if __name__ == "__main__":
     unittest.main()

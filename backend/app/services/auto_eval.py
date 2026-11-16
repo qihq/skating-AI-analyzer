@@ -122,6 +122,9 @@ def _candidate_confidence(candidates: dict[str, Any], label: str) -> float | Non
 def _final_key_frame_records(bio_data: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(bio_data, dict):
         return None
+    if bio_data.get("jump_stage_contract") == "tal-evidence.v1":
+        from .jump_stages import available_stage_anchors
+        return available_stage_anchors(bio_data) or None
     key_frames = bio_data.get("key_frames") if isinstance(bio_data.get("key_frames"), dict) else {}
     timestamps = (
         bio_data.get("key_frame_timestamps")
@@ -363,9 +366,13 @@ def build_auto_eval_payload(
     auto_flags: list[str] = []
     candidates = bio_data.get("key_frame_candidates") if isinstance(bio_data, dict) else None
     final_key_frames = _final_key_frame_records(bio_data)
-    signature_records, signature_source = _key_frame_signature_records(final_key_frames, candidates)
-
-    key_frame_order_valid = _key_frame_order_valid(final_key_frames, candidates, auto_flags)
+    authoritative_stages = isinstance(bio_data, dict) and bio_data.get("jump_stage_contract") == "tal-evidence.v1"
+    if authoritative_stages:
+        signature_records, signature_source = final_key_frames, "jump_stage_anchors"
+        key_frame_order_valid = _key_frame_order_valid(final_key_frames, None, auto_flags)
+    else:
+        signature_records, signature_source = _key_frame_signature_records(final_key_frames, candidates)
+        key_frame_order_valid = _key_frame_order_valid(final_key_frames, candidates, auto_flags)
     phase_sequence = _phase_sequence(vision_structured, profile)
     phase_sequence_valid, phase_violations = _phase_sequence_valid(phase_sequence, profile, auto_flags)
     conflicts = _high_confidence_conflicts(signature_records, phase_sequence)
@@ -397,4 +404,11 @@ def build_auto_eval_payload(
         ],
         "phase_transition_violations": phase_violations,
     }
+    if authoritative_stages:
+        anchors = bio_data.get("jump_stage_anchors") or {}
+        payload["stage_anchor_rejections"] = {
+            role: {"status": anchor.get("status"), "reason": anchor.get("reason"),
+                   "quality_flags": anchor.get("quality_flags", [])}
+            for role, anchor in anchors.items() if isinstance(anchor, dict) and anchor.get("status") != "available"
+        }
     return _json_safe(payload)

@@ -466,3 +466,24 @@ class AnnualExport(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SegmentReanchorRevision(Base):
+    """Auxiliary manual identity branch; the parent automatic record is immutable."""
+    __tablename__ = "segment_reanchor_revisions"
+    __table_args__ = (
+        UniqueConstraint("analysis_id", "revision"),
+        UniqueConstraint("analysis_id", "idempotency_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("analyses.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    parent_revision: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(100))
+    payload_digest: Mapped[str] = mapped_column(String(64))
+    preview_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="submitted")
+    selection: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

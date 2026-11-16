@@ -122,6 +122,7 @@ async def generate_media_renditions(video_path: Path, analysis_id: str) -> dict[
     manifest = read_or_create_manifest(video_path, analysis_id)
     for source in manifest["sources"]:
         if source.get("quality") == "original" or source.get("status") == "ready":
+            source.pop("error", None)  # a stale failure message must not outlive a ready rendition
             continue
         quality = str(source["quality"])
         height = int(str(quality).removesuffix("p"))
@@ -129,8 +130,9 @@ async def generate_media_renditions(video_path: Path, analysis_id: str) -> dict[
         source["status"] = "processing"
         manifest["status"] = "processing"
         _atomic_write(manifest_path_for_video(video_path), manifest)
+        # Explicit even width: "-2" with force_original_aspect_ratio=decrease could round to an odd width (405x720).
         command = [
-            "ffmpeg", "-y", "-i", str(video_path), "-vf", f"scale=-2:{height}:force_original_aspect_ratio=decrease",
+            "ffmpeg", "-y", "-i", str(video_path), "-vf", f"scale=round(iw*{height}/ih/2)*2:{height}",
             "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-g", str(max(1, RENDITION_KEYFRAME_SECONDS * 30)),
             "-c:a", "aac", "-movflags", "+faststart", str(target),
         ]
@@ -141,6 +143,7 @@ async def generate_media_renditions(video_path: Path, analysis_id: str) -> dict[
                 raise RuntimeError(result.stderr[-400:] or "ffmpeg failed")
             probe = await asyncio.to_thread(_probe, target)
             source.update(_source(quality, "ready", metadata=probe, url=f"/api/analysis/{analysis_id}/video?quality={quality}", filename=f"renditions/{quality}.mp4"))
+            source.pop("error", None)  # drop the message left by a previous failed attempt
         except Exception as exc:  # noqa: BLE001
             source["status"] = "failed"
             source["error"] = str(exc)[:400]

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import math
 import logging
 import hashlib
 from pathlib import Path
 from typing import Any
 
+from app.trial import trial_profile
 from app.services.smoothing import smooth_keypoint_sequence
 from app.services.target_lock import MANUAL_BBOX_MIN_SIDE, extract_pose_target_bbox
 
@@ -596,6 +598,10 @@ def _tracker_diagnostics_by_index(target_lock: dict[str, Any] | None) -> dict[in
 def _tracker_bbox_is_reliable(diagnostic: dict[str, Any] | None) -> bool:
     if not isinstance(diagnostic, dict):
         return True
+    if (diagnostic.get("input_binding_valid") is False or
+            diagnostic.get("image_binding_valid") is False or
+            diagnostic.get("identity_status") == "identity_unconfirmed"):
+        return False
     state = str(diagnostic.get("state") or "")
     if state == "detector_relocked" and _detector_relock_bbox_is_partial_shift(diagnostic):
         return False
@@ -1454,7 +1460,7 @@ def _apply_short_gap_interpolation(
         if any(
             isinstance(diagnostics[frame_index], dict)
             and (
-                diagnostics[frame_index].get("reason") == _MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_REASON
+                diagnostics[frame_index].get("reason") in {_MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_REASON, "continuous_input_binding_invalid"}
                 or diagnostics[frame_index].get("pose_reference_source") == _MANUAL_LOCK_TRACKER_BLOCKED_SOURCE
             )
             for frame_index in range(gap_start, gap_end)
@@ -1462,6 +1468,9 @@ def _apply_short_gap_interpolation(
         ):
             continue
 
+        # Timed production output cannot bridge lost/untrusted target segments.
+        if any("temporal" in f for f in frames[before_index:after_index+1]):
+            continue
         before = frames[before_index]
         after = frames[after_index]
         if before.get("tracking_state") != "tracked" or after.get("tracking_state") != "tracked":
@@ -1540,11 +1549,89 @@ def log_pose_runtime_mode() -> None:
     _POSE_MODE_LOGGED = True
 
 
+def _attach_pose_frame_times(
+    frames: list[dict[str, Any]], frame_paths: list[Path], target_lock: dict[str, Any] | None,
+    frame_times: list[dict[str, Any]] | None, effective_fps: float | None, slow_motion_scale: float,
+) -> None:
+    """Bind exact frame IDs/hashes/PTS; never infer by nearest timestamp."""
+    from fractions import Fraction
+    from app.services.smoothing import finite_number, pose_temporal_segments
+    from app.services.continuous_tracking import file_sha256, pose_input_binding_valid
+
+    lock = target_lock or {}
+    bound = "pose_frame_bindings" in lock
+    diagnostics = _tracker_diagnostics_by_index(lock)
+    scale = finite_number(slow_motion_scale)
+    records: dict[str, list[dict[str, Any]]] = {}
+    for record in frame_times or []:
+        if isinstance(record, dict):
+            records.setdefault(str(record.get("frame_id", "")), []).append(record)
+    for i, frame in enumerate(frames):
+        path = frame_paths[i]
+        diagnostic = diagnostics.get(i) or {}
+        timestamp = None
+        source = "unknown"
+        binding = None
+        if bound:
+            bindings = lock.get("pose_frame_bindings") or []
+            binding = bindings[i] if i < len(bindings) else None
+            if pose_input_binding_valid(path, i, lock, diagnostic) and isinstance(binding, dict):
+                try:
+                    decoded = float(binding["source_pts"] * Fraction(binding["source_time_base"]))
+                    candidate = finite_number(diagnostic.get("timestamp"))
+                    # The tracker has already validated source origin and PTS.
+                    if math.isfinite(decoded) and candidate is not None:
+                        timestamp, source = candidate, "bound_source_pts"
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    pass
+            frame["input_binding_valid"] = timestamp is not None and diagnostic.get("input_binding_valid") is True
+            frame["tracker_id"] = diagnostic.get("tracker_id")
+            frame["image_binding_valid"] = diagnostic.get("image_binding_valid", frame["input_binding_valid"])
+            frame["identity_status"] = diagnostic.get("identity_status")
+        elif frame_times is not None:
+            matches = records.get(path.stem, [])
+            if len(matches) == 1:
+                record = matches[0]
+                if "sha256" not in record or record["sha256"] == file_sha256(path):
+                    timestamp, source = finite_number(record.get("timestamp")), "selected_frame_timestamp"
+        else:
+            # Explicit, documented compatibility clock; not advertised as PTS.
+            fps = finite_number(effective_fps)
+            analysis_time = i/(fps if fps is not None and fps > 0 else 5.)
+            timestamp = analysis_time*scale if scale is not None and scale > 0 else None
+            source = "legacy_effective_fps"
+        if bound and frame_times is not None:
+            matches = records.get(path.stem, [])
+            if (len(matches) != 1 or timestamp is None or
+                    finite_number(matches[0].get("timestamp")) is None or
+                    abs(float(matches[0]["timestamp"])-timestamp) > 1e-8 or
+                    ("sha256" in matches[0] and matches[0]["sha256"] != (binding or {}).get("sha256"))):
+                timestamp, source = None, "binding_selected_mismatch"
+                frame["input_binding_valid"] = False
+        frame["timestamp"] = timestamp
+        frame["temporal"] = {
+            "time_source": source, "playback_timestamp": timestamp,
+            "analysis_timestamp": timestamp/scale if timestamp is not None and scale is not None and scale > 0 else None,
+            "slow_motion_scale": scale,
+            "binding": dict(binding) if isinstance(binding, dict) else None,
+            **({"tracking_continuity_segment": diagnostic.get("continuity_segment"),
+                "tracking_continuity_reason": diagnostic.get("continuity_reason"),
+                "segment_identity": diagnostic.get("segment_identity"),
+                "identity_rejected_reason": diagnostic.get("identity_rejected_reason"),
+                "tracking_rejected_reasons": list(diagnostic.get("rejected_reasons") or [])}
+               if bound else {}),
+        }
+    pose_temporal_segments(frames, effective_fps or 5.)
+
+
 def extract_pose(
     frames_dir: str,
     target_lock: dict[str, Any] | None = None,
     bbox_per_frame: list[dict[str, float]] | None = None,
     effective_fps: float | None = None,
+    *,
+    frame_times: list[dict[str, Any]] | None = None,
+    slow_motion_scale: float = 1.0,
 ) -> dict[str, Any]:
     """从抽样帧中提取目标选手骨骼关键点。
 
@@ -1562,12 +1649,16 @@ def extract_pose(
     num_poses, _ = _get_pose_runtime_config()
     frame_paths = sorted(Path(frames_dir).glob("frame_*.jpg"))
     if not frame_paths:
+        if trial_profile() == "legacy-analysis-preview":
+            raise RuntimeError("Local pose inference has no decoded frames")
         return _empty_payload()
 
     try:
         import cv2  # type: ignore
         import mediapipe as mp  # type: ignore
     except Exception:
+        if trial_profile() == "legacy-analysis-preview":
+            raise
         return _empty_payload()
 
     frames: list[dict[str, Any]] = []
@@ -1586,6 +1677,8 @@ def extract_pose(
     tracker_bbox_history: list[tuple[int, dict[str, float]]] = []
     tracker_diagnostics_by_index = _tracker_diagnostics_by_index(target_lock)
     manual_lock_unreliable_tracker_blocked_frames = 0
+    input_binding_blocked_frames = 0
+    from app.services.continuous_tracking import pose_input_binding_valid
     lost_count = 0
     tasks_landmarker = _resolve_tasks_landmarker()
     pose_mode = "multi_pose" if tasks_landmarker is not None else "single_pose_crop"
@@ -1614,12 +1707,19 @@ def extract_pose(
                 previous_tracker_diagnostic,
                 reference_bbox,
             )
+            continuous_input = isinstance(target_lock, dict) and "pose_frame_bindings" in target_lock
+            binding_blocked = (not pose_input_binding_valid(frame_path, frame_index, target_lock, tracker_diagnostic)
+                               or (continuous_input and not _tracker_bbox_is_reliable(tracker_diagnostic)))
             if (
-                _manual_lock_blocks_unreliable_tracker_pose(target_lock, tracker_diagnostic)
-                and contained_candidate_bbox is None
-                and identity_observation_bbox is None
+                binding_blocked
+                or (_manual_lock_blocks_unreliable_tracker_pose(target_lock, tracker_diagnostic)
+                    and contained_candidate_bbox is None
+                    and identity_observation_bbox is None)
             ):
-                manual_lock_unreliable_tracker_blocked_frames += 1
+                if binding_blocked:
+                    input_binding_blocked_frames += 1
+                else:
+                    manual_lock_unreliable_tracker_blocked_frames += 1
                 lost_count += 1
                 lost_frames += 1
                 low_confidence_frames += 1
@@ -1657,7 +1757,7 @@ def extract_pose(
                         "pose_reference_source": _MANUAL_LOCK_TRACKER_BLOCKED_SOURCE,
                         "crop_attempts": [],
                         "candidate_validation": None,
-                        "reason": _MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_REASON,
+                        "reason": "continuous_input_binding_invalid" if binding_blocked else _MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_REASON,
                         "rejected_candidates": [],
                         "top_candidates": [],
                     }
@@ -1994,6 +2094,13 @@ def extract_pose(
                 {
                     "frame": frame_path.name,
                     "keypoints": best_candidate.get("keypoints", []),
+                    # _map_landmarks_to_keypoints already reverses the crop.
+                    "projection_geometry": {
+                        "schema_version": "pose-projection.v1",
+                        "coordinate_space": "full_image_normalized",
+                        "image_width": image_width, "image_height": image_height,
+                        "provenance": "landmarks_mapped_to_full_image",
+                    },
                     "target_bbox": output_bbox,
                     "tracking_confidence": confidence,
                     "tracking_state": tracking_state,
@@ -2039,8 +2146,11 @@ def extract_pose(
             tasks_landmarker.close()
 
     quality_flags: list[str] = []
+    if input_binding_blocked_frames:
+        quality_flags.append("pose_input_binding_invalid")
     if manual_lock_unreliable_tracker_blocked_frames:
         quality_flags.append(_MANUAL_LOCK_UNRELIABLE_TRACKER_POSE_FLAG)
+    _attach_pose_frame_times(frames, frame_paths, target_lock, frame_times, effective_fps, slow_motion_scale)
     interpolated_frames, remaining_lost_frames = _apply_short_gap_interpolation(frames, diagnostic_frames)
     if interpolated_frames:
         quality_flags.append("pose_interpolated")
@@ -2049,6 +2159,10 @@ def extract_pose(
     except Exception:
         logger.warning("pose smoothing failed; using raw keypoints", exc_info=True)
         quality_flags.append("pose_smoothing_failed_fallback")
+        for frame in frames:
+            for point in frame.get("keypoints", []):
+                point["quality"] = {"source": "postprocessing_failed", "analysis_usable": False,
+                                    "processing_version": "pose-temporal.v2"}
 
     payload: dict[str, Any] = {
         "connections": POSE_CONNECTIONS,
@@ -2070,6 +2184,7 @@ def extract_pose(
             ),
             "multi_pose_frames": multi_pose_frames,
             "single_pose_crop_frames": single_pose_crop_frames,
+            "input_binding_blocked_frames": input_binding_blocked_frames,
             "manual_lock_unreliable_tracker_blocked_frames": manual_lock_unreliable_tracker_blocked_frames,
             "candidate_count_histogram": candidate_count_histogram,
             "frames": diagnostic_frames,
