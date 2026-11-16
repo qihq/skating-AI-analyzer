@@ -13,7 +13,7 @@ CodeGraph 的作用不是生成一张静态图片，而是把仓库解析成本�
 进入项目根目录：
 
 ```powershell
-cd C:\Users\qihq\Documents\skating-analyzer
+cd <repo>
 ```
 
 ## 常用命令

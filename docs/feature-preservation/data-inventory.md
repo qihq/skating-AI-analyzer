@@ -20,7 +20,7 @@
 
 ## Iteration 0 isolation map
 
-All writable development paths resolve under `C:\Users\qihq\Documents\skating-analyzer-v2-runtime`. The local `.env.v2.local` is ignored by Git and selects a separate SQLite database. The committed `.env.v2.example` is a template only.
+All writable development paths resolve under `<runtime-dir>`. The local `.env.v2.local` is ignored by Git and selects a separate SQLite database. The committed `.env.v2.example` is a template only.
 
 ## Iteration 6 backup and cleanup policy
 

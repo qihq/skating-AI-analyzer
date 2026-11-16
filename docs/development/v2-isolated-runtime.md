@@ -4,9 +4,9 @@ Baseline: `c291324c62bcc930f96f3429dcdc9521e060b516`
 
 Branch: `codex/skating-analyzer-v2`
 
-Worktree: `C:\Users\qihq\Documents\skating-analyzer-v2`
+Worktree: `<repo>`
 
-Runtime root: `C:\Users\qihq\Documents\skating-analyzer-v2-runtime`
+Runtime root: `<runtime-dir>`
 
 The main worktree and its `data`, database, backups, outputs, and uncommitted files are not used.
 

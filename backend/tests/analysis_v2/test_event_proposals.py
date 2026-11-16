@@ -281,7 +281,7 @@ def test_merge_split_outcomes_keep_pts_ids_and_revisions() -> None:
 
 
 def test_pilot12_reports_recall_ci_strata_and_no_label_leakage() -> None:
-    root = Path(r"C:\Users\qihq\Documents\skating-analyzer-v2-runtime\test-data\pilot-12-run-20260801")
+    root = Path(r"<runtime-dir>\test-data\pilot-12-run-20260801")
     if not root.exists():
         pytest.skip("private pilot runtime is unavailable")
     result = evaluate_pilot12_event_proposals(root / "api-analysis-index-live.json", root / "snapshot-manifest.json")

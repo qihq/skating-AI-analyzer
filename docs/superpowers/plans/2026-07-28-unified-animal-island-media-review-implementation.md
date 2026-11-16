@@ -612,7 +612,7 @@ npm run build
 **Static checks:**
 
 ```powershell
-Set-Location C:\Users\qihq\Documents\skating-analyzer
+Set-Location <repo>
 git diff --check
 rg -n '<video| controls(=|\s|>)|createChatShareImage|createReportShareImage|createMilestoneShareImage|className="[^"]*island-button' frontend/src -g '*.tsx' -g '*.ts'
 ```

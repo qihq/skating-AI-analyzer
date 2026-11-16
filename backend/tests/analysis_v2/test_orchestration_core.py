@@ -343,7 +343,7 @@ def test_cancelled_shadow_stage_records_checkpoint_and_after_contamination_captu
 
 
 def test_pilot_golden_fixture_is_read_only_and_fingerprintable() -> None:
-    path = Path(r"C:\Users\qihq\Documents\skating-analyzer-v2-runtime\test-data\pilot-12-run-20260801\golden\v2\manifest.json")
+    path = Path(r"<runtime-dir>\test-data\pilot-12-run-20260801\golden\v2\manifest.json")
     if not path.is_file():
         pytest.skip("private pilot Golden fixture is not mounted")
     summary = golden_fixture_summary(path)

@@ -1,7 +1,7 @@
 param(
     [string]$ReviewDir = "tmp\target-preview-review\v5.2.296-awaiting-target-review-69",
     [string]$SelectionJson = "",
-    [string]$VideoDir = "C:\Users\qihq\Pictures\skate testing video",
+    [string]$VideoDir = "D:\videos",
     [string]$Label = "v5.2.302-reviewed-target-apply",
     [switch]$DryRunOnly,
     [switch]$SkipDiagnostics

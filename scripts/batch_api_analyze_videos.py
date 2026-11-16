@@ -16,7 +16,7 @@ import httpx
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-DEFAULT_VIDEO_DIR = Path(r"C:\Users\qihq\Pictures\skate testing video")
+DEFAULT_VIDEO_DIR = Path(r"D:\videos")
 DEFAULT_OUTPUT_DIR = Path("tmp") / "api-batch-skate-analysis"
 DEFAULT_NOTE_PREFIX = "codex api full coverage 2026-05-30"
 AUTO_ACTION_TYPE = "auto"
