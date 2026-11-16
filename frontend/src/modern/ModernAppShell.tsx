@@ -1,3 +1,4 @@
+import TrialBanner from "../components/TrialBanner";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
 import ModeToggle from "../components/ModeToggle";
@@ -41,7 +42,7 @@ function ModernShellContent() {
           </div>
         </header>
         <NetworkStatus />
-        <main className="modern-island-content"><Outlet /></main>
+        <main className="modern-island-content"><TrialBanner /><Outlet /></main>
       </div>
       <IslandDock activeSpace={activeSpace} />
     </div>

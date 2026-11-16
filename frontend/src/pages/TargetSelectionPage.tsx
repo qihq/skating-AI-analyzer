@@ -1,8 +1,10 @@
 import { PointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { confirmTargetLock, fetchAnalysis, fetchTargetPreview, TargetBBox, TargetCandidate, TargetPreviewResponse } from "../api/client";
 import SubmitButton from "../modern/SubmitButton";
+
+import { SegmentReanchorSelection } from "../components/SegmentReanchor";
 
 const AUTO_CONFIRM_THRESHOLD = 0.72;
 const MIN_BBOX_SIZE = 0.02;
@@ -63,7 +65,12 @@ function midpoint(a: PointerPoint, b: PointerPoint) {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
-export default function TargetSelectionPage({ hideHeader = false }: { hideHeader?: boolean }) {
+export default function TargetSelectionPage(props: { hideHeader?: boolean }) {
+  const [params] = useSearchParams();
+  return params.get("reanchor") === "1" ? <SegmentReanchorSelection/> : <OriginalTargetSelectionPage {...props}/>;
+}
+
+function OriginalTargetSelectionPage({ hideHeader = false }: { hideHeader?: boolean }) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const previewRef = useRef<HTMLDivElement | null>(null);

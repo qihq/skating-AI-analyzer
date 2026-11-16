@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { AxiosError, type AxiosResponse } from "axios";
 
 export type AnalysisStatus =
   | "pending"
@@ -38,6 +38,10 @@ export interface ReportImprovement {
 }
 
 export interface StructuredReport {
+  local_execution?: Record<string, boolean>;
+  profile_warning?: string | null;
+  source?: string | null;
+  technical_conclusion?: string | null;
   summary: string;
   issues: ReportIssue[];
   improvements: ReportImprovement[];
@@ -57,7 +61,70 @@ export interface StructuredReport {
   } | null;
 }
 
+export type JumpStageStatus = "candidate" | "unavailable" | "not_implemented" | "not_applicable";
+export interface JumpStageEvidence {
+  support_frames?: JumpProjectionPoint[];
+  support_interval?: { start: number; end: number; time_axis: string; playback_start?: number | null; playback_end?: number | null } | null;
+  interval_basis?: string;
+  observation_sequences?: { status: string; support_frames: JumpProjectionPoint[]; reason: string }[];
+  representative_basis?: string;
+  rejected_support?: { frame_id?: string; reason: string }[];
+  [key: string]: unknown;
+}
+export interface JumpStageNode {
+  evidence?: JumpStageEvidence;
+  status: JumpStageStatus;
+  frame_id: string | null;
+  timestamp: number | null; // analysis seconds; never player time
+  playback_timestamp: number | null;
+  source_timestamp?: number | null;
+  time_source?: string;
+  slow_motion_scale?: number | null;
+  source_pts?: number | null;
+  source_time_base?: string | null;
+  image_ref?: { kind: "analysis_frame"; frame_id: string } | null;
+  confidence?: number | null;
+  reason: string;
+  quality_flags?: string[];
+  warnings?: string[];
+}
+export interface JumpProjectionPoint {
+  signals?: Record<string, unknown>;
+  frame_id: string;
+  pose_index: number;
+  x: number;
+  y: number;
+  segment_id: number;
+  continuous_segment: number | string | null;
+  identity_id: string | number | null;
+  tracker_id: string | number | null;
+  event_id: string | null;
+  image_ref: { kind: "analysis_frame"; frame_id: string };
+  analysis_timestamp: number;
+  playback_timestamp: number | null;
+  source_timestamp: number | null;
+  source_pts: number | null;
+  source_time_base: string | null;
+  time_source: string;
+  geometry: { image_width: number; image_height: number; coordinate_space: string; provenance: string };
+  quality: Record<string, unknown>;
+}
+export interface JumpProjectionSegment { segment_id: number; point_indices: number[]; reason: string }
+export interface JumpProjectionSlot { pose_index: number; frame_id?: string; status: string; reason?: string; point_index?: number; segment_id?: number }
+export interface JumpMeasurement {
+  points?: JumpProjectionPoint[];
+  segments?: JumpProjectionSegment[];
+  slots?: JumpProjectionSlot[];
+  value: number | null;
+  status: string;
+  unit?: string | null;
+  reason: string;
+  [key: string]: unknown;
+}
 export interface BioData {
+  jump_stage_contract?: "tal-evidence.v1" | string;
+  jump_stages?: Partial<Record<"takeoff" | "pull-in" | "apex" | "rotation" | "landing", JumpStageNode>>;
+  jump_measurements?: Record<string, JumpMeasurement>;
   key_frames?: {
     T?: string;
     A?: string;
@@ -71,6 +138,7 @@ export interface BioData {
   };
   jump_metrics_status?: "ok" | "invalid" | string;
   jump_metrics_warning?: string | null;
+  profile_warning?: string | null;
   bio_subscores?: Record<string, number>;
   [key: string]: unknown;
 }
@@ -120,7 +188,8 @@ export interface PoseKeypoint {
   y: number;
   z: number;
   visibility: number;
-  interpolated?: boolean;
+  interpolated?: boolean | null;
+  quality?: { source?: string; analysis_usable?: boolean; limb_consistency?: { status?: string; reason?: string } } | null;
   provenance?: "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked";
   raw_x?: number | null;
   raw_y?: number | null;
@@ -128,6 +197,13 @@ export interface PoseKeypoint {
 }
 
 export interface PoseFrame {
+  input_binding_valid?: boolean | null;
+  image_binding_valid?: boolean | null;
+  identity_status?: "identity_confirmed" | "identity_unconfirmed" | null;
+  temporal?: { time_source?: string; binding?: Record<string, unknown>; [key: string]: unknown } | null;
+  projection_geometry?: Record<string, unknown> | null;
+  identity_id?: number | string | null;
+  event_id?: string | null;
   frame: string;
   source_frame_index?: number;
   keypoints: PoseKeypoint[];
@@ -139,6 +215,7 @@ export interface PoseFrame {
   } | null;
   tracking_confidence?: number | null;
   tracking_state?: string | null;
+  tracker_state?: string | null;
   identity_state?: "confirmed" | "uncertain" | "lost" | null;
   pose_provenance?: "measured" | "smoothed" | "interpolated-display-only" | "missing" | "clipped" | "identity-blocked" | null;
   source_pts_sec?: number | null;
@@ -148,7 +225,22 @@ export interface PoseFrame {
   pose_candidates?: Record<string, unknown>[];
 }
 
+export interface PoseGeometry {
+  schema_version: "pose-geometry.v1";
+  coordinate_space: "sample_normalized";
+  sample_width: number;
+  sample_height: number;
+  content_rect: {x: number; y: number; width: number; height: number};
+  source_width: number;
+  source_height: number;
+  rotation_degrees: 0;
+  crop: "none";
+  provenance: "saved_metadata_verified_frames";
+}
+
 export interface PoseResponse {
+  geometry?: PoseGeometry | null;
+  geometry_unavailable_reason?: string | null;
   connections: number[][];
   frames: PoseFrame[];
   frame_urls: Record<string, string>;
@@ -1143,6 +1235,41 @@ export const apiClient = axios.create({
   timeout: 600000,
 });
 
+function isUploadResponsePayload(value: unknown): value is UploadResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { id?: unknown }).id === "string" &&
+    (value as { id: string }).id.trim().length > 0 &&
+    typeof (value as { status?: unknown }).status === "string" &&
+    (value as { status: string }).status.length > 0
+  );
+}
+
+function createUploadHttpError(status: number, data: unknown, request: XMLHttpRequest, message?: string) {
+  const response = {
+    data,
+    status,
+    statusText: request.statusText || "",
+    headers: {},
+    config: {},
+  } as unknown as AxiosResponse;
+
+  const error = new AxiosError(
+    message ?? `Request failed with status code ${status}`,
+    status >= 400 && status < 500 ? "ERR_BAD_REQUEST" : "ERR_BAD_RESPONSE",
+    undefined,
+    request,
+    response,
+  );
+  (error as AxiosError & { status?: number }).status = status;
+  return error;
+}
+
+function createUploadTransportError(message: string, code: string, request: XMLHttpRequest) {
+  return new AxiosError(message, code, undefined, request);
+}
+
 export function uploadAnalysis(
   formData: FormData,
   options?: {
@@ -1173,26 +1300,36 @@ export function uploadAnalysis(
     };
 
     request.onload = () => {
-      const responseData = request.response ?? (request.responseText ? JSON.parse(request.responseText) : null);
+      // In JSON mode non-JSON/empty bodies are null; responseText is unavailable.
+      const responseData: unknown = request.response;
       if (request.status >= 200 && request.status < 300) {
-        resolve(responseData as UploadResponse);
+        if (isUploadResponsePayload(responseData)) {
+          resolve(responseData);
+          return;
+        }
+
+        // A 2xx body that cannot be read as an upload response must not be
+        // reported as success: callers rely on response.id.
+        reject(
+          createUploadHttpError(
+            request.status,
+            responseData,
+            request,
+            `Upload response for status ${request.status} is missing an analysis id or status`,
+          ),
+        );
         return;
       }
 
-      reject({
-        response: {
-          status: request.status,
-          data: responseData,
-        },
-      });
+      reject(createUploadHttpError(request.status, responseData, request));
     };
 
     request.onerror = () => {
-      reject(new Error("Network Error"));
+      reject(createUploadTransportError("Network Error", "ERR_NETWORK", request));
     };
 
     request.ontimeout = () => {
-      reject(new Error("Timeout"));
+      reject(createUploadTransportError("Timeout", "ECONNABORTED", request));
     };
 
     if (options?.signal) {
@@ -2009,4 +2146,52 @@ export async function createAnnualExport(collectionId: string, force = false, pa
 export async function fetchAnnualExport(exportId: string): Promise<AnnualExport> {
   const response = await apiClient.get<AnnualExport>(`/annual/exports/${exportId}`);
   return response.data;
+}
+
+export interface SegmentAnchorSelection {
+  analysis_id: string; expected_revision: number; segment: number;
+  observation_index: number; candidate_index: number; source_sha256: string;
+  image_sha256: string; source_pts: number; source_time_base: string;
+  source_origin_sec: number; slow_motion_scale: number; geometry_digest: string;
+  receipt_digest: string; binding_digest: string; bbox: number[];
+}
+export interface SegmentRevision {
+  revision: number; parent_revision: number; status: "submitted" | "processing" | "success" | "insufficient" | "failed";
+  selection: SegmentAnchorSelection; error: string | null; superseded: boolean;
+  identity_source: string; automatic_cross_gap_identity: false;
+}
+export interface SegmentCandidates {
+  current_revision: number; revisions: SegmentRevision[];
+  observations: { observation_index: number; segment: number; timestamp: number; image_url: string;
+    canvas: {width: number; height: number}; candidates: {index: number; bbox: number[]; confidence: number; selection: SegmentAnchorSelection}[] }[];
+  unavailable: {observation_index?: number; segment?: number; reason: string}[];
+}
+export interface SegmentPreview {
+  preview_digest: string; parent_revision: number; revision: number; local_range: number[];
+  invalidates_segment: number; note: string;
+}
+export interface SegmentRevisionDetail extends SegmentRevision {
+  report: {summary?: string; profile_warning?: string} | null;
+  analysis_profile: string | null; bio_data: Record<string, unknown> | null;
+}
+export async function fetchSegmentCandidates(id: string, pin: string): Promise<SegmentCandidates> {
+  return (await apiClient.get(`/analysis/${id}/identity/segments`, parentHeaders(pin))).data;
+}
+export async function previewSegmentAnchor(id: string, selection: SegmentAnchorSelection, pin: string): Promise<SegmentPreview> {
+  return (await apiClient.post(`/analysis/${id}/identity/segments/preview`, selection, parentHeaders(pin))).data;
+}
+export async function confirmSegmentAnchor(id: string, selection: SegmentAnchorSelection, preview: SegmentPreview, key: string, pin: string): Promise<SegmentRevision> {
+  return (await apiClient.post(`/analysis/${id}/identity/segments/confirm`, {
+    selection, preview_digest: preview.preview_digest, idempotency_key: key,
+    confirmation: "confirm_manual_segment_target",
+  }, parentHeaders(pin))).data;
+}
+export async function fetchSegmentRevision(id: string, revision: number, pin: string): Promise<SegmentRevisionDetail> {
+  return (await apiClient.get(`/analysis/${id}/identity/segments/revisions/${revision}`, parentHeaders(pin))).data;
+}
+export async function fetchSegmentRevisionPose(id: string, revision: number, pin: string): Promise<PoseResponse> {
+  return (await apiClient.get(`/analysis/${id}/identity/segments/revisions/${revision}/pose`, parentHeaders(pin))).data;
+}
+export async function fetchSegmentSavedImage(url: string, pin: string): Promise<Blob> {
+  return (await apiClient.get(url.replace(/^\/api/, ""), {...parentHeaders(pin), responseType: "blob"})).data;
 }

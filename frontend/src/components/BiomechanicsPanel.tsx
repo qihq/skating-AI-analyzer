@@ -1,10 +1,14 @@
 import { BioData } from "../api/client";
+import ProfileEvidenceWarning, { normalizeProfileWarning, resolveProfileWarning } from "./ProfileEvidenceWarning";
 
 type BiomechanicsPanelProps = {
   bioData: BioData;
   mode: "child" | "parent";
   onSelectFrame?: (frameId: string) => void;
+  reportWarning?: string | null;
 };
+
+const JUMP_WARNING_FALLBACK = "当前视频关键帧检测不稳定，生物力学指标已标记为数据异常。";
 
 function metricDisplay(value: number | null | undefined, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -26,15 +30,20 @@ const frameStyles = {
   rose: "border-rose-200 bg-rose-50 text-rose-700",
 } as const;
 
-export default function BiomechanicsPanel({ bioData, mode, onSelectFrame }: BiomechanicsPanelProps) {
+export default function BiomechanicsPanel({ bioData, mode, onSelectFrame, reportWarning }: BiomechanicsPanelProps) {
   const keyFrames = bioData.key_frames ?? {};
   const metrics = bioData.jump_metrics;
+  const profileWarning = resolveProfileWarning(reportWarning, bioData.profile_warning);
   if (!metrics) {
-    return null;
+    return profileWarning ? (
+      <ProfileEvidenceWarning reportWarning={reportWarning} bioWarning={bioData.profile_warning} />
+    ) : null;
   }
 
   const isChildMode = mode === "child";
   const showWarning = bioData.jump_metrics_status === "invalid" || Boolean(bioData.jump_metrics_warning);
+  const jumpWarningText = bioData.jump_metrics_warning ?? (showWarning ? JUMP_WARNING_FALLBACK : "");
+  const showProfileWarning = Boolean(profileWarning) && profileWarning !== normalizeProfileWarning(jumpWarningText);
   const visibleMetrics = isChildMode
     ? [
         { label: "滞空时间", caption: "Air time", icon: "T", tone: "cyan" as const, ...metricDisplay(metrics.air_time_seconds, 2), unit: "s" },
@@ -57,8 +66,12 @@ export default function BiomechanicsPanel({ bioData, mode, onSelectFrame }: Biom
     <div className="space-y-4 rounded-[24px] border border-slate-200 bg-slate-50/80 p-4 tablet:p-5">
       {showWarning ? (
         <div className="rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700">
-          {bioData.jump_metrics_warning ?? "当前视频关键帧检测不稳定，生物力学指标已标记为数据异常。"}
+          {bioData.jump_metrics_warning ?? JUMP_WARNING_FALLBACK}
         </div>
+      ) : null}
+
+      {showProfileWarning ? (
+        <ProfileEvidenceWarning reportWarning={reportWarning} bioWarning={bioData.profile_warning} />
       ) : null}
 
       {frameButtons.length ? (

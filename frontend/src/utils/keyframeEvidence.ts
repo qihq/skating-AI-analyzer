@@ -3,6 +3,8 @@ import type { AnalysisExperienceV2, ExperienceEvent, KeyMomentV2, ProfileMomentK
 import { MOMENT_LABELS, orderedMoments } from "../analysis-v2/momentSelectors";
 
 export type KeyframeKey =
+  | "pull-in"
+  | "rotation"
   | "T"
   | "A"
   | "L"
@@ -32,6 +34,9 @@ export type KeyframeEvidenceItem = {
   status: string | null;
   confidence: number | null;
   reason: string | null;
+  playbackTimestamp?: number | null;
+  seekTimestamp?: number | null;
+  seekReason?: string | null;
 };
 
 type EvidenceBuildContext = {
@@ -119,7 +124,48 @@ function experienceMomentItem(moment: KeyMomentV2): KeyframeEvidenceItem {
   };
 }
 
+
+export const JUMP_STAGE_ORDER = ["takeoff", "pull-in", "apex", "rotation", "landing"] as const;
+const JUMP_STAGE_LABELS = { takeoff: "起跳", "pull-in": "收紧", apex: "最高点", rotation: "旋转", landing: "落冰" };
+export function hasCurrentJumpStages(analysis: AnalysisDetail): boolean {
+  const profile = String(analysis.analysis_profile ?? analysis.bio_data?.analysis_profile ?? "").toLowerCase();
+  const nonJump = ["spin", "spiral", "step", "step_sequence"].includes(profile);
+  // A jump contract with unavailable/missing nodes still owns jump authority.
+  return analysis.facts_authority !== "v2" && !nonJump && analysis.bio_data?.jump_stage_contract === "tal-evidence.v1";
+}
+
+/** Bundled original and quality sources share playback seconds. Validate
+ * their known extent before passing a timestamp to the existing player.
+ */
+export function jumpStageSeek(analysis: AnalysisDetail, node: Record<string, unknown>): { time: number | null; reason: string | null } {
+  if (node.status !== "candidate") return { time: null, reason: "节点不可用，不可定位" };
+  const playback = typeof node.playback_timestamp === "number" && Number.isFinite(node.playback_timestamp) ? node.playback_timestamp : null;
+  const source = typeof node.source_timestamp === "number" && Number.isFinite(node.source_timestamp) ? node.source_timestamp : null;
+  if (playback == null || playback < 0 || source == null || Math.abs(source - playback) > .002 || node.time_source !== "bound_source_pts") return { time: null, reason: "缺少可信播放时间，仅展示保存原帧" };
+  const duration = analysis.source_duration_sec ?? analysis.media_manifest?.source_timeline?.duration_sec;
+  if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 || playback > duration) return { time: null, reason: "播放时间无法映射到已知媒体范围" };
+  return { time: playback, reason: null };
+}
+
+function stageEvidenceItems(analysis: AnalysisDetail): KeyframeEvidenceItem[] {
+  return JUMP_STAGE_ORDER.map(key => {
+    const node = asRecord(analysis.bio_data?.jump_stages?.[key]) ?? {};
+    const status = cleanString(node.status) ?? "unavailable";
+    const ref = asRecord(node.image_ref);
+    const frame = status === "candidate" && ref?.kind === "analysis_frame" && ref.frame_id === node.frame_id
+      ? cleanString(node.frame_id) : null;
+    const seek = jumpStageSeek(analysis, node);
+    const stem = frame ? stripImageExtension(frame) : null;
+    const imageUrl = stem ? "/api/frames/" + encodeURIComponent(analysis.id) + "/" + encodeURIComponent(stem + ".jpg") + "?saved_only=true" : null;
+    return { key, label: JUMP_STAGE_LABELS[key], value: frame ?? "", frameId: frame, imageUrl,
+      timestamp: numberValue(node.timestamp), playbackTimestamp: numberValue(node.playback_timestamp),
+      seekTimestamp: seek.time, seekReason: seek.reason, status, source: "保存阶段证据（tal-evidence.v1）",
+      confidence: numberValue(node.confidence), reason: cleanString(node.reason) ?? "阶段证据不足" };
+  });
+}
+
 export function keyframeOrderForAnalysis(analysis: AnalysisDetail): KeyframeKey[] {
+  if (hasCurrentJumpStages(analysis)) return [...JUMP_STAGE_ORDER];
   const profile = String(analysis.analysis_profile ?? "").trim().toLowerCase();
   if (profile === "spin") {
     return SPIN_KEYFRAME_ORDER;
@@ -321,6 +367,7 @@ function resolveImageUrl(analysis: AnalysisDetail, ref: FrameRef) {
     return ref.frameId;
   }
 
+  if (analysis.bio_data?.jump_stage_contract === "tal-evidence.v1") return `/api/frames/${encodeURIComponent(analysis.id)}/${encodeURIComponent(stripImageExtension(ref.frameId) + ".jpg")}?saved_only=true`;
   const urls = analysis.pose_data?.frame_urls ?? {};
   const stem = stripImageExtension(ref.frameId);
   const directCandidates = [ref.frameId, `${ref.frameId}.jpg`, stem, `${stem}.jpg`];
@@ -503,11 +550,15 @@ export function buildKeyframeEvidenceItems(
 }
 
 export function buildCurrentKeyframeEvidenceItems(analysis: AnalysisDetail): KeyframeEvidenceItem[] {
+  if (analysis.facts_authority === "v2") return [];
+  if (hasCurrentJumpStages(analysis)) return stageEvidenceItems(analysis);
   const context = buildContext(analysis);
   const bioData = asRecord(analysis.bio_data);
   const keyFrames = asRecord(bioData?.key_frames);
   return keyframeOrderForAnalysis(analysis).map((key) => {
-    const ref = frameRefFromUnknown(keyFrames?.[key]);
+    const aliases: Partial<Record<KeyframeKey, string[]>> = {spin_entry:["旋转入"],spin_main:["旋转中"],spin_exit:["旋转出"],spiral_hold:["峰值"],step_sequence:["步法序列","峰值"]};
+    const saved = keyFrames?.[key] ?? aliases[key]?.map(alias => keyFrames?.[alias]).find(value => value != null);
+    const ref = frameRefFromUnknown(saved);
     const semanticMatch = ref.frameId
       ? context.semanticMatches.byFrame.get(normalizedFrameKey(ref.frameId))
       : context.semanticMatches.byKey.get(key);

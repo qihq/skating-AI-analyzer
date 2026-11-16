@@ -1,3 +1,4 @@
+import TrialBanner from "./TrialBanner";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { PRIMARY_NAV_ITEMS, primaryTabForPath } from "../navigation";
@@ -76,7 +77,7 @@ export default function AppLayout() {
       <BottomNav activeTab={activeTab} />
       <div className="min-w-0 overflow-x-hidden web:pl-[240px]">
         <AppHeader />
-        <main className="page-content safe-bottom mx-auto min-w-0 w-full max-w-[1480px] overflow-x-hidden px-4 pt-[96px] phone:px-5 tablet:px-6 tablet:pt-[108px] web:px-8 web:pb-10 web:pt-[112px]"><Outlet /></main>
+        <main className="page-content safe-bottom mx-auto min-w-0 w-full max-w-[1480px] overflow-x-hidden px-4 pt-[96px] phone:px-5 tablet:px-6 tablet:pt-[108px] web:px-8 web:pb-10 web:pt-[112px]"><TrialBanner /><Outlet /></main>
       </div>
     </div>
   );

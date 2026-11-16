@@ -217,18 +217,18 @@ function formatActionConfirmation(report: AnalysisDetail["report"] | null | unde
 
 function buildReportShareDocument(analysis: AnalysisDetail) {
   const report = analysis.report;
-  const score = analysis.force_score ?? 0;
+  const score = analysis.force_score;
   // This legacy page is retained only for compatibility/parent tooling.  A
   // V2 record must not use its legacy biomechanics dictionary to complete a
   // share artifact when the V2 report projection is missing a subscore.
-  const subscores = normalizeSubscores(report?.subscores) ?? (analysis.facts_authority === "v2" ? null : normalizeSubscores(analysis.bio_data?.bio_subscores));
+  const subscores = normalizeSubscores(report?.subscores) ?? (analysis.facts_authority === "v2" || report?.source === "legacy/local" ? null : normalizeSubscores(analysis.bio_data?.bio_subscores));
   return {
     eyebrow: "Animal Island · 复盘报告",
     title: analysis.action_type || "滑冰复盘",
     subtitle: `${analysis.skater_name ?? "IceBuddy"} · ${formatShortDate(analysis.created_at)}`,
     intro: report?.summary ?? "本次报告已生成，建议结合训练重点继续练习。",
     sections: [
-      { label: "Force Score", title: `${score} · ${scoreLevelText(score)}`, body: "本次动作的综合稳定性参考分。" },
+      ...(score != null ? [{ label: "Force Score", title: `${score} · ${scoreLevelText(score)}`, body: "本次动作的综合稳定性参考分。" }] : [{ label: "本地处理", title: "未评分 · 证据不足", body: "已保存可用本地事实，未调用外部 AI。" }]),
       ...(report?.issues ?? []).map((issue, index) => ({ label: index === 0 ? "核心问题" : "补充观察", title: issue.category, body: issue.description })),
       { label: "训练重点", title: report?.training_focus ?? "先把动作做稳，再慢慢加速度。", body: "按当前节奏练习，并在教练或家长陪同下复盘。" },
       ...(report?.improvements ?? []).map((item) => ({ label: "下一步建议", title: item.target, body: item.action })),
@@ -560,7 +560,7 @@ export default function ReportPage() {
   const [shareImagePreview, setShareImagePreview] = useState<ShareImagePreview[]>([]);
   const deferredAnalysis = useDeferredValue(analysis);
   const rawReportSubscores = normalizeSubscores(deferredAnalysis?.report?.subscores);
-  const rawBioSubscores = deferredAnalysis?.facts_authority === "v2" ? null : normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
+  const rawBioSubscores = deferredAnalysis?.facts_authority === "v2" || deferredAnalysis?.report?.source === "legacy/local" ? null : normalizeSubscores(deferredAnalysis?.bio_data?.bio_subscores);
   const subscores = rawReportSubscores ?? rawBioSubscores;
   const subscoreSource =
     deferredAnalysis?.report?.subscores_source ??
@@ -1036,7 +1036,7 @@ export default function ReportPage() {
                       {deferredAnalysis.skill_category ? <span>{deferredAnalysis.skill_category}</span> : null}
                     </div>
                   </div>
-                  <CompactForceScoreSummary score={deferredAnalysis.force_score ?? 0} />
+                  {deferredAnalysis.force_score != null ? <CompactForceScoreSummary score={deferredAnalysis.force_score} /> : <span className="text-sm text-slate-500">本地结果 · 未评分</span>}
                 </div>
 
                 <div className="rounded-[22px] bg-slate-50 px-4 py-4">

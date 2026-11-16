@@ -1,3 +1,5 @@
+import ActionPhaseStrip from "./ActionPhaseStrip";
+import { hasCurrentJumpStages } from "../utils/keyframeEvidence";
 import { useMemo, useRef, useState } from "react";
 
 import { AnalysisDetail } from "../api/client";
@@ -88,6 +90,13 @@ export default function KeyframeEvidencePanel({ analysis, experience = null, sel
   const evidenceCardsClass = layout === "wide"
     ? "mt-4 grid gap-3 tablet:grid-cols-3"
     : "mt-4 flex snap-x gap-3 overflow-x-auto pb-1 tablet:grid tablet:grid-cols-3 tablet:overflow-visible xl:grid-cols-1 wide:grid-cols-3";
+
+  // The new automatic contract has one authoritative view. Manual drafts
+  // remain a separate source and never overwrite its stages or markers.
+  if (!experience && hasCurrentJumpStages(analysis) && activeSource.id === "current") return <div>
+    <button type="button" onClick={() => setActiveSourceId("draft")}>查看独立人工复核草稿</button>
+    <ActionPhaseStrip analysis={analysis} pose={analysis.pose_data} showVideo />
+  </div>;
 
   const seekTo = (timestamp: number | null) => {
     if (timestamp == null) {

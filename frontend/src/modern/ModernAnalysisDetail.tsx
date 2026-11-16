@@ -1,3 +1,6 @@
+import { SegmentRevisionChooser, SegmentRevisionReplay } from "../components/SegmentReanchor";
+import { useSavedJumpReplay } from "../analysis-v2/useSavedJumpReplay";
+import type { AnalysisDetail } from "../api/client";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
@@ -26,7 +29,8 @@ const ITEMS = [
 export default function ModernAnalysisDetail({ initialView }: { initialView?: AnalysisView }) {
   const { id } = useParams<{ id: string }>();
   const { isParentMode, parentPin } = useAppMode();
-  const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
+  const [storedExperience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
+  const experience = storedExperience?.analysisId === id ? storedExperience : null;
   const [selectedMomentKey, setSelectedMomentKey] = useState<ProfileMomentKey | null>(null);
   const [params, setParams] = useSearchParams();
   const view = resolveAnalysisView({ initialView, view: params.get("view"), legacyTab: params.get("tab") });
@@ -35,6 +39,7 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
     to: `/analysis/${id}?view=${item.to}${item.id === "more" ? "&tool=diagnostics" : ""}`,
   }));
   const selected = useMemo(() => experience ? selectProposalEvent(experience, params.get("event")) : { eventId: null, event: null }, [experience, params]);
+  const savedJumpReplay = useSavedJumpReplay(experience, selected.eventId, view === "moments");
   const proposalEvents = useMemo(() => experience ? orderedProposalEvents(experience) : [], [experience]);
   useEffect(() => {
     if (!experience || !selected.eventId || params.get("event") === selected.eventId) return;
@@ -61,6 +66,8 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
         description="结论、关键时刻、身体姿态和追问都集中在同一次复盘里。"
         action={<Link className="island-button island-button--secondary" to="/review">返回冰场小屋</Link>}
       />
+      {id ? <SegmentRevisionChooser id={id}/> : null}
+      {params.has("aux") && id ? <SegmentRevisionReplay key={`${id}:${params.get("aux")}`} id={id} revision={Number(params.get("aux"))}/> : <>
       <SectionNav label="分析详情分区" items={sectionItems} activeId={view} />
       {experience ? (
         <section className="modern-analysis-detail__experience" data-testid="analysis-experience-contract" aria-label="分析复盘状态">
@@ -78,19 +85,20 @@ export default function ModernAnalysisDetail({ initialView }: { initialView?: An
         </section>
       ) : null}
       <div className="modern-analysis-detail__content">
-        {experience ? <ExperienceSection experience={experience} view={view} selectedEvent={selected.event} selectedEventId={selected.eventId} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} parentPin={parentPin} analysisId={id} initialSeekPts={params.has("t") && Number.isFinite(Number(params.get("t"))) ? Number(params.get("t")) : null} /> : (
+        {experience ? <ExperienceSection savedJumpReplay={savedJumpReplay} experience={experience} view={view} selectedEvent={selected.event} selectedEventId={selected.eventId} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} parentPin={parentPin} analysisId={id} initialSeekPts={params.get("t")?.trim() && Number.isFinite(Number(params.get("t"))) ? Number(params.get("t")) : null} /> : (
           <section className="app-card p-6" role="status">当前复盘暂时不可用，请稍后重试。</section>
         )}
       </div>
+      </>}
     </div>
   );
 }
 
-function ExperienceSection({ experience, view, selectedEvent, selectedEventId, selectedMomentKey, onSelectMoment, parentPin, analysisId, initialSeekPts }: { experience: AnalysisExperienceV2; view: AnalysisView; selectedEvent: ExperienceEvent | null; selectedEventId: string | null; selectedMomentKey: ProfileMomentKey | null; onSelectMoment: (key: ProfileMomentKey) => void; parentPin: string | null; analysisId?: string; initialSeekPts: number | null }) {
+function ExperienceSection({ savedJumpReplay, experience, view, selectedEvent, selectedEventId, selectedMomentKey, onSelectMoment, parentPin, analysisId, initialSeekPts }: { savedJumpReplay: AnalysisDetail | null; experience: AnalysisExperienceV2; view: AnalysisView; selectedEvent: ExperienceEvent | null; selectedEventId: string | null; selectedMomentKey: ProfileMomentKey | null; onSelectMoment: (key: ProfileMomentKey) => void; parentPin: string | null; analysisId?: string; initialSeekPts: number | null }) {
   const familyView = presentAnalysisExperience(experience, selectedEventId);
   const eventSelector = experience.diagnosticOnly ? null : <EventSelector experience={experience} selectedEvent={selectedEvent} selectedEventId={selectedEventId} />;
   if (view === "summary") return <div className="space-y-5">{eventSelector}<AnalysisExperienceSummary experience={experience} selectedEventId={selectedEventId} /><div className="grid gap-5 web:grid-cols-2"><AnalysisExperienceBody experience={experience} selectedEventId={selectedEventId} /><AnalysisExperienceMore experience={experience} selectedEventId={selectedEventId} /></div></div>;
-  if (view === "moments") return <div className="space-y-5">{eventSelector}{selectedEvent ? <ActionPhaseStrip analysisId={analysisId} pose={null} event={selectedEvent} selectedMomentKey={selectedMomentKey} onSelectMoment={onSelectMoment} parentPin={parentPin} showVideo initialSeekPts={initialSeekPts} /> : <UnavailableCard text="当前没有可展示的动作片段。" />}</div>;
+  if (view === "moments") return <div className="space-y-5">{eventSelector}{savedJumpReplay ? <ActionPhaseStrip key={`${analysisId}:${selectedEventId}`} analysis={savedJumpReplay} pose={savedJumpReplay.pose_data} showVideo initialSeekPts={initialSeekPts} /> : selectedEvent ? <ActionPhaseStrip key={`${analysisId}:${selectedEventId}`} analysisId={analysisId} pose={null} event={selectedEvent} selectedMomentKey={selectedMomentKey} onSelectMoment={onSelectMoment} parentPin={parentPin} showVideo initialSeekPts={initialSeekPts} /> : <UnavailableCard text="当前没有可展示的动作片段。" />}</div>;
   if (view === "body") return <div className="space-y-5">{eventSelector}<AnalysisExperienceBody experience={experience} selectedEventId={selectedEventId} /></div>;
   if (view === "more") return <div className="space-y-5"><AnalysisExperienceMore experience={experience} selectedEventId={selectedEventId} />{experience.diagnosticOnly ? <Link className="inline-flex min-h-[44px] items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700" to={`/me/advanced?analysis=${encodeURIComponent(experience.analysisId)}`}>打开家长复核工具</Link> : null}</div>;
   return <section className="app-card p-6" aria-labelledby="experience-chat-title"><h2 id="experience-chat-title" className="text-2xl font-semibold text-slate-900">追问</h2><p className="mt-3 leading-7 text-slate-600">你可以围绕这次复盘继续提问。回答只会使用当前复盘里已经确认的内容，并会保留未知或需要确认的部分。</p><Link className="mt-5 inline-flex min-h-[44px] items-center rounded-full bg-blue-500 px-5 py-2 text-sm font-semibold text-white" to={`/analysis-chat?analysis=${encodeURIComponent(experience.analysisId)}${selectedEventId ? `&event=${encodeURIComponent(selectedEventId)}` : ""}`}>继续追问</Link><p className="mt-3 text-xs text-slate-500">{familyView.excludedClaimCount ? `${familyView.excludedClaimCount} 项内容仍未进入确定结论。` : "当前复盘没有需要额外确认的内容。"}</p></section>;

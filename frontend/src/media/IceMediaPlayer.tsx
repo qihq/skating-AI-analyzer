@@ -32,7 +32,7 @@ export const IceMediaPlayer = forwardRef<IceMediaPlayerHandle | null, Props>(fun
   const style = aspectRatio ? { "--ice-media-aspect-ratio": String(aspectRatio) } as CSSProperties : undefined;
   return <section className={`ice-media-player ${className}`} style={style}>
     <div className="ice-media-player__surface">
-      {mode !== "pose" ? <VideoSurface ref={videoRef} controller={controller} manifest={fallbackManifest}>{mode === "overlay" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} className="ice-media-player__overlay" /> : null}{overlay}</VideoSurface> : null}
+      {mode !== "pose" ? <VideoSurface ref={videoRef} controller={controller} manifest={fallbackManifest}>{mode === "overlay" && pose ? <PoseSurface pose={pose} videoRef={videoRef} timestamp={controller.state.currentTime} className="ice-media-player__overlay" /> : null}{overlay}</VideoSurface> : null}
       {mode === "pose" && pose ? <PoseSurface pose={pose} timestamp={controller.state.previewTime ?? controller.state.currentTime} /> : null}
     </div>
     <MediaControls controller={controller} markers={markers} sourceFrame={sourceFrame ?? controller.state.sourceFrame} onStepSourceFrame={onStepSourceFrame ?? controller.stepSourceFrame} unavailableFrame={unavailableFrame} />

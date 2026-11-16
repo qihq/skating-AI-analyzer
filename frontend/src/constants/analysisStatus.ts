@@ -24,7 +24,7 @@ export function getAnalysisStatusLabel(status: AnalysisStatus | string): string 
     case "awaiting_target_selection":
       return "等待确认主滑行者";
     case "analyzing":
-      return "AI 分析中";
+      return "分析中";
     case "generating_report":
       return "生成报告中";
     case "processing":
@@ -46,11 +46,11 @@ export function getAnalysisStageDescription(status: AnalysisStatus | string | nu
     case "awaiting_target_selection":
       return "自动锁定置信度不足，等待确认主滑行者后继续。";
     case "analyzing":
-      return "关键帧已送入视觉模型，正在生成结构化观察。";
+      return "正在处理关键帧与可用姿态证据。";
     case "generating_report":
       return "视觉结果与生物力学指标已就绪，正在汇总报告。";
     case "completed":
-      return "分析已完成，可以查看完整报告。";
+      return "处理已完成，可以查看结果及证据限制。";
     case "failed":
       return "分析已中断，请查看调试日志或重试。";
     default:

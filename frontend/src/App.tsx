@@ -1,3 +1,5 @@
+import LocalAnalysisRoute from "./components/LocalAnalysisRoute";
+import TrialReviewGate from "./components/TrialReviewGate";
 import { lazy, Suspense, useEffect, useLayoutEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
@@ -142,15 +144,15 @@ export default function App() {
           <Route path="/annual" element={<ThemedPage classic={<AnnualCollectionPage />} modern={<ModernGrowthFrame view="annual"><AnnualCollectionPage /></ModernGrowthFrame>} />} />
           <Route path="/path" element={<ThemedPage classic={<SkillTreePage />} modern={<ModernGrowthFrame view="skills"><SkillTreePage /></ModernGrowthFrame>} />} />
           <Route path="/snowball" element={<ThemedPage classic={<SnowballPage />} modern={<ModernGrowthFrame view="snowball"><SnowballPage /></ModernGrowthFrame>} />} />
-          <Route path="/review" element={<ThemedPage classic={<ReviewPage />} modern={<ModernReviewSpace><ReviewPage /></ModernReviewSpace>} />} />
+          <Route path="/review" element={<ThemedPage classic={<TrialReviewGate><ReviewPage /></TrialReviewGate>} modern={<ModernReviewSpace><TrialReviewGate><ReviewPage /></TrialReviewGate></ModernReviewSpace>} />} />
           <Route path="/analysis-chat" element={<ThemedPage classic={<AnalysisChatPage />} modern={<ModernAnalysisChatRoute><AnalysisChatPage autoSelectFirst={false} showSelectorWhenEmpty /></ModernAnalysisChatRoute>} />} />
           <Route path="/archive" element={<ThemedPage classic={<ArchivePage />} modern={<ModernGrowthFrame view="timeline"><ArchivePage /></ModernGrowthFrame>} />} />
           <Route path="/history" element={<ThemedPage classic={<HistoryPage />} modern={<ModernGrowthFrame view="timeline"><HistoryPage /></ModernGrowthFrame>} />} />
           <Route path="/compare/results/:comparison_id" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
           <Route path="/compare/:id_a/:id_b" element={<ThemedPage classic={<ComparePage />} modern={<ModernGrowthFrame view="compare"><ComparePage /></ModernGrowthFrame>} />} />
-          <Route path="/analysis/:id" element={<ModernAnalysisDetail />} />
+          <Route path="/analysis/:id" element={<LocalAnalysisRoute><ModernAnalysisDetail /></LocalAnalysisRoute>} />
           {/* Ordinary report/history links use one authority-backed presenter in both themes. */}
-          <Route path="/report/:id" element={<AnalysisExperienceReport />} />
+          <Route path="/report/:id" element={<LocalAnalysisRoute><AnalysisExperienceReport /></LocalAnalysisRoute>} />
           <Route path="/report/:id/workspace" element={<ThemedPage classic={<ReportWorkspacePage />} modern={<ModernAnalysisDetail />} />} />
           <Route path="/report/:id/pose-debug" element={<ThemedPage classic={<PoseDebugPage />} modern={<ModernAnalysisDetail initialView="more" />} />} />
           <Route path="/report/:id/target" element={<ThemedPage classic={<TargetSelectionPage />} modern={<ModernReviewSpace title="确认主滑行者" description="确认这次要分析的滑行者，然后继续生成同一份复盘。"><TargetSelectionPage hideHeader /></ModernReviewSpace>} />} />

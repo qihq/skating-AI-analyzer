@@ -1,5 +1,5 @@
 import type { AnalysisDetail, SelectedSemanticFrame } from "../api/client";
-import { buildCurrentKeyframeEvidenceItems } from "../utils/keyframeEvidence";
+import { buildCurrentKeyframeEvidenceItems, hasCurrentJumpStages } from "../utils/keyframeEvidence";
 import type { MediaMarker } from "./types";
 
 function semanticMarkers(frames: SelectedSemanticFrame[]): MediaMarker[] {
@@ -12,6 +12,9 @@ function semanticMarkers(frames: SelectedSemanticFrame[]): MediaMarker[] {
 
 // Keep all evidence groups visible: a semantic candidate must not erase T/A/L evidence.
 export function analysisMediaMarkers(analysis: AnalysisDetail, includePartial = true): MediaMarker[] {
+  if (analysis.facts_authority === "v2") return [];
+  if (hasCurrentJumpStages(analysis)) return buildCurrentKeyframeEvidenceItems(analysis).flatMap(item =>
+    item.seekTimestamp == null ? [] : [{id: "stage-" + item.key, label: item.label + "（候选）", timestamp: item.seekTimestamp, phase: item.key}]);
   const seen = new Set<string>();
   const add = (marker: MediaMarker) => {
     const key = `${marker.label}-${marker.timestamp.toFixed(3)}`;

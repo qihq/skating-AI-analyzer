@@ -233,7 +233,7 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
     let exactFrame = frame;
     if (!exactFrame) {
       try {
-        exactFrame = await fetchGoldenSourceFrame(parentPin, source.source_sha256, frameIndex);
+        exactFrame = await fetchGoldenSourceFrameByPts(parentPin, source.source_sha256, time);
         pendingFrameSeek.current = exactFrame.pts; setFrame(exactFrame); setTime(exactFrame.pts);
       } catch {
         setMessage("无法锁定当前源帧，请先移动播放位置后重试。");
@@ -314,6 +314,7 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
   const addBox = () => {
     if (!workspace || !selected) return;
     if (!requireSourceFrame() || !frame) return;
+    if (frame.pts < selected.start_pts || frame.pts > selected.end_pts) { setMessage("当前主滑手框帧不在动作区间内，请把播放位置移动到动作开始和结束之间后重新画框。"); return; }
     const bbox = { left: numberValue(boxDraft.left), top: numberValue(boxDraft.top), right: numberValue(boxDraft.right), bottom: numberValue(boxDraft.bottom) };
     if (Object.values(bbox).some((value) => !Number.isFinite(value)) || bbox.left < 0 || bbox.top < 0 || bbox.right > 1 || bbox.bottom > 1 || bbox.right <= bbox.left || bbox.bottom <= bbox.top) { setMessage("Enter a real normalized box (0 to 1, with positive area) before adding it."); return; }
     setWorkspace({ ...workspace, tracks: [...workspace.tracks, { label_id: uid("track"), event_id: selected.event_id, source_sha256: selected.source_sha256, source_frame_index: frame.sourceFrameIndex, pts: frame.pts, bbox, state: boxDraft.state }] }); markDirty(); setBoxPreview(null); setMessage(null);
@@ -321,6 +322,7 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
   const addPoseJoint = () => {
     if (!workspace || !selected) return;
     if (!requireSourceFrame() || !frame) return;
+    if (frame.pts < selected.start_pts || frame.pts > selected.end_pts) { setMessage("当前 Pose 帧不在动作区间内，请把播放位置移动到动作开始和结束之间后再添加关节。"); return; }
     const x = numberValue(poseDraft.x); const y = numberValue(poseDraft.y); const visibility = numberValue(poseDraft.visibility);
     if (![x, y, visibility].every(Number.isFinite) || x < 0 || x > 1 || y < 0 || y > 1 || visibility < 0 || visibility > 1) { setMessage("Enter observed normalized joint coordinates and visibility (0 to 1) before adding them."); return; }
     const existing = workspace.poses.find((item) => item.event_id === selected.event_id && item.source_frame_index === frame.sourceFrameIndex);
@@ -330,6 +332,25 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
   };
   const save = async () => {
     if (!workspace || !parentPin || offline) return;
+    const eventById = new Map(workspace.events.map((event) => [event.event_id, event]));
+    const invalidTrack = workspace.tracks.find((track) => {
+      const event = eventById.get(track.event_id);
+      return !event || event.source_sha256 !== track.source_sha256 || track.pts < event.start_pts || track.pts > event.end_pts;
+    });
+    const invalidPose = workspace.poses.find((pose) => {
+      const event = eventById.get(pose.event_id);
+      return !event || event.source_sha256 !== pose.source_sha256 || pose.pts < event.start_pts || pose.pts > event.end_pts;
+    });
+    const invalidLabel = invalidTrack ?? invalidPose;
+    if (invalidLabel) {
+      const event = eventById.get(invalidLabel.event_id);
+      const kind = invalidTrack ? "主滑手框" : "Pose";
+      const frameDescription = invalidLabel.source_frame_index == null ? `${invalidLabel.pts.toFixed(3)} 秒` : `第 ${invalidLabel.source_frame_index} 帧（${invalidLabel.pts.toFixed(3)} 秒）`;
+      setMessage(event
+        ? `保存前检查失败：${kind}${frameDescription}不在动作区间 ${event.start_pts.toFixed(3)}-${event.end_pts.toFixed(3)} 秒内。请删除这个标签，并在动作区间内重新添加。`
+        : `保存前检查失败：${kind}${frameDescription}没有对应动作。请删除这个标签后重试。`);
+      return;
+    }
     const savedGeneration = editGeneration.current;
     setSaving(true); setMessage(null);
     try {
@@ -342,7 +363,13 @@ export default function GoldenAnnotationWorkspace({ gateTemplate }: GoldenAnnota
       }
       setReview(await fetchGoldenReviewQueue(parentPin));
     }
-    catch (error) { const status = axios.isAxiosError(error) ? error.response?.status : 0; setMessage(status === 409 ? "Another save won. Reloaded data is required before retrying." : "Save failed. Nothing was marked confirmed. Check event bounds, profile fields, and label values."); }
+    catch (error) {
+      const status = axios.isAxiosError(error) ? error.response?.status : 0;
+      if (status === 409) setMessage("保存冲突：Golden revision 已被其他保存更新。请刷新页面后重新应用当前修改。");
+      else if (status === 422) setMessage("保存失败，Golden 没有写入任何修改。请检查：人物框/Pose 帧是否位于对应动作区间内、动作开始是否早于结束，以及动作类型与细分字段是否匹配。");
+      else if (axios.isAxiosError(error) && !error.response) setMessage("保存失败，未连接到 Golden 服务；没有写入任何修改。请检查网络后重试。");
+      else setMessage("保存失败，Golden 没有写入任何修改。请检查动作区间、动作字段和标签值后重试。");
+    }
     finally { setSaving(false); }
   };
   const upload = async (event: ChangeEvent<HTMLInputElement>) => {

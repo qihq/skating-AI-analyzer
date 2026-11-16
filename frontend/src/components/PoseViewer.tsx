@@ -1,3 +1,4 @@
+import { isLimbUncertain } from "../utils/poseCanvas";
 import { useEffect, useRef, useState } from "react";
 
 import { PoseFrame, PoseKeypoint, PoseResponse } from "../api/client";
@@ -173,22 +174,28 @@ function drawPose(
     const smoothed = a.provenance === "smoothed" || b.provenance === "smoothed";
     const clipped = a.provenance === "clipped" || b.provenance === "clipped";
     const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
-    context.strokeStyle = interpolated ? "rgba(148, 163, 184, 0.42)" : clipped ? "rgba(251, 146, 60, 0.72)" : smoothed ? "rgba(167, 139, 250, 0.72)" : lowConfidence ? "rgba(245, 158, 11, 0.46)" : "rgba(226, 232, 240, 0.82)";
+    const uncertain = isLimbUncertain(a) || isLimbUncertain(b);
+    context.strokeStyle = uncertain ? "rgba(249, 115, 22, 0.95)" : interpolated ? "rgba(148, 163, 184, 0.42)" : clipped ? "rgba(251, 146, 60, 0.72)" : smoothed ? "rgba(167, 139, 250, 0.72)" : lowConfidence ? "rgba(245, 158, 11, 0.46)" : "rgba(226, 232, 240, 0.82)";
     context.lineWidth = interpolated ? 2 : 3;
-    context.setLineDash(interpolated ? [6, 6] : clipped ? [2, 5] : []);
+    context.setLineDash(uncertain ? [4,3] : interpolated ? [6, 6] : clipped ? [2, 5] : []);
     context.beginPath();
     context.moveTo(a.x * width, a.y * height);
     context.lineTo(b.x * width, b.y * height);
     context.stroke();
   }
   context.setLineDash([]);
+  if (frame.keypoints.some(isLimbUncertain)) {
+    context.fillStyle = "#F97316";
+    context.font = "12px sans-serif";
+    context.fillText("虚线：肢体位置存疑，原始点未用于分析", 6, height - 10);
+  }
 
   for (const point of frame.keypoints) {
     if (point.visibility < 0.5) {
       continue;
     }
     const lowConfidence = frame.tracking_state === "low_confidence" || (typeof frame.tracking_confidence === "number" && frame.tracking_confidence <= 0.2);
-    context.fillStyle = frame.tracking_state === "interpolated" || point.interpolated || point.provenance === "interpolated-display-only" ? "rgba(148, 163, 184, 0.62)" : lowConfidence ? "rgba(245, 158, 11, 0.72)" : keypointColor(point);
+    context.fillStyle = isLimbUncertain(point) ? "#F97316" : frame.tracking_state === "interpolated" || point.interpolated || point.provenance === "interpolated-display-only" ? "rgba(148, 163, 184, 0.62)" : lowConfidence ? "rgba(245, 158, 11, 0.72)" : keypointColor(point);
     context.beginPath();
     context.arc(point.x * width, point.y * height, AXIS_POINTS.has(point.id) ? 5 : 4, 0, Math.PI * 2);
     context.fill();

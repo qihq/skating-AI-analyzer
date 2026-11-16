@@ -63,12 +63,16 @@ describe("GoldenAnnotationWorkspace", () => {
     }
   });
 
-  it("locks the nearest source frame before enabling box drawing", async () => {
-    mockData(); render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
-    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+  it("locks the nearest source frame at the current playback PTS before enabling box drawing", async () => {
+    mockData();
+    frameByPts.mockResolvedValue({ sourceFrameIndex: 126, pts: 4.2, duration: .033 });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Report current player time" }));
+    fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
-    await waitFor(() => expect(frame).toHaveBeenCalledWith("1234", "d".repeat(64), 0));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/已锁定第 1 帧/);
+    await waitFor(() => expect(frameByPts).toHaveBeenCalledWith("1234", "d".repeat(64), 4.2));
+    expect(frame).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/已锁定第 126 帧/);
     expect(screen.getByRole("button", { name: /正在等待画框/ })).toBeInTheDocument();
   });
 
@@ -99,7 +103,87 @@ describe("GoldenAnnotationWorkspace", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /新建动作/i })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
     fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/Save failed/));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/保存失败.*没有写入任何修改/));
+  });
+
+  it("rejects track and pose labels outside the selected event before saving", async () => {
+    mockData();
+    frameByPts.mockResolvedValue({ sourceFrameIndex: 126, pts: 4.2, duration: .033 });
+    save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Report current player time" }));
+    fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
+    await waitFor(() => expect(frameByPts).toHaveBeenCalledWith("1234", "d".repeat(64), 4.2));
+
+    fireEvent.change(screen.getByLabelText("Box left"), { target: { value: "0.1" } });
+    fireEvent.change(screen.getByLabelText("Box top"), { target: { value: "0.1" } });
+    fireEvent.change(screen.getByLabelText("Box right"), { target: { value: "0.8" } });
+    fireEvent.change(screen.getByLabelText("Box bottom"), { target: { value: "0.9" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "添加到当前帧" })[0]);
+    expect(screen.getByRole("alert")).toHaveTextContent(/主滑手框帧不在动作区间内/);
+
+    fireEvent.change(screen.getByLabelText("Pose joint X"), { target: { value: "0.5" } });
+    fireEvent.change(screen.getByLabelText("Pose joint Y"), { target: { value: "0.5" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "添加到当前帧" })[1]);
+    expect(screen.getByRole("alert")).toHaveTextContent(/Pose 帧不在动作区间内/);
+
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const payload = save.mock.calls[save.mock.calls.length - 1][1];
+    expect(payload.tracks).toEqual([]);
+    expect(payload.poses).toEqual([]);
+  });
+
+  it("adds and saves a track when the locked frame is inside the selected event", async () => {
+    mockData();
+    frameByPts.mockResolvedValue({ sourceFrameIndex: 126, pts: 4.2, duration: .033 });
+    save.mockResolvedValue({ dataset_id: "golden-v2-private-catalog", revision: 3, sources: [], events: [], tracks: [], poses: [] });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Report current player time" }));
+    fireEvent.click(screen.getByRole("button", { name: /新建动作/i }));
+    fireEvent.click(screen.getByRole("button", { name: /锁定当前画面并画主滑手框/ }));
+    await waitFor(() => expect(frameByPts).toHaveBeenCalledWith("1234", "d".repeat(64), 4.2));
+
+    fireEvent.change(screen.getByLabelText("Box left"), { target: { value: "0.1" } });
+    fireEvent.change(screen.getByLabelText("Box top"), { target: { value: "0.1" } });
+    fireEvent.change(screen.getByLabelText("Box right"), { target: { value: "0.8" } });
+    fireEvent.change(screen.getByLabelText("Box bottom"), { target: { value: "0.9" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "添加到当前帧" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const payload = save.mock.calls[save.mock.calls.length - 1][1];
+    expect(payload.tracks).toEqual([expect.objectContaining({ source_frame_index: 126, pts: 4.2 })]);
+  });
+
+  it("blocks an existing out-of-range label and identifies the offending frame before the request", async () => {
+    mockData();
+    const sourceHash = "d".repeat(64);
+    workspace.mockResolvedValue({
+      dataset_id: "golden-v2-private-catalog", revision: 2,
+      sources: [{ source_sha256: sourceHash, duration_pts: 8, width: 1280, height: 720, source_frame_count: 240, display_rotation_degrees: 0, redacted_alias: "source-001", recording_session_id: "session-01", grouping_id: "group-01" }],
+      events: [{ event_id: "event-01", source_sha256: sourceHash, start_pts: 2, end_pts: 3, profile: "spin", subtype: null, observability: "observable", strata: [], ambiguity_tags: [], failure_tags: [], annotator_confidence: .9, main_skater_confirmed: true, split: "development", challenge_intervals: [] }],
+      tracks: [{ label_id: "track-01", event_id: "event-01", source_sha256: sourceHash, source_frame_index: 0, pts: 0, bbox: { left: .1, top: .1, right: .8, bottom: .9 }, state: "confirmed" }],
+      poses: [],
+    });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /旋转 2\.00-3\.00 秒/ }));
+    fireEvent.change(screen.getByLabelText("动作细分（可选）"), { target: { value: "dirty" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/主滑手框第 0 帧（0\.000 秒）不在动作区间 2\.000-3\.000 秒内/);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("explains a schema validation failure without claiming anything was saved", async () => {
+    mockData();
+    save.mockRejectedValue({ isAxiosError: true, response: { status: 422 } });
+    render(<MemoryRouter><GoldenAnnotationWorkspace gateTemplate={gateTemplate} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /新建动作/i }));
+    fireEvent.click(screen.getByRole("button", { name: /保存人工真值/i }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/人物框\/Pose 帧是否位于对应动作区间内/));
+    expect(screen.getByText(/有未保存修改/)).toBeInTheDocument();
   });
 
   it("captures a jump moment from the exact returned source frame and sends it as Ground Truth", async () => {

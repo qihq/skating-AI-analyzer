@@ -14,8 +14,8 @@ type Props = {
 };
 
 export function MediaControls({ controller, markers = [], sourceFrame, onStepSourceFrame, unavailableFrame = false }: Props) {
-  const { state, source, togglePlay, commitSeek, previewSeek, setMuted, setPlaybackRate, setQuality } = controller;
-  const qualities: MediaQuality[] = ["auto", "original", "1080p", "720p", "480p"];
+  const { state, togglePlay, commitSeek, previewSeek, setMuted, setPlaybackRate, setQuality } = controller;
+  const qualityOptions: MediaQuality[] = controller.availableQualities ?? ["auto"];
   return <div className="ice-media-controls">
     <MediaTimeline duration={state.duration} currentTime={state.currentTime} previewTime={state.previewTime} buffered={state.buffered} markers={markers} onPreview={previewSeek} onCommit={commitSeek} />
     <div className="ice-media-controls__row">
@@ -35,7 +35,7 @@ export function MediaControls({ controller, markers = [], sourceFrame, onStepSou
       <label className="ice-media-controls__select">
         <span className="sr-only">Video quality</span>
         <select aria-label="Video quality" value={state.quality} onChange={(event) => void setQuality(event.target.value as MediaQuality)}>
-          {qualities.filter((quality) => quality === "auto" || quality === "original" || source?.quality === quality).map((quality) => <option key={quality} value={quality}>{quality === "auto" ? "Auto" : quality}</option>)}
+          {qualityOptions.map((quality) => <option key={quality} value={quality}>{quality === "auto" ? "Auto" : quality}</option>)}
         </select>
       </label>
       {markers.map((marker) => <Button key={marker.id} aria-label={`\u8df3\u5230${marker.label}`} onClick={() => commitSeek(marker.timestamp)}>{marker.label}</Button>)}

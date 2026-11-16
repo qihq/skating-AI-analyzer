@@ -1,3 +1,5 @@
+import { useContext } from "react";
+import { LocalTrialContext } from "../components/TrialReviewGate";
 import axios from "axios";
 import { ChangeEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -144,11 +146,112 @@ function sessionLabel(session: TrainingSessionRecord) {
   return parts.join(" · ");
 }
 
+const UPLOAD_NETWORK_HINT =
+  "网络连接中断：请确认后端服务是否正常运行、网络是否已恢复。本次上传可能已经送达，请先到记录列表确认是否已创建记录，再决定是否重试。";
+const UPLOAD_TIMEOUT_HINT =
+  "上传超时：请确认后端服务与网络状况。本次上传可能仍在处理中，请稍后到记录列表确认是否已创建记录，再决定是否重试。";
+const UPLOAD_FALLBACK_HINT = "上传失败，请稍后重试。";
+
+function cleanUploadErrorText(value: string, maxLength = 200) {
+  // Proxy error pages are not actionable application messages.
+  if (/<[^>]*>/.test(value)) return "";
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (!collapsed) {
+    return "";
+  }
+  return collapsed.length > maxLength ? `${collapsed.slice(0, maxLength)}…` : collapsed;
+}
+
+function readableUploadDetail(value: unknown): string {
+  if (typeof value === "string") {
+    return cleanUploadErrorText(value);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 3)
+      .map((item) => readableUploadDetail(item))
+      .filter((item) => item.length > 0)
+      .join("；");
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const messageSource = record.message ?? record.msg ?? record.error ?? record.error_message;
+    const message = typeof messageSource === "string" ? cleanUploadErrorText(messageSource) : "";
+    const code = typeof record.code === "string" ? cleanUploadErrorText(record.code, 64) : "";
+    const location = Array.isArray(record.loc)
+      ? record.loc
+          .filter((part): part is string | number => typeof part === "string" || typeof part === "number")
+          .join(".")
+      : "";
+    if (message) {
+      const labeled = location && !message.includes(location) ? `${location}: ${message}` : message;
+      return code ? `${labeled}（${code}）` : labeled;
+    }
+    if (code) {
+      return `错误代码：${code}`;
+    }
+    return location ? `参数错误：${location}` : "";
+  }
+  return "";
+}
+
+function uploadErrorDetailText(data: unknown): string {
+  if (!data || typeof data !== "object") {
+    return readableUploadDetail(data);
+  }
+  const record = data as Record<string, unknown>;
+  for (const key of ["detail", "message", "error", "error_message"]) {
+    if (key in record) {
+      const text = readableUploadDetail(record[key]);
+      if (text) {
+        return text;
+      }
+    }
+  }
+  return readableUploadDetail(record);
+}
+
+function formatUploadError(requestError: unknown): string {
+  if (axios.isAxiosError(requestError)) {
+    const status = requestError.response?.status ?? 0;
+    const code = requestError.code;
+    if (code === "ERR_CANCELED" || code === "ABORT_ERR") {
+      return "上传已取消。";
+    }
+    if (code === "ECONNABORTED" || code === "ETIMEDOUT") {
+      return UPLOAD_TIMEOUT_HINT;
+    }
+    if (status >= 200 && status < 300) {
+      return `上传服务返回了无法识别的响应（HTTP ${status}），请先到记录列表确认是否已创建记录，再决定是否重试。`;
+    }
+    const detail = uploadErrorDetailText(requestError.response?.data);
+    if (detail) {
+      return detail;
+    }
+    if (code === "ERR_NETWORK" || status === 0) {
+      return UPLOAD_NETWORK_HINT;
+    }
+    return `上传失败（HTTP ${status}），请稍后重试。`;
+  }
+  if (requestError instanceof DOMException && requestError.name === "AbortError") {
+    return "上传已取消。";
+  }
+  if (requestError instanceof Error && requestError.message === "Network Error") {
+    return UPLOAD_NETWORK_HINT;
+  }
+  if (requestError instanceof Error && requestError.message === "Timeout") {
+    return UPLOAD_TIMEOUT_HINT;
+  }
+  return UPLOAD_FALLBACK_HINT;
+}
+
 export default function ReviewPage() {
+  const localTrial = useContext(LocalTrialContext);
   const { isParentMode, parentPin, childView, setChildView } = useAppMode();
   const location = useLocation();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const durationRequestIdRef = useRef(0);
   const draft = useMemo(() => loadDraft(), []);
   const preferredSkaterId = (location.state as { skaterId?: string } | null)?.skaterId ?? "";
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -185,6 +288,14 @@ export default function ReviewPage() {
   const [proposalCollection, setProposalCollection] = useState<EventProposalCollection | null>(null);
   const [proposalExperience, setProposalExperience] = useState<AnalysisExperienceV2 | null>(null);
   const [proposalError, setProposalError] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      // Invalidate any in-flight duration read so a late settle cannot update state after unmount.
+      durationRequestIdRef.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isParentMode || !parentPin || !proposalReviewAnalysisId) return;
@@ -437,6 +548,8 @@ export default function ReviewPage() {
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
+    const durationRequestId = durationRequestIdRef.current + 1;
+    durationRequestIdRef.current = durationRequestId;
     setSelectedFile(file);
     setVideoDurationSec(null);
     setManualWindowStart("");
@@ -444,8 +557,16 @@ export default function ReviewPage() {
     setError(null);
     if (file) {
       void readVideoDuration(file)
-        .then((duration) => setVideoDurationSec(duration))
-        .catch(() => setVideoDurationSec(null));
+        .then((duration) => {
+          if (durationRequestIdRef.current === durationRequestId) {
+            setVideoDurationSec(duration);
+          }
+        })
+        .catch(() => {
+          if (durationRequestIdRef.current === durationRequestId) {
+            setVideoDurationSec(null);
+          }
+        });
     }
   };
 
@@ -562,6 +683,10 @@ export default function ReviewPage() {
           });
         },
       });
+      if (localTrial) {
+        navigate(`/report/${response.id}`);
+        return;
+      }
       startTransition(() => {
         setUploadProgress({ loaded: selectedFile.size, total: selectedFile.size, percent: 100 });
         setUploadStage("processing");
@@ -574,11 +699,7 @@ export default function ReviewPage() {
     } catch (requestError) {
       setUploadStage("idle");
       setPendingAnalysisId(null);
-      if (axios.isAxiosError(requestError)) {
-        setError(String(requestError.response?.data?.detail ?? "上传失败，请稍后重试。"));
-      } else {
-        setError("上传失败，请稍后重试。");
-      }
+      setError(formatUploadError(requestError));
       setIsSubmitting(false);
     }
   };

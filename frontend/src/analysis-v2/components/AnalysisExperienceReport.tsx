@@ -1,3 +1,4 @@
+import { useSavedJumpReplay } from "../useSavedJumpReplay";
 import { Link, useParams } from "react-router-dom";
 
 import { fetchAnalysisExperienceV2 } from "../api";
@@ -24,7 +25,7 @@ function EventUnavailable() {
   return <section className="app-card border border-slate-200 bg-slate-50 p-6" role="status"><p className="text-sm leading-7 text-slate-600">当前没有可安全展示的动作片段；需要家长复核后才能继续查看。</p></section>;
 }
 
-/** Family-facing report route. It deliberately has no legacy/raw fallback. */
+/** Family report keeps V2 authority; the matching saved legacy TAL event has a read-only replay projection. */
 export default function AnalysisExperienceReport({ compact = false }: { compact?: boolean }) {
   const { id } = useParams<{ id: string }>();
   const [experience, setExperience] = useState<AnalysisExperienceV2 | null>(null);
@@ -55,6 +56,7 @@ export default function AnalysisExperienceReport({ compact = false }: { compact?
   }, [id]);
 
   const selectedEvent = useMemo(() => experience?.events.find((event) => event.eventId === selectedEventId) ?? experience?.events[0] ?? null, [experience, selectedEventId]);
+  const savedJumpReplay = useSavedJumpReplay(experience, selectedEvent?.eventId ?? null);
   useEffect(() => setSelectedMomentKey(null), [selectedEvent?.eventId]);
 
   if (error) return <section className="app-card mx-auto max-w-3xl p-8" role="alert"><h1 className="text-2xl font-semibold text-slate-900">复盘暂时不可用</h1><p className="mt-3 text-sm leading-7 text-slate-600">{error}</p><Link className="mt-5 inline-flex min-h-[44px] items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700" to="/history">返回历史记录</Link></section>;
@@ -68,7 +70,7 @@ export default function AnalysisExperienceReport({ compact = false }: { compact?
       {experience.events.length > 1 ? <div className="mt-5"><EventPicker experience={experience} selectedEventId={selectedEvent?.eventId ?? null} onSelect={(next) => setSelectedEventId(next)} /></div> : null}
     </header>
     <AnalysisExperienceSummary experience={experience} selectedEventId={selectedEvent?.eventId} />
-    {familyCanInspectEvents && selectedEvent ? <ActionPhaseStrip analysisId={experience.analysisId} pose={null} event={selectedEvent} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} showVideo /> : <EventUnavailable />}
+    {savedJumpReplay ? <ActionPhaseStrip analysis={savedJumpReplay} pose={savedJumpReplay.pose_data} showVideo /> : familyCanInspectEvents && selectedEvent ? <ActionPhaseStrip analysisId={experience.analysisId} pose={null} event={selectedEvent} selectedMomentKey={selectedMomentKey} onSelectMoment={setSelectedMomentKey} showVideo /> : <EventUnavailable />}
     <div className="grid gap-6 web:grid-cols-2"><AnalysisExperienceBody experience={experience} selectedEventId={familyCanInspectEvents ? selectedEvent?.eventId : null} /><AnalysisExperienceMore experience={experience} selectedEventId={familyCanInspectEvents ? selectedEvent?.eventId : null} /></div>
   </div>;
 }
